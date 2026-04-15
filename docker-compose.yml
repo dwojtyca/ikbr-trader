@@ -1,0 +1,112 @@
+version: "3.9"
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ikbr-trader-app:local
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ikbr_trader
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./infra/sql:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ikbr_trader"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ingestion:
+    <<: *app-image
+    command: pnpm --filter @ikbr/ingestion start
+    env_file:
+      - .env
+    environment:
+      PORT: 3101
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
+      REDIS_URL: redis://redis:6379
+      IB_SOCKET_HOST: host.docker.internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3101:3101"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  signal-engine:
+    <<: *app-image
+    command: pnpm --filter @ikbr/signal-engine start
+    env_file:
+      - .env
+    environment:
+      SIGNAL_PORT: 3102
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
+      REDIS_URL: redis://redis:6379
+      EXECUTION_BASE_URL: http://execution-engine:3103
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "3102:3102"
+    restart: unless-stopped
+
+  execution-engine:
+    <<: *app-image
+    command: pnpm --filter @ikbr/execution-engine start
+    env_file:
+      - .env
+    environment:
+      EXECUTION_PORT: 3103
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
+      IB_SOCKET_HOST: host.docker.internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3103:3103"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  ui:
+    <<: *app-image
+    command: pnpm --filter @ikbr/ui dev
+    environment:
+      UI_HOST: 0.0.0.0
+      UI_PORT: 5173
+      INGESTION_PROXY_TARGET: http://ingestion:3101
+      SIGNAL_PROXY_TARGET: http://signal-engine:3102
+      EXECUTION_PROXY_TARGET: http://execution-engine:3103
+    depends_on:
+      - ingestion
+      - signal-engine
+      - execution-engine
+    ports:
+      - "5173:5173"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

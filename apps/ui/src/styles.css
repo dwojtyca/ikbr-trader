@@ -1,0 +1,271 @@
+:root {
+  --bg: #f7efe4;
+  --panel: #fffdf8;
+  --ink: #1d2a24;
+  --muted: #56655f;
+  --accent: #0a7a64;
+  --accent-2: #e17e32;
+  --danger: #a63c3c;
+  --border: #dacdb9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background: radial-gradient(circle at 20% 0%, #fff8ed 0%, var(--bg) 60%);
+  font-family: 'Avenir Next', 'Trebuchet MS', 'Segoe UI', sans-serif;
+}
+
+button {
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, #fffefb, #f5e8d5);
+  color: var(--ink);
+  padding: 0.55rem 0.8rem;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.app-shell {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 1.25rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.hero {
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: linear-gradient(130deg, #fffef9 0%, #f6eee0 100%);
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.hero p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.panel {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  padding: 0.9rem;
+}
+
+.controls {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pill {
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.6rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+}
+
+.pill.ok {
+  background: #e5f7f1;
+  border-color: #9bdac7;
+}
+
+.pill.bad {
+  background: #fdeaea;
+  border-color: #e5b3b3;
+}
+
+.pill small {
+  color: var(--muted);
+}
+
+.action-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.action-grid.compact {
+  align-items: center;
+}
+
+.toggle {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+  padding: 0.35rem 0.5rem;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+.meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.meta-row .error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+.panel-head h2 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.panel-head.compact {
+  margin-top: 0.8rem;
+}
+
+.panel-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.panel-head span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.order-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.6rem;
+}
+
+.order-filters input,
+.order-filters select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fffefb;
+  color: var(--ink);
+  padding: 0.45rem 0.55rem;
+  font-size: 0.84rem;
+  min-width: 120px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.metric-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fffaf2;
+  padding: 0.55rem 0.65rem;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.metric-card small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.metric-card strong {
+  font-size: 1rem;
+}
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  min-width: 980px;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  padding: 0.5rem 0.55rem;
+  white-space: nowrap;
+}
+
+th {
+  background: #f8f0e3;
+  color: #39433f;
+  position: sticky;
+  top: 0;
+}
+
+tbody tr:hover {
+  background: #f9f6ef;
+}
+
+.reason {
+  max-width: 460px;
+  font-size: 0.82rem;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.positive {
+  color: #1f7a56;
+  font-weight: 700;
+}
+
+.negative {
+  color: var(--danger);
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    padding: 0.8rem;
+  }
+
+  .hero h1 {
+    font-size: 1.25rem;
+  }
+}

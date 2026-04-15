@@ -1,0 +1,21 @@
+{
+  "name": "ikbr-trader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
+    "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
+    "dev:execution": "pnpm --filter @ikbr/execution-engine dev",
+    "dev:ui": "pnpm --filter @ikbr/ui dev"
+  },
+  "packageManager": "pnpm@9.5.0",
+  "engines": {
+    "node": ">=20"
+  }
+}
