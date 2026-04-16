@@ -74,6 +74,7 @@ Najważniejsze zmienne środowiskowe:
 - filtry spreadu i płynności (profilowe limity)
 - risk checks: `maxRiskPerTradePct`, `maxExposurePct`, `maxOpenPositions`
 - sizing pozycji na bazie ATR stop distance + profilowego `quantityFactor`
+- wyliczanie poziomów `SL/TP` (ATR multipliers) dla sygnałów wejścia
 - zapis wyników do `proposed_orders` ze statusem `PROPOSED`/`REJECTED`
 - limity pozycji/ekspozycji liczone są z live snapshotu konta (`/execution/account/summary`), z fallbackiem do lokalnego DB gdy execution API jest niedostępne
 
@@ -90,6 +91,8 @@ Najważniejsze zmienne środowiskowe:
 - `GET /execution/orders?limit=50&status=PROPOSED` - przegląd orders z DB
 - `POST /execution/execute-proposed/:id` - wykonaj istniejący `PROPOSED` order
 - `POST /execution/execute-ticket` - wykonaj ręczny, ustrukturyzowany signal ticket (opcjonalnie persist)
+- execution wysyła bracket (`parent + TP + SL`) jeśli ticket ma `stop` i `takeProfit` oraz `positionEffect=OPEN_OR_ADD`
+- przy `positionEffect=CLOSE_OR_REDUCE` bracket nie jest zakładany (order tylko zamyka/redukuje pozycję)
 
 Przykład ręcznego ticketu:
 
@@ -100,8 +103,11 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
     "ticket": {
       "instrument": "AAPL",
       "side": "BUY",
+      "positionEffect": "OPEN_OR_ADD",
       "orderType": "MKT",
       "quantity": 1,
+      "stop": 250,
+      "takeProfit": 275,
       "reason": "manual paper test",
       "confidence": 0.7,
       "riskCheckStatus": "PASS"

@@ -7,6 +7,7 @@ interface ProposedOrderRow {
   instrument: string;
   conid: string | null;
   side: Side;
+  position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
   order_type: 'MKT' | 'LMT';
   quantity: number;
   entry: number | null;
@@ -46,6 +47,7 @@ export class ExecutionRepository {
         instrument TEXT NOT NULL,
         conid TEXT,
         side TEXT NOT NULL,
+        position_effect TEXT,
         order_type TEXT NOT NULL,
         quantity DOUBLE PRECISION NOT NULL,
         entry DOUBLE PRECISION,
@@ -73,6 +75,7 @@ export class ExecutionRepository {
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS last_error TEXT;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_status_idx
@@ -113,6 +116,7 @@ export class ExecutionRepository {
         instrument,
         conid,
         side,
+        position_effect,
         order_type,
         quantity,
         entry,
@@ -128,7 +132,7 @@ export class ExecutionRepository {
       VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
-        $11, 'PROPOSED', $12, NOW()
+        $11, $12, 'PROPOSED', $13, NOW()
       )
       RETURNING id
       `,
@@ -136,6 +140,7 @@ export class ExecutionRepository {
         ticket.instrument,
         ticket.conid ?? null,
         ticket.side,
+        ticket.positionEffect ?? null,
         ticket.orderType,
         ticket.quantity,
         ticket.entry ?? null,
@@ -154,7 +159,7 @@ export class ExecutionRepository {
   async getProposedOrderById(id: number): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              broker_order_id, execution_account_id, execution_message, last_error,
              execution_attempted_at, executed_at, created_at
@@ -210,7 +215,7 @@ export class ExecutionRepository {
 
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              broker_order_id, execution_account_id, execution_message, last_error,
              execution_attempted_at, executed_at, created_at
@@ -355,6 +360,7 @@ export class ExecutionRepository {
       instrument: row.instrument,
       conid: row.conid ?? undefined,
       side: row.side,
+      positionEffect: row.position_effect ?? undefined,
       orderType: row.order_type,
       quantity: row.quantity,
       entry: row.entry ?? undefined,

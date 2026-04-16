@@ -17,6 +17,7 @@ interface ProposedOrderRow {
   instrument: string;
   conid: string | null;
   side: Side;
+  position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
   order_type: 'MKT' | 'LMT';
   quantity: number;
   entry: number | null;
@@ -72,6 +73,7 @@ export class SignalRepository {
         instrument TEXT NOT NULL,
         conid TEXT,
         side TEXT NOT NULL,
+        position_effect TEXT,
         order_type TEXT NOT NULL,
         quantity DOUBLE PRECISION NOT NULL,
         entry DOUBLE PRECISION,
@@ -93,6 +95,7 @@ export class SignalRepository {
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS strategy TEXT;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS indicator_snapshot JSONB;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_created_idx
@@ -183,6 +186,7 @@ export class SignalRepository {
         instrument,
         conid,
         side,
+        position_effect,
         order_type,
         quantity,
         entry,
@@ -199,7 +203,7 @@ export class SignalRepository {
       VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, NOW()
+        $11, $12, $13, $14, $15, NOW()
       )
       RETURNING id
       `,
@@ -207,6 +211,7 @@ export class SignalRepository {
         order.instrument,
         order.conid ?? null,
         order.side,
+        order.positionEffect ?? null,
         order.orderType,
         order.quantity,
         order.entry ?? null,
@@ -239,7 +244,7 @@ export class SignalRepository {
   async getRecentSignals(limit: number): Promise<ProposedOrder[]> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot, created_at
       FROM proposed_orders
       ORDER BY created_at DESC
@@ -260,6 +265,7 @@ export class SignalRepository {
       instrument: row.instrument,
       conid: row.conid ?? undefined,
       side: row.side,
+      positionEffect: row.position_effect ?? undefined,
       orderType: row.order_type,
       quantity: row.quantity,
       entry: row.entry ?? undefined,

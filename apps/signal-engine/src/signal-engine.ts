@@ -253,6 +253,7 @@ export class SignalEngine {
       }
     }
 
+    const protectWithBracket = signalMode === 'OPEN_OR_ADD';
     const spreadScore = clamp(1 - safeDiv(spreadBps, spreadLimitBps, 0), 0, 1);
     const confidence = clamp(decision.score * (0.85 + 0.15 * spreadScore), 0, 1);
     const minConfidence = clamp(this.options.minConfidence * profile.minConfidenceMultiplier, 0, 0.95);
@@ -272,11 +273,12 @@ export class SignalEngine {
       instrument: symbol,
       conid: latest.conid,
       side: decision.side,
+      positionEffect: signalMode,
       orderType: 'LMT',
       quantity,
       entry,
-      stop,
-      takeProfit,
+      stop: protectWithBracket ? stop : undefined,
+      takeProfit: protectWithBracket ? takeProfit : undefined,
       reason: `Signal ${decision.side}: profile=${profile.id}, assetClass=${assetClass}, regime=${regime}, mode=${signalMode}, position=${existingPositionQty.toFixed(4)}, buy=${decision.buyScore.toFixed(2)}, sell=${decision.sellScore.toFixed(2)}`,
       confidence,
       timestamp: new Date().toISOString(),

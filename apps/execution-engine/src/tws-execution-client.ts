@@ -32,6 +32,21 @@ interface PlaceOrderResult {
   brokerOrderId: string;
 }
 
+interface PlannedOrder {
+  orderId: number;
+  order: Record<string, unknown>;
+}
+
+interface PlaceOrderPlan {
+  parentOrderId: number;
+  orders: PlannedOrder[];
+  relatedOrderIds: Set<number>;
+  bracket?: {
+    takeProfitOrderId: number;
+    stopLossOrderId: number;
+  };
+}
+
 export interface BrokerOrderStatusUpdate {
   brokerOrderId: string;
   status: string;
@@ -204,13 +219,19 @@ export class TwsExecutionClient {
     await this.connect();
 
     const contract = await this.resolveContract(ticket);
-    const orderId = this.allocOrderId();
-    const order = this.buildOrder(ticket, accountId, tif);
+    const plan = this.buildOrderPlan(ticket, accountId, tif);
+    const { parentOrderId } = plan;
+
+    if (plan.bracket) {
+      this.onLog(
+        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId}`
+      );
+    }
 
     return new Promise<PlaceOrderResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting orderStatus for orderId=${orderId}`));
+        reject(new Error(`Timed out waiting orderStatus for orderId=${parentOrderId}`));
       }, this.config.orderTimeoutMs);
 
       const cleanup = () => {
@@ -232,30 +253,30 @@ export class TwsExecutionClient {
         _whyHeld: string,
         _mktCapPrice: number
       ) => {
-        if (incomingOrderId !== orderId) return;
+        if (incomingOrderId !== parentOrderId) return;
 
         const normalized = String(status || '').toUpperCase();
         if (normalized === 'FILLED') {
           cleanup();
-          resolve({ orderId, status: 'FILLED', brokerOrderId: String(orderId) });
+          resolve({ orderId: parentOrderId, status: 'FILLED', brokerOrderId: String(parentOrderId) });
           return;
         }
 
         if (normalized === 'PRESUBMITTED' || normalized === 'SUBMITTED' || normalized === 'PENDINGSUBMIT') {
           cleanup();
-          resolve({ orderId, status: 'SUBMITTED', brokerOrderId: String(orderId) });
+          resolve({ orderId: parentOrderId, status: 'SUBMITTED', brokerOrderId: String(parentOrderId) });
           return;
         }
 
         if (normalized === 'INACTIVE' || normalized === 'CANCELLED' || normalized === 'APICANCELLED') {
           cleanup();
-          reject(new Error(`Order ${orderId} was not accepted by broker, status=${normalized}`));
+          reject(new Error(`Order ${parentOrderId} was not accepted by broker, status=${normalized}`));
         }
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && Number(parsed.reqId) !== orderId) return;
+        if (parsed.reqId !== undefined && !plan.relatedOrderIds.has(Number(parsed.reqId))) return;
 
         const code = Number(parsed.code);
         const fatalCodes = new Set([103, 104, 109, 110, 201, 202, 203, 321, 322, 323, 354]);
@@ -264,12 +285,19 @@ export class TwsExecutionClient {
         }
 
         cleanup();
-        reject(new Error(`Broker rejected order ${orderId}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(new Error(`Broker rejected order ${parentOrderId}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
       };
 
       this.ib.on('orderStatus', onOrderStatus);
       this.ib.on('error', onError);
-      this.ib.placeOrder(orderId, contract, order);
+      try {
+        for (const plannedOrder of plan.orders) {
+          this.ib.placeOrder(plannedOrder.orderId, contract, plannedOrder.order);
+        }
+      } catch (error) {
+        cleanup();
+        reject(error as Error);
+      }
     });
   }
 
@@ -373,7 +401,100 @@ export class TwsExecutionClient {
     });
   }
 
-  private buildOrder(ticket: SignalTicket, accountId: string, tif: string): Record<string, unknown> {
+  private buildOrderPlan(ticket: SignalTicket, accountId: string, tif: string): PlaceOrderPlan {
+    const parentOrderId = this.allocOrderId();
+    const attachBracket = this.shouldAttachBracket(ticket);
+    const parentOrder = this.buildParentOrder(ticket, accountId, tif, !attachBracket);
+
+    if (!attachBracket) {
+      return {
+        parentOrderId,
+        orders: [{ orderId: parentOrderId, order: parentOrder }],
+        relatedOrderIds: new Set([parentOrderId])
+      };
+    }
+
+    this.validateBracket(ticket);
+
+    const oppositeAction = ticket.side === 'BUY' ? 'SELL' : 'BUY';
+    const takeProfitOrderId = this.allocOrderId();
+    const stopLossOrderId = this.allocOrderId();
+
+    const takeProfitOrder: Record<string, unknown> = {
+      action: oppositeAction,
+      totalQuantity: ticket.quantity,
+      orderType: 'LMT',
+      lmtPrice: ticket.takeProfit,
+      tif,
+      account: accountId,
+      parentId: parentOrderId,
+      transmit: false
+    };
+
+    const stopLossOrder: Record<string, unknown> = {
+      action: oppositeAction,
+      totalQuantity: ticket.quantity,
+      orderType: 'STP',
+      auxPrice: ticket.stop,
+      tif,
+      account: accountId,
+      parentId: parentOrderId,
+      transmit: true
+    };
+
+    return {
+      parentOrderId,
+      orders: [
+        { orderId: parentOrderId, order: parentOrder },
+        { orderId: takeProfitOrderId, order: takeProfitOrder },
+        { orderId: stopLossOrderId, order: stopLossOrder }
+      ],
+      relatedOrderIds: new Set([parentOrderId, takeProfitOrderId, stopLossOrderId]),
+      bracket: {
+        takeProfitOrderId,
+        stopLossOrderId
+      }
+    };
+  }
+
+  private shouldAttachBracket(ticket: SignalTicket): boolean {
+    if (ticket.positionEffect === 'CLOSE_OR_REDUCE') return false;
+    if (ticket.stop === undefined || ticket.takeProfit === undefined) return false;
+    if (!Number.isFinite(ticket.stop) || !Number.isFinite(ticket.takeProfit)) return false;
+    return true;
+  }
+
+  private validateBracket(ticket: SignalTicket): void {
+    if (ticket.stop === undefined || ticket.takeProfit === undefined) {
+      throw new Error('Bracket order requires stop and takeProfit');
+    }
+    if (!Number.isFinite(ticket.stop) || !Number.isFinite(ticket.takeProfit)) {
+      throw new Error('Bracket order requires finite stop and takeProfit');
+    }
+    if (ticket.stop <= 0 || ticket.takeProfit <= 0) {
+      throw new Error('Bracket order requires positive stop and takeProfit');
+    }
+
+    if (ticket.side === 'BUY' && ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+      if (!(ticket.stop < ticket.entry)) {
+        throw new Error(`Invalid BUY bracket: stop (${ticket.stop}) must be below entry (${ticket.entry})`);
+      }
+      if (!(ticket.takeProfit > ticket.entry)) {
+        throw new Error(`Invalid BUY bracket: takeProfit (${ticket.takeProfit}) must be above entry (${ticket.entry})`);
+      }
+    }
+
+    if (ticket.side === 'SELL' && ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+      if (!(ticket.stop > ticket.entry)) {
+        throw new Error(`Invalid SELL bracket: stop (${ticket.stop}) must be above entry (${ticket.entry})`);
+      }
+      if (!(ticket.takeProfit < ticket.entry)) {
+        throw new Error(`Invalid SELL bracket: takeProfit (${ticket.takeProfit}) must be below entry (${ticket.entry})`);
+      }
+    }
+  }
+
+  private buildParentOrder(ticket: SignalTicket, accountId: string, tif: string, transmit: boolean): Record<string, unknown> {
     if (ticket.side !== 'BUY' && ticket.side !== 'SELL') {
       throw new Error(`Execution supports BUY/SELL only, got ${ticket.side}`);
     }
@@ -388,7 +509,7 @@ export class TwsExecutionClient {
       orderType,
       tif,
       account: accountId,
-      transmit: true
+      transmit
     };
 
     if (orderType === 'LMT') {

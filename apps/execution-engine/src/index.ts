@@ -32,6 +32,7 @@ const ticketSchema = z.object({
   instrument: z.string().min(1),
   conid: z.string().optional(),
   side: z.enum(['BUY', 'SELL', 'HOLD']),
+  positionEffect: z.enum(['OPEN_OR_ADD', 'CLOSE_OR_REDUCE']).optional(),
   orderType: z.enum(['MKT', 'LMT']).default('MKT'),
   quantity: z.coerce.number().positive(),
   entry: z.coerce.number().optional(),

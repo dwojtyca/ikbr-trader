@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS proposed_orders (
   instrument TEXT NOT NULL,
   conid TEXT,
   side TEXT NOT NULL,
+  position_effect TEXT,
   order_type TEXT NOT NULL,
   quantity DOUBLE PRECISION NOT NULL,
   entry DOUBLE PRECISION,
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS proposed_orders (
 );
 
 ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS conid TEXT;
+ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;
 ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS entry DOUBLE PRECISION;
 ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PROPOSED';
 ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS strategy TEXT;

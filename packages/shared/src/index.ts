@@ -3,6 +3,7 @@ export type RiskCheckStatus = 'PASS' | 'REJECT';
 export type ProposedOrderStatus = 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED';
 export type AssetClass = 'stock' | 'commodity' | 'index';
 export type MarketRegime = 'trend' | 'range' | 'high_volatility';
+export type PositionEffect = 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
 
 export interface Candle {
   conid: string;
@@ -30,6 +31,7 @@ export interface SignalTicket {
   instrument: string;
   conid?: string;
   side: Side;
+  positionEffect?: PositionEffect;
   orderType: 'MKT' | 'LMT';
   quantity: number;
   entry?: number;
