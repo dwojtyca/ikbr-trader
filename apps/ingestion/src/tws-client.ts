@@ -11,7 +11,6 @@ interface TwsClientConfig {
   primaryExchange?: string;
   currency: string;
   marketDataType: number;
-  snapshot: boolean;
 }
 
 interface TickerState {
@@ -28,6 +27,8 @@ type ContractShape = Record<string, unknown>;
 type ContractDetailsShape = {
   contract?: ContractShape;
   summary?: ContractShape;
+  longName?: string;
+  marketName?: string;
 };
 
 export interface HistoricalBackfillResult {
@@ -198,12 +199,26 @@ export class TwsClient {
         tickerId,
         contract,
         '',
-        this.config.snapshot,
+        false,
         false
       );
 
       this.onLog(`subscribed market data ${sub.symbol} (${sub.conid}) tickerId=${tickerId}`);
     }
+  }
+
+  clearSubscriptions(): void {
+    for (const [conid, tickerId] of this.subscriptionsByConid.entries()) {
+      try {
+        this.ib.cancelMktData(tickerId);
+        this.onLog(`cancelled market data ${conid} tickerId=${tickerId}`);
+      } catch (error) {
+        this.onLog(`failed to cancel market data ${conid} tickerId=${tickerId}: ${(error as Error).message}`);
+      }
+    }
+
+    this.subscriptionsByConid.clear();
+    this.tickerStates.clear();
   }
 
   async backfillRecentCandles1m(subscriptions: InstrumentSubscription[], candlesPerSymbol: number): Promise<HistoricalBackfillResult[]> {
@@ -235,17 +250,38 @@ export class TwsClient {
     const symbol = instrument.symbol;
     const directConid = toNum(instrument.conid);
     if (directConid) {
+      const details = await this.requestContractDetails(symbol, this.buildContractFromInstrument(instrument, directConid));
+      const summary = pickContract(details);
+      const conid = toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
+
       return {
         symbol,
-        conid: String(directConid),
-        contract: this.buildContractFromInstrument(instrument, directConid)
+        conid: String(conid),
+        contract: summary,
+        displayName: this.pickDisplayName(symbol, details)
       };
     }
 
-    const reqId = this.allocReqId();
-    const contract = this.withDefaults(this.buildContractFromInstrument(instrument));
+    const details = await this.requestContractDetails(symbol, this.buildContractFromInstrument(instrument));
+    const summary = pickContract(details);
+    const conId = toNum(summary.conId) ?? toNum(summary.conid);
+    if (!conId) {
+      throw new Error(`No conId in contract details for ${symbol}`);
+    }
 
-    return new Promise<InstrumentSubscription>((resolve, reject) => {
+    return {
+      symbol,
+      conid: String(conId),
+      contract: summary,
+      displayName: this.pickDisplayName(symbol, details)
+    };
+  }
+
+  private async requestContractDetails(symbol: string, contractLike: ContractShape): Promise<ContractDetailsShape> {
+    const reqId = this.allocReqId();
+    const contract = this.withDefaults(contractLike);
+
+    return new Promise<ContractDetailsShape>((resolve, reject) => {
       let firstDetails: ContractDetailsShape | undefined;
 
       const timeout = setTimeout(() => {
@@ -274,18 +310,7 @@ export class TwsClient {
           return;
         }
 
-        const summary = pickContract(firstDetails);
-        const conId = toNum(summary.conId) ?? toNum(summary.conid);
-        if (!conId) {
-          reject(new Error(`No conId in contract details for ${symbol}`));
-          return;
-        }
-
-        resolve({
-          symbol,
-          conid: String(conId),
-          contract: summary
-        });
+        resolve(firstDetails);
       };
 
       const onError = (err: Error, code?: number, incomingReqId?: number) => {
@@ -299,6 +324,16 @@ export class TwsClient {
       this.ib.on('error', onError);
       this.ib.reqContractDetails(reqId, contract);
     });
+  }
+
+  private pickDisplayName(symbol: string, details: ContractDetailsShape): string | undefined {
+    const longName = typeof details.longName === 'string' ? details.longName.trim() : '';
+    if (longName && longName.toUpperCase() !== symbol.toUpperCase()) return longName;
+
+    const marketName = typeof details.marketName === 'string' ? details.marketName.trim() : '';
+    if (marketName && marketName.toUpperCase() !== symbol.toUpperCase()) return marketName;
+
+    return undefined;
   }
 
   private buildContractFromInstrument(instrument: WatchlistInstrument, directConid?: number): ContractShape {

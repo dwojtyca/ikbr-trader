@@ -21,4 +21,5 @@ export interface InstrumentSubscription {
   symbol: string;
   conid: string;
   contract?: Record<string, unknown>;
+  displayName?: string;
 }

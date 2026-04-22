@@ -1,4 +1,3 @@
-version: "3.9"
 x-app-image: &app-image
   build:
     context: .
@@ -43,6 +42,7 @@ services:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
       IB_SOCKET_HOST: host.docker.internal
+      SIGNAL_ENGINE_BASE_URL: http://signal-engine:3102
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +91,21 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+  llm-agent:
+    <<: *app-image
+    command: pnpm --filter @ikbr/llm-agent start
+    env_file:
+      - .env
+    environment:
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
+      EXECUTION_BASE_URL: http://execution-engine:3103
+    depends_on:
+      postgres:
+        condition: service_healthy
+      execution-engine:
+        condition: service_started
+    restart: unless-stopped
+
   ui:
     <<: *app-image
     command: pnpm --filter @ikbr/ui dev
@@ -104,6 +119,7 @@ services:
       - ingestion
       - signal-engine
       - execution-engine
+      - llm-agent
     ports:
       - "5173:5173"
     restart: unless-stopped

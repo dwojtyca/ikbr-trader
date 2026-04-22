@@ -20,6 +20,10 @@ interface SignalEngineOptions {
   atrStopMult: number;
   atrTpMult: number;
   minConfidence: number;
+  lmtEntryMode: 'touch' | 'last' | 'mid';
+  lmtEntryBufferBps: number;
+  minStopBpsByAssetClass: Record<AssetClass, number>;
+  maxMarketStateAgeMs: number;
   assetClassBySymbol: Record<string, AssetClass>;
   executionBaseUrl: string;
   riskLimits: RiskLimits;
@@ -32,18 +36,23 @@ interface DecisionScore {
   sellScore: number;
 }
 
+interface EntryPriceSelection {
+  entry: number;
+  source: 'touch' | 'last' | 'mid' | 'fallback_last';
+}
+
 export class SignalEngine {
   constructor(
     private readonly repo: SignalRepository,
     private readonly options: SignalEngineOptions
   ) {}
 
-  async runForSymbol(symbol: string, exposureSnapshot?: ExposureSnapshot): Promise<ProposedOrder> {
+  async runForSymbol(symbol: string, exposureSnapshot?: ExposureSnapshot, generatedFromCandleTs?: Date): Promise<ProposedOrder> {
     const candles = await this.repo.getRecentCandles(symbol, '1m', this.options.minCandles + 80);
     const candles1h = await this.repo.getRecentCandles(symbol, '1h', 160);
 
     if (candles.length < this.options.minCandles) {
-      return this.rejectedOrder(symbol, undefined, 'Insufficient candles for indicators');
+      return this.rejectedOrder(symbol, undefined, 'Insufficient candles for indicators', undefined, 'HOLD', 'adaptive_profile_v1', generatedFromCandleTs);
     }
 
     const closes = candles.map((c) => c.close);
@@ -100,7 +109,7 @@ export class SignalEngine {
       indicators.dcLower20 === undefined ||
       indicators.trendFilterValue === undefined
     ) {
-      return this.rejectedOrder(symbol, latest.conid, 'Indicator values are not available', indicators);
+      return this.rejectedOrder(symbol, latest.conid, 'Indicator values are not available', indicators, 'HOLD', 'adaptive_profile_v1', generatedFromCandleTs);
     }
 
     const regime = this.detectRegime(assetClass, latest.close, indicators);
@@ -118,13 +127,31 @@ export class SignalEngine {
         `Liquidity filter rejected signal for profile ${profile.id}: low 1m volume`,
         indicators,
         'HOLD',
-        profile.id
+        profile.id,
+        generatedFromCandleTs
       );
     }
 
     const marketState = await this.repo.getMarketState(latest.conid);
     if (!marketState) {
-      return this.rejectedOrder(symbol, latest.conid, 'No market state in Redis for conid', indicators, 'HOLD', profile.id);
+      return this.rejectedOrder(symbol, latest.conid, 'No market state in Redis for conid', indicators, 'HOLD', profile.id, generatedFromCandleTs);
+    }
+
+    const marketStateTs = new Date(marketState.ts);
+    if (
+      this.options.maxMarketStateAgeMs > 0 &&
+      !Number.isNaN(marketStateTs.getTime()) &&
+      Date.now() - marketStateTs.getTime() > this.options.maxMarketStateAgeMs
+    ) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `Execution feasibility rejected: stale market state age ${Date.now() - marketStateTs.getTime()}ms`,
+        indicators,
+        'HOLD',
+        profile.id,
+        generatedFromCandleTs
+      );
     }
 
     const spread =
@@ -140,7 +167,8 @@ export class SignalEngine {
         `Spread filter rejected signal (${spreadBps.toFixed(2)} bps > ${spreadLimitBps.toFixed(2)} bps)`,
         indicators,
         'HOLD',
-        profile.id
+        profile.id,
+        generatedFromCandleTs
       );
     }
 
@@ -152,33 +180,59 @@ export class SignalEngine {
         `No edge for ${profile.id}: buyScore=${decision.buyScore.toFixed(2)}, sellScore=${decision.sellScore.toFixed(2)}`,
         indicators,
         'HOLD',
-        profile.id
+        profile.id,
+        generatedFromCandleTs
       );
     }
 
     const stopMult = this.options.atrStopMult * profile.atrStopMultFactor;
     const tpMult = this.options.atrTpMult * profile.atrTpMultFactor;
-    const entry = latest.close;
-    const stop = decision.side === 'BUY'
+    const entrySelection = this.selectEntryPrice(decision.side, latest.close, marketState);
+    const entry = entrySelection.entry;
+    let stop = decision.side === 'BUY'
       ? entry - indicators.atr14 * stopMult
       : entry + indicators.atr14 * stopMult;
-    const takeProfit = decision.side === 'BUY'
+    let takeProfit = decision.side === 'BUY'
       ? entry + indicators.atr14 * tpMult
       : entry - indicators.atr14 * tpMult;
 
-    const riskPerUnit = Math.abs(entry - stop);
-    if (riskPerUnit <= 0) {
-      return this.rejectedOrder(symbol, latest.conid, 'Risk per unit is zero', indicators, decision.side, profile.id);
+    const rawRiskPerUnit = Math.abs(entry - stop);
+    const rawRewardPerUnit = Math.abs(takeProfit - entry);
+    const rr = rawRiskPerUnit > 0 ? safeDiv(rawRewardPerUnit, rawRiskPerUnit, 2) : 2;
+    const minStopBps = Math.max(0, this.options.minStopBpsByAssetClass[assetClass] ?? 0);
+    const minRiskPerUnit = entry * (minStopBps / 10000);
+
+    if (minRiskPerUnit > rawRiskPerUnit) {
+      const widenedRisk = minRiskPerUnit;
+      stop = decision.side === 'BUY' ? entry - widenedRisk : entry + widenedRisk;
+      takeProfit = decision.side === 'BUY' ? entry + widenedRisk * rr : entry - widenedRisk * rr;
     }
 
-    const maxRiskCash = (this.options.riskLimits.accountEquity * this.options.riskLimits.maxRiskPerTradePct) / 100;
-    const riskBasedQuantity = Math.floor((maxRiskCash / riskPerUnit) * profile.quantityFactor);
-
-    if (riskBasedQuantity < 1) {
-      return this.rejectedOrder(symbol, latest.conid, 'Sizing rejected: quantity below 1 share/contract', indicators, decision.side, profile.id);
+    const riskPerUnit = Math.abs(entry - stop);
+    if (riskPerUnit <= 0) {
+      return this.rejectedOrder(symbol, latest.conid, 'Risk per unit is zero', indicators, decision.side, profile.id, generatedFromCandleTs);
     }
 
     const riskSnapshot = exposureSnapshot ?? (await this.repo.getExposureSnapshot(this.options.executionBaseUrl));
+    const effectiveAccountEquity =
+      riskSnapshot.accountEquity && Number.isFinite(riskSnapshot.accountEquity) && riskSnapshot.accountEquity > 0
+        ? riskSnapshot.accountEquity
+        : this.options.riskLimits.accountEquity;
+    const maxRiskCash = (effectiveAccountEquity * this.options.riskLimits.maxRiskPerTradePct) / 100;
+    const riskBasedQuantity = Math.floor((maxRiskCash / riskPerUnit) * profile.quantityFactor);
+
+    if (riskBasedQuantity < 1) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        'Sizing rejected: quantity below 1 share/contract',
+        indicators,
+        decision.side,
+        profile.id,
+        generatedFromCandleTs
+      );
+    }
+
     const exposure = riskSnapshot.exposure;
     const openPositions = riskSnapshot.openPositions;
     const existingPositionQty = riskSnapshot.positionsBySymbol[symbol.toUpperCase()] ?? 0;
@@ -187,13 +241,21 @@ export class SignalEngine {
       (decision.side === 'BUY' && existingPositionQty < -1e-12) ||
       (decision.side === 'SELL' && existingPositionQty > 1e-12);
 
-    const maxExposure = (this.options.riskLimits.accountEquity * this.options.riskLimits.maxExposurePct) / 100;
+    const maxExposure = (effectiveAccountEquity * this.options.riskLimits.maxExposurePct) / 100;
     const maxNotionalPerTradePct = this.options.riskLimits.maxNotionalPerTradePct ?? this.options.riskLimits.maxExposurePct;
-    const maxNotionalPerTrade = (this.options.riskLimits.accountEquity * maxNotionalPerTradePct) / 100;
+    const maxNotionalPerTrade = (effectiveAccountEquity * maxNotionalPerTradePct) / 100;
     const availableExposure = Math.max(0, maxExposure - exposure);
 
     if (!hasOpenPosition && openPositions >= this.options.riskLimits.maxOpenPositions) {
-      return this.rejectedOrder(symbol, latest.conid, 'Risk check failed: max open positions reached', indicators, decision.side, profile.id);
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        'Risk check failed: max open positions reached',
+        indicators,
+        decision.side,
+        profile.id,
+        generatedFromCandleTs
+      );
     }
 
     let quantity: number;
@@ -209,7 +271,8 @@ export class SignalEngine {
           `Sizing rejected: no closeable quantity for open position=${existingPositionQty.toFixed(4)}`,
           indicators,
           decision.side,
-          profile.id
+          profile.id,
+          generatedFromCandleTs
         );
       }
       quantity = closeQty;
@@ -221,7 +284,8 @@ export class SignalEngine {
           `Risk check failed: max exposure exceeded (current=${exposure.toFixed(2)}, available=${availableExposure.toFixed(2)}, limit=${maxExposure.toFixed(2)}, source=${riskSnapshot.source})`,
           indicators,
           decision.side,
-          profile.id
+          profile.id,
+          generatedFromCandleTs
         );
       }
 
@@ -236,7 +300,8 @@ export class SignalEngine {
           `Sizing rejected by notional caps (riskQty=${riskBasedQuantity}, capExposureQty=${quantityCapByExposure}, capTradeQty=${quantityCapByNotional}, available=${availableExposure.toFixed(2)}, maxTradeNotional=${maxNotionalPerTrade.toFixed(2)})`,
           indicators,
           decision.side,
-          profile.id
+          profile.id,
+          generatedFromCandleTs
         );
       }
 
@@ -248,7 +313,8 @@ export class SignalEngine {
           `Risk check failed: max exposure exceeded (current=${exposure.toFixed(2)}, new=${newNotional.toFixed(2)}, post=${(exposure + newNotional).toFixed(2)}, limit=${maxExposure.toFixed(2)}, source=${riskSnapshot.source})`,
           indicators,
           decision.side,
-          profile.id
+          profile.id,
+          generatedFromCandleTs
         );
       }
     }
@@ -265,7 +331,8 @@ export class SignalEngine {
         `Confidence too low (${confidence.toFixed(2)} < ${minConfidence.toFixed(2)}) for ${profile.id}`,
         indicators,
         decision.side,
-        profile.id
+        profile.id,
+        generatedFromCandleTs
       );
     }
 
@@ -279,13 +346,14 @@ export class SignalEngine {
       entry,
       stop: protectWithBracket ? stop : undefined,
       takeProfit: protectWithBracket ? takeProfit : undefined,
-      reason: `Signal ${decision.side}: profile=${profile.id}, assetClass=${assetClass}, regime=${regime}, mode=${signalMode}, position=${existingPositionQty.toFixed(4)}, buy=${decision.buyScore.toFixed(2)}, sell=${decision.sellScore.toFixed(2)}`,
+      reason: `Signal ${decision.side}: profile=${profile.id}, assetClass=${assetClass}, regime=${regime}, mode=${signalMode}, position=${existingPositionQty.toFixed(4)}, entrySource=${entrySelection.source}, buy=${decision.buyScore.toFixed(2)}, sell=${decision.sellScore.toFixed(2)}`,
       confidence,
       timestamp: new Date().toISOString(),
       riskCheckStatus: 'PASS',
       status: 'PROPOSED',
       strategy: profile.id,
-      indicators
+      indicators,
+      generatedFromCandleTs
     };
   }
 
@@ -293,6 +361,43 @@ export class SignalEngine {
     const overridden = this.options.assetClassBySymbol[symbol.toUpperCase()];
     if (overridden) return overridden;
     return inferAssetClass(symbol);
+  }
+
+  private selectEntryPrice(
+    side: 'BUY' | 'SELL',
+    latestClose: number,
+    marketState: { bid?: number; ask?: number; lastPrice: number }
+  ): EntryPriceSelection {
+    const mode = this.options.lmtEntryMode;
+    const bid = Number.isFinite(marketState.bid) ? Number(marketState.bid) : undefined;
+    const ask = Number.isFinite(marketState.ask) ? Number(marketState.ask) : undefined;
+    const last = Number.isFinite(marketState.lastPrice) && marketState.lastPrice > 0 ? marketState.lastPrice : latestClose;
+    const bufferMultiplier = this.options.lmtEntryBufferBps / 10000;
+
+    const applyBuffer = (price: number): number => {
+      if (!(bufferMultiplier > 0)) return price;
+      return side === 'BUY'
+        ? price * (1 + bufferMultiplier)
+        : price * (1 - bufferMultiplier);
+    };
+
+    if (mode === 'last') {
+      return { entry: applyBuffer(last), source: 'last' };
+    }
+
+    if (mode === 'mid' && bid !== undefined && ask !== undefined) {
+      return { entry: applyBuffer((bid + ask) / 2), source: 'mid' };
+    }
+
+    if (side === 'BUY' && ask !== undefined) {
+      return { entry: applyBuffer(ask), source: 'touch' };
+    }
+
+    if (side === 'SELL' && bid !== undefined) {
+      return { entry: applyBuffer(bid), source: 'touch' };
+    }
+
+    return { entry: applyBuffer(last), source: 'fallback_last' };
   }
 
   private detectRegime(assetClass: AssetClass, price: number, indicators: IndicatorSnapshot): MarketRegime {
@@ -325,20 +430,21 @@ export class SignalEngine {
       : profile.style === 'range'
         ? this.scoreRange(price, indicators)
         : this.scoreBreakout(price, indicators);
+    const adjusted = this.applyContextAdjustments(profile, price, indicators, scored);
 
-    const edge = 0.06;
-    if (scored.buyScore >= profile.entryScore && scored.buyScore > scored.sellScore + edge) {
-      return { side: 'BUY', score: scored.buyScore, buyScore: scored.buyScore, sellScore: scored.sellScore };
+    const edge = profile.decisionEdge;
+    if (adjusted.buyScore >= profile.entryScore && adjusted.buyScore > adjusted.sellScore + edge) {
+      return { side: 'BUY', score: adjusted.buyScore, buyScore: adjusted.buyScore, sellScore: adjusted.sellScore };
     }
-    if (scored.sellScore >= profile.entryScore && scored.sellScore > scored.buyScore + edge) {
-      return { side: 'SELL', score: scored.sellScore, buyScore: scored.buyScore, sellScore: scored.sellScore };
+    if (adjusted.sellScore >= profile.entryScore && adjusted.sellScore > adjusted.buyScore + edge) {
+      return { side: 'SELL', score: adjusted.sellScore, buyScore: adjusted.buyScore, sellScore: adjusted.sellScore };
     }
 
     return {
       side: 'HOLD',
-      score: Math.max(scored.buyScore, scored.sellScore),
-      buyScore: scored.buyScore,
-      sellScore: scored.sellScore
+      score: Math.max(adjusted.buyScore, adjusted.sellScore),
+      buyScore: adjusted.buyScore,
+      sellScore: adjusted.sellScore
     };
   }
 
@@ -388,28 +494,33 @@ export class SignalEngine {
     const nearLower = clamp(safeDiv(indicators.bbMiddle! - price, halfBand, 0), 0, 1);
     const nearUpper = clamp(safeDiv(price - indicators.bbMiddle!, halfBand, 0), 0, 1);
 
-    const weakTrend = 1 - clamp(Math.abs(safeDiv(indicators.ema20! - indicators.ema50!, price, 0)) * 2500, 0, 1);
-    const rsiBuy = clamp((45 - indicators.rsi14!) / 20, 0, 1);
-    const rsiSell = clamp((indicators.rsi14! - 55) / 20, 0, 1);
+    const weakTrend = 1 - clamp(Math.abs(safeDiv(indicators.ema20! - indicators.ema50!, price, 0)) * 3200, 0, 1);
+    const rsiBuy = clamp((41 - indicators.rsi14!) / 14, 0, 1);
+    const rsiSell = clamp((indicators.rsi14! - 59) / 14, 0, 1);
 
-    const macdRevertBuy =
-      indicators.macdHistPrev !== undefined && indicators.macdHist! > indicators.macdHistPrev ? 1 : 0.35;
-    const macdRevertSell =
-      indicators.macdHistPrev !== undefined && indicators.macdHist! < indicators.macdHistPrev ? 1 : 0.35;
+    const macdReversalDenom = Math.max(Math.abs(indicators.macdHistPrev ?? 0), indicators.atr14! * 0.035, price * 0.0006, 0.001);
+    const macdImproving = indicators.macdHistPrev !== undefined
+      ? clamp(safeDiv(indicators.macdHist! - indicators.macdHistPrev, macdReversalDenom, 0), 0, 1)
+      : 0;
+    const macdWeakening = indicators.macdHistPrev !== undefined
+      ? clamp(safeDiv(indicators.macdHistPrev - indicators.macdHist!, macdReversalDenom, 0), 0, 1)
+      : 0;
+    const buyMomentumReset = 0.55 * macdImproving + 0.45 * (indicators.macdHist! <= 0 ? 1 : 0.2);
+    const sellMomentumReset = 0.55 * macdWeakening + 0.45 * (indicators.macdHist! >= 0 ? 1 : 0.2);
 
     const buyScore = clamp(
-      0.38 * nearLower +
-      0.28 * rsiBuy +
-      0.2 * weakTrend +
-      0.14 * macdRevertBuy,
+      0.34 * nearLower +
+      0.24 * rsiBuy +
+      0.24 * buyMomentumReset +
+      0.18 * weakTrend,
       0,
       1
     );
     const sellScore = clamp(
-      0.38 * nearUpper +
-      0.28 * rsiSell +
-      0.2 * weakTrend +
-      0.14 * macdRevertSell,
+      0.34 * nearUpper +
+      0.24 * rsiSell +
+      0.24 * sellMomentumReset +
+      0.18 * weakTrend,
       0,
       1
     );
@@ -455,13 +566,55 @@ export class SignalEngine {
     return { buyScore, sellScore };
   }
 
+  private applyContextAdjustments(
+    profile: StrategyProfile,
+    price: number,
+    indicators: IndicatorSnapshot,
+    scored: { buyScore: number; sellScore: number }
+  ): { buyScore: number; sellScore: number } {
+    let buyScore = scored.buyScore;
+    let sellScore = scored.sellScore;
+
+    const trendFilter = indicators.trendFilterValue ?? price;
+    const emaBullAligned = indicators.ema20! > indicators.ema50! && indicators.ema50! >= indicators.ema200!;
+    const emaBearAligned = indicators.ema20! < indicators.ema50! && indicators.ema50! <= indicators.ema200!;
+
+    if (profile.style !== 'range') {
+      if (price < trendFilter) buyScore *= 0.82;
+      if (price > trendFilter) sellScore *= 0.82;
+      if (!emaBullAligned) buyScore *= 0.88;
+      if (!emaBearAligned) sellScore *= 0.88;
+    } else {
+      const trendStretchBps = Math.abs(safeDiv(price - trendFilter, price, 0) * 10000);
+      const localTrendBps = Math.abs(safeDiv(indicators.ema20! - indicators.ema50!, price, 0) * 10000);
+      if (trendStretchBps >= 28 || localTrendBps >= 20) {
+        buyScore *= 0.88;
+        sellScore *= 0.88;
+      }
+    }
+
+    if (profile.regime === 'high_volatility') {
+      const bbWidthPct = indicators.bbWidthPct ?? 0;
+      const atrPct = safeDiv(indicators.atr14!, price, 0);
+      const volPenalty = clamp(1 - Math.max(bbWidthPct * 2.2, atrPct * 8), 0.68, 1);
+      buyScore *= volPenalty;
+      sellScore *= volPenalty;
+    }
+
+    return {
+      buyScore: clamp(buyScore, 0, 1),
+      sellScore: clamp(sellScore, 0, 1)
+    };
+  }
+
   private rejectedOrder(
     symbol: string,
     conid: string | undefined,
     reason: string,
     indicators?: IndicatorSnapshot,
     side: Side = 'HOLD',
-    strategy = 'adaptive_profile_v1'
+    strategy = 'adaptive_profile_v1',
+    generatedFromCandleTs?: Date
   ): ProposedOrder {
     return {
       instrument: symbol,
@@ -475,7 +628,8 @@ export class SignalEngine {
       riskCheckStatus: 'REJECT',
       status: 'REJECTED',
       strategy,
-      indicators
+      indicators,
+      generatedFromCandleTs
     };
   }
 }

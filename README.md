@@ -4,6 +4,7 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 - `apps/ingestion` - sesja TWS/IB Gateway Socket API, subskrypcje market data, agregacja 1m candles, zapis do Postgresa, cache rynku w Redisie
 - `apps/signal-engine` - silnik sygnałów (EMA20/50, RSI14, ATR14, risk model, zapis proposed orders)
 - `apps/execution-engine` - wykonanie zleceń przez TWS Socket API na bazie `proposed_orders` lub ręcznego ticketu
+- `apps/llm-agent` - autonomiczny agent LLM analizujący `PROPOSED` + newsy i decydujący `EXECUTE` / `REJECT`
 - `packages/shared` - wspólne typy domenowe
 
 ## Quick start
@@ -22,7 +23,8 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 4. `pnpm dev:ingestion`
 5. `pnpm dev:signal`
 6. `pnpm dev:execution`
-7. `pnpm dev:ui`
+7. `pnpm dev:llm`
+8. `pnpm dev:ui`
 
 ## TWS / IB Gateway setup
 
@@ -30,7 +32,7 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 2. Włącz `Configure -> API -> Settings -> Enable ActiveX and Socket Clients`.
 3. Dodaj `127.0.0.1` do `Trusted IPs`.
 4. Ustaw port socket zgodny z trybem (paper zwykle `4002`, live zwykle `4001`).
-5. W `.env` ustaw `IB_SOCKET_PORT` i opcjonalnie `IBKR_ACCOUNT_ID`.
+5. W `.env` ustaw `IB_SOCKET_PORT`.
 6. Uruchom ingestion i wykonaj `POST /bootstrap`.
 
 Przy uruchomieniu przez Docker Compose:
@@ -47,9 +49,9 @@ Najważniejsze zmienne środowiskowe:
 - `IB_SOCKET_HOST`, `IB_SOCKET_PORT`, `IB_CLIENT_ID` - połączenie do TWS/IB Gateway (Socket API)
 - `EXECUTION_CLIENT_ID` - osobny client ID dla execution socket
 - `IB_MARKET_DATA_TYPE` - typ danych rynkowych (`1` live, `2` frozen, `3` delayed, `4` delayed frozen)
-- `EXECUTION_DEFAULT_TIF`, `EXECUTION_ORDER_TIMEOUT_MS`, `EXECUTION_DRY_RUN` - parametry wykonania zleceń
+- `EXECUTION_DEFAULT_TIF`, `EXECUTION_ORDER_TIMEOUT_MS`, `EXECUTION_SUBMITTED_AUTO_CANCEL_MS`, `EXECUTION_RETRY_AS_MKT_ON_CODE_110`, `EXECUTION_MIN_TICK_OVERRIDES` - parametry wykonania zleceń
+- `LLM_AGENT_*`, `OPENAI_API_KEY`, `BENZINGA_API_KEY` - parametry autonomicznego agenta LLM
 - `WATCHLIST_SYMBOLS` - symbole do subskrypcji i liczenia sygnałów
-- `INGESTION_BACKFILL_1M_CANDLES` - ile świec 1m dociągnąć z historii na `POST /bootstrap` (domyślnie: `SIGNAL_MIN_CANDLES`)
 - `SIGNAL_ASSET_CLASS_OVERRIDES` - ręczne mapowanie klasy aktywa (`AAPL:stock,GC:commodity,SPY:index`)
 - `MAX_RISK_PER_TRADE_PCT`, `MAX_EXPOSURE_PCT`, `MAX_OPEN_POSITIONS` - limity ryzyka
 
@@ -88,8 +90,9 @@ Najważniejsze zmienne środowiskowe:
 
 - `POST /execution/bootstrap` - połączenie socket + odczyt managed accounts
 - `GET /execution/account/summary` - snapshot konta z TWS (equity/cash/margins/PnL + open positions)
-- `GET /execution/orders?limit=50&status=PROPOSED` - przegląd orders z DB
-- `POST /execution/execute-proposed/:id` - wykonaj istniejący `PROPOSED` order
+- `GET /execution/orders?limit=50&status=PROPOSED` - przegląd orders z DB (+ filtry `decisionSource` i `aiDecision`)
+- `POST /execution/execute-proposed/:id` - wykonaj istniejący `PROPOSED`, lub `REJECTED` z `overrideRejected=true`
+- `POST /execution/reject-proposed/:id` - systemowe/manualne odrzucenie `PROPOSED`
 - `POST /execution/execute-ticket` - wykonaj ręczny, ustrukturyzowany signal ticket (opcjonalnie persist)
 - execution wysyła bracket (`parent + TP + SL`) jeśli ticket ma `stop` i `takeProfit` oraz `positionEffect=OPEN_OR_ADD`
 - przy `positionEffect=CLOSE_OR_REDUCE` bracket nie jest zakładany (order tylko zamyka/redukuje pozycję)
@@ -108,12 +111,11 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
       "quantity": 1,
       "stop": 250,
       "takeProfit": 275,
-      "reason": "manual paper test",
+      "reason": "manual execution test",
       "confidence": 0.7,
       "riskCheckStatus": "PASS"
     },
-    "persist": true,
-    "dryRun": true
+    "persist": true
   }'
 ```
 
@@ -130,9 +132,26 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - `Run Signals Once`
 - `Execution Bootstrap`
 - `Execute All Proposed`
+- `Reject` (manual reject dla `PROPOSED`)
+- `Execute override` (dla orderów `REJECTED` przez AI)
 - Widoki:
 - watchlista (symbol, conid, last/bid/ask/spread, ostatnia świeca 1m)
-- tabela `proposed_orders` z przyciskiem wykonania pojedynczego zlecenia
+- tabela `proposed_orders` z metadanymi AI (`Decision Source`, `AI Decision`, `AI Model`, `AI Reason`)
+
+## LLM Agent (autonomiczny execution gate)
+
+- Agent cyklicznie pobiera i atomowo claimuje nowe `PROPOSED` z DB.
+- Buduje kontekst z:
+- order ticketu (symbol/side/qty/entry/SL/TP/strategy/confidence),
+- aktualnego stanu konta i pozycji z `/execution/account/summary`,
+- newsów symbolu z Benzinga (okno `LLM_AGENT_NEWS_WINDOW_HOURS`).
+- Następnie podejmuje decyzję przez OpenAI (`LLM_AGENT_MODEL`) i:
+- `EXECUTE`: wywołuje `/execution/execute-proposed/:id`,
+- `REJECT`: wywołuje `/execution/reject-proposed/:id`.
+- Każda decyzja trafia do `llm_order_decisions` (audit trail).
+- Fail-closed: przy błędzie LLM/news/API order dostaje `REJECTED` z technicznym powodem.
+- Cooldown na symbol (`LLM_AGENT_SYMBOL_COOLDOWN_MS`) ogranicza spam decyzji na tym samym tickerze.
+- Uwaga: przy `LLM_AGENT_ENABLED=true` i brakujących `OPENAI_API_KEY` / `BENZINGA_API_KEY` agent będzie odrzucał `PROPOSED` (fail-closed).
 
 ## Istotne uwagi IBKR
 
@@ -141,7 +160,6 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - Limity market data lines i snapshotów ograniczają rozmiar watchlisty.
 - Obsługiwane typy orderów i routing trzeba potwierdzić manualnie w TWS przed automatyzacją.
 - Ingestion i Execution muszą mieć różne client IDs (`IB_CLIENT_ID` vs `EXECUTION_CLIENT_ID`).
-- Domyślnie `EXECUTION_DRY_RUN=true` (paper-safe); ustaw `false` dopiero gdy chcesz faktycznie wysyłać zlecenia.
 
 ## Najbliższe kroki (Etap 3/4)
 

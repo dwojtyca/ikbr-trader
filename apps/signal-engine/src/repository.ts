@@ -26,10 +26,40 @@ interface ProposedOrderRow {
   reason: string;
   confidence: number;
   risk_check_status: RiskCheckStatus;
-  status: 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED' | 'EXECUTED';
+  status: 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED' | 'SUPERSEDED' | 'EXPIRED' | 'EXECUTED';
   strategy: string | null;
   indicator_snapshot: IndicatorSnapshot | string | null;
+  execution_attempted_at: Date | string | null;
+  executed_at: Date | string | null;
+  generated_from_candle_ts: Date | string | null;
+  lifecycle_reason: string | null;
+  superseded_by_order_id: number | null;
   created_at: Date | string;
+}
+
+interface SignalOutcomeRow {
+  proposed_order_id: number;
+  instrument: string;
+  strategy: string | null;
+  side: Side;
+  confidence: number;
+  entry: number | null;
+  stop: number | null;
+  take_profit: number | null;
+  executed_at: Date | string | null;
+  conid: string | null;
+}
+
+export interface SignalOutcomeSummary {
+  scope: 'symbol' | 'strategy';
+  key: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  open: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
 }
 
 export interface ExposureSnapshot {
@@ -37,6 +67,7 @@ export interface ExposureSnapshot {
   openPositions: number;
   source: 'execution' | 'db';
   positionsBySymbol: Record<string, number>;
+  accountEquity?: number;
 }
 
 export class SignalRepository {
@@ -85,6 +116,19 @@ export class SignalRepository {
         status TEXT NOT NULL,
         strategy TEXT,
         indicator_snapshot JSONB,
+        decision_source TEXT NOT NULL DEFAULT 'signal',
+        decision_actor TEXT,
+        ai_decision TEXT,
+        ai_reason TEXT,
+        ai_model TEXT,
+        ai_decision_confidence DOUBLE PRECISION,
+        llm_decision_id BIGINT,
+        source_error TEXT,
+        processing_owner TEXT,
+        processing_claimed_at TIMESTAMPTZ,
+        generated_from_candle_ts TIMESTAMPTZ,
+        lifecycle_reason TEXT,
+        superseded_by_order_id BIGINT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
@@ -96,6 +140,21 @@ export class SignalRepository {
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS indicator_snapshot JSONB;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS generated_from_candle_ts TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS superseded_by_order_id BIGINT;`);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_created_idx
@@ -105,6 +164,33 @@ export class SignalRepository {
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_status_idx
       ON proposed_orders (status);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS proposed_orders_instrument_status_side_created_idx
+      ON proposed_orders (instrument, status, side, created_at DESC);
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS proposed_orders_signal_candle_idx
+      ON proposed_orders (instrument, generated_from_candle_ts DESC);
+    `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS signal_outcomes (
+        id BIGSERIAL PRIMARY KEY,
+        proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id),
+        evaluated_at TIMESTAMPTZ NOT NULL,
+        pnl_pct DOUBLE PRECISION,
+        hit_stop BOOLEAN,
+        hit_take_profit BOOLEAN,
+        notes TEXT
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS signal_outcomes_order_idx
+      ON signal_outcomes (proposed_order_id, evaluated_at DESC);
     `);
   }
 
@@ -198,12 +284,28 @@ export class SignalRepository {
         status,
         strategy,
         indicator_snapshot,
+        decision_source,
+        decision_actor,
+        ai_decision,
+        ai_reason,
+        ai_model,
+        ai_decision_confidence,
+        llm_decision_id,
+        source_error,
+        processing_owner,
+        processing_claimed_at,
+        generated_from_candle_ts,
+        lifecycle_reason,
+        superseded_by_order_id,
         created_at
       )
       VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, NOW()
+        $11, $12, $13, $14, $15,
+        'signal', NULL, NULL, NULL, NULL,
+        NULL, NULL, NULL, NULL, NULL,
+        $16, $17, $18, NOW()
       )
       RETURNING id
       `,
@@ -222,30 +324,72 @@ export class SignalRepository {
         order.riskCheckStatus,
         order.status,
         order.strategy ?? null,
-        JSON.stringify(order.indicators ?? null)
+        JSON.stringify(order.indicators ?? null),
+        order.generatedFromCandleTs ?? null,
+        order.lifecycleReason ?? null,
+        order.supersededByOrderId ?? null
       ]
     );
 
     return Number(result.rows[0].id);
   }
 
-  async cancelOpenProposalsForInstrument(instrument: string): Promise<void> {
+  async supersedePendingSignalsForInstrument(instrument: string, supersededByOrderId: number): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
-      SET status = 'CANCELLED'
+      SET status = 'SUPERSEDED',
+          lifecycle_reason = COALESCE(lifecycle_reason, 'Superseded by newer signal for instrument'),
+          superseded_by_order_id = $2
       WHERE instrument = $1
         AND status = 'PROPOSED'
+        AND id <> $2
+        AND processing_owner IS NULL
       `,
-      [instrument]
+      [instrument, supersededByOrderId]
     );
+  }
+
+  async expireStalePendingSignals(ttlMs: number): Promise<number> {
+    if (!(ttlMs > 0)) return 0;
+
+    const result = await this.pool.query(
+      `
+      UPDATE proposed_orders
+      SET status = 'EXPIRED',
+          lifecycle_reason = COALESCE(lifecycle_reason, 'Signal expired before execution')
+      WHERE status = 'PROPOSED'
+        AND processing_owner IS NULL
+        AND created_at < NOW() - (($1::BIGINT || ' milliseconds')::interval)
+      `,
+      [ttlMs]
+    );
+
+    return Number(result.rowCount ?? 0);
+  }
+
+  async hasSignalForInstrumentCandle(instrument: string, candleTs: Date): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+      SELECT 1
+      FROM proposed_orders
+      WHERE instrument = $1
+        AND generated_from_candle_ts = $2
+      LIMIT 1
+      `,
+      [instrument, candleTs]
+    );
+
+    return Boolean(result.rows[0]);
   }
 
   async getRecentSignals(limit: number): Promise<ProposedOrder[]> {
     const result = await this.pool.query(
       `
       SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
-             reason, confidence, risk_check_status, status, strategy, indicator_snapshot, created_at
+             reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
+             execution_attempted_at, executed_at, generated_from_candle_ts, lifecycle_reason, superseded_by_order_id,
+             created_at
       FROM proposed_orders
       ORDER BY created_at DESC
       LIMIT $1
@@ -254,6 +398,205 @@ export class SignalRepository {
     );
 
     return result.rows.map((row) => this.mapRow(row as ProposedOrderRow));
+  }
+
+  async hasRecentDuplicateHoldReject(instrument: string, reason: string, windowMs: number): Promise<boolean> {
+    if (windowMs <= 0) return false;
+    if (!instrument.trim() || !reason.trim()) return false;
+
+    const result = await this.pool.query(
+      `
+      SELECT 1
+      FROM proposed_orders
+      WHERE instrument = $1
+        AND side = 'HOLD'
+        AND status = 'REJECTED'
+        AND reason = $2
+        AND created_at >= NOW() - (($3::BIGINT || ' milliseconds')::interval)
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [instrument, reason, windowMs]
+    );
+
+    return Boolean(result.rows[0]);
+  }
+
+  async refreshSignalOutcomes(limit = 500): Promise<number> {
+    const candidates = await this.pool.query(
+      `
+      SELECT po.id AS proposed_order_id, po.instrument, po.strategy, po.side, po.confidence, po.entry, po.stop, po.take_profit,
+             COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) AS executed_at,
+             po.conid
+      FROM proposed_orders po
+      LEFT JOIN LATERAL (
+        SELECT so.id
+        FROM signal_outcomes so
+        WHERE so.proposed_order_id = po.id
+        ORDER BY so.evaluated_at DESC
+        LIMIT 1
+      ) latest ON TRUE
+      WHERE po.status = 'FILLED'
+        AND po.entry IS NOT NULL
+        AND latest.id IS NULL
+      ORDER BY COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) ASC
+      LIMIT $1
+      `,
+      [limit]
+    );
+
+    let inserted = 0;
+    for (const row of candidates.rows as SignalOutcomeRow[]) {
+      const executedAtRaw = row.executed_at instanceof Date ? row.executed_at : row.executed_at ? new Date(row.executed_at) : null;
+      if (!executedAtRaw || Number.isNaN(executedAtRaw.getTime())) continue;
+
+      const candles = await this.pool.query(
+        `
+        SELECT ts, high, low, close
+        FROM candles_1m
+        WHERE symbol = $1
+          AND ts >= $2
+        ORDER BY ts ASC
+        LIMIT 500
+        `,
+        [row.instrument, executedAtRaw]
+      );
+
+      const entry = Number(row.entry ?? NaN);
+      if (!Number.isFinite(entry) || entry <= 0) continue;
+
+      const stop = row.stop !== null ? Number(row.stop) : undefined;
+      const takeProfit = row.take_profit !== null ? Number(row.take_profit) : undefined;
+      let pnlPct: number | null = null;
+      let hitStop = false;
+      let hitTakeProfit = false;
+      let notes = 'mark_to_market';
+
+      for (const candle of candles.rows as Array<{ ts: Date | string; high: number; low: number; close: number }>) {
+        const high = Number(candle.high);
+        const low = Number(candle.low);
+
+        if (row.side === 'BUY') {
+          if (takeProfit !== undefined && high >= takeProfit) {
+            pnlPct = ((takeProfit - entry) / entry) * 100;
+            hitTakeProfit = true;
+            notes = 'take_profit_hit';
+            break;
+          }
+          if (stop !== undefined && low <= stop) {
+            pnlPct = ((stop - entry) / entry) * 100;
+            hitStop = true;
+            notes = 'stop_hit';
+            break;
+          }
+        } else if (row.side === 'SELL') {
+          if (takeProfit !== undefined && low <= takeProfit) {
+            pnlPct = ((entry - takeProfit) / entry) * 100;
+            hitTakeProfit = true;
+            notes = 'take_profit_hit';
+            break;
+          }
+          if (stop !== undefined && high >= stop) {
+            pnlPct = ((entry - stop) / entry) * 100;
+            hitStop = true;
+            notes = 'stop_hit';
+            break;
+          }
+        }
+      }
+
+      if (pnlPct === null && candles.rows.length > 0) {
+        const lastCandle = candles.rows[candles.rows.length - 1] as { close: number };
+        const close = Number(lastCandle.close);
+        if (Number.isFinite(close) && close > 0) {
+          pnlPct = row.side === 'BUY'
+            ? ((close - entry) / entry) * 100
+            : ((entry - close) / entry) * 100;
+        }
+      }
+
+      await this.pool.query(
+        `
+        INSERT INTO signal_outcomes (proposed_order_id, evaluated_at, pnl_pct, hit_stop, hit_take_profit, notes)
+        VALUES ($1, NOW(), $2, $3, $4, $5)
+        `,
+        [row.proposed_order_id, pnlPct, hitStop, hitTakeProfit, notes]
+      );
+      inserted += 1;
+    }
+
+    return inserted;
+  }
+
+  async getSignalOutcomeSummary(limit = 20): Promise<SignalOutcomeSummary[]> {
+    const result = await this.pool.query(
+      `
+      WITH latest AS (
+        SELECT DISTINCT ON (so.proposed_order_id)
+          so.proposed_order_id,
+          so.pnl_pct,
+          so.notes
+        FROM signal_outcomes so
+        ORDER BY so.proposed_order_id, so.evaluated_at DESC
+      ),
+      base AS (
+        SELECT
+          po.instrument,
+          COALESCE(po.strategy, 'n/a') AS strategy,
+          latest.pnl_pct,
+          latest.notes
+        FROM latest
+        JOIN proposed_orders po ON po.id = latest.proposed_order_id
+      ),
+      symbol_stats AS (
+        SELECT
+          'symbol'::text AS scope,
+          instrument AS key,
+          COUNT(*)::int AS trades,
+          COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
+          COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
+          COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+          AVG(pnl_pct) AS avg_pnl_pct,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct
+        FROM base
+        GROUP BY instrument
+      ),
+      strategy_stats AS (
+        SELECT
+          'strategy'::text AS scope,
+          strategy AS key,
+          COUNT(*)::int AS trades,
+          COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
+          COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
+          COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+          AVG(pnl_pct) AS avg_pnl_pct,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct
+        FROM base
+        GROUP BY strategy
+      )
+      SELECT *
+      FROM (
+        SELECT * FROM symbol_stats
+        UNION ALL
+        SELECT * FROM strategy_stats
+      ) stats
+      ORDER BY trades DESC, key ASC
+      LIMIT $1
+      `,
+      [limit]
+    );
+
+    return result.rows.map((row) => ({
+      scope: row.scope,
+      key: row.key,
+      trades: Number(row.trades),
+      wins: Number(row.wins),
+      losses: Number(row.losses),
+      open: Number(row.open),
+      winRate: Number(row.trades) > 0 ? Number(row.wins) / Number(row.trades) : 0,
+      avgPnlPct: row.avg_pnl_pct === null ? undefined : Number(row.avg_pnl_pct),
+      medianPnlPct: row.median_pnl_pct === null ? undefined : Number(row.median_pnl_pct)
+    }));
   }
 
   private mapRow(row: ProposedOrderRow): ProposedOrder {
@@ -278,6 +621,11 @@ export class SignalRepository {
       status: this.normalizeStatus(row.status),
       strategy: row.strategy ?? undefined,
       indicators,
+      executionAttemptedAt: row.execution_attempted_at ? new Date(row.execution_attempted_at) : undefined,
+      executedAt: row.executed_at ? new Date(row.executed_at) : undefined,
+      generatedFromCandleTs: row.generated_from_candle_ts ? new Date(row.generated_from_candle_ts) : undefined,
+      lifecycleReason: row.lifecycle_reason ?? undefined,
+      supersededByOrderId: row.superseded_by_order_id ?? undefined,
       createdAt
     };
   }
@@ -311,6 +659,10 @@ export class SignalRepository {
         if (!response.ok) return null;
 
         const payload = (await response.json()) as {
+          metrics?: {
+            netLiquidation?: number | string;
+            equityWithLoanValue?: number | string;
+          };
           totals?: {
             grossExposure?: number | string;
             positionsCount?: number | string;
@@ -323,6 +675,8 @@ export class SignalRepository {
 
         const exposure = Number(payload?.totals?.grossExposure);
         const openPositions = Number(payload?.totals?.positionsCount);
+        const accountEquityRaw = payload?.metrics?.netLiquidation ?? payload?.metrics?.equityWithLoanValue;
+        const accountEquity = Number(accountEquityRaw);
 
         if (!Number.isFinite(exposure) || !Number.isFinite(openPositions)) return null;
         const positionsBySymbol: Record<string, number> = {};
@@ -333,7 +687,13 @@ export class SignalRepository {
           positionsBySymbol[position.symbol.toUpperCase()] = qty;
         }
 
-        return { exposure, openPositions, source: 'execution', positionsBySymbol };
+        return {
+          exposure,
+          openPositions,
+          source: 'execution',
+          positionsBySymbol,
+          accountEquity: Number.isFinite(accountEquity) && accountEquity > 0 ? accountEquity : undefined
+        };
       } finally {
         clearTimeout(timeout);
       }
@@ -359,7 +719,6 @@ export class SignalRepository {
           AVG(COALESCE(entry, 0)) AS avg_entry
         FROM proposed_orders
         WHERE status IN ('FILLED', 'EXECUTED')
-          AND COALESCE(broker_order_id, '') NOT LIKE 'DRYRUN-%'
         GROUP BY UPPER(instrument)
       )
       SELECT

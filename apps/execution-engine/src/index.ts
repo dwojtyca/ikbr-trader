@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 import { z } from 'zod';
 import { ProposedOrder, ProposedOrderStatus, SignalTicket } from '@ikbr/shared';
 import { config } from './config.js';
-import { ExecutionRepository, OrderListFilters } from './repository.js';
+import { DecisionActor, ExecutionRepository, OrderDecisionMetadata, OrderListFilters } from './repository.js';
 import { AccountSnapshot, TwsExecutionClient } from './tws-execution-client.js';
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
@@ -18,12 +18,26 @@ const tws = new TwsExecutionClient(
     exchange: config.IB_EXCHANGE,
     primaryExchange: config.IB_PRIMARY_EXCHANGE,
     currency: config.IB_CURRENCY,
-    orderTimeoutMs: config.EXECUTION_ORDER_TIMEOUT_MS
+    orderTimeoutMs: config.EXECUTION_ORDER_TIMEOUT_MS,
+    submittedAutoCancelMs: config.EXECUTION_SUBMITTED_AUTO_CANCEL_MS,
+    retryAsMktOnCode110: config.executionRetryAsMktOnCode110,
+    minTickOverrides: config.executionMinTickOverrides,
+    contractFallbackByConid: config.contractFallbackByConid
   },
   (line) => app.log.info(line),
   (update) => {
     void repo.applyBrokerStatusUpdate(update).catch((err) => {
       app.log.warn({ update, err }, 'failed to apply broker order status update');
+    });
+  },
+  (fill) => {
+    void repo.upsertBrokerExecutionFill(fill).catch((err) => {
+      app.log.warn({ fill, err }, 'failed to persist broker execution fill');
+    });
+  },
+  (report) => {
+    void repo.applyBrokerCommissionReport(report).catch((err) => {
+      app.log.warn({ report, err }, 'failed to persist broker commission report');
     });
   }
 );
@@ -44,14 +58,49 @@ const ticketSchema = z.object({
   riskCheckStatus: z.enum(['PASS', 'REJECT']).default('PASS')
 });
 
+const decisionActorSchema = z.enum(['llm-agent', 'user', 'user_override']);
+const decisionMetadataSchema = z.object({
+  actor: decisionActorSchema.optional(),
+  decisionSource: z.enum(['signal', 'llm', 'user', 'user_override']).optional(),
+  aiDecision: z.enum(['EXECUTE', 'REJECT']).optional(),
+  aiReason: z.string().optional(),
+  aiModel: z.string().optional(),
+  aiDecisionConfidence: z.coerce.number().min(0).max(1).optional(),
+  llmDecisionId: z.coerce.number().int().positive().optional(),
+  sourceError: z.string().optional()
+});
+
 const executeTicketBodySchema = z.object({
   ticket: ticketSchema,
   persist: z.boolean().default(true),
-  strategy: z.string().default('manual_ticket'),
-  dryRun: z.boolean().optional()
+  strategy: z.string().default('manual_ticket')
+});
+
+const executeProposedBodySchema = decisionMetadataSchema.extend({
+  overrideRejected: z.boolean().optional()
+});
+
+const rejectProposedBodySchema = decisionMetadataSchema.extend({
+  reason: z.string().min(1),
+  actor: z.enum(['llm-agent', 'user'])
 });
 
 let accountSnapshotCache: { accountId: string; fetchedAtMs: number; snapshot: AccountSnapshot } | null = null;
+let executionSyncCache: { accountId: string; syncedAtMs: number } | null = null;
+
+async function syncRecentExecutions(accountId: string): Promise<void> {
+  if (executionSyncCache && executionSyncCache.accountId === accountId && Date.now() - executionSyncCache.syncedAtMs < 5 * 60_000) {
+    return;
+  }
+
+  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const count = await tws.syncExecutions(accountId, since);
+  executionSyncCache = {
+    accountId,
+    syncedAtMs: Date.now()
+  };
+  app.log.info({ accountId, count, since: since.toISOString() }, 'synced recent broker executions');
+}
 
 function validateExecutableTicket(ticket: SignalTicket): string | null {
   if (ticket.riskCheckStatus !== 'PASS') {
@@ -73,6 +122,37 @@ function validateExecutableTicket(ticket: SignalTicket): string | null {
   return null;
 }
 
+function normalizeDecisionMetadata(raw: z.infer<typeof decisionMetadataSchema> | undefined, fallbackActor: DecisionActor): OrderDecisionMetadata {
+  const actor = (raw?.actor as DecisionActor | undefined) ?? fallbackActor;
+
+  const defaultDecisionSource = actor === 'llm-agent'
+    ? 'llm'
+    : actor === 'user_override'
+      ? 'user_override'
+      : 'user';
+
+  const out: OrderDecisionMetadata = {
+    decisionActor: actor,
+    decisionSource: raw?.decisionSource ?? defaultDecisionSource,
+    aiDecision: raw?.aiDecision,
+    aiReason: raw?.aiReason,
+    aiModel: raw?.aiModel,
+    aiDecisionConfidence: raw?.aiDecisionConfidence,
+    llmDecisionId: raw?.llmDecisionId,
+    sourceError: raw?.sourceError
+  };
+
+  if (actor === 'llm-agent' && !out.aiDecision) {
+    out.aiDecision = 'EXECUTE';
+  }
+
+  return out;
+}
+
+function buildSubmittedConflictMessage(symbol: string, existing: { id: number; brokerOrderId?: string; createdAt: Date }): string {
+  return `Execution blocked for ${symbol}: active SUBMITTED order already exists (id=${existing.id}, brokerOrderId=${existing.brokerOrderId ?? 'n/a'}, createdAt=${existing.createdAt.toISOString()})`;
+}
+
 async function ensureBrokerSession(): Promise<{ accountId: string; accounts: string[] }> {
   await tws.connect();
   const accounts = await tws.getManagedAccounts();
@@ -89,13 +169,12 @@ async function ensureBrokerSession(): Promise<{ accountId: string; accounts: str
   return { accountId, accounts };
 }
 
-async function executePersistedOrder(order: ProposedOrder, dryRun: boolean): Promise<{
+async function executePersistedOrder(order: ProposedOrder, metadata?: OrderDecisionMetadata): Promise<{
   execution: {
     orderId: number;
     accountId: string;
     brokerOrderId: string;
     status: string;
-    dryRun: boolean;
   };
 }> {
   if (!order.id) {
@@ -104,34 +183,27 @@ async function executePersistedOrder(order: ProposedOrder, dryRun: boolean): Pro
 
   const validationError = validateExecutableTicket(order);
   if (validationError) {
-    await repo.markRejected(order.id, validationError);
+    await repo.markRejected(order.id, validationError, {
+      ...metadata,
+      aiDecision: metadata?.aiDecision ?? 'REJECT'
+    });
     throw new Error(validationError);
   }
 
-  const { accountId } = await ensureBrokerSession();
-  await repo.markExecutionAttempt(order.id, accountId);
-
-  if (dryRun) {
-    const fakeBrokerOrderId = `DRYRUN-${order.id}`;
-    await repo.markCancelled(order.id, 'Dry run: order accepted but not sent to broker');
-
-    return {
-      execution: {
-        orderId: order.id,
-        accountId,
-        brokerOrderId: fakeBrokerOrderId,
-        status: 'CANCELLED',
-        dryRun: true
-      }
-    };
+  const activeSubmitted = await repo.findActiveSubmittedByInstrument(order.instrument, order.id);
+  if (activeSubmitted) {
+    throw new Error(buildSubmittedConflictMessage(order.instrument, activeSubmitted));
   }
+
+  const { accountId } = await ensureBrokerSession();
+  await repo.markExecutionAttempt(order.id, accountId, metadata);
 
   try {
     const result = await tws.placeSignalOrder(order, accountId, config.EXECUTION_DEFAULT_TIF);
     if (result.status === 'FILLED') {
-      await repo.markFilled(order.id, accountId, result.brokerOrderId, `Broker accepted order, status=${result.status}`);
+      await repo.markFilled(order.id, accountId, result.brokerOrderId, `Broker accepted order, status=${result.status}`, metadata);
     } else {
-      await repo.markSubmitted(order.id, accountId, result.brokerOrderId, `Broker accepted order, status=${result.status}`);
+      await repo.markSubmitted(order.id, accountId, result.brokerOrderId, `Broker accepted order, status=${result.status}`, metadata);
     }
 
     return {
@@ -139,13 +211,15 @@ async function executePersistedOrder(order: ProposedOrder, dryRun: boolean): Pro
         orderId: order.id,
         accountId,
         brokerOrderId: result.brokerOrderId,
-        status: result.status,
-        dryRun: false
+        status: result.status
       }
     };
   } catch (error) {
     const message = (error as Error).message;
     await repo.markCancelled(order.id, message);
+    if (metadata) {
+      await repo.setDecisionMetadata(order.id, { ...metadata, sourceError: message });
+    }
     throw error;
   }
 }
@@ -173,16 +247,34 @@ app.get('/execution/account/summary', async (request) => {
     .parse(request.query ?? {});
 
   const { accountId, accounts } = await ensureBrokerSession();
+  await syncRecentExecutions(accountId);
 
   if (!query.force && accountSnapshotCache && accountSnapshotCache.accountId === accountId && Date.now() - accountSnapshotCache.fetchedAtMs < 10_000) {
+    const cumulative = await repo.getCumulativeRealizedPnL({
+      baseCurrency: config.IB_CURRENCY,
+      fxToBaseByCurrency: accountSnapshotCache.snapshot.fxToBaseByCurrency
+    });
     return {
       source: 'cache',
       accounts,
-      ...accountSnapshotCache.snapshot
+      ...accountSnapshotCache.snapshot,
+      totals: {
+        ...accountSnapshotCache.snapshot.totals,
+        dailyRealizedPnL: accountSnapshotCache.snapshot.totals.realizedPnL,
+        cumulativeRealizedPnL: cumulative.pnl
+      },
+      diagnostics: {
+        cumulativeRealizedPnLComplete: cumulative.complete,
+        cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports
+      }
     };
   }
 
   const snapshot = await tws.getAccountSnapshot(accountId);
+  const cumulative = await repo.getCumulativeRealizedPnL({
+    baseCurrency: config.IB_CURRENCY,
+    fxToBaseByCurrency: snapshot.fxToBaseByCurrency
+  });
   accountSnapshotCache = {
     accountId,
     fetchedAtMs: Date.now(),
@@ -192,7 +284,16 @@ app.get('/execution/account/summary', async (request) => {
   return {
     source: 'live',
     accounts,
-    ...snapshot
+    ...snapshot,
+    totals: {
+      ...snapshot.totals,
+      dailyRealizedPnL: snapshot.totals.realizedPnL,
+      cumulativeRealizedPnL: cumulative.pnl
+    },
+    diagnostics: {
+      cumulativeRealizedPnLComplete: cumulative.complete,
+      cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports
+    }
   };
 });
 
@@ -204,8 +305,10 @@ app.get('/execution/orders', async (request) => {
       side: z.enum(['BUY', 'SELL', 'HOLD']).optional(),
       type: z.enum(['MKT', 'LMT']).optional(),
       qty: z.string().trim().optional(),
-      status: z.enum(['PROPOSED', 'REJECTED', 'SUBMITTED', 'FILLED', 'CANCELLED']).optional(),
-      risk: z.enum(['PASS', 'REJECT']).optional()
+      status: z.enum(['PROPOSED', 'REJECTED', 'SUBMITTED', 'FILLED', 'CANCELLED', 'SUPERSEDED', 'EXPIRED']).optional(),
+      risk: z.enum(['PASS', 'REJECT']).optional(),
+      decisionSource: z.enum(['signal', 'llm', 'user', 'user_override']).optional(),
+      aiDecision: z.enum(['EXECUTE', 'REJECT']).optional()
     })
     .parse(request.query ?? {});
 
@@ -224,7 +327,9 @@ app.get('/execution/orders', async (request) => {
     orderType: query.type,
     qty,
     status: query.status as ProposedOrderStatus | undefined,
-    riskCheckStatus: query.risk
+    riskCheckStatus: query.risk,
+    decisionSource: query.decisionSource,
+    aiDecision: query.aiDecision
   };
 
   return repo.listOrders(query.limit, filters);
@@ -232,21 +337,30 @@ app.get('/execution/orders', async (request) => {
 
 app.post('/execution/execute-proposed/:id', async (request, reply) => {
   const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params ?? {});
-  const body = z.object({ dryRun: z.boolean().optional() }).parse(request.body ?? {});
+  const body = executeProposedBodySchema.parse(request.body ?? {});
 
   const order = await repo.getProposedOrderById(params.id);
   if (!order) {
     return reply.code(404).send({ error: `proposed order id=${params.id} not found` });
   }
 
-  if (order.status !== 'PROPOSED') {
-    return reply.code(409).send({ error: `order id=${params.id} is not PROPOSED (current=${order.status})` });
+  const canExecute = order.status === 'PROPOSED' || (order.status === 'REJECTED' && body.overrideRejected === true);
+  if (!canExecute) {
+    return reply.code(409).send({ error: `order id=${params.id} cannot be executed (current=${order.status})` });
+  }
+
+  const fallbackActor: DecisionActor = body.overrideRejected ? 'user_override' : (body.actor as DecisionActor | undefined) ?? 'user';
+  const metadata = normalizeDecisionMetadata(body, fallbackActor);
+  const activeSubmitted = await repo.findActiveSubmittedByInstrument(order.instrument, order.id);
+  if (activeSubmitted) {
+    return reply.code(409).send({ error: buildSubmittedConflictMessage(order.instrument, activeSubmitted) });
   }
 
   try {
-    const result = await executePersistedOrder(order, body.dryRun ?? config.executionDryRun);
+    const result = await executePersistedOrder(order, metadata);
+    const fresh = await repo.getProposedOrderById(params.id);
     return {
-      order,
+      order: fresh,
       ...result
     };
   } catch (error) {
@@ -254,9 +368,78 @@ app.post('/execution/execute-proposed/:id', async (request, reply) => {
   }
 });
 
+app.post('/execution/reject-proposed/:id', async (request, reply) => {
+  const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params ?? {});
+  const body = rejectProposedBodySchema.parse(request.body ?? {});
+
+  const order = await repo.getProposedOrderById(params.id);
+  if (!order) {
+    return reply.code(404).send({ error: `proposed order id=${params.id} not found` });
+  }
+
+  if (order.status !== 'PROPOSED') {
+    return reply.code(409).send({ error: `order id=${params.id} cannot be rejected (current=${order.status})` });
+  }
+
+  const metadata = normalizeDecisionMetadata(body, body.actor);
+  metadata.aiDecision = metadata.aiDecision ?? 'REJECT';
+
+  await repo.markRejected(params.id, body.reason, metadata);
+  const fresh = await repo.getProposedOrderById(params.id);
+  return { order: fresh };
+});
+
+app.post('/execution/cancel-proposed/:id', async (request, reply) => {
+  const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params ?? {});
+
+  const order = await repo.getProposedOrderById(params.id);
+  if (!order) {
+    return reply.code(404).send({ error: `proposed order id=${params.id} not found` });
+  }
+
+  if (order.status !== 'SUBMITTED') {
+    return reply.code(409).send({ error: `order id=${params.id} cannot be cancelled (current=${order.status})` });
+  }
+
+  if (!order.brokerOrderId) {
+    return reply.code(400).send({ error: `order id=${params.id} has no brokerOrderId to cancel` });
+  }
+
+  try {
+    const result = await tws.cancelBrokerOrder(order.brokerOrderId);
+    const fresh = await repo.getProposedOrderById(params.id);
+    return {
+      order: fresh,
+      cancel: result
+    };
+  } catch (error) {
+    const message = (error as Error).message;
+
+    // IB code=10147 means order is no longer active/not found in broker open orders.
+    // Treat as terminal from UI perspective and close local SUBMITTED row.
+    if (message.includes('code=10147')) {
+      await repo.markCancelled(params.id, `Broker reports order not found (code=10147); marked as CANCELLED locally. Original error: ${message}`);
+      const fresh = await repo.getProposedOrderById(params.id);
+      return {
+        order: fresh,
+        cancel: {
+          brokerOrderId: order.brokerOrderId,
+          status: 'NOT_FOUND_ASSUMED_CANCELLED'
+        }
+      };
+    }
+
+    return reply.code(400).send({ error: message });
+  }
+});
+
 app.post('/execution/execute-ticket', async (request, reply) => {
   const body = executeTicketBodySchema.parse(request.body ?? {});
   const ticket = body.ticket as SignalTicket;
+  const activeSubmitted = await repo.findActiveSubmittedByInstrument(ticket.instrument);
+  if (activeSubmitted) {
+    return reply.code(409).send({ error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted) });
+  }
 
   if (!body.persist) {
     const validationError = validateExecutableTicket(ticket);
@@ -267,23 +450,12 @@ app.post('/execution/execute-ticket', async (request, reply) => {
     try {
       const { accountId } = await ensureBrokerSession();
 
-      if (body.dryRun ?? config.executionDryRun) {
-        return {
-          execution: {
-            accountId,
-            status: 'DRYRUN',
-            dryRun: true
-          }
-        };
-      }
-
       const result = await tws.placeSignalOrder(ticket, accountId, config.EXECUTION_DEFAULT_TIF);
       return {
         execution: {
           accountId,
           brokerOrderId: result.brokerOrderId,
-          status: result.status,
-          dryRun: false
+          status: result.status
         }
       };
     } catch (error) {
@@ -298,7 +470,10 @@ app.post('/execution/execute-ticket', async (request, reply) => {
   }
 
   try {
-    const result = await executePersistedOrder(inserted, body.dryRun ?? config.executionDryRun);
+    const result = await executePersistedOrder(inserted, {
+      decisionSource: 'user',
+      decisionActor: 'user'
+    });
     const fresh = await repo.getProposedOrderById(insertedId);
 
     return {

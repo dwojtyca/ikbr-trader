@@ -19,15 +19,98 @@ const schema = z.object({
   IB_EXCHANGE: z.string().default('SMART'),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default('USD'),
+  WATCHLIST_CONTRACT_OVERRIDES: z.string().default(''),
   IBKR_ACCOUNT_ID: optionalTrimmedString,
   EXECUTION_DEFAULT_TIF: z.string().default('DAY'),
   EXECUTION_ORDER_TIMEOUT_MS: z.coerce.number().default(15000),
-  EXECUTION_DRY_RUN: z.string().default('true')
+  EXECUTION_SUBMITTED_AUTO_CANCEL_MS: z.coerce.number().int().min(0).default(0),
+  EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default('false'),
+  EXECUTION_MIN_TICK_OVERRIDES: z.string().default('')
 });
 
 const env = schema.parse(process.env);
 
+type OverrideKey = 'conid' | 'secType' | 'exchange' | 'primaryExchange' | 'currency';
+
+function mapOverrideKey(raw: string): OverrideKey | undefined {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'conid') return 'conid';
+  if (normalized === 'sectype') return 'secType';
+  if (normalized === 'exchange') return 'exchange';
+  if (normalized === 'primaryexchange' || normalized === 'primaryexch' || normalized === 'primary') return 'primaryExchange';
+  if (normalized === 'currency') return 'currency';
+  return undefined;
+}
+
+interface ContractFallback {
+  symbol: string;
+  secType?: string;
+  exchange?: string;
+  primaryExch?: string;
+  currency?: string;
+}
+
+function parseExecutionMinTickOverrides(raw: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const entries = raw
+    .split(/[;,]/g)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const [keyRaw, valueRaw = ''] = entry.split('=', 2);
+    const key = keyRaw.trim();
+    const value = Number(valueRaw.trim());
+    if (!key || !Number.isFinite(value) || value <= 0) continue;
+    out[key.toUpperCase()] = value;
+  }
+
+  return out;
+}
+
+function parseContractFallbackByConid(raw: string): Record<string, ContractFallback> {
+  const out: Record<string, ContractFallback> = {};
+  const entries = raw
+    .split(';')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const [symbolRaw, pairsRaw = ''] = entry.split(':', 2);
+    const symbol = symbolRaw.trim().toUpperCase();
+    if (!symbol) continue;
+
+    const patch: { conid?: string; secType?: string; exchange?: string; primaryExchange?: string; currency?: string } = {};
+    const pairs = pairsRaw
+      .split('|')
+      .map((pair) => pair.trim())
+      .filter(Boolean);
+
+    for (const pair of pairs) {
+      const [keyRaw, valueRaw = ''] = pair.split('=', 2);
+      const key = mapOverrideKey(keyRaw);
+      const value = valueRaw.trim();
+      if (!key || !value) continue;
+      patch[key] = value;
+    }
+
+    if (!patch.conid) continue;
+
+    out[patch.conid] = {
+      symbol,
+      secType: patch.secType,
+      exchange: patch.exchange,
+      primaryExch: patch.primaryExchange,
+      currency: patch.currency
+    };
+  }
+
+  return out;
+}
+
 export const config = {
   ...env,
-  executionDryRun: env.EXECUTION_DRY_RUN.toLowerCase() === 'true'
+  executionRetryAsMktOnCode110: env.EXECUTION_RETRY_AS_MKT_ON_CODE_110.toLowerCase() === 'true',
+  executionMinTickOverrides: parseExecutionMinTickOverrides(env.EXECUTION_MIN_TICK_OVERRIDES),
+  contractFallbackByConid: parseContractFallbackByConid(env.WATCHLIST_CONTRACT_OVERRIDES)
 };

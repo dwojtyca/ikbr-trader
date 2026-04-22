@@ -1,6 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { deriveOrderDiagnostics } from '@ikbr/shared';
 
-type HealthResponse = { ok: boolean; twsConnected?: boolean };
+type HealthResponse = {
+  ok: boolean;
+  twsConnected?: boolean;
+  connected?: boolean;
+  bootstrapped?: boolean;
+  lastBootstrapAt?: string | null;
+  lastTickAt?: string | null;
+  lastCandleAt?: string | null;
+  signalEventDriven?: boolean;
+  lastSignalRunStartedAt?: string | null;
+  lastSignalRunFinishedAt?: string | null;
+  lastSignalRunSource?: 'manual' | 'candle' | 'startup' | null;
+  lastSignalRunSymbols?: string[];
+  lastSignalGeneratedCount?: number;
+};
 
 type MarketState = {
   conid: string;
@@ -26,6 +41,7 @@ type Candle = {
 
 type WatchlistItem = {
   symbol: string;
+  displayName: string | null;
   conid: string | null;
   subscribed: boolean;
   marketState: MarketState | null;
@@ -53,11 +69,28 @@ type Order = {
   confidence: number;
   timestamp: string;
   riskCheckStatus: 'PASS' | 'REJECT';
-  status: 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED';
+  status: 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED' | 'SUPERSEDED' | 'EXPIRED';
+  decisionSource?: 'signal' | 'llm' | 'user' | 'user_override';
+  aiDecision?: 'EXECUTE' | 'REJECT';
+  aiReason?: string;
+  aiModel?: string;
+  aiDecisionConfidence?: number;
+  llmDecisionId?: number;
+  sourceError?: string;
   brokerOrderId?: string;
   executionAccountId?: string;
   executionMessage?: string;
   lastError?: string;
+  executionAttemptedAt?: string;
+  executedAt?: string;
+  createdAt?: string;
+  indicators?: {
+    regime?: 'trend' | 'range' | 'high_volatility';
+    strategyProfile?: string;
+  };
+  brokerWarning?: string;
+  cancelReasonCode?: 'submitted_timeout' | 'locate_held' | 'broker_not_ready' | 'broker_rejected' | 'manual_cancel' | 'unknown';
+  cancelReasonDetail?: string;
 };
 
 type SignalOrder = {
@@ -72,6 +105,8 @@ type OrderFilters = {
   qty: string;
   status: string;
   risk: string;
+  decisionSource: string;
+  aiDecision: string;
 };
 
 type AccountMetricSet = {
@@ -102,6 +137,8 @@ type AccountPositionSnapshot = {
   averageCost?: number;
   unrealizedPnL?: number;
   realizedPnL?: number;
+  unrealizedPnLBase?: number;
+  realizedPnLBase?: number;
 };
 
 type AccountSummaryResponse = {
@@ -110,6 +147,7 @@ type AccountSummaryResponse = {
   accounts: string[];
   retrievedAt: string;
   accountTime?: string;
+  fxToBaseByCurrency?: Record<string, number>;
   metrics: AccountMetricSet;
   totals: {
     positionsCount: number;
@@ -119,6 +157,12 @@ type AccountSummaryResponse = {
     netExposure: number;
     unrealizedPnL: number;
     realizedPnL: number;
+    dailyRealizedPnL?: number;
+    cumulativeRealizedPnL?: number;
+  };
+  diagnostics?: {
+    cumulativeRealizedPnLComplete?: boolean;
+    cumulativeRealizedPnLMissingCommissionReports?: number;
   };
   positions: AccountPositionSnapshot[];
 };
@@ -144,9 +188,43 @@ function formatTs(value?: string | null): string {
   return date.toLocaleString();
 }
 
+function formatAgeShort(value?: string | null): string {
+  if (!value) return '-';
+  const ts = new Date(value).getTime();
+  if (Number.isNaN(ts)) return '-';
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return '0s';
+  const totalSec = Math.floor(diffMs / 1000);
+  if (totalSec < 60) return `${totalSec}s`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) return `${totalMin}m`;
+  const totalHr = Math.floor(totalMin / 60);
+  if (totalHr < 24) return `${totalHr}h`;
+  return `${Math.floor(totalHr / 24)}d`;
+}
+
 function formatPct(value?: number | null): string {
   if (value === undefined || value === null || Number.isNaN(value)) return '-';
   return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}%`;
+}
+
+function formatCancelReasonLabel(value?: Order['cancelReasonCode']): string {
+  switch (value) {
+    case 'submitted_timeout':
+      return 'Submitted timeout';
+    case 'locate_held':
+      return 'Locate held';
+    case 'broker_not_ready':
+      return 'Broker delayed';
+    case 'broker_rejected':
+      return 'Broker rejected';
+    case 'manual_cancel':
+      return 'Manual cancel';
+    case 'unknown':
+      return 'Unknown';
+    default:
+      return '-';
+  }
 }
 
 export function App() {
@@ -154,6 +232,7 @@ export function App() {
   const watchlistPollInFlightRef = useRef(false);
   const healthPollInFlightRef = useRef(false);
   const accountPollInFlightRef = useRef(false);
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   const [ingestionHealth, setIngestionHealth] = useState<HealthResponse | null>(null);
   const [signalHealth, setSignalHealth] = useState<HealthResponse | null>(null);
@@ -162,20 +241,24 @@ export function App() {
   const [watchlist, setWatchlist] = useState<WatchlistResponse | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [accountSummary, setAccountSummary] = useState<AccountSummaryResponse | null>(null);
+  const [watchlistExpanded, setWatchlistExpanded] = useState(false);
   const [orderFilters, setOrderFilters] = useState<OrderFilters>({
     instrument: '',
     side: '',
     type: '',
     qty: '',
     status: '',
-    risk: ''
+    risk: '',
+    decisionSource: '',
+    aiDecision: ''
   });
 
   const [loadingWatchlist, setLoadingWatchlist] = useState(false);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [loadingAccount, setLoadingAccount] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [dryRunExecute, setDryRunExecute] = useState(true);
+  const [expandedAiOrderRows, setExpandedAiOrderRows] = useState<Record<string, boolean>>({});
+  const [openActionMenuRowKey, setOpenActionMenuRowKey] = useState<string | null>(null);
 
   const [lastAction, setLastAction] = useState<string>('Ready');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -187,6 +270,46 @@ export function App() {
     () => Object.values(orderFilters).some((value) => value.trim() !== ''),
     [orderFilters]
   );
+  const ingestionStatusExtra = useMemo(() => {
+    const parts = [watchlist?.connected ? 'socket:on' : 'socket:off'];
+    const tickAge = formatAgeShort(ingestionHealth?.lastTickAt ?? null);
+    const candleAge = formatAgeShort(ingestionHealth?.lastCandleAt ?? null);
+    if (tickAge !== '-') parts.push(`tick:${tickAge}`);
+    if (candleAge !== '-') parts.push(`candle:${candleAge}`);
+    return parts.join(' ');
+  }, [ingestionHealth?.lastCandleAt, ingestionHealth?.lastTickAt, watchlist?.connected, nowTick]);
+  const signalStatusExtra = useMemo(() => {
+    const age = formatAgeShort(signalHealth?.lastSignalRunFinishedAt ?? null);
+    const source = signalHealth?.lastSignalRunSource;
+    const generated = signalHealth?.lastSignalGeneratedCount;
+    const parts: string[] = [];
+    if (source) parts.push(source);
+    if (age !== '-') parts.push(age);
+    if (generated !== undefined) parts.push(`gen:${generated}`);
+    return parts.join(' ') || undefined;
+  }, [signalHealth?.lastSignalGeneratedCount, signalHealth?.lastSignalRunFinishedAt, signalHealth?.lastSignalRunSource, nowTick]);
+  const executionStatusExtra = useMemo(() => {
+    const parts = [executionHealth?.twsConnected ? 'tws:on' : 'tws:off'];
+    const snapshotAge = formatAgeShort(accountSummary?.retrievedAt ?? null);
+    if (snapshotAge !== '-') parts.push(`snap:${snapshotAge}`);
+    return parts.join(' ');
+  }, [accountSummary?.retrievedAt, executionHealth?.twsConnected, nowTick]);
+
+  function orderRowKey(order: Order): string {
+    return `${order.id ?? 'no-id'}-${order.timestamp}`;
+  }
+
+  function toggleAiPanel(rowKey: string): void {
+    setExpandedAiOrderRows((prev) => ({ ...prev, [rowKey]: !prev[rowKey] }));
+  }
+
+  function orderCreatedAt(order: Order): string {
+    return order.createdAt ?? order.timestamp;
+  }
+
+  function orderUpdatedAt(order: Order): string {
+    return order.executedAt ?? order.executionAttemptedAt ?? order.timestamp;
+  }
 
   function buildOrdersQuery(filters: OrderFilters): string {
     const params = new URLSearchParams();
@@ -198,6 +321,8 @@ export function App() {
     if (filters.type) params.set('type', filters.type);
     if (filters.status) params.set('status', filters.status);
     if (filters.risk) params.set('risk', filters.risk);
+    if (filters.decisionSource) params.set('decisionSource', filters.decisionSource);
+    if (filters.aiDecision) params.set('aiDecision', filters.aiDecision);
 
     const qtyRaw = filters.qty.trim();
     if (qtyRaw && /^-?\d+(\.\d+)?$/.test(qtyRaw)) {
@@ -236,7 +361,7 @@ export function App() {
     if (!silent) setLoadingOrders(true);
     try {
       const data = await requestJson<Order[]>(buildOrdersQuery(filters));
-      setOrders(data);
+      setOrders(data.map((order) => ({ ...order, ...deriveOrderDiagnostics(order) })));
     } finally {
       if (!silent) setLoadingOrders(false);
     }
@@ -285,6 +410,10 @@ export function App() {
     await requestJson('/api/ingestion/bootstrap', { method: 'POST' });
   }
 
+  async function stopIngestion() {
+    await requestJson('/api/ingestion/stop', { method: 'POST' });
+  }
+
   async function runSignalsOnce() {
     const result = await requestJson<{ generated: number; results: SignalOrder[] }>('/api/signal/signals/run-once', {
       method: 'POST',
@@ -298,11 +427,31 @@ export function App() {
     await requestJson('/api/execution/execution/bootstrap', { method: 'POST' });
   }
 
-  async function executeOrder(orderId: number) {
+  async function executeOrder(orderId: number, overrideRejected = false) {
     await requestJson(`/api/execution/execution/execute-proposed/${orderId}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ dryRun: dryRunExecute })
+      body: JSON.stringify({
+        overrideRejected,
+        actor: overrideRejected ? 'user_override' : 'user'
+      })
+    });
+  }
+
+  async function rejectOrder(orderId: number, reason: string) {
+    await requestJson(`/api/execution/execution/reject-proposed/${orderId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        reason,
+        actor: 'user'
+      })
+    });
+  }
+
+  async function cancelOrder(orderId: number) {
+    await requestJson(`/api/execution/execution/cancel-proposed/${orderId}`, {
+      method: 'POST'
     });
   }
 
@@ -313,9 +462,48 @@ export function App() {
     }
   }
 
+  async function executePositionExit(position: AccountPositionSnapshot) {
+    const qty = Math.abs(position.position);
+    if (!(qty > 0)) return;
+
+    const side: 'BUY' | 'SELL' = position.position > 0 ? 'SELL' : 'BUY';
+    const positionEffect: 'CLOSE_OR_REDUCE' = 'CLOSE_OR_REDUCE';
+
+    await requestJson('/api/execution/execution/execute-ticket', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        ticket: {
+          instrument: position.symbol,
+          conid: position.conid,
+          side,
+          positionEffect,
+          orderType: 'MKT',
+          quantity: qty,
+          reason: `Manual close/reduce from UI (${side})`,
+          confidence: 1,
+          riskCheckStatus: 'PASS'
+        },
+        persist: true,
+      })
+    });
+  }
+
   useEffect(() => {
     orderFiltersRef.current = orderFilters;
   }, [orderFilters]);
+
+  useEffect(() => {
+    const onDocumentClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest('.actions-menu')) {
+        setOpenActionMenuRowKey(null);
+      }
+    };
+
+    document.addEventListener('click', onDocumentClick);
+    return () => document.removeEventListener('click', onDocumentClick);
+  }, []);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -329,6 +517,15 @@ export function App() {
 
   useEffect(() => {
     void refreshAll();
+  }, []);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      setNowTick(Date.now());
+    }, 1000);
+
+    return () => clearInterval(interval);
   }, []);
 
   useEffect(() => {
@@ -358,7 +555,7 @@ export function App() {
         .finally(() => {
           watchlistPollInFlightRef.current = false;
         });
-    }, 10000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, []);
@@ -377,7 +574,7 @@ export function App() {
           healthPollInFlightRef.current = false;
           accountPollInFlightRef.current = false;
         });
-    }, 10000);
+    }, 5000);
 
     return () => clearInterval(interval);
   }, []);
@@ -391,24 +588,30 @@ export function App() {
 
       <section className="panel controls">
         <div className="status-row">
-          <StatusPill label="Ingestion" ok={Boolean(ingestionHealth?.ok)} extra={watchlist?.connected ? 'socket:on' : 'socket:off'} />
-          <StatusPill label="Signal" ok={Boolean(signalHealth?.ok)} />
-          <StatusPill label="Execution" ok={Boolean(executionHealth?.ok)} extra={executionHealth?.twsConnected ? 'tws:on' : 'tws:off'} />
+          <StatusPill label="Ingestion" ok={Boolean(ingestionHealth?.ok)} extra={ingestionStatusExtra} />
+          <StatusPill label="Signal" ok={Boolean(signalHealth?.ok)} extra={signalStatusExtra} />
+          <StatusPill label="Execution" ok={Boolean(executionHealth?.ok)} extra={executionStatusExtra} />
           <StatusPill label="Proposed" ok={proposedCount > 0} extra={String(proposedCount)} />
         </div>
 
         <div className="action-grid">
-          <button disabled={Boolean(busyAction)} onClick={() => void handleAction('Ingestion bootstrap', bootstrapIngestion)}>Ingestion Bootstrap</button>
+          <button
+            disabled={Boolean(busyAction)}
+            onClick={() =>
+              void handleAction(
+                watchlist?.bootstrapped ? 'Stop Ingestion' : 'Start Ingestion',
+                watchlist?.bootstrapped ? stopIngestion : bootstrapIngestion
+              )
+            }
+          >
+            {watchlist?.bootstrapped ? 'Stop Ingestion' : 'Start Ingestion'}
+          </button>
           <button disabled={Boolean(busyAction)} onClick={() => void handleAction('Signals run-once', runSignalsOnce)}>Run Signals Once</button>
           <button disabled={Boolean(busyAction)} onClick={() => void handleAction('Execution bootstrap', bootstrapExecution)}>Execution Bootstrap</button>
           <button disabled={Boolean(busyAction)} onClick={() => void handleAction('Refresh', refreshAll)}>Refresh</button>
         </div>
 
         <div className="action-grid compact">
-          <label className="toggle">
-            <input type="checkbox" checked={dryRunExecute} onChange={(e) => setDryRunExecute(e.target.checked)} />
-            Execute in dry-run
-          </label>
           <button disabled={Boolean(busyAction) || proposedCount === 0} onClick={() => void handleAction('Execute all proposed', executeAllProposed)}>
             Execute All Proposed
           </button>
@@ -436,9 +639,17 @@ export function App() {
               <MetricCard label="Buying Power" value={formatNum(accountSummary.metrics.buyingPower)} />
               <MetricCard label="Available Funds" value={formatNum(accountSummary.metrics.availableFunds)} />
               <MetricCard label="Unrealized PnL" value={formatNum(accountSummary.totals.unrealizedPnL)} tone={accountSummary.totals.unrealizedPnL} />
-              <MetricCard label="Realized PnL" value={formatNum(accountSummary.totals.realizedPnL)} tone={accountSummary.totals.realizedPnL} />
+              <MetricCard
+                label="Daily Realized PnL"
+                value={formatNum(accountSummary.totals.dailyRealizedPnL ?? accountSummary.totals.realizedPnL)}
+                tone={accountSummary.totals.dailyRealizedPnL ?? accountSummary.totals.realizedPnL}
+              />
+              <MetricCard
+                label="Cumulative Realized PnL"
+                value={formatNum(accountSummary.totals.cumulativeRealizedPnL)}
+                tone={accountSummary.totals.cumulativeRealizedPnL}
+              />
               <MetricCard label="Gross Exposure" value={formatNum(accountSummary.totals.grossExposure)} />
-              <MetricCard label="Cushion" value={formatPct(accountSummary.metrics.cushion)} />
             </div>
 
             <div className="panel-head compact">
@@ -458,15 +669,16 @@ export function App() {
                     <th>Price</th>
                     <th>Market Value</th>
                     <th>Avg Cost</th>
-                    <th>Unrealized PnL</th>
-                    <th>Realized PnL</th>
+                    <th>Unrealized PnL (base)</th>
+                    <th>Realized PnL (base)</th>
                     <th>Exchange</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {accountSummary.positions.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="muted">No open positions</td>
+                      <td colSpan={10} className="muted">No open positions</td>
                     </tr>
                   ) : (
                     accountSummary.positions.map((position) => (
@@ -477,9 +689,30 @@ export function App() {
                         <td>{formatNum(position.marketPrice)}</td>
                         <td>{formatNum(position.marketValue)}</td>
                         <td>{formatNum(position.averageCost)}</td>
-                        <td className={toToneClass(position.unrealizedPnL)}>{formatNum(position.unrealizedPnL)}</td>
-                        <td className={toToneClass(position.realizedPnL)}>{formatNum(position.realizedPnL)}</td>
+                        <td className={toToneClass(position.unrealizedPnLBase ?? position.unrealizedPnL)}>
+                          {formatNum(position.unrealizedPnLBase ?? position.unrealizedPnL)}
+                        </td>
+                        <td className={toToneClass(position.realizedPnLBase ?? position.realizedPnL)}>
+                          {formatNum(position.realizedPnLBase ?? position.realizedPnL)}
+                        </td>
                         <td>{position.exchange ?? '-'}</td>
+                        <td>
+                          <button
+                            disabled={Boolean(busyAction) || !(Math.abs(position.position) > 0)}
+                            onClick={() => {
+                              const side = position.position > 0 ? 'SELL' : 'BUY';
+                              const qty = Math.abs(position.position);
+                              const verb = side === 'SELL' ? 'Sell' : 'Buy to cover';
+                              const confirmed = window.confirm(
+                                `${verb} ${qty} ${position.symbol} (MKT)?`
+                              );
+                              if (!confirmed) return;
+                              void handleAction(`${verb} ${position.symbol}`, async () => executePositionExit(position));
+                            }}
+                          >
+                            {position.position > 0 ? 'Sell' : 'Buy to cover'}
+                          </button>
+                        </td>
                       </tr>
                     ))
                   )}
@@ -495,42 +728,51 @@ export function App() {
       <section className="panel">
         <div className="panel-head">
           <h2>Watchlist</h2>
-          <span>{loadingWatchlist ? 'loading...' : `items: ${watchlist?.watchlist.length ?? 0}`}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+            <span>{loadingWatchlist ? 'loading...' : `items: ${watchlist?.watchlist.length ?? 0}`}</span>
+            <button type="button" onClick={() => setWatchlistExpanded((value) => !value)}>
+              {watchlistExpanded ? 'Hide' : 'Show'}
+            </button>
+          </div>
         </div>
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Conid</th>
-                <th>Subscribed</th>
-                <th>Last</th>
-                <th>Bid</th>
-                <th>Ask</th>
-                <th>Spread</th>
-                <th>1m Close</th>
-                <th>1m Vol</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(watchlist?.watchlist ?? []).map((item) => (
-                <tr key={item.symbol}>
-                  <td>{item.symbol}</td>
-                  <td>{item.conid ?? '-'}</td>
-                  <td>{item.subscribed ? 'yes' : 'no'}</td>
-                  <td>{formatNum(item.marketState?.lastPrice)}</td>
-                  <td>{formatNum(item.marketState?.bid)}</td>
-                  <td>{formatNum(item.marketState?.ask)}</td>
-                  <td>{formatNum(item.marketState?.spread, 4)}</td>
-                  <td>{formatNum(item.latestCandle1m?.close)}</td>
-                  <td>{formatNum(item.latestCandle1m?.volume, 0)}</td>
-                  <td>{formatTs(item.marketState?.ts ?? item.latestCandle1m?.ts ?? null)}</td>
+        {watchlistExpanded ? (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Name</th>
+                  <th>Conid</th>
+                  <th>Subscribed</th>
+                  <th>Last</th>
+                  <th>Bid</th>
+                  <th>Ask</th>
+                  <th>Spread</th>
+                  <th>1m Close</th>
+                  <th>1m Vol</th>
+                  <th>Updated</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {(watchlist?.watchlist ?? []).map((item) => (
+                  <tr key={item.symbol}>
+                    <td>{item.symbol}</td>
+                    <td>{item.displayName ?? '-'}</td>
+                    <td>{item.conid ?? '-'}</td>
+                    <td>{item.subscribed ? 'yes' : 'no'}</td>
+                    <td>{formatNum(item.marketState?.lastPrice)}</td>
+                    <td>{formatNum(item.marketState?.bid)}</td>
+                    <td>{formatNum(item.marketState?.ask)}</td>
+                    <td>{formatNum(item.marketState?.spread, 4)}</td>
+                    <td>{formatNum(item.latestCandle1m?.close)}</td>
+                    <td>{formatNum(item.latestCandle1m?.volume, 0)}</td>
+                    <td>{formatTs(item.marketState?.ts ?? item.latestCandle1m?.ts ?? null)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </section>
 
       <section className="panel">
@@ -570,69 +812,214 @@ export function App() {
             <option value="SUBMITTED">SUBMITTED</option>
             <option value="FILLED">FILLED</option>
             <option value="CANCELLED">CANCELLED</option>
+            <option value="SUPERSEDED">SUPERSEDED</option>
+            <option value="EXPIRED">EXPIRED</option>
           </select>
           <select value={orderFilters.risk} onChange={(e) => setOrderFilters((prev) => ({ ...prev, risk: e.target.value }))}>
             <option value="">Risk: all</option>
             <option value="PASS">PASS</option>
             <option value="REJECT">REJECT</option>
           </select>
+          <select value={orderFilters.decisionSource} onChange={(e) => setOrderFilters((prev) => ({ ...prev, decisionSource: e.target.value }))}>
+            <option value="">Decision Source: all</option>
+            <option value="signal">signal</option>
+            <option value="llm">llm</option>
+            <option value="user">user</option>
+            <option value="user_override">user_override</option>
+          </select>
+          <select value={orderFilters.aiDecision} onChange={(e) => setOrderFilters((prev) => ({ ...prev, aiDecision: e.target.value }))}>
+            <option value="">AI Decision: all</option>
+            <option value="EXECUTE">EXECUTE</option>
+            <option value="REJECT">REJECT</option>
+          </select>
           <button
             type="button"
             disabled={!hasOrderFilters}
-            onClick={() => setOrderFilters({ instrument: '', side: '', type: '', qty: '', status: '', risk: '' })}
+            onClick={() => setOrderFilters({ instrument: '', side: '', type: '', qty: '', status: '', risk: '', decisionSource: '', aiDecision: '' })}
           >
             Clear filters
           </button>
         </div>
         <div className="table-wrap">
-          <table>
+          <table className="orders-table">
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Instrument</th>
+                <th>Symbol</th>
+                <th>Regime</th>
                 <th>Side</th>
-                <th>Type</th>
                 <th>Qty</th>
                 <th>Status</th>
                 <th>Risk</th>
-                <th>Confidence</th>
-                <th>Reason</th>
+                <th>Created at</th>
+                <th>Updated at</th>
                 <th>Broker</th>
-                <th>Action</th>
+                <th>More</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
               {orders.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="muted">No orders match current filters</td>
+                  <td colSpan={12} className="muted">No orders match current filters</td>
                 </tr>
               ) : (
-                orders.map((order) => (
-                  <tr key={`${order.id}-${order.timestamp}`}>
-                    <td>{order.id ?? '-'}</td>
-                    <td>{order.instrument}</td>
-                    <td>{order.side}</td>
-                    <td>{order.orderType}</td>
-                    <td>{formatNum(order.quantity, 0)}</td>
-                    <td>{order.status}</td>
-                    <td>{order.riskCheckStatus}</td>
-                    <td>{formatPct(order.confidence)}</td>
-                    <td className="reason" title={order.reason}>{order.reason}</td>
-                    <td>{order.brokerOrderId ?? '-'}</td>
-                    <td>
-                      {order.status === 'PROPOSED' && order.id !== undefined ? (
-                        <button
-                          disabled={Boolean(busyAction)}
-                          onClick={() => void handleAction(`Execute order ${order.id}`, async () => executeOrder(order.id as number))}
-                        >
-                          Execute
-                        </button>
-                      ) : (
-                        <span className="muted">-</span>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                orders.map((order) => {
+                  const rowKey = orderRowKey(order);
+                  const aiOpen = Boolean(expandedAiOrderRows[rowKey]);
+                  const isActionMenuOpen = openActionMenuRowKey === rowKey;
+                  const availableActions: Array<{ key: string; label: string; run: () => void }> = [];
+
+                  if (order.status === 'PROPOSED' && order.id !== undefined) {
+                    const orderId = order.id as number;
+                    availableActions.push({
+                      key: 'execute',
+                      label: 'Execute',
+                      run: () => void handleAction(`Execute order ${orderId}`, async () => executeOrder(orderId))
+                    });
+                    availableActions.push({
+                      key: 'reject',
+                      label: 'Reject',
+                      run: () => {
+                        const reason = window.prompt('Reject reason', 'Manual reject from UI');
+                        if (!reason || !reason.trim()) return;
+                        void handleAction(`Reject order ${orderId}`, async () => rejectOrder(orderId, reason.trim()));
+                      }
+                    });
+                  }
+
+                  if (order.status === 'REJECTED' && order.decisionSource === 'llm' && order.id !== undefined) {
+                    const orderId = order.id as number;
+                    availableActions.push({
+                      key: 'execute-override',
+                      label: 'Execute override',
+                      run: () => void handleAction(`Execute override ${orderId}`, async () => executeOrder(orderId, true))
+                    });
+                  }
+
+                  if (order.status === 'SUBMITTED' && order.id !== undefined) {
+                    const orderId = order.id as number;
+                    availableActions.push({
+                      key: 'cancel',
+                      label: 'Cancel',
+                      run: () => {
+                        const confirmed = window.confirm(`Cancel submitted order #${orderId}?`);
+                        if (!confirmed) return;
+                        void handleAction(`Cancel order ${orderId}`, async () => cancelOrder(orderId));
+                      }
+                    });
+                  }
+
+                  return (
+                    <Fragment key={rowKey}>
+                      <tr>
+                        <td>{order.id ?? '-'}</td>
+                        <td>{order.instrument}</td>
+                        <td>{order.indicators?.regime ?? '-'}</td>
+                        <td>{order.side}</td>
+                        <td>{formatNum(order.quantity, 0)}</td>
+                        <td>{order.status}</td>
+                        <td>{order.riskCheckStatus}</td>
+                        <td>{formatTs(orderCreatedAt(order))}</td>
+                        <td>{formatTs(orderUpdatedAt(order))}</td>
+                        <td>{order.brokerOrderId ?? '-'}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="ai-toggle-btn"
+                            onClick={() => toggleAiPanel(rowKey)}
+                          >
+                            {aiOpen ? 'Less' : 'More'}
+                          </button>
+                        </td>
+                        <td>
+                          <div className="actions-menu">
+                            <button
+                              type="button"
+                              className="actions-trigger"
+                              aria-label="Open actions"
+                              onClick={() => setOpenActionMenuRowKey((prev) => (prev === rowKey ? null : rowKey))}
+                            >
+                              <span className="dot" />
+                              <span className="dot" />
+                              <span className="dot" />
+                            </button>
+                            {isActionMenuOpen ? (
+                              <div className="actions-dropdown">
+                                {availableActions.length === 0 ? (
+                                  <div className="actions-empty muted">No actions available</div>
+                                ) : (
+                                  availableActions.map((action) => (
+                                    <button
+                                      key={action.key}
+                                      type="button"
+                                      disabled={Boolean(busyAction)}
+                                      onClick={() => {
+                                        setOpenActionMenuRowKey(null);
+                                        action.run();
+                                      }}
+                                    >
+                                      {action.label}
+                                    </button>
+                                  ))
+                                )}
+                              </div>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                      {aiOpen ? (
+                        <tr className="ai-details-row">
+                          <td colSpan={12} className="ai-details-cell">
+                            <div className="ai-details-panel">
+                              <div className="ai-details-grid">
+                                <div><span>Type</span><strong>{order.orderType}</strong></div>
+                                <div><span>Confidence</span><strong>{formatPct(order.confidence)}</strong></div>
+                                <div><span>Risk</span><strong>{order.riskCheckStatus}</strong></div>
+                                <div><span>Regime</span><strong>{order.indicators?.regime ?? '-'}</strong></div>
+                                <div><span>Decision Source</span><strong>{order.decisionSource ?? '-'}</strong></div>
+                                <div><span>AI Decision</span><strong>{order.aiDecision ?? '-'}</strong></div>
+                                <div><span>AI Model</span><strong>{order.aiModel ?? '-'}</strong></div>
+                                <div><span>AI Confidence</span><strong>{formatPct(order.aiDecisionConfidence)}</strong></div>
+                                <div><span>LLM Decision ID</span><strong>{order.llmDecisionId ?? '-'}</strong></div>
+                                <div><span>Cancel Reason</span><strong>{formatCancelReasonLabel(order.cancelReasonCode)}</strong></div>
+                                <div><span>Strategy Profile</span><strong>{order.indicators?.strategyProfile ?? '-'}</strong></div>
+                              </div>
+                              <div className="ai-details-text">
+                                <span>Reason</span>
+                                <p>{order.reason}</p>
+                              </div>
+                              <div className="ai-details-text">
+                                <span>AI Reason</span>
+                                <p>{order.aiReason ?? '-'}</p>
+                              </div>
+                            <div className="ai-details-text">
+                              <span>Source Error</span>
+                              <p>{order.sourceError ?? '-'}</p>
+                            </div>
+                            <div className="ai-details-text">
+                              <span>Execution Message</span>
+                              <p>{order.executionMessage ?? '-'}</p>
+                            </div>
+                            <div className="ai-details-text">
+                              <span>Last Error</span>
+                              <p>{order.lastError ?? '-'}</p>
+                            </div>
+                            <div className="ai-details-text">
+                              <span>Broker Warning</span>
+                              <p>{order.brokerWarning ?? '-'}</p>
+                            </div>
+                            <div className="ai-details-text">
+                              <span>Cancel Detail</span>
+                              <p>{order.cancelReasonDetail ?? '-'}</p>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                      ) : null}
+                    </Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>

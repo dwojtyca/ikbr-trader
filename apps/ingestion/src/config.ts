@@ -24,11 +24,12 @@ const schema = z.object({
   IB_EXCHANGE: z.string().default('SMART'),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default('USD'),
-  IB_MKT_DATA_SNAPSHOT: z.string().default('false'),
   IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
   IBKR_ACCOUNT_ID: optionalTrimmedString,
   WATCHLIST_SYMBOLS: z.string().default('AAPL,MSFT,XOM'),
   WATCHLIST_CONTRACT_OVERRIDES: z.string().default(''),
+  SIGNAL_ENGINE_BASE_URL: z.string().default('http://localhost:3102'),
+  INGESTION_TRIGGER_SIGNALS_ON_CANDLE: z.string().default('true'),
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
   INGESTION_BACKFILL_1M_CANDLES: optionalNumberFromEnv,
   POSTGRES_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/ikbr_trader'),
@@ -113,6 +114,6 @@ export const config = {
   ...env,
   watchlistSymbols: watchlistInstruments.map((item) => item.symbol),
   watchlistInstruments,
-  ibMarketDataSnapshot: env.IB_MKT_DATA_SNAPSHOT.toLowerCase() === 'true',
+  ingestionTriggerSignalsOnCandle: env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === 'true',
   backfill1mCandles: Math.max(0, env.INGESTION_BACKFILL_1M_CANDLES ?? env.SIGNAL_MIN_CANDLES)
 };

@@ -79,6 +79,34 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
+  apps/llm-agent:
+    dependencies:
+      '@ikbr/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.6.1
+      pg:
+        specifier: ^8.13.0
+        version: 8.20.0
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.4
+        version: 22.19.17
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      tsx:
+        specifier: ^4.19.1
+        version: 4.21.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   apps/signal-engine:
     dependencies:
       '@ikbr/shared':
@@ -118,6 +146,9 @@ importers:
 
   apps/ui:
     dependencies:
+      '@ikbr/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       react:
         specifier: ^18.3.1
         version: 18.3.1

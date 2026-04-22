@@ -16,6 +16,57 @@ const aggregator = new CandleAggregator();
 const higherTimeframeAggregator = new HigherTimeframeAggregator();
 let activeSubscriptions: InstrumentSubscription[] = [];
 let lastBootstrapAt: Date | null = null;
+let lastTickAt: Date | null = null;
+let lastCandleAt: Date | null = null;
+
+async function flushBufferedCandles(): Promise<void> {
+  const buffered = aggregator.flushAll();
+  for (const candle of buffered) {
+    await repo.upsertCandle(candle);
+  }
+
+  const higher = higherTimeframeAggregator.flushAll();
+  for (const candle of higher) {
+    await repo.upsertCandle(candle);
+  }
+}
+
+async function stopIngestionSession(): Promise<void> {
+  await flushBufferedCandles();
+  twsClient.clearSubscriptions();
+  twsClient.disconnect();
+  activeSubscriptions = [];
+}
+
+async function triggerSignalsForCandle(symbol: string, candleTs: Date): Promise<void> {
+  if (!config.ingestionTriggerSignalsOnCandle) return;
+
+  const base = config.SIGNAL_ENGINE_BASE_URL.replace(/\/$/, '');
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const response = await fetch(`${base}/signals/on-candle`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        symbol,
+        candleTs: candleTs.toISOString()
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      app.log.warn({ symbol, candleTs, status: response.status, text }, 'signal trigger request failed');
+    }
+  } catch (error) {
+    app.log.warn({ symbol, candleTs, error: (error as Error).message }, 'signal trigger request errored');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 const twsClient = new TwsClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -25,10 +76,10 @@ const twsClient = new TwsClient(
     exchange: config.IB_EXCHANGE,
     primaryExchange: config.IB_PRIMARY_EXCHANGE,
     currency: config.IB_CURRENCY,
-    marketDataType: config.IB_MARKET_DATA_TYPE,
-    snapshot: config.ibMarketDataSnapshot
+    marketDataType: config.IB_MARKET_DATA_TYPE
   },
   async (tick) => {
+    lastTickAt = tick.ts;
     const spread = tick.bid !== undefined && tick.ask !== undefined ? tick.ask - tick.bid : undefined;
 
     await repo.writeMarketState(redis, {
@@ -43,8 +94,10 @@ const twsClient = new TwsClient(
 
     const ready = aggregator.ingest(tick);
     for (const oneMinuteCandle of ready) {
+      lastCandleAt = oneMinuteCandle.ts;
       await repo.upsertCandle(oneMinuteCandle);
       app.log.debug({ candle: oneMinuteCandle }, 'persisted candle 1m');
+      void triggerSignalsForCandle(oneMinuteCandle.symbol, oneMinuteCandle.ts);
 
       const higherCandles = higherTimeframeAggregator.ingest(oneMinuteCandle);
       for (const higherCandle of higherCandles) {
@@ -56,7 +109,14 @@ const twsClient = new TwsClient(
   (line) => app.log.info(line)
 );
 
-app.get('/health', async () => ({ ok: true }));
+app.get('/health', async () => ({
+  ok: true,
+  connected: twsClient.isConnected(),
+  bootstrapped: activeSubscriptions.length > 0,
+  lastBootstrapAt,
+  lastTickAt,
+  lastCandleAt
+}));
 
 app.get('/watchlist', async () => {
   const subscriptionsBySymbol = new Map(activeSubscriptions.map((sub) => [sub.symbol, sub]));
@@ -71,6 +131,7 @@ app.get('/watchlist', async () => {
 
       return {
         symbol,
+        displayName: subscription?.displayName ?? null,
         conid: subscription?.conid ?? null,
         subscribed: Boolean(subscription),
         marketState,
@@ -160,6 +221,16 @@ app.post('/bootstrap', async () => {
   };
 });
 
+app.post('/stop', async () => {
+  await stopIngestionSession();
+  return {
+    stopped: true,
+    connected: twsClient.isConnected(),
+    bootstrapped: activeSubscriptions.length > 0,
+    lastBootstrapAt
+  };
+});
+
 async function main(): Promise<void> {
   await repo.init();
 
@@ -182,15 +253,7 @@ main().catch((err) => {
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, async () => {
     try {
-      const buffered = aggregator.flushAll();
-      for (const candle of buffered) {
-        await repo.upsertCandle(candle);
-      }
-      const higher = higherTimeframeAggregator.flushAll();
-      for (const candle of higher) {
-        await repo.upsertCandle(candle);
-      }
-      twsClient.disconnect();
+      await stopIngestionSession();
       await pg.end();
       await redis.quit();
       await app.close();

@@ -12,6 +12,7 @@
     "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",
+    "dev:llm": "pnpm --filter @ikbr/llm-agent dev",
     "dev:ui": "pnpm --filter @ikbr/ui dev"
   },
   "packageManager": "pnpm@9.5.0",

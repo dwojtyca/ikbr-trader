@@ -8,6 +8,7 @@ export interface StrategyProfile {
   regime: MarketRegime;
   style: ProfileStyle;
   entryScore: number;
+  decisionEdge: number;
   minConfidenceMultiplier: number;
   atrStopMultFactor: number;
   atrTpMultFactor: number;
@@ -22,12 +23,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'stock',
     regime: 'trend',
     style: 'trend',
-    entryScore: 0.6,
-    minConfidenceMultiplier: 1,
+    entryScore: 0.66,
+    decisionEdge: 0.1,
+    minConfidenceMultiplier: 1.03,
     atrStopMultFactor: 1,
     atrTpMultFactor: 1,
-    quantityFactor: 1,
-    spreadFactor: 1,
+    quantityFactor: 0.95,
+    spreadFactor: 0.95,
     requireVolume: true
   },
   {
@@ -35,12 +37,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'stock',
     regime: 'range',
     style: 'range',
-    entryScore: 0.64,
-    minConfidenceMultiplier: 1.03,
+    entryScore: 0.72,
+    decisionEdge: 0.14,
+    minConfidenceMultiplier: 1.08,
     atrStopMultFactor: 0.95,
     atrTpMultFactor: 0.9,
-    quantityFactor: 0.85,
-    spreadFactor: 0.85,
+    quantityFactor: 0.7,
+    spreadFactor: 0.78,
     requireVolume: true
   },
   {
@@ -48,12 +51,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'stock',
     regime: 'high_volatility',
     style: 'trend',
-    entryScore: 0.7,
-    minConfidenceMultiplier: 1.1,
+    entryScore: 0.82,
+    decisionEdge: 0.18,
+    minConfidenceMultiplier: 1.2,
     atrStopMultFactor: 1.35,
     atrTpMultFactor: 1.3,
-    quantityFactor: 0.6,
-    spreadFactor: 0.75,
+    quantityFactor: 0.4,
+    spreadFactor: 0.58,
     requireVolume: true
   },
   {
@@ -61,12 +65,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'commodity',
     regime: 'trend',
     style: 'breakout',
-    entryScore: 0.58,
-    minConfidenceMultiplier: 0.98,
+    entryScore: 0.64,
+    decisionEdge: 0.1,
+    minConfidenceMultiplier: 1.02,
     atrStopMultFactor: 1.2,
     atrTpMultFactor: 1.35,
-    quantityFactor: 1,
-    spreadFactor: 1.05,
+    quantityFactor: 0.9,
+    spreadFactor: 1,
     requireVolume: false
   },
   {
@@ -74,12 +79,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'commodity',
     regime: 'range',
     style: 'range',
-    entryScore: 0.66,
-    minConfidenceMultiplier: 1.06,
+    entryScore: 0.74,
+    decisionEdge: 0.14,
+    minConfidenceMultiplier: 1.1,
     atrStopMultFactor: 1.1,
     atrTpMultFactor: 1,
-    quantityFactor: 0.75,
-    spreadFactor: 0.8,
+    quantityFactor: 0.65,
+    spreadFactor: 0.74,
     requireVolume: false
   },
   {
@@ -87,12 +93,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'commodity',
     regime: 'high_volatility',
     style: 'breakout',
-    entryScore: 0.72,
-    minConfidenceMultiplier: 1.12,
+    entryScore: 0.82,
+    decisionEdge: 0.18,
+    minConfidenceMultiplier: 1.22,
     atrStopMultFactor: 1.6,
     atrTpMultFactor: 1.6,
-    quantityFactor: 0.55,
-    spreadFactor: 0.72,
+    quantityFactor: 0.38,
+    spreadFactor: 0.56,
     requireVolume: false
   },
   {
@@ -100,12 +107,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'index',
     regime: 'trend',
     style: 'trend',
-    entryScore: 0.58,
-    minConfidenceMultiplier: 0.97,
+    entryScore: 0.64,
+    decisionEdge: 0.1,
+    minConfidenceMultiplier: 1,
     atrStopMultFactor: 0.95,
     atrTpMultFactor: 1.1,
-    quantityFactor: 1,
-    spreadFactor: 1,
+    quantityFactor: 0.95,
+    spreadFactor: 0.95,
     requireVolume: false
   },
   {
@@ -113,12 +121,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'index',
     regime: 'range',
     style: 'range',
-    entryScore: 0.64,
-    minConfidenceMultiplier: 1.05,
+    entryScore: 0.72,
+    decisionEdge: 0.14,
+    minConfidenceMultiplier: 1.08,
     atrStopMultFactor: 0.95,
     atrTpMultFactor: 0.95,
-    quantityFactor: 0.85,
-    spreadFactor: 0.82,
+    quantityFactor: 0.72,
+    spreadFactor: 0.76,
     requireVolume: false
   },
   {
@@ -126,12 +135,13 @@ const PROFILES: StrategyProfile[] = [
     assetClass: 'index',
     regime: 'high_volatility',
     style: 'trend',
-    entryScore: 0.7,
-    minConfidenceMultiplier: 1.1,
+    entryScore: 0.8,
+    decisionEdge: 0.18,
+    minConfidenceMultiplier: 1.18,
     atrStopMultFactor: 1.25,
     atrTpMultFactor: 1.2,
-    quantityFactor: 0.6,
-    spreadFactor: 0.72,
+    quantityFactor: 0.42,
+    spreadFactor: 0.58,
     requireVolume: false
   }
 ];
