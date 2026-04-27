@@ -63,6 +63,21 @@ button:disabled {
   color: var(--muted);
 }
 
+.nav-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.nav-link {
+  min-width: 92px;
+}
+
+.nav-link.active {
+  background: linear-gradient(180deg, #e7f6f0, #d7efe5);
+  border-color: #91cdb8;
+}
+
 .panel {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -187,6 +202,12 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 0.6rem;
   margin-bottom: 0.6rem;
+}
+
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem;
 }
 
 .metric-card {

@@ -189,6 +189,13 @@ app.get('/signals/outcomes/summary', async (request) => {
   return repo.getSignalOutcomeSummary(Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 100) : 20);
 });
 
+app.get('/signals/report', async (request) => {
+  const query = (request.query ?? {}) as { limit?: string };
+  const limit = Number(query.limit ?? 300);
+  await repo.refreshSignalOutcomes(500);
+  return repo.getSignalReport(Number.isFinite(limit) ? Math.min(Math.max(limit, 20), 2000) : 300);
+});
+
 async function main(): Promise<void> {
   await repo.init();
 

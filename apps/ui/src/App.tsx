@@ -167,6 +167,56 @@ type AccountSummaryResponse = {
   positions: AccountPositionSnapshot[];
 };
 
+type ReportOverview = {
+  trades: number;
+  wins: number;
+  losses: number;
+  open: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
+  avgConfidence?: number;
+  takeProfitHits: number;
+  stopHits: number;
+};
+
+type ReportAggregate = {
+  key: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  open: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
+  avgConfidence?: number;
+  takeProfitHits: number;
+  stopHits: number;
+};
+
+type ReportTrade = {
+  orderId: number;
+  instrument: string;
+  strategy: string;
+  side: 'BUY' | 'SELL';
+  regime: string;
+  confidence: number;
+  pnlPct?: number;
+  notes: string;
+  executedAt: string;
+};
+
+type SignalReportResponse = {
+  generatedAt: string;
+  limit: number;
+  overview: ReportOverview;
+  bySymbol: ReportAggregate[];
+  byStrategy: ReportAggregate[];
+  bySide: ReportAggregate[];
+  byRegime: ReportAggregate[];
+  worstTrades: ReportTrade[];
+};
+
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
   const response = await fetch(input, init);
   if (!response.ok) {
@@ -208,6 +258,11 @@ function formatPct(value?: number | null): string {
   return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}%`;
 }
 
+function formatPnlPct(value?: number | null): string {
+  if (value === undefined || value === null || Number.isNaN(value)) return '-';
+  return `${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}%`;
+}
+
 function formatCancelReasonLabel(value?: Order['cancelReasonCode']): string {
   switch (value) {
     case 'submitted_timeout':
@@ -241,6 +296,9 @@ export function App() {
   const [watchlist, setWatchlist] = useState<WatchlistResponse | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [accountSummary, setAccountSummary] = useState<AccountSummaryResponse | null>(null);
+  const [report, setReport] = useState<SignalReportResponse | null>(null);
+  const [loadingReport, setLoadingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [watchlistExpanded, setWatchlistExpanded] = useState(false);
   const [orderFilters, setOrderFilters] = useState<OrderFilters>({
     instrument: '',
@@ -259,6 +317,9 @@ export function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [expandedAiOrderRows, setExpandedAiOrderRows] = useState<Record<string, boolean>>({});
   const [openActionMenuRowKey, setOpenActionMenuRowKey] = useState<string | null>(null);
+  const [route, setRoute] = useState<'console' | 'report'>(() =>
+    window.location.pathname === '/report' ? 'report' : 'console'
+  );
 
   const [lastAction, setLastAction] = useState<string>('Ready');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -266,6 +327,18 @@ export function App() {
   const orderFiltersRef = useRef(orderFilters);
 
   const proposedCount = useMemo(() => orders.filter((o) => o.status === 'PROPOSED').length, [orders]);
+  const reportWeakestSide = useMemo(() => {
+    const settledRows = (report?.bySide ?? []).filter((row) => row.trades > 0 && row.avgPnlPct !== undefined);
+    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+  }, [report?.bySide]);
+  const reportWeakestStrategy = useMemo(() => {
+    const settledRows = (report?.byStrategy ?? []).filter((row) => row.trades >= 2 && row.avgPnlPct !== undefined);
+    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+  }, [report?.byStrategy]);
+  const reportWeakestSymbol = useMemo(() => {
+    const settledRows = (report?.bySymbol ?? []).filter((row) => row.trades >= 2 && row.avgPnlPct !== undefined);
+    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+  }, [report?.bySymbol]);
   const hasOrderFilters = useMemo(
     () => Object.values(orderFilters).some((value) => value.trim() !== ''),
     [orderFilters]
@@ -380,6 +453,21 @@ export function App() {
     }
   }
 
+  async function refreshReport(options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) setLoadingReport(true);
+    setReportError(null);
+    try {
+      const data = await requestJson<SignalReportResponse>('/api/signal/signals/report?limit=300');
+      setReport(data);
+    } catch (error) {
+      setReportError((error as Error).message);
+      if (!silent) setReport(null);
+    } finally {
+      if (!silent) setLoadingReport(false);
+    }
+  }
+
   async function refreshAll() {
     setLastError(null);
     try {
@@ -404,6 +492,14 @@ export function App() {
     } finally {
       setBusyAction(null);
     }
+  }
+
+  function navigate(nextRoute: 'console' | 'report'): void {
+    const nextPath = nextRoute === 'report' ? '/report' : '/';
+    if (window.location.pathname !== nextPath) {
+      window.history.pushState({}, '', nextPath);
+    }
+    setRoute(nextRoute);
   }
 
   async function bootstrapIngestion() {
@@ -494,6 +590,15 @@ export function App() {
   }, [orderFilters]);
 
   useEffect(() => {
+    const onPopState = () => {
+      setRoute(window.location.pathname === '/report' ? 'report' : 'console');
+    };
+
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
     const onDocumentClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (!target?.closest('.actions-menu')) {
@@ -506,6 +611,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (route !== 'console') return;
     const timeout = setTimeout(() => {
       void refreshOrders({ filters: orderFilters }).catch((error) => {
         setLastError((error as Error).message);
@@ -516,8 +622,12 @@ export function App() {
   }, [orderFilters]);
 
   useEffect(() => {
+    if (route === 'report') {
+      void refreshReport();
+      return;
+    }
     void refreshAll();
-  }, []);
+  }, [route]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -529,6 +639,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (route !== 'console') return;
     const interval = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       if (ordersPollInFlightRef.current) return;
@@ -545,6 +656,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (route !== 'console') return;
     const interval = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       if (watchlistPollInFlightRef.current) return;
@@ -561,6 +673,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (route !== 'console') return;
     const interval = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       if (healthPollInFlightRef.current || accountPollInFlightRef.current) return;
@@ -579,13 +692,184 @@ export function App() {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (route !== 'report') return;
+    const interval = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void refreshReport({ silent: true }).catch(() => {});
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, [route]);
+
   return (
     <div className="app-shell">
       <header className="hero">
         <h1>IKBR Trader Console</h1>
-        <p>Ingestion, signal engine i execution w jednym panelu operatorskim.</p>
+        <p>
+          {route === 'report'
+            ? 'Raport skuteczności strategii na bazie zrealizowanych signal outcomes.'
+            : 'Ingestion, signal engine i execution w jednym panelu operatorskim.'}
+        </p>
+        <div className="nav-row">
+          <button type="button" className={`nav-link ${route === 'console' ? 'active' : ''}`} onClick={() => navigate('console')}>
+            Console
+          </button>
+          <button type="button" className={`nav-link ${route === 'report' ? 'active' : ''}`} onClick={() => navigate('report')}>
+            Report
+          </button>
+        </div>
       </header>
 
+      {route === 'report' ? (
+        <>
+          <section className="panel controls">
+            <div className="panel-head">
+              <h2>Signal Report</h2>
+              <span>{loadingReport ? 'loading...' : report ? `last refresh ${formatTs(report.generatedAt)}` : 'not available'}</span>
+            </div>
+            <div className="action-grid">
+              <button disabled={loadingReport} onClick={() => void refreshReport()}>
+                Refresh Report
+              </button>
+            </div>
+            <div className="meta-row">
+              <span>{report ? `Recent evaluated trades: ${report.limit}` : 'Report not loaded yet'}</span>
+              {reportError ? <span className="error">{reportError}</span> : null}
+            </div>
+          </section>
+
+          {report ? (
+            <>
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>Overview</h2>
+                  <span>{report.overview.trades} evaluated trades</span>
+                </div>
+                <div className="metrics-grid">
+                  <MetricCard label="Trades" value={formatNum(report.overview.trades, 0)} />
+                  <MetricCard label="Win Rate" value={formatPct(report.overview.winRate)} tone={report.overview.avgPnlPct} />
+                  <MetricCard label="Avg PnL %" value={formatPnlPct(report.overview.avgPnlPct)} tone={report.overview.avgPnlPct} />
+                  <MetricCard label="Median PnL %" value={formatPnlPct(report.overview.medianPnlPct)} tone={report.overview.medianPnlPct} />
+                  <MetricCard label="Avg Confidence" value={formatPct(report.overview.avgConfidence)} />
+                  <MetricCard label="Take Profit Hits" value={formatNum(report.overview.takeProfitHits, 0)} />
+                  <MetricCard label="Stop Hits" value={formatNum(report.overview.stopHits, 0)} tone={report.overview.stopHits > report.overview.takeProfitHits ? -1 : 1} />
+                  <MetricCard label="Open / MTM" value={formatNum(report.overview.open, 0)} />
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>Highlights</h2>
+                  <span>Quick read on current weak spots</span>
+                </div>
+                <div className="report-grid">
+                  <div className="metric-card">
+                    <small>Weakest Side</small>
+                    <strong className={toToneClass(reportWeakestSide?.avgPnlPct)}>
+                      {reportWeakestSide ? `${reportWeakestSide.key} (${formatPnlPct(reportWeakestSide.avgPnlPct)})` : '-'}
+                    </strong>
+                  </div>
+                  <div className="metric-card">
+                    <small>Weakest Strategy</small>
+                    <strong className={toToneClass(reportWeakestStrategy?.avgPnlPct)}>
+                      {reportWeakestStrategy ? `${reportWeakestStrategy.key} (${formatPnlPct(reportWeakestStrategy.avgPnlPct)})` : '-'}
+                    </strong>
+                  </div>
+                  <div className="metric-card">
+                    <small>Weakest Symbol</small>
+                    <strong className={toToneClass(reportWeakestSymbol?.avgPnlPct)}>
+                      {reportWeakestSymbol ? `${reportWeakestSymbol.key} (${formatPnlPct(reportWeakestSymbol.avgPnlPct)})` : '-'}
+                    </strong>
+                  </div>
+                </div>
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Symbol</h2>
+                  <span>Most active symbols in current sample</span>
+                </div>
+                <ReportAggregateTable rows={report.bySymbol} />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Strategy</h2>
+                  <span>Profile-level outcome summary</span>
+                </div>
+                <ReportAggregateTable rows={report.byStrategy} />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Side</h2>
+                  <span>BUY vs SELL quality check</span>
+                </div>
+                <ReportAggregateTable rows={report.bySide} />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Regime</h2>
+                  <span>How each market regime is behaving</span>
+                </div>
+                <ReportAggregateTable rows={report.byRegime} />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>Worst Trades</h2>
+                  <span>Lowest PnL trades from current sample</span>
+                </div>
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Order ID</th>
+                        <th>Symbol</th>
+                        <th>Strategy</th>
+                        <th>Side</th>
+                        <th>Regime</th>
+                        <th>Confidence</th>
+                        <th>PnL %</th>
+                        <th>Outcome</th>
+                        <th>Executed At</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.worstTrades.length === 0 ? (
+                        <tr>
+                          <td colSpan={9} className="muted">No evaluated trades yet</td>
+                        </tr>
+                      ) : (
+                        report.worstTrades.map((trade) => (
+                          <tr key={trade.orderId}>
+                            <td>{trade.orderId}</td>
+                            <td>{trade.instrument}</td>
+                            <td>{trade.strategy}</td>
+                            <td>{trade.side}</td>
+                            <td>{trade.regime}</td>
+                            <td>{formatPct(trade.confidence)}</td>
+                            <td className={toToneClass(trade.pnlPct)}>{formatPnlPct(trade.pnlPct)}</td>
+                            <td>{trade.notes}</td>
+                            <td>{formatTs(trade.executedAt)}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </>
+          ) : (
+            <section className="panel">
+              <div className="muted">Report unavailable. Try refreshing after a few filled trades are evaluated.</div>
+            </section>
+          )}
+        </>
+      ) : (
+        <>
       <section className="panel controls">
         <div className="status-row">
           <StatusPill label="Ingestion" ok={Boolean(ingestionHealth?.ok)} extra={ingestionStatusExtra} />
@@ -1025,6 +1309,8 @@ export function App() {
           </table>
         </div>
       </section>
+        </>
+      )}
     </div>
   );
 }
@@ -1043,6 +1329,53 @@ function MetricCard({ label, value, tone }: { label: string; value: string; tone
     <div className="metric-card">
       <small>{label}</small>
       <strong className={toToneClass(tone)}>{value}</strong>
+    </div>
+  );
+}
+
+function ReportAggregateTable({ rows }: { rows: ReportAggregate[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Trades</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Open</th>
+            <th>Win Rate</th>
+            <th>Avg PnL %</th>
+            <th>Median PnL %</th>
+            <th>Avg Confidence</th>
+            <th>TP Hits</th>
+            <th>Stop Hits</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={11} className="muted">No data</td>
+            </tr>
+          ) : (
+            rows.map((row) => (
+              <tr key={row.key}>
+                <td>{row.key}</td>
+                <td>{formatNum(row.trades, 0)}</td>
+                <td>{formatNum(row.wins, 0)}</td>
+                <td>{formatNum(row.losses, 0)}</td>
+                <td>{formatNum(row.open, 0)}</td>
+                <td>{formatPct(row.winRate)}</td>
+                <td className={toToneClass(row.avgPnlPct)}>{formatPnlPct(row.avgPnlPct)}</td>
+                <td className={toToneClass(row.medianPnlPct)}>{formatPnlPct(row.medianPnlPct)}</td>
+                <td>{formatPct(row.avgConfidence)}</td>
+                <td>{formatNum(row.takeProfitHits, 0)}</td>
+                <td>{formatNum(row.stopHits, 0)}</td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -2,6 +2,20 @@ export interface AccountSummary {
   source: 'cache' | 'live';
   accountId: string;
   retrievedAt: string;
+  metrics?: {
+    netLiquidation?: number;
+    totalCashValue?: number;
+    settledCash?: number;
+    buyingPower?: number;
+    availableFunds?: number;
+    excessLiquidity?: number;
+    equityWithLoanValue?: number;
+    grossPositionValue?: number;
+    initMarginReq?: number;
+    maintMarginReq?: number;
+    unrealizedPnL?: number;
+    realizedPnL?: number;
+  };
   totals: {
     positionsCount: number;
     grossExposure: number;

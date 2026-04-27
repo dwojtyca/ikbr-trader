@@ -160,6 +160,8 @@ export interface AccountSnapshot {
   positions: AccountPositionSnapshot[];
 }
 
+const IBKR_UNSET_DOUBLE_THRESHOLD = 1e307;
+
 function toNum(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
@@ -167,6 +169,13 @@ function toNum(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
+}
+
+function toBrokerRealizedPnl(value: unknown): number | undefined {
+  const parsed = toNum(value);
+  if (parsed === undefined) return undefined;
+  if (Math.abs(parsed) >= IBKR_UNSET_DOUBLE_THRESHOLD) return undefined;
+  return parsed;
 }
 
 export class TwsExecutionClient {
@@ -1410,7 +1419,7 @@ export class TwsExecutionClient {
         execId,
         commission: toNum(report.commission),
         currency: typeof report.currency === 'string' ? report.currency : undefined,
-        realizedPnL: toNum(report.realizedPNL)
+        realizedPnL: toBrokerRealizedPnl(report.realizedPNL)
       });
     });
   }

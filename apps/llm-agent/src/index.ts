@@ -245,6 +245,7 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
       indicatorSummary,
       accountSummary: {
         accountId: accountSummary.accountId,
+        metrics: accountSummary.metrics,
         totals: accountSummary.totals,
         openPositions
       },
@@ -267,6 +268,7 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
       newsCount: news.length,
       positionSnapshotJson: {
         accountId: accountSummary.accountId,
+        metrics: accountSummary.metrics,
         totals: accountSummary.totals,
         indicatorSummary,
         currentPosition,

@@ -87,6 +87,8 @@ export interface ActiveSubmittedOrder {
 export class ExecutionRepository {
   constructor(private readonly pool: Pool) {}
 
+  private static readonly IBKR_UNSET_DOUBLE_THRESHOLD = 1e307;
+
   private toFiniteNumber(value: unknown, fallback = 0): number {
     if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
     if (typeof value === 'string') {
@@ -96,6 +98,13 @@ export class ExecutionRepository {
       return Number.isFinite(parsed) ? parsed : fallback;
     }
     return fallback;
+  }
+
+  private normalizeBrokerRealizedPnl(value: unknown): number {
+    const parsed = this.toFiniteNumber(value, NaN);
+    if (!Number.isFinite(parsed)) return 0;
+    if (Math.abs(parsed) >= ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD) return 0;
+    return parsed;
   }
 
   private parseBrokerExecutionTime(value?: string): Date | null {
@@ -144,7 +153,7 @@ export class ExecutionRepository {
       );
       const convertedFx = Number.isFinite(fxToBase) && fxToBase > 0 ? fxToBase : 1;
       const commission = this.toFiniteNumber(row.commission, 0);
-      const realized = this.toFiniteNumber(row.realized_pnl, 0);
+      const realized = this.normalizeBrokerRealizedPnl(row.realized_pnl);
 
       if (row.commission === null) {
         missingCommissionReports += 1;
@@ -254,7 +263,10 @@ export class ExecutionRepository {
         report.execId,
         report.commission ?? null,
         report.currency ?? null,
-        report.realizedPnL ?? null
+        report.realizedPnL !== undefined &&
+        Math.abs(report.realizedPnL) < ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD
+          ? report.realizedPnL
+          : null
       ]
     );
   }
@@ -366,6 +378,15 @@ export class ExecutionRepository {
     await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN side DROP NOT NULL;`).catch(() => undefined);
     await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN shares DROP NOT NULL;`).catch(() => undefined);
     await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN price DROP NOT NULL;`).catch(() => undefined);
+    await this.pool.query(
+      `
+      UPDATE broker_execution_fills
+      SET realized_pnl = NULL
+      WHERE realized_pnl IS NOT NULL
+        AND ABS(realized_pnl) >= $1
+      `,
+      [ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD]
+    );
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_status_idx

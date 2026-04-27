@@ -62,6 +62,56 @@ export interface SignalOutcomeSummary {
   medianPnlPct?: number;
 }
 
+export interface SignalReportOverview {
+  trades: number;
+  wins: number;
+  losses: number;
+  open: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
+  avgConfidence?: number;
+  takeProfitHits: number;
+  stopHits: number;
+}
+
+export interface SignalReportAggregate {
+  key: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  open: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
+  avgConfidence?: number;
+  takeProfitHits: number;
+  stopHits: number;
+}
+
+export interface SignalReportTrade {
+  orderId: number;
+  instrument: string;
+  strategy: string;
+  side: Side;
+  regime: string;
+  confidence: number;
+  pnlPct?: number;
+  notes: string;
+  executedAt: string;
+}
+
+export interface SignalReport {
+  generatedAt: string;
+  limit: number;
+  overview: SignalReportOverview;
+  bySymbol: SignalReportAggregate[];
+  byStrategy: SignalReportAggregate[];
+  bySide: SignalReportAggregate[];
+  byRegime: SignalReportAggregate[];
+  worstTrades: SignalReportTrade[];
+}
+
 export interface ExposureSnapshot {
   exposure: number;
   openPositions: number;
@@ -599,6 +649,129 @@ export class SignalRepository {
     }));
   }
 
+  async getSignalReport(limit = 300): Promise<SignalReport> {
+    const boundedLimit = Math.min(Math.max(limit, 20), 2000);
+    const baseCte = `
+      WITH latest AS (
+        SELECT DISTINCT ON (so.proposed_order_id)
+          so.proposed_order_id,
+          so.pnl_pct,
+          so.notes,
+          so.hit_stop,
+          so.hit_take_profit,
+          so.evaluated_at
+        FROM signal_outcomes so
+        ORDER BY so.proposed_order_id, so.evaluated_at DESC
+      ),
+      base AS (
+        SELECT
+          po.id AS order_id,
+          po.instrument,
+          COALESCE(po.strategy, 'n/a') AS strategy,
+          po.side,
+          COALESCE(po.indicator_snapshot ->> 'regime', 'unknown') AS regime,
+          po.confidence,
+          latest.pnl_pct,
+          COALESCE(latest.notes, 'n/a') AS notes,
+          COALESCE(latest.hit_stop, false) AS hit_stop,
+          COALESCE(latest.hit_take_profit, false) AS hit_take_profit,
+          COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) AS executed_at
+        FROM latest
+        JOIN proposed_orders po ON po.id = latest.proposed_order_id
+        ORDER BY COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) DESC
+        LIMIT $1
+      )
+    `;
+
+    const overviewResult = await this.pool.query(
+      `
+      ${baseCte}
+      SELECT
+        COUNT(*)::int AS trades,
+        COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
+        COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
+        COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+        AVG(pnl_pct) AS avg_pnl_pct,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct,
+        AVG(confidence) AS avg_confidence,
+        COUNT(*) FILTER (WHERE hit_take_profit)::int AS take_profit_hits,
+        COUNT(*) FILTER (WHERE hit_stop)::int AS stop_hits
+      FROM base
+      `,
+      [boundedLimit]
+    );
+
+    const aggregateResults = await Promise.all([
+      this.queryReportAggregate(baseCte, boundedLimit, 'instrument'),
+      this.queryReportAggregate(baseCte, boundedLimit, 'strategy'),
+      this.queryReportAggregate(baseCte, boundedLimit, 'side'),
+      this.queryReportAggregate(baseCte, boundedLimit, 'regime')
+    ]);
+
+    const worstTradesResult = await this.pool.query(
+      `
+      ${baseCte}
+      SELECT
+        order_id,
+        instrument,
+        strategy,
+        side,
+        regime,
+        confidence,
+        pnl_pct,
+        notes,
+        executed_at
+      FROM base
+      WHERE pnl_pct IS NOT NULL
+      ORDER BY pnl_pct ASC, executed_at DESC
+      LIMIT 12
+      `,
+      [boundedLimit]
+    );
+
+    const overviewRow = overviewResult.rows[0] ?? {};
+    const trades = Number(overviewRow.trades ?? 0);
+    const wins = Number(overviewRow.wins ?? 0);
+
+    return {
+      generatedAt: new Date().toISOString(),
+      limit: boundedLimit,
+      overview: {
+        trades,
+        wins,
+        losses: Number(overviewRow.losses ?? 0),
+        open: Number(overviewRow.open ?? 0),
+        winRate: trades > 0 ? wins / trades : 0,
+        avgPnlPct: overviewRow.avg_pnl_pct === null || overviewRow.avg_pnl_pct === undefined
+          ? undefined
+          : Number(overviewRow.avg_pnl_pct),
+        medianPnlPct: overviewRow.median_pnl_pct === null || overviewRow.median_pnl_pct === undefined
+          ? undefined
+          : Number(overviewRow.median_pnl_pct),
+        avgConfidence: overviewRow.avg_confidence === null || overviewRow.avg_confidence === undefined
+          ? undefined
+          : Number(overviewRow.avg_confidence),
+        takeProfitHits: Number(overviewRow.take_profit_hits ?? 0),
+        stopHits: Number(overviewRow.stop_hits ?? 0)
+      },
+      bySymbol: aggregateResults[0],
+      byStrategy: aggregateResults[1],
+      bySide: aggregateResults[2],
+      byRegime: aggregateResults[3],
+      worstTrades: worstTradesResult.rows.map((row) => ({
+        orderId: Number(row.order_id),
+        instrument: String(row.instrument),
+        strategy: String(row.strategy),
+        side: row.side as Side,
+        regime: String(row.regime),
+        confidence: Number(row.confidence ?? 0),
+        pnlPct: row.pnl_pct === null || row.pnl_pct === undefined ? undefined : Number(row.pnl_pct),
+        notes: String(row.notes ?? 'n/a'),
+        executedAt: new Date(row.executed_at).toISOString()
+      }))
+    };
+  }
+
   private mapRow(row: ProposedOrderRow): ProposedOrder {
     const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
@@ -645,6 +818,60 @@ export class SignalRepository {
   private normalizeStatus(status: ProposedOrderRow['status']): ProposedOrderStatus {
     if (status === 'EXECUTED') return 'SUBMITTED';
     return status;
+  }
+
+  private async queryReportAggregate(
+    baseCte: string,
+    limit: number,
+    dimension: 'instrument' | 'strategy' | 'side' | 'regime'
+  ): Promise<SignalReportAggregate[]> {
+    const keySqlByDimension = {
+      instrument: 'instrument',
+      strategy: 'strategy',
+      side: 'side',
+      regime: 'regime'
+    } satisfies Record<typeof dimension, string>;
+
+    const result = await this.pool.query(
+      `
+      ${baseCte}
+      SELECT
+        ${keySqlByDimension[dimension]} AS key,
+        COUNT(*)::int AS trades,
+        COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
+        COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
+        COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+        AVG(pnl_pct) AS avg_pnl_pct,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct,
+        AVG(confidence) AS avg_confidence,
+        COUNT(*) FILTER (WHERE hit_take_profit)::int AS take_profit_hits,
+        COUNT(*) FILTER (WHERE hit_stop)::int AS stop_hits
+      FROM base
+      GROUP BY 1
+      ORDER BY trades DESC, key ASC
+      LIMIT 12
+      `,
+      [limit]
+    );
+
+    return result.rows.map((row) => {
+      const trades = Number(row.trades ?? 0);
+      const wins = Number(row.wins ?? 0);
+
+      return {
+        key: String(row.key),
+        trades,
+        wins,
+        losses: Number(row.losses ?? 0),
+        open: Number(row.open ?? 0),
+        winRate: trades > 0 ? wins / trades : 0,
+        avgPnlPct: row.avg_pnl_pct === null || row.avg_pnl_pct === undefined ? undefined : Number(row.avg_pnl_pct),
+        medianPnlPct: row.median_pnl_pct === null || row.median_pnl_pct === undefined ? undefined : Number(row.median_pnl_pct),
+        avgConfidence: row.avg_confidence === null || row.avg_confidence === undefined ? undefined : Number(row.avg_confidence),
+        takeProfitHits: Number(row.take_profit_hits ?? 0),
+        stopHits: Number(row.stop_hits ?? 0)
+      };
+    });
   }
 
   private async tryLoadExposureFromExecution(executionBaseUrl: string): Promise<ExposureSnapshot | null> {
