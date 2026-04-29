@@ -28,6 +28,8 @@ const schema = z.object({
   SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(0.55),
   SIGNAL_LMT_ENTRY_MODE: z.enum(['touch', 'last', 'mid']).default('touch'),
   SIGNAL_LMT_ENTRY_BUFFER_BPS: z.coerce.number().min(0).default(0),
+  SIGNAL_FRACTIONAL_SYMBOLS: z.string().default(''),
+  SIGNAL_FRACTIONAL_QUANTITY_STEP: z.coerce.number().positive().default(0.0001),
   SIGNAL_MIN_STOP_BPS_STOCK: z.coerce.number().min(0).default(12),
   SIGNAL_MIN_STOP_BPS_INDEX: z.coerce.number().min(0).default(10),
   SIGNAL_MIN_STOP_BPS_COMMODITY: z.coerce.number().min(0).default(14),
@@ -60,5 +62,10 @@ export const config = {
   watchlistSymbols: env.WATCHLIST_SYMBOLS.split(',').map((s) => s.trim()).filter(Boolean),
   signalEventDriven: env.SIGNAL_EVENT_DRIVEN.toLowerCase() === 'true',
   volumeFilterMode: env.IB_MARKET_DATA_TYPE === 1 ? 'strict' as const : 'off' as const,
-  assetClassOverrides: parseAssetClassOverrides(env.SIGNAL_ASSET_CLASS_OVERRIDES)
+  assetClassOverrides: parseAssetClassOverrides(env.SIGNAL_ASSET_CLASS_OVERRIDES),
+  fractionalSymbols: new Set(
+    env.SIGNAL_FRACTIONAL_SYMBOLS.split(',')
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean)
+  )
 };

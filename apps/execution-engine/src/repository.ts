@@ -240,6 +240,48 @@ export class ExecutionRepository {
         this.parseBrokerExecutionTime(fill.executedAt)
       ]
     );
+
+    if (proposedOrderId !== null) {
+      await this.reconcileFilledOrdersFromBrokerFills(proposedOrderId);
+    }
+  }
+
+  async reconcileFilledOrdersFromBrokerFills(proposedOrderId?: number): Promise<number> {
+    const params: number[] = [];
+    const idFilter = proposedOrderId !== undefined
+      ? `AND po.id = $${params.push(proposedOrderId)}`
+      : '';
+
+    const result = await this.pool.query(
+      `
+      WITH fill_totals AS (
+        SELECT proposed_order_id,
+               SUM(ABS(COALESCE(shares, 0))) AS filled_shares,
+               MAX(COALESCE(executed_at, created_at)) AS latest_fill_at
+        FROM broker_execution_fills
+        WHERE proposed_order_id IS NOT NULL
+        GROUP BY proposed_order_id
+      )
+      UPDATE proposed_orders po
+      SET status = 'FILLED',
+          execution_message = 'Broker execution fill reconciliation: filled=' || fill_totals.filled_shares || '/' || po.quantity,
+          last_error = NULL,
+          source_error = NULL,
+          executed_at = COALESCE(po.executed_at, fill_totals.latest_fill_at, NOW()),
+          processing_owner = NULL,
+          processing_claimed_at = NULL
+      FROM fill_totals
+      WHERE po.id = fill_totals.proposed_order_id
+        AND po.status <> 'FILLED'
+        AND po.quantity > 0
+        AND fill_totals.filled_shares >= po.quantity - 0.000001
+        ${idFilter}
+      RETURNING po.id
+      `,
+      params
+    );
+
+    return result.rowCount ?? 0;
   }
 
   async applyBrokerCommissionReport(report: BrokerCommissionReport): Promise<void> {
@@ -274,6 +316,7 @@ export class ExecutionRepository {
   private executionMessagePriority(message?: string | null): number {
     const normalized = String(message ?? '').trim();
     if (!normalized) return 0;
+    if (/^Broker accepted order, status=/i.test(normalized)) return 1;
     if (/^Broker order status update: /i.test(normalized)) return 1;
     if (/submitted-timeout|locate-held|held while securities are located|will not be placed at the exchange until|broker rejected order|not accepted by broker/i.test(normalized)) {
       return 3;
@@ -431,6 +474,7 @@ export class ExecutionRepository {
       WHERE status = 'SUBMITTED'
         AND executed_at IS NOT NULL
     `);
+    await this.reconcileFilledOrdersFromBrokerFills();
   }
 
   async insertProposedFromTicket(ticket: SignalTicket, strategy = 'manual_ticket'): Promise<number> {

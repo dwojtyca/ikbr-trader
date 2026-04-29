@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { IndicatorSnapshot } from '@ikbr/shared';
 import { ClaimedOrder } from './repository.js';
-import { MarketNewsItem } from './benzinga-client.js';
+import { MarketNewsItem } from './marketaux-client.js';
 
 const decisionSchema = z.object({
   decision: z.enum(['EXECUTE', 'REJECT']),
@@ -97,8 +97,11 @@ export class OpenAiDecider {
       '- Be conservative around unclear market/news context.',
       '- Always evaluate the order against the current open positions across the whole account, not only the same symbol.',
       '- Reject trades that obviously duplicate existing exposure, create unhealthy concentration, or conflict with current portfolio positioning unless there is a strong justification.',
+      '- For OPEN_OR_ADD trades, reject orders that would create a single-name concentration that is too large for the account, even if buying power technically allows it.',
+      '- For OPEN_OR_ADD trades, be cautious when the proposed side would materially increase same-direction exposure (for example, more long exposure when the account is already heavily long).',
       '- When judging order size or concentration, use account metrics such as netLiquidation, availableFunds, buyingPower, and equityWithLoanValue as the primary scale of the account.',
       '- Do not reject a trade only because its notional is much larger than current grossExposure; a mostly-cash account can still support a first position if the order is reasonable relative to account size and available funds.',
+      '- As a rule of thumb, OPEN_OR_ADD trades above roughly 8% of netLiquidation or that clearly dominate existing portfolio concentration should usually be rejected unless there is exceptional support.',
       '- If the order closes or reduces an existing position, that can be a positive factor.',
       '- Treat indicatorSummary as a compact technical snapshot from the signal engine.',
       '- Global technical heuristics: for longs, ema20 > ema50 and ema50 >= ema200 is supportive; for shorts, ema20 < ema50 and ema50 <= ema200 is supportive.',

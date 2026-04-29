@@ -20,6 +20,8 @@ const engine = new SignalEngine(repo, {
   minConfidence: config.SIGNAL_MIN_CONFIDENCE,
   lmtEntryMode: config.SIGNAL_LMT_ENTRY_MODE,
   lmtEntryBufferBps: config.SIGNAL_LMT_ENTRY_BUFFER_BPS,
+  fractionalSymbols: config.fractionalSymbols,
+  fractionalQuantityStep: config.SIGNAL_FRACTIONAL_QUANTITY_STEP,
   minStopBpsByAssetClass: {
     stock: config.SIGNAL_MIN_STOP_BPS_STOCK,
     index: config.SIGNAL_MIN_STOP_BPS_INDEX,

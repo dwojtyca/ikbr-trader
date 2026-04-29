@@ -1,7 +1,7 @@
 import { IndicatorSnapshot } from '@ikbr/shared';
 import { Pool } from 'pg';
 import { config } from './config.js';
-import { BenzingaClient, MarketNewsItem } from './benzinga-client.js';
+import { MarketAuxClient, MarketNewsItem } from './marketaux-client.js';
 import { ExecutionApiClient } from './execution-api-client.js';
 import { OpenAiDecider } from './openai-decider.js';
 import { ClaimedOrder, LlmAgentRepository } from './repository.js';
@@ -9,9 +9,9 @@ import { ClaimedOrder, LlmAgentRepository } from './repository.js';
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const repo = new LlmAgentRepository(pool);
 const executionApi = new ExecutionApiClient(config.EXECUTION_BASE_URL, config.LLM_AGENT_HTTP_TIMEOUT_MS);
-const benzinga = new BenzingaClient({
-  apiKey: config.BENZINGA_API_KEY,
-  baseUrl: config.BENZINGA_BASE_URL,
+const marketaux = new MarketAuxClient({
+  apiKey: config.MARKETAUX_API_KEY,
+  baseUrl: config.MARKETAUX_BASE_URL,
   timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS
 });
 const decider = new OpenAiDecider({
@@ -205,16 +205,16 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
     : null;
 
   let news: MarketNewsItem[] = [];
-  if (!benzinga.isConfigured()) {
+  if (!marketaux.isConfigured()) {
     if (config.llmAgentFailClosed) {
-      await rejectFailClosed(order, 'AI reject (fail-closed): BENZINGA_API_KEY is not configured', {
-        sourceError: 'BENZINGA_API_KEY is missing'
+      await rejectFailClosed(order, 'AI reject (fail-closed): MARKETAUX_API_KEY is not configured', {
+        sourceError: 'MARKETAUX_API_KEY is missing'
       });
       return;
     }
   } else {
     try {
-      news = await benzinga.getNewsForSymbol(order.instrument, config.LLM_AGENT_NEWS_WINDOW_HOURS, config.LLM_AGENT_MAX_NEWS_ITEMS);
+      news = await marketaux.getNewsForSymbol(order.instrument, config.LLM_AGENT_NEWS_WINDOW_HOURS, config.LLM_AGENT_MAX_NEWS_ITEMS);
     } catch (error) {
       const message = (error as Error).message;
       if (config.llmAgentFailClosed) {

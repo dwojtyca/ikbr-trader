@@ -24,8 +24,8 @@ const schema = z.object({
   LLM_AGENT_MAX_NEWS_ITEMS: z.coerce.number().int().min(0).max(50).default(12),
   OPENAI_API_KEY: optionalTrimmedString,
   OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
-  BENZINGA_API_KEY: optionalTrimmedString,
-  BENZINGA_BASE_URL: z.string().default('https://api.benzinga.com/api/v2/news')
+  MARKETAUX_API_KEY: optionalTrimmedString,
+  MARKETAUX_BASE_URL: z.string().default('https://api.marketaux.com/v1/news/all')
 });
 
 const env = schema.parse(process.env);

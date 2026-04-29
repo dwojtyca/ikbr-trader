@@ -62,6 +62,16 @@ export interface SignalOutcomeSummary {
   medianPnlPct?: number;
 }
 
+export interface SignalPerformanceStats {
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgPnlPct?: number;
+  medianPnlPct?: number;
+  expectancyPct?: number;
+}
+
 export interface SignalReportOverview {
   trades: number;
   wins: number;
@@ -118,6 +128,27 @@ export interface ExposureSnapshot {
   source: 'execution' | 'db';
   positionsBySymbol: Record<string, number>;
   accountEquity?: number;
+  longExposure?: number;
+  shortExposure?: number;
+  positionContextsBySymbol?: Record<string, {
+    quantity: number;
+    averageCost?: number;
+    marketPrice?: number;
+    marketValue?: number;
+    unrealizedPnL?: number;
+  }>;
+}
+
+export interface LatestFilledOrderContext {
+  instrument: string;
+  side: Side;
+  quantity: number;
+  entry?: number;
+  stop?: number;
+  takeProfit?: number;
+  executedAt: Date;
+  createdAt: Date;
+  strategy?: string;
 }
 
 export class SignalRepository {
@@ -312,6 +343,118 @@ export class SignalRepository {
       openPositions: positions.length,
       source: 'db',
       positionsBySymbol
+    };
+  }
+
+  async getLatestFilledOrderContext(instrument: string): Promise<LatestFilledOrderContext | null> {
+    const result = await this.pool.query(
+      `
+      SELECT instrument, side, quantity, entry, stop, take_profit, executed_at, created_at, strategy
+      FROM proposed_orders
+      WHERE UPPER(instrument) = UPPER($1)
+        AND status = 'FILLED'
+      ORDER BY COALESCE(executed_at, created_at) DESC
+      LIMIT 1
+      `,
+      [instrument]
+    );
+
+    const row = result.rows[0] as {
+      instrument: string;
+      side: Side;
+      quantity: number;
+      entry: number | null;
+      stop: number | null;
+      take_profit: number | null;
+      executed_at: Date | string | null;
+      created_at: Date | string;
+      strategy: string | null;
+    } | undefined;
+
+    if (!row) return null;
+
+    const executedAtRaw = row.executed_at ?? row.created_at;
+    const executedAt = executedAtRaw instanceof Date ? executedAtRaw : new Date(executedAtRaw);
+    const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    if (Number.isNaN(executedAt.getTime()) || Number.isNaN(createdAt.getTime())) return null;
+
+    return {
+      instrument: row.instrument,
+      side: row.side,
+      quantity: Number(row.quantity),
+      entry: row.entry === null ? undefined : Number(row.entry),
+      stop: row.stop === null ? undefined : Number(row.stop),
+      takeProfit: row.take_profit === null ? undefined : Number(row.take_profit),
+      executedAt,
+      createdAt,
+      strategy: row.strategy ?? undefined
+    };
+  }
+
+  async getSignalPerformance(input: {
+    instrument?: string;
+    strategy: string;
+    side: Exclude<Side, 'HOLD'>;
+    limit?: number;
+  }): Promise<SignalPerformanceStats> {
+    const limit = Math.max(5, Math.min(100, input.limit ?? 40));
+    const params: Array<string | number> = [input.strategy, input.side, limit];
+    const instrumentFilter = input.instrument
+      ? `AND UPPER(po.instrument) = UPPER($${params.push(input.instrument)})`
+      : '';
+
+    const result = await this.pool.query(
+      `
+      SELECT pnl_pct
+      FROM (
+        SELECT so.pnl_pct, so.evaluated_at
+        FROM signal_outcomes so
+        JOIN proposed_orders po ON po.id = so.proposed_order_id
+        WHERE po.strategy = $1
+          AND po.side = $2
+          AND so.pnl_pct IS NOT NULL
+          ${instrumentFilter}
+        ORDER BY so.evaluated_at DESC
+        LIMIT $3
+      ) recent
+      ORDER BY evaluated_at ASC
+      `,
+      params
+    );
+
+    const values = result.rows
+      .map((row: { pnl_pct: number | string | null }) => Number(row.pnl_pct))
+      .filter((value: number) => Number.isFinite(value));
+    const trades = values.length;
+    if (trades === 0) {
+      return { trades: 0, wins: 0, losses: 0, winRate: 0 };
+    }
+
+    const sorted = [...values].sort((a, b) => a - b);
+    const midpoint = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 === 0
+      ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+      : sorted[midpoint];
+    const wins = values.filter((value) => value > 0).length;
+    const losses = trades - wins;
+    const avg = values.reduce((sum, value) => sum + value, 0) / trades;
+    const avgWin = wins > 0
+      ? values.filter((value) => value > 0).reduce((sum, value) => sum + value, 0) / wins
+      : 0;
+    const avgLoss = losses > 0
+      ? Math.abs(values.filter((value) => value <= 0).reduce((sum, value) => sum + value, 0) / losses)
+      : 0;
+    const winRate = wins / trades;
+    const expectancy = avgWin * winRate - avgLoss * (1 - winRate);
+
+    return {
+      trades,
+      wins,
+      losses,
+      winRate,
+      avgPnlPct: avg,
+      medianPnlPct: median,
+      expectancyPct: expectancy
     };
   }
 
@@ -892,26 +1035,49 @@ export class SignalRepository {
           };
           totals?: {
             grossExposure?: number | string;
+            longExposure?: number | string;
+            shortExposure?: number | string;
             positionsCount?: number | string;
           };
           positions?: Array<{
             symbol?: string;
             position?: number | string;
+            averageCost?: number | string;
+            marketPrice?: number | string;
+            marketValue?: number | string;
+            unrealizedPnL?: number | string;
           }>;
         };
 
         const exposure = Number(payload?.totals?.grossExposure);
+        const longExposure = Number(payload?.totals?.longExposure);
+        const shortExposure = Number(payload?.totals?.shortExposure);
         const openPositions = Number(payload?.totals?.positionsCount);
         const accountEquityRaw = payload?.metrics?.netLiquidation ?? payload?.metrics?.equityWithLoanValue;
         const accountEquity = Number(accountEquityRaw);
 
         if (!Number.isFinite(exposure) || !Number.isFinite(openPositions)) return null;
         const positionsBySymbol: Record<string, number> = {};
+        const positionContextsBySymbol: Record<string, {
+          quantity: number;
+          averageCost?: number;
+          marketPrice?: number;
+          marketValue?: number;
+          unrealizedPnL?: number;
+        }> = {};
         for (const position of payload.positions ?? []) {
           if (!position?.symbol) continue;
           const qty = Number(position.position);
           if (!Number.isFinite(qty)) continue;
-          positionsBySymbol[position.symbol.toUpperCase()] = qty;
+          const key = position.symbol.toUpperCase();
+          positionsBySymbol[key] = qty;
+          positionContextsBySymbol[key] = {
+            quantity: qty,
+            averageCost: Number.isFinite(Number(position.averageCost)) ? Number(position.averageCost) : undefined,
+            marketPrice: Number.isFinite(Number(position.marketPrice)) ? Number(position.marketPrice) : undefined,
+            marketValue: Number.isFinite(Number(position.marketValue)) ? Number(position.marketValue) : undefined,
+            unrealizedPnL: Number.isFinite(Number(position.unrealizedPnL)) ? Number(position.unrealizedPnL) : undefined
+          };
         }
 
         return {
@@ -919,7 +1085,10 @@ export class SignalRepository {
           openPositions,
           source: 'execution',
           positionsBySymbol,
-          accountEquity: Number.isFinite(accountEquity) && accountEquity > 0 ? accountEquity : undefined
+          accountEquity: Number.isFinite(accountEquity) && accountEquity > 0 ? accountEquity : undefined,
+          longExposure: Number.isFinite(longExposure) ? longExposure : undefined,
+          shortExposure: Number.isFinite(shortExposure) ? shortExposure : undefined,
+          positionContextsBySymbol
         };
       } finally {
         clearTimeout(timeout);

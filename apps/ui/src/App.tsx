@@ -231,6 +231,17 @@ function formatNum(value?: number | null, digits = 2): string {
   return value.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
+function formatQty(value?: number | null): string {
+  if (value === undefined || value === null || Number.isNaN(value)) return '-';
+  const abs = Math.abs(value);
+  const digits = Math.abs(value - Math.trunc(value)) < 1e-9
+    ? 0
+    : abs >= 100
+      ? 2
+      : 4;
+  return value.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+}
+
 function formatTs(value?: string | null): string {
   if (!value) return '-';
   const date = new Date(value);
@@ -969,7 +980,7 @@ export function App() {
                       <tr key={`${position.conid ?? position.symbol}-${position.symbol}`}>
                         <td>{position.symbol}</td>
                         <td>{position.conid ?? '-'}</td>
-                        <td>{formatNum(position.position, 0)}</td>
+                        <td>{formatQty(position.position)}</td>
                         <td>{formatNum(position.marketPrice)}</td>
                         <td>{formatNum(position.marketValue)}</td>
                         <td>{formatNum(position.averageCost)}</td>
@@ -1201,7 +1212,7 @@ export function App() {
                         <td>{order.instrument}</td>
                         <td>{order.indicators?.regime ?? '-'}</td>
                         <td>{order.side}</td>
-                        <td>{formatNum(order.quantity, 0)}</td>
+                        <td>{formatQty(order.quantity)}</td>
                         <td>{order.status}</td>
                         <td>{order.riskCheckStatus}</td>
                         <td>{formatTs(orderCreatedAt(order))}</td>

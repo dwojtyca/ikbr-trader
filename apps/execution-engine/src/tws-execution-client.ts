@@ -400,7 +400,7 @@ export class TwsExecutionClient {
         if (parsed.reqId !== undefined && !plan.relatedOrderIds.has(Number(parsed.reqId))) return;
 
         const code = Number(parsed.code);
-        const fatalCodes = new Set([103, 104, 109, 110, 200, 201, 202, 203, 321, 322, 323, 354]);
+        const fatalCodes = new Set([103, 104, 109, 110, 200, 201, 202, 203, 320, 321, 322, 323, 354]);
         if (Number.isFinite(code) && !fatalCodes.has(code)) {
           return;
         }

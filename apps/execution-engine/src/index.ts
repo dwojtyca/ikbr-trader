@@ -86,20 +86,35 @@ const rejectProposedBodySchema = decisionMetadataSchema.extend({
 });
 
 let accountSnapshotCache: { accountId: string; fetchedAtMs: number; snapshot: AccountSnapshot } | null = null;
+let accountSnapshotInFlight: Promise<AccountSnapshot> | null = null;
 let executionSyncCache: { accountId: string; syncedAtMs: number } | null = null;
+let executionSyncInFlight: Promise<void> | null = null;
 
 async function syncRecentExecutions(accountId: string): Promise<void> {
   if (executionSyncCache && executionSyncCache.accountId === accountId && Date.now() - executionSyncCache.syncedAtMs < 5 * 60_000) {
     return;
   }
 
+  if (executionSyncInFlight) {
+    await executionSyncInFlight;
+    return;
+  }
+
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  const count = await tws.syncExecutions(accountId, since);
-  executionSyncCache = {
-    accountId,
-    syncedAtMs: Date.now()
-  };
-  app.log.info({ accountId, count, since: since.toISOString() }, 'synced recent broker executions');
+  executionSyncInFlight = (async () => {
+    const count = await tws.syncExecutions(accountId, since);
+    executionSyncCache = {
+      accountId,
+      syncedAtMs: Date.now()
+    };
+    app.log.info({ accountId, count, since: since.toISOString() }, 'synced recent broker executions');
+  })();
+
+  try {
+    await executionSyncInFlight;
+  } finally {
+    executionSyncInFlight = null;
+  }
 }
 
 function validateExecutableTicket(ticket: SignalTicket): string | null {
@@ -270,7 +285,13 @@ app.get('/execution/account/summary', async (request) => {
     };
   }
 
-  const snapshot = await tws.getAccountSnapshot(accountId);
+  if (!accountSnapshotInFlight) {
+    accountSnapshotInFlight = tws.getAccountSnapshot(accountId).finally(() => {
+      accountSnapshotInFlight = null;
+    });
+  }
+
+  const snapshot = await accountSnapshotInFlight;
   const cumulative = await repo.getCumulativeRealizedPnL({
     baseCurrency: config.IB_CURRENCY,
     fxToBaseByCurrency: snapshot.fxToBaseByCurrency

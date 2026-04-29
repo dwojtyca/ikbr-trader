@@ -1,6 +1,6 @@
 import { AssetClass, IndicatorSnapshot, MarketRegime, ProposedOrder, RiskLimits, Side } from '@ikbr/shared';
 import { lastAtr, lastBollinger, lastDonchian, lastEma, lastMacd, lastObvSlope, lastRsi } from './indicators.js';
-import { ExposureSnapshot, SignalRepository } from './repository.js';
+import { ExposureSnapshot, LatestFilledOrderContext, SignalPerformanceStats, SignalRepository } from './repository.js';
 import { inferAssetClass, pickStrategyProfile, StrategyProfile } from './strategy-profiles.js';
 
 function clamp(value: number, min: number, max: number): number {
@@ -10,6 +10,16 @@ function clamp(value: number, min: number, max: number): number {
 function safeDiv(numerator: number, denominator: number, fallback = 0): number {
   if (!Number.isFinite(denominator) || denominator === 0) return fallback;
   return numerator / denominator;
+}
+
+function stepDecimals(step: number): number {
+  const normalized = step.toString().toLowerCase();
+  if (normalized.includes('e-')) {
+    const exp = Number(normalized.split('e-')[1]);
+    return Number.isFinite(exp) ? exp : 0;
+  }
+  const parts = normalized.split('.');
+  return parts[1]?.length ?? 0;
 }
 
 interface SignalEngineOptions {
@@ -22,6 +32,8 @@ interface SignalEngineOptions {
   minConfidence: number;
   lmtEntryMode: 'touch' | 'last' | 'mid';
   lmtEntryBufferBps: number;
+  fractionalSymbols: Set<string>;
+  fractionalQuantityStep: number;
   minStopBpsByAssetClass: Record<AssetClass, number>;
   maxMarketStateAgeMs: number;
   assetClassBySymbol: Record<string, AssetClass>;
@@ -36,10 +48,34 @@ interface DecisionScore {
   sellScore: number;
 }
 
+interface ConfidenceFloor {
+  value: number;
+  reason?: string;
+}
+
 interface EntryPriceSelection {
   entry: number;
   source: 'touch' | 'last' | 'mid' | 'fallback_last';
 }
+
+interface ManagedExitContext {
+  symbol: string;
+  conid: string;
+  latestClose: number;
+  latestCandleTs: Date;
+  latestFilled: LatestFilledOrderContext | null;
+  existingPositionQty: number;
+  positionAverageCost?: number;
+  positionMarketPrice?: number;
+  indicators: IndicatorSnapshot;
+  profile: StrategyProfile;
+  marketState: { bid?: number; ask?: number; lastPrice: number };
+  generatedFromCandleTs?: Date;
+}
+
+const STOCK_RANGE_OPEN_DISABLED = true;
+const MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT = 0.35;
+const MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT = 0.8;
 
 export class SignalEngine {
   constructor(
@@ -76,6 +112,7 @@ export class SignalEngine {
       ema50: lastEma(closes, 50),
       ema200: lastEma(closes, 200),
       rsi14: lastRsi(closes, 14),
+      rsi14Prev: lastRsi(closes.slice(0, -1), 14),
       atr14: lastAtr(highs, lows, closes, 14),
       macdLine: macdSnapshot.macdLine,
       macdSignal: macdSnapshot.signalLine,
@@ -173,6 +210,34 @@ export class SignalEngine {
     }
 
     const decision = this.scoreDecision(profile, latest.close, indicators);
+    const riskSnapshot = exposureSnapshot ?? (await this.repo.getExposureSnapshot(this.options.executionBaseUrl));
+    const exposure = riskSnapshot.exposure;
+    const openPositions = riskSnapshot.openPositions;
+    const existingPositionQty = riskSnapshot.positionsBySymbol[symbol.toUpperCase()] ?? 0;
+    const hasOpenPosition = Math.abs(existingPositionQty) > 1e-12;
+    const positionContext = riskSnapshot.positionContextsBySymbol?.[symbol.toUpperCase()];
+
+    if (hasOpenPosition) {
+      const managedExit = await this.evaluateManagedExit({
+        symbol,
+        conid: latest.conid,
+        latestClose: latest.close,
+        latestCandleTs: latest.ts,
+        latestFilled: await this.repo.getLatestFilledOrderContext(symbol),
+        existingPositionQty,
+        positionAverageCost: positionContext?.averageCost,
+        positionMarketPrice: positionContext?.marketPrice,
+        indicators,
+        profile,
+        marketState,
+        generatedFromCandleTs
+      });
+
+      if (managedExit) {
+        return managedExit;
+      }
+    }
+
     if (decision.side === 'HOLD') {
       return this.rejectedOrder(
         symbol,
@@ -180,6 +245,37 @@ export class SignalEngine {
         `No edge for ${profile.id}: buyScore=${decision.buyScore.toFixed(2)}, sellScore=${decision.sellScore.toFixed(2)}`,
         indicators,
         'HOLD',
+        profile.id,
+        generatedFromCandleTs
+      );
+    }
+
+    const closesOrReducesPosition =
+      (decision.side === 'BUY' && existingPositionQty < -1e-12) ||
+      (decision.side === 'SELL' && existingPositionQty > 1e-12);
+
+    if (!closesOrReducesPosition) {
+      const qualityRejection = this.evaluateEntryQuality(symbol, assetClass, profile, decision, latest.close, indicators);
+      if (qualityRejection) {
+        return this.rejectedOrder(
+          symbol,
+          latest.conid,
+          qualityRejection,
+          indicators,
+          decision.side,
+          profile.id,
+          generatedFromCandleTs
+        );
+      }
+    }
+
+    if (STOCK_RANGE_OPEN_DISABLED && profile.id === 'stocks_range_v1' && !closesOrReducesPosition) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        'Risk overlay rejected signal: stock range opens are disabled pending re-tuning',
+        indicators,
+        decision.side,
         profile.id,
         generatedFromCandleTs
       );
@@ -213,19 +309,19 @@ export class SignalEngine {
       return this.rejectedOrder(symbol, latest.conid, 'Risk per unit is zero', indicators, decision.side, profile.id, generatedFromCandleTs);
     }
 
-    const riskSnapshot = exposureSnapshot ?? (await this.repo.getExposureSnapshot(this.options.executionBaseUrl));
+    const quantityStep = this.quantityStepForSymbol(symbol);
     const effectiveAccountEquity =
       riskSnapshot.accountEquity && Number.isFinite(riskSnapshot.accountEquity) && riskSnapshot.accountEquity > 0
         ? riskSnapshot.accountEquity
         : this.options.riskLimits.accountEquity;
     const maxRiskCash = (effectiveAccountEquity * this.options.riskLimits.maxRiskPerTradePct) / 100;
-    const riskBasedQuantity = Math.floor((maxRiskCash / riskPerUnit) * profile.quantityFactor);
+    const riskBasedQuantity = this.roundDownToQuantityStep((maxRiskCash / riskPerUnit) * profile.quantityFactor, quantityStep);
 
-    if (riskBasedQuantity < 1) {
+    if (riskBasedQuantity < quantityStep) {
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        'Sizing rejected: quantity below 1 share/contract',
+        `Sizing rejected: quantity below minimum step ${quantityStep}`,
         indicators,
         decision.side,
         profile.id,
@@ -233,18 +329,18 @@ export class SignalEngine {
       );
     }
 
-    const exposure = riskSnapshot.exposure;
-    const openPositions = riskSnapshot.openPositions;
-    const existingPositionQty = riskSnapshot.positionsBySymbol[symbol.toUpperCase()] ?? 0;
-    const hasOpenPosition = Math.abs(existingPositionQty) > 1e-12;
-    const closesOrReducesPosition =
-      (decision.side === 'BUY' && existingPositionQty < -1e-12) ||
-      (decision.side === 'SELL' && existingPositionQty > 1e-12);
-
     const maxExposure = (effectiveAccountEquity * this.options.riskLimits.maxExposurePct) / 100;
     const maxNotionalPerTradePct = this.options.riskLimits.maxNotionalPerTradePct ?? this.options.riskLimits.maxExposurePct;
     const maxNotionalPerTrade = (effectiveAccountEquity * maxNotionalPerTradePct) / 100;
     const availableExposure = Math.max(0, maxExposure - exposure);
+    const currentDirectionalExposure = decision.side === 'BUY'
+      ? Math.max(0, riskSnapshot.longExposure ?? 0)
+      : Math.max(0, riskSnapshot.shortExposure ?? 0);
+    const maxDirectionalExposure = maxExposure * MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT;
+    const currentSymbolExposure = Math.abs(positionContext?.marketValue ?? 0);
+    const maxSymbolExposure = Math.min(maxNotionalPerTrade, maxExposure * MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT);
+    const availableDirectionalExposure = Math.max(0, maxDirectionalExposure - currentDirectionalExposure);
+    const availableSymbolExposure = Math.max(0, maxSymbolExposure - currentSymbolExposure);
 
     if (!hasOpenPosition && openPositions >= this.options.riskLimits.maxOpenPositions) {
       return this.rejectedOrder(
@@ -263,8 +359,8 @@ export class SignalEngine {
 
     if (closesOrReducesPosition) {
       signalMode = 'CLOSE_OR_REDUCE';
-      const closeQty = Math.floor(Math.abs(existingPositionQty));
-      if (closeQty < 1) {
+      const closeQty = this.roundDownToQuantityStep(Math.abs(existingPositionQty), quantityStep);
+      if (closeQty < quantityStep) {
         return this.rejectedOrder(
           symbol,
           latest.conid,
@@ -289,15 +385,26 @@ export class SignalEngine {
         );
       }
 
-      const quantityCapByExposure = Math.floor(availableExposure / entry);
-      const quantityCapByNotional = Math.floor(maxNotionalPerTrade / entry);
-      quantity = Math.min(riskBasedQuantity, quantityCapByExposure, quantityCapByNotional);
+      const quantityCapByExposure = this.roundDownToQuantityStep(availableExposure / entry, quantityStep);
+      const quantityCapByNotional = this.roundDownToQuantityStep(maxNotionalPerTrade / entry, quantityStep);
+      const quantityCapByDirectionalExposure = this.roundDownToQuantityStep(availableDirectionalExposure / entry, quantityStep);
+      const quantityCapBySymbolExposure = this.roundDownToQuantityStep(availableSymbolExposure / entry, quantityStep);
+      quantity = this.roundDownToQuantityStep(
+        Math.min(
+          riskBasedQuantity,
+          quantityCapByExposure,
+          quantityCapByNotional,
+          quantityCapByDirectionalExposure,
+          quantityCapBySymbolExposure
+        ),
+        quantityStep
+      );
 
-      if (quantity < 1) {
+      if (quantity < quantityStep) {
         return this.rejectedOrder(
           symbol,
           latest.conid,
-          `Sizing rejected by notional caps (riskQty=${riskBasedQuantity}, capExposureQty=${quantityCapByExposure}, capTradeQty=${quantityCapByNotional}, available=${availableExposure.toFixed(2)}, maxTradeNotional=${maxNotionalPerTrade.toFixed(2)})`,
+          `Sizing rejected by notional caps (riskQty=${riskBasedQuantity}, capExposureQty=${quantityCapByExposure}, capTradeQty=${quantityCapByNotional}, capDirectionalQty=${quantityCapByDirectionalExposure}, capSymbolQty=${quantityCapBySymbolExposure}, available=${availableExposure.toFixed(2)}, availableDirectional=${availableDirectionalExposure.toFixed(2)}, availableSymbol=${availableSymbolExposure.toFixed(2)}, maxTradeNotional=${maxNotionalPerTrade.toFixed(2)})`,
           indicators,
           decision.side,
           profile.id,
@@ -306,6 +413,30 @@ export class SignalEngine {
       }
 
       const newNotional = quantity * entry;
+      if (currentDirectionalExposure + newNotional > maxDirectionalExposure) {
+        return this.rejectedOrder(
+          symbol,
+          latest.conid,
+          `Risk overlay rejected: directional exposure too high (current=${currentDirectionalExposure.toFixed(2)}, new=${newNotional.toFixed(2)}, limit=${maxDirectionalExposure.toFixed(2)})`,
+          indicators,
+          decision.side,
+          profile.id,
+          generatedFromCandleTs
+        );
+      }
+
+      if (currentSymbolExposure + newNotional > maxSymbolExposure) {
+        return this.rejectedOrder(
+          symbol,
+          latest.conid,
+          `Risk overlay rejected: symbol concentration too high (current=${currentSymbolExposure.toFixed(2)}, new=${newNotional.toFixed(2)}, limit=${maxSymbolExposure.toFixed(2)})`,
+          indicators,
+          decision.side,
+          profile.id,
+          generatedFromCandleTs
+        );
+      }
+
       if (exposure + newNotional > maxExposure) {
         return this.rejectedOrder(
           symbol,
@@ -322,13 +453,21 @@ export class SignalEngine {
     const protectWithBracket = signalMode === 'OPEN_OR_ADD';
     const spreadScore = clamp(1 - safeDiv(spreadBps, spreadLimitBps, 0), 0, 1);
     const confidence = clamp(decision.score * (0.85 + 0.15 * spreadScore), 0, 1);
-    const minConfidence = clamp(this.options.minConfidence * profile.minConfidenceMultiplier, 0, 0.95);
+    const baseMinConfidence = clamp(this.options.minConfidence * profile.minConfidenceMultiplier, 0, 0.95);
+    const profilePerformance = decision.side === 'BUY' || decision.side === 'SELL'
+      ? await this.repo.getSignalPerformance({ strategy: profile.id, side: decision.side, limit: 40 })
+      : { trades: 0, wins: 0, losses: 0, winRate: 0 };
+    const symbolPerformance = decision.side === 'BUY' || decision.side === 'SELL'
+      ? await this.repo.getSignalPerformance({ instrument: symbol, strategy: profile.id, side: decision.side, limit: 30 })
+      : { trades: 0, wins: 0, losses: 0, winRate: 0 };
+    const confidenceFloor = this.buildConfidenceFloor(baseMinConfidence, profilePerformance, symbolPerformance);
+    const minConfidence = confidenceFloor.value;
 
     if (confidence < minConfidence) {
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        `Confidence too low (${confidence.toFixed(2)} < ${minConfidence.toFixed(2)}) for ${profile.id}`,
+        `Confidence too low (${confidence.toFixed(2)} < ${minConfidence.toFixed(2)}) for ${profile.id}${confidenceFloor.reason ? `; ${confidenceFloor.reason}` : ''}`,
         indicators,
         decision.side,
         profile.id,
@@ -361,6 +500,113 @@ export class SignalEngine {
     const overridden = this.options.assetClassBySymbol[symbol.toUpperCase()];
     if (overridden) return overridden;
     return inferAssetClass(symbol);
+  }
+
+  private evaluateEntryQuality(
+    symbol: string,
+    assetClass: AssetClass,
+    profile: StrategyProfile,
+    decision: DecisionScore,
+    price: number,
+    indicators: IndicatorSnapshot
+  ): string | null {
+    if (decision.side !== 'BUY' && decision.side !== 'SELL') return null;
+
+    if (profile.style === 'trend') {
+      if (decision.side === 'BUY' && (indicators.rsi14 ?? 50) > 68) {
+        return `Entry quality rejected: trend BUY is overextended (RSI14=${indicators.rsi14?.toFixed(2)})`;
+      }
+
+      if (decision.side === 'SELL' && (indicators.rsi14 ?? 50) < 36) {
+        return `Entry quality rejected: trend SELL is overextended (RSI14=${indicators.rsi14?.toFixed(2)})`;
+      }
+
+      if (assetClass === 'stock' && decision.side === 'BUY') {
+        const has1hTrend = indicators.trendFilterSource === 'EMA50_1h';
+        const aligned1h = price > (indicators.trendFilterValue ?? price);
+        if (!has1hTrend || !aligned1h) {
+          return `Entry quality rejected: stock trend BUY lacks 1h trend alignment (${symbol})`;
+        }
+      }
+
+      if (assetClass === 'stock' && decision.side === 'SELL') {
+        const macdFalling = indicators.macdHistPrev !== undefined && indicators.macdHist !== undefined
+          ? indicators.macdHist < indicators.macdHistPrev
+          : true;
+        if (!(price < indicators.ema20! && indicators.ema20! < indicators.ema50! && macdFalling)) {
+          return `Entry quality rejected: stock trend SELL lacks breakdown confirmation (${symbol})`;
+        }
+      }
+    }
+
+    if (profile.style === 'range') {
+      const lowerZoneTop = indicators.bbLower! + (indicators.bbMiddle! - indicators.bbLower!) * 0.38;
+      const upperZoneBottom = indicators.bbUpper! - (indicators.bbUpper! - indicators.bbMiddle!) * 0.38;
+      const rsiPrev = indicators.rsi14Prev;
+      const rsiNow = indicators.rsi14!;
+      const macdImproving = indicators.macdHistPrev !== undefined && indicators.macdHist !== undefined
+        ? indicators.macdHist > indicators.macdHistPrev
+        : false;
+      const macdWeakening = indicators.macdHistPrev !== undefined && indicators.macdHist !== undefined
+        ? indicators.macdHist < indicators.macdHistPrev
+        : false;
+
+      if (decision.side === 'BUY') {
+        const rsiReversal = rsiPrev !== undefined
+          ? (rsiPrev <= 42 && rsiNow > rsiPrev) || rsiNow <= 36
+          : rsiNow <= 40;
+        if (!(price <= lowerZoneTop && rsiReversal && macdImproving)) {
+          return `Entry quality rejected: range BUY lacks lower-band reversal (price=${price.toFixed(4)}, RSI14=${rsiNow.toFixed(2)})`;
+        }
+      }
+
+      if (decision.side === 'SELL') {
+        const rsiReversal = rsiPrev !== undefined
+          ? (rsiPrev >= 58 && rsiNow < rsiPrev) || rsiNow >= 64
+          : rsiNow >= 60;
+        if (!(price >= upperZoneBottom && rsiReversal && macdWeakening)) {
+          return `Entry quality rejected: range SELL lacks upper-band reversal (price=${price.toFixed(4)}, RSI14=${rsiNow.toFixed(2)})`;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private buildConfidenceFloor(
+    baseMinConfidence: number,
+    profilePerformance: SignalPerformanceStats,
+    symbolPerformance: SignalPerformanceStats
+  ): ConfidenceFloor {
+    let adjustment = 0;
+    const reasons: string[] = [];
+
+    if (
+      profilePerformance.trades >= 8 &&
+      (profilePerformance.expectancyPct ?? 0) < 0 &&
+      (profilePerformance.medianPnlPct ?? 0) < 0
+    ) {
+      adjustment += 0.08;
+      reasons.push(
+        `profile expectancy weak (n=${profilePerformance.trades}, median=${profilePerformance.medianPnlPct?.toFixed(3)}%, expectancy=${profilePerformance.expectancyPct?.toFixed(3)}%)`
+      );
+    }
+
+    if (
+      symbolPerformance.trades >= 4 &&
+      (symbolPerformance.expectancyPct ?? 0) < 0 &&
+      (symbolPerformance.medianPnlPct ?? 0) < 0
+    ) {
+      adjustment += 0.05;
+      reasons.push(
+        `symbol/profile expectancy weak (n=${symbolPerformance.trades}, median=${symbolPerformance.medianPnlPct?.toFixed(3)}%, expectancy=${symbolPerformance.expectancyPct?.toFixed(3)}%)`
+      );
+    }
+
+    return {
+      value: clamp(baseMinConfidence + adjustment, 0, 0.95),
+      reason: reasons.join('; ') || undefined
+    };
   }
 
   private selectEntryPrice(
@@ -580,17 +826,26 @@ export class SignalEngine {
     const emaBearAligned = indicators.ema20! < indicators.ema50! && indicators.ema50! <= indicators.ema200!;
 
     if (profile.style !== 'range') {
-      if (price < trendFilter) buyScore *= 0.82;
-      if (price > trendFilter) sellScore *= 0.82;
-      if (!emaBullAligned) buyScore *= 0.88;
-      if (!emaBearAligned) sellScore *= 0.88;
+      if (price < trendFilter) buyScore *= 0.76;
+      if (price > trendFilter) sellScore *= 0.84;
+      if (!emaBullAligned) buyScore *= 0.78;
+      if (!emaBearAligned) sellScore *= 0.9;
     } else {
       const trendStretchBps = Math.abs(safeDiv(price - trendFilter, price, 0) * 10000);
       const localTrendBps = Math.abs(safeDiv(indicators.ema20! - indicators.ema50!, price, 0) * 10000);
       if (trendStretchBps >= 28 || localTrendBps >= 20) {
-        buyScore *= 0.88;
-        sellScore *= 0.88;
+        buyScore *= 0.8;
+        sellScore *= 0.84;
       }
+    }
+
+    if (profile.assetClass === 'stock') {
+      if ((indicators.macdHist ?? 0) <= 0) buyScore *= 0.82;
+      if ((indicators.macdHist ?? 0) >= 0) sellScore *= 0.94;
+      if ((indicators.rsi14 ?? 50) > 66) buyScore *= 0.88;
+      if ((indicators.rsi14 ?? 50) < 34) sellScore *= 0.9;
+      if (price < indicators.ema20!) buyScore *= 0.85;
+      if (price > indicators.ema20!) sellScore *= 0.94;
     }
 
     if (profile.regime === 'high_volatility') {
@@ -605,6 +860,160 @@ export class SignalEngine {
       buyScore: clamp(buyScore, 0, 1),
       sellScore: clamp(sellScore, 0, 1)
     };
+  }
+
+  private async evaluateManagedExit(context: ManagedExitContext): Promise<ProposedOrder | null> {
+    const {
+      symbol,
+      conid,
+      latestClose,
+      latestCandleTs,
+      latestFilled,
+      existingPositionQty,
+      positionAverageCost,
+      positionMarketPrice,
+      indicators,
+      profile,
+      marketState,
+      generatedFromCandleTs
+    } = context;
+
+    const isLong = existingPositionQty > 0;
+    const exitSide: Side = isLong ? 'SELL' : 'BUY';
+    const referenceEntry = positionAverageCost ?? latestFilled?.entry;
+    const livePrice = positionMarketPrice ?? latestClose;
+    const pnlPct = Number.isFinite(referenceEntry) && referenceEntry && referenceEntry > 0
+      ? isLong
+        ? ((livePrice - referenceEntry) / referenceEntry) * 100
+        : ((referenceEntry - livePrice) / referenceEntry) * 100
+      : undefined;
+    const initialRiskPct = latestFilled?.entry && latestFilled.stop
+      ? Math.abs((latestFilled.entry - latestFilled.stop) / latestFilled.entry) * 100
+      : undefined;
+    const rMultiple = pnlPct !== undefined && initialRiskPct !== undefined && initialRiskPct > 0
+      ? pnlPct / initialRiskPct
+      : undefined;
+
+    const heldMinutes = latestFilled
+      ? Math.max(0, Math.floor((latestCandleTs.getTime() - latestFilled.executedAt.getTime()) / 60000))
+      : 0;
+    const maxHoldMinutes = profile.style === 'range'
+      ? 30
+      : profile.style === 'trend'
+        ? 120
+        : 90;
+
+    const longMomentumBroken =
+      latestClose < (indicators.trendFilterValue ?? latestClose) &&
+      indicators.ema20! < indicators.ema50! &&
+      (indicators.macdHist ?? 0) < 0 &&
+      (indicators.rsi14 ?? 50) < 48;
+    const shortMomentumBroken =
+      latestClose > (indicators.trendFilterValue ?? latestClose) &&
+      indicators.ema20! > indicators.ema50! &&
+      (indicators.macdHist ?? 0) > 0 &&
+      (indicators.rsi14 ?? 50) > 52;
+
+    if (heldMinutes >= maxHoldMinutes && (pnlPct === undefined || pnlPct < 0.2)) {
+      return this.buildManagedExitOrder(
+        symbol,
+        conid,
+        existingPositionQty,
+        exitSide,
+        marketState,
+        indicators,
+        profile.id,
+        `Managed exit: time stop after ${heldMinutes}m with pnl=${pnlPct?.toFixed(2) ?? 'n/a'}%`,
+        generatedFromCandleTs
+      );
+    }
+
+    const profitProtectTriggered =
+      pnlPct !== undefined &&
+      pnlPct > 0 &&
+      (rMultiple === undefined || rMultiple >= 0.5) &&
+      (
+        (isLong && latestClose < indicators.ema20! && (indicators.macdHist ?? 0) < (indicators.macdHistPrev ?? indicators.macdHist ?? 0)) ||
+        (!isLong && latestClose > indicators.ema20! && (indicators.macdHist ?? 0) > (indicators.macdHistPrev ?? indicators.macdHist ?? 0))
+      );
+
+    if (profitProtectTriggered) {
+      return this.buildManagedExitOrder(
+        symbol,
+        conid,
+        existingPositionQty,
+        exitSide,
+        marketState,
+        indicators,
+        profile.id,
+        `Managed exit: profit protection after ${heldMinutes}m with pnl=${pnlPct.toFixed(2)}%${rMultiple !== undefined ? ` (${rMultiple.toFixed(2)}R)` : ''}`,
+        generatedFromCandleTs
+      );
+    }
+
+    if ((isLong && longMomentumBroken) || (!isLong && shortMomentumBroken)) {
+      return this.buildManagedExitOrder(
+        symbol,
+        conid,
+        existingPositionQty,
+        exitSide,
+        marketState,
+        indicators,
+        profile.id,
+        `Managed exit: momentum breakdown with pnl=${pnlPct?.toFixed(2) ?? 'n/a'}%`,
+        generatedFromCandleTs
+      );
+    }
+
+    return null;
+  }
+
+  private buildManagedExitOrder(
+    symbol: string,
+    conid: string,
+    existingPositionQty: number,
+    side: Side,
+    marketState: { bid?: number; ask?: number; lastPrice: number },
+    indicators: IndicatorSnapshot,
+    strategy: string,
+    reason: string,
+    generatedFromCandleTs?: Date
+  ): ProposedOrder | null {
+    const quantityStep = this.quantityStepForSymbol(symbol);
+    const quantity = this.roundDownToQuantityStep(Math.abs(existingPositionQty), quantityStep);
+    if (quantity < quantityStep) return null;
+
+    const entrySelection = this.selectEntryPrice(side === 'BUY' ? 'BUY' : 'SELL', marketState.lastPrice, marketState);
+    return {
+      instrument: symbol,
+      conid,
+      side,
+      positionEffect: 'CLOSE_OR_REDUCE',
+      orderType: 'LMT',
+      quantity,
+      entry: entrySelection.entry,
+      reason,
+      confidence: 0.72,
+      timestamp: new Date().toISOString(),
+      riskCheckStatus: 'PASS',
+      status: 'PROPOSED',
+      strategy,
+      indicators,
+      generatedFromCandleTs
+    };
+  }
+
+  private quantityStepForSymbol(symbol: string): number {
+    return this.options.fractionalSymbols.has(symbol.toUpperCase())
+      ? this.options.fractionalQuantityStep
+      : 1;
+  }
+
+  private roundDownToQuantityStep(value: number, step: number): number {
+    if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(step) || step <= 0) return 0;
+    const decimals = stepDecimals(step);
+    const scaled = Math.floor(value / step + 1e-9) * step;
+    return Number(scaled.toFixed(decimals));
   }
 
   private rejectedOrder(

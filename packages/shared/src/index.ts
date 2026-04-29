@@ -58,6 +58,7 @@ export interface IndicatorSnapshot {
   ema50?: number;
   ema200?: number;
   rsi14?: number;
+  rsi14Prev?: number;
   atr14?: number;
   macdLine?: number;
   macdSignal?: number;
