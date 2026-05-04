@@ -80,6 +80,8 @@ interface OpenOrderContext {
   symbol: string;
   side: SignalTicket['side'];
   positionEffect?: SignalTicket['positionEffect'];
+  role: 'parent' | 'take_profit' | 'stop_loss';
+  parentOrderId?: number;
 }
 
 export interface BrokerExecutionFill {
@@ -184,6 +186,13 @@ export class TwsExecutionClient {
   private nextOrderId = 1;
   private connectPromise?: Promise<void>;
   private readonly openOrderContext = new Map<number, OpenOrderContext>();
+  private readonly orderStatusById = new Map<number, string>();
+  private readonly bracketPlansByParent = new Map<number, {
+    symbol: string;
+    takeProfitOrderId: number;
+    stopLossOrderId: number;
+  }>();
+  private readonly bracketVerificationTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly locateAutoCancelAttempted = new Set<number>();
   private readonly submittedAutoCancelTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly brokerOrderWarnings = new Map<number, string[]>();
@@ -339,7 +348,7 @@ export class TwsExecutionClient {
   ): Promise<PlaceOrderResult> {
     const plan = this.buildOrderPlan(ticket, accountId, tif);
     const { parentOrderId } = plan;
-    this.trackParentOrderContext(parentOrderId, ticket);
+    this.trackOrderPlanContext(plan, ticket);
 
     if (plan.bracket) {
       this.onLog(
@@ -1297,6 +1306,7 @@ export class TwsExecutionClient {
       this.onLog('execution socket disconnected');
       this.connected = false;
       this.clearAllSubmittedAutoCancelTimers();
+      this.clearAllBracketVerificationTimers();
     });
 
     this.ib.on('error', (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
@@ -1366,6 +1376,7 @@ export class TwsExecutionClient {
         remaining: number
       ) => {
         const normalized = String(status || '').toUpperCase();
+        this.orderStatusById.set(orderId, normalized);
         this.onLog(`execution orderStatus orderId=${orderId} status=${normalized} filled=${filled} remaining=${remaining}`);
         this.onBrokerOrderStatus?.({
           brokerOrderId: String(orderId),
@@ -1373,12 +1384,21 @@ export class TwsExecutionClient {
           message: `Broker order status update: ${normalized} (filled=${filled}, remaining=${remaining})`
         });
 
-        if (normalized === 'SUBMITTED' || normalized === 'PRESUBMITTED' || normalized === 'PENDINGSUBMIT') {
+        const context = this.openOrderContext.get(orderId);
+
+        if (
+          context?.role === 'parent' &&
+          (normalized === 'SUBMITTED' || normalized === 'PRESUBMITTED' || normalized === 'PENDINGSUBMIT')
+        ) {
           this.scheduleSubmittedAutoCancel(orderId);
         }
 
         if (normalized === 'PENDINGCANCEL') {
           this.clearSubmittedAutoCancelTimer(orderId);
+        }
+
+        if (context?.role === 'parent' && normalized === 'FILLED') {
+          this.scheduleBracketVerification(orderId);
         }
 
         if (normalized === 'FILLED' || normalized === 'CANCELLED' || normalized === 'APICANCELLED' || normalized === 'INACTIVE') {
@@ -1439,11 +1459,36 @@ export class TwsExecutionClient {
     return `${year}${month}${day}-${hour}:${minute}:${second}`;
   }
 
-  private trackParentOrderContext(orderId: number, ticket: SignalTicket): void {
-    this.openOrderContext.set(orderId, {
+  private trackOrderPlanContext(plan: PlaceOrderPlan, ticket: SignalTicket): void {
+    this.openOrderContext.set(plan.parentOrderId, {
       symbol: ticket.instrument,
       side: ticket.side,
-      positionEffect: ticket.positionEffect
+      positionEffect: ticket.positionEffect,
+      role: 'parent'
+    });
+
+    if (!plan.bracket) return;
+
+    this.openOrderContext.set(plan.bracket.takeProfitOrderId, {
+      symbol: ticket.instrument,
+      side: ticket.side,
+      positionEffect: ticket.positionEffect,
+      role: 'take_profit',
+      parentOrderId: plan.parentOrderId
+    });
+
+    this.openOrderContext.set(plan.bracket.stopLossOrderId, {
+      symbol: ticket.instrument,
+      side: ticket.side,
+      positionEffect: ticket.positionEffect,
+      role: 'stop_loss',
+      parentOrderId: plan.parentOrderId
+    });
+
+    this.bracketPlansByParent.set(plan.parentOrderId, {
+      symbol: ticket.instrument,
+      takeProfitOrderId: plan.bracket.takeProfitOrderId,
+      stopLossOrderId: plan.bracket.stopLossOrderId
     });
   }
 
@@ -1455,6 +1500,9 @@ export class TwsExecutionClient {
   }
 
   private scheduleSubmittedAutoCancel(orderId: number): void {
+    const context = this.openOrderContext.get(orderId);
+    if (context?.role !== 'parent') return;
+
     const timeoutMs = Number(this.config.submittedAutoCancelMs ?? 0);
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
     if (this.submittedAutoCancelTimers.has(orderId)) return;
@@ -1508,6 +1556,52 @@ export class TwsExecutionClient {
       clearTimeout(timer);
     }
     this.submittedAutoCancelTimers.clear();
+  }
+
+  private scheduleBracketVerification(parentOrderId: number): void {
+    const bracket = this.bracketPlansByParent.get(parentOrderId);
+    if (!bracket) return;
+    if (this.bracketVerificationTimers.has(parentOrderId)) return;
+
+    const timer = setTimeout(() => {
+      this.bracketVerificationTimers.delete(parentOrderId);
+
+      const takeProfitStatus = this.orderStatusById.get(bracket.takeProfitOrderId);
+      const stopLossStatus = this.orderStatusById.get(bracket.stopLossOrderId);
+      const takeProfitOk = this.isProtectiveOrderActiveOrDone(takeProfitStatus);
+      const stopLossOk = this.isProtectiveOrderActiveOrDone(stopLossStatus);
+
+      if (takeProfitOk && stopLossOk) {
+        this.onLog(
+          `execution bracket verified parent=${parentOrderId} symbol=${bracket.symbol} tp=${bracket.takeProfitOrderId}:${takeProfitStatus} sl=${bracket.stopLossOrderId}:${stopLossStatus}`
+        );
+        return;
+      }
+
+      const message = `Bracket verification warning: protective child order not active for parent=${parentOrderId}, symbol=${bracket.symbol}, tp=${bracket.takeProfitOrderId}:${takeProfitStatus ?? 'missing'}, sl=${bracket.stopLossOrderId}:${stopLossStatus ?? 'missing'}`;
+      this.onLog(`execution ${message}`);
+      this.onBrokerOrderStatus?.({
+        brokerOrderId: String(parentOrderId),
+        status: 'FILLED',
+        message
+      });
+    }, 5_000);
+
+    this.bracketVerificationTimers.set(parentOrderId, timer);
+  }
+
+  private isProtectiveOrderActiveOrDone(status: string | undefined): boolean {
+    return status === 'SUBMITTED' ||
+      status === 'PRESUBMITTED' ||
+      status === 'PENDINGSUBMIT' ||
+      status === 'FILLED';
+  }
+
+  private clearAllBracketVerificationTimers(): void {
+    for (const timer of this.bracketVerificationTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.bracketVerificationTimers.clear();
   }
 
   private buildCancelMessage(orderId: number, baseMessage: string): string {

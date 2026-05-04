@@ -33,6 +33,8 @@ const schema = z.object({
   SIGNAL_MIN_STOP_BPS_STOCK: z.coerce.number().min(0).default(12),
   SIGNAL_MIN_STOP_BPS_INDEX: z.coerce.number().min(0).default(10),
   SIGNAL_MIN_STOP_BPS_COMMODITY: z.coerce.number().min(0).default(14),
+  SIGNAL_STRATEGY_COOLDOWN_MS: z.coerce.number().int().min(0).default(12 * 60 * 60 * 1000),
+  SIGNAL_SYMBOL_ADD_LOSS_LIMIT: z.coerce.number().min(0).default(1000),
   SIGNAL_ASSET_CLASS_OVERRIDES: z.string().default('')
 });
 

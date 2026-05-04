@@ -1,7 +1,7 @@
 import { AssetClass, IndicatorSnapshot, MarketRegime, ProposedOrder, RiskLimits, Side } from '@ikbr/shared';
 import { lastAtr, lastBollinger, lastDonchian, lastEma, lastMacd, lastObvSlope, lastRsi } from './indicators.js';
 import { ExposureSnapshot, LatestFilledOrderContext, SignalPerformanceStats, SignalRepository } from './repository.js';
-import { inferAssetClass, pickStrategyProfile, StrategyProfile } from './strategy-profiles.js';
+import { inferAssetClass, listStrategyProfiles, pickStrategyProfiles, StrategyProfile } from './strategy-profiles.js';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -38,6 +38,8 @@ interface SignalEngineOptions {
   maxMarketStateAgeMs: number;
   assetClassBySymbol: Record<string, AssetClass>;
   executionBaseUrl: string;
+  strategyCooldownMs: number;
+  symbolAddLossLimit: number;
   riskLimits: RiskLimits;
 }
 
@@ -76,6 +78,7 @@ interface ManagedExitContext {
 const STOCK_RANGE_OPEN_DISABLED = true;
 const MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT = 0.35;
 const MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT = 0.8;
+const STRATEGY_IDS = listStrategyProfiles().map((profile) => profile.id);
 
 export class SignalEngine {
   constructor(
@@ -150,7 +153,19 @@ export class SignalEngine {
     }
 
     const regime = this.detectRegime(assetClass, latest.close, indicators);
-    const profile = pickStrategyProfile(assetClass, regime);
+    await this.repo.syncStrategyRuntimeStates(STRATEGY_IDS, this.options.strategyCooldownMs);
+    const profile = await this.pickActiveProfile(assetClass, regime);
+    if (!profile) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `Strategy gate rejected: no active profile for assetClass=${assetClass}, regime=${regime}`,
+        indicators,
+        'HOLD',
+        'strategy_gate',
+        generatedFromCandleTs
+      );
+    }
 
     indicators.regime = regime;
     indicators.strategyProfile = profile.id;
@@ -253,6 +268,24 @@ export class SignalEngine {
     const closesOrReducesPosition =
       (decision.side === 'BUY' && existingPositionQty < -1e-12) ||
       (decision.side === 'SELL' && existingPositionQty > 1e-12);
+    const increasesExistingExposure =
+      (decision.side === 'BUY' && existingPositionQty > 1e-12) ||
+      (decision.side === 'SELL' && existingPositionQty < -1e-12);
+
+    if (increasesExistingExposure && this.options.symbolAddLossLimit > 0) {
+      const dayPnl = await this.repo.getSymbolNetPnlSince(symbol, this.currentUtcDayStart());
+      if (dayPnl <= -this.options.symbolAddLossLimit) {
+        return this.rejectedOrder(
+          symbol,
+          latest.conid,
+          `Symbol add blocked: same-direction exposure increase after daily realized PnL ${dayPnl.toFixed(2)} <= -${this.options.symbolAddLossLimit.toFixed(2)}`,
+          indicators,
+          decision.side,
+          profile.id,
+          generatedFromCandleTs
+        );
+      }
+    }
 
     if (!closesOrReducesPosition) {
       const qualityRejection = this.evaluateEntryQuality(symbol, assetClass, profile, decision, latest.close, indicators);
@@ -500,6 +533,25 @@ export class SignalEngine {
     const overridden = this.options.assetClassBySymbol[symbol.toUpperCase()];
     if (overridden) return overridden;
     return inferAssetClass(symbol);
+  }
+
+  private currentUtcDayStart(): Date {
+    const now = new Date();
+    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  }
+
+  private async pickActiveProfile(assetClass: AssetClass, regime: MarketRegime): Promise<StrategyProfile | null> {
+    const candidates = pickStrategyProfiles(assetClass, regime);
+    const now = Date.now();
+
+    for (const profile of candidates) {
+      const state = await this.repo.getStrategyRuntimeState(profile.id);
+      if (!state.enabled || state.permanentlyDisabled) continue;
+      if (state.cooldownUntil && state.cooldownUntil.getTime() > now) continue;
+      return profile;
+    }
+
+    return null;
   }
 
   private evaluateEntryQuality(

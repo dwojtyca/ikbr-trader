@@ -5,6 +5,7 @@ import { ProposedOrder } from '@ikbr/shared';
 import { config } from './config.js';
 import { SignalRepository } from './repository.js';
 import { SignalEngine } from './signal-engine.js';
+import { listStrategyProfiles } from './strategy-profiles.js';
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -30,6 +31,8 @@ const engine = new SignalEngine(repo, {
   maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
   assetClassBySymbol: config.assetClassOverrides,
   executionBaseUrl: config.EXECUTION_BASE_URL,
+  strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
+  symbolAddLossLimit: config.SIGNAL_SYMBOL_ADD_LOSS_LIMIT,
   riskLimits: {
     accountEquity: config.ACCOUNT_EQUITY,
     maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,
@@ -196,6 +199,23 @@ app.get('/signals/report', async (request) => {
   const limit = Number(query.limit ?? 300);
   await repo.refreshSignalOutcomes(500);
   return repo.getSignalReport(Number.isFinite(limit) ? Math.min(Math.max(limit, 20), 2000) : 300);
+});
+
+app.get('/signals/strategies', async () => {
+  const profiles = listStrategyProfiles();
+  await repo.syncStrategyRuntimeStates(
+    profiles.map((profile) => profile.id),
+    config.SIGNAL_STRATEGY_COOLDOWN_MS
+  );
+
+  const strategies = await Promise.all(
+    profiles.map(async (profile) => ({
+      ...profile,
+      runtime: await repo.getStrategyRuntimeState(profile.id)
+    }))
+  );
+
+  return { strategies };
 });
 
 async function main(): Promise<void> {

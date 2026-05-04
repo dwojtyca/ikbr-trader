@@ -72,6 +72,16 @@ export interface SignalPerformanceStats {
   expectancyPct?: number;
 }
 
+export interface StrategyRuntimeState {
+  strategyId: string;
+  enabled: boolean;
+  permanentlyDisabled: boolean;
+  cooldownUntil?: Date;
+  consecutiveLossCount: number;
+  cooldownCount: number;
+  reason?: string;
+}
+
 export interface SignalReportOverview {
   trades: number;
   wins: number;
@@ -285,6 +295,21 @@ export class SignalRepository {
       CREATE INDEX IF NOT EXISTS signal_outcomes_order_idx
       ON signal_outcomes (proposed_order_id, evaluated_at DESC);
     `);
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS strategy_runtime_state (
+        strategy_id TEXT PRIMARY KEY,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        permanently_disabled BOOLEAN NOT NULL DEFAULT FALSE,
+        cooldown_until TIMESTAMPTZ,
+        consecutive_loss_count INTEGER NOT NULL DEFAULT 0,
+        cooldown_count INTEGER NOT NULL DEFAULT 0,
+        last_evaluated_fill_at TIMESTAMPTZ,
+        last_state_change_at TIMESTAMPTZ,
+        reason TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
   }
 
   async getRecentCandles(symbol: string, timeframe: Candle['timeframe'], limit: number): Promise<Candle[]> {
@@ -401,6 +426,207 @@ export class SignalRepository {
       createdAt,
       strategy: row.strategy ?? undefined
     };
+  }
+
+  async syncStrategyRuntimeStates(strategyIds: string[], cooldownMs: number): Promise<void> {
+    if (strategyIds.length === 0) return;
+
+    const existingResult = await this.pool.query(
+      `
+      SELECT strategy_id, enabled, permanently_disabled, cooldown_until, consecutive_loss_count,
+        cooldown_count, last_evaluated_fill_at, reason
+      FROM strategy_runtime_state
+      WHERE strategy_id = ANY($1)
+      `,
+      [strategyIds]
+    );
+
+    const states = new Map<string, {
+      strategyId: string;
+      enabled: boolean;
+      permanentlyDisabled: boolean;
+      cooldownUntil: Date | null;
+      consecutiveLossCount: number;
+      cooldownCount: number;
+      lastEvaluatedFillAt: Date | null;
+      reason: string | null;
+      changed: boolean;
+    }>();
+
+    for (const strategyId of strategyIds) {
+      states.set(strategyId, {
+        strategyId,
+        enabled: true,
+        permanentlyDisabled: false,
+        cooldownUntil: null,
+        consecutiveLossCount: 0,
+        cooldownCount: 0,
+        lastEvaluatedFillAt: null,
+        reason: null,
+        changed: false
+      });
+    }
+
+    for (const row of existingResult.rows) {
+      const state = states.get(String(row.strategy_id));
+      if (!state) continue;
+      state.enabled = row.enabled !== false;
+      state.permanentlyDisabled = row.permanently_disabled === true;
+      state.cooldownUntil = row.cooldown_until ? new Date(row.cooldown_until) : null;
+      state.consecutiveLossCount = Number(row.consecutive_loss_count ?? 0);
+      state.cooldownCount = Number(row.cooldown_count ?? 0);
+      state.lastEvaluatedFillAt = row.last_evaluated_fill_at ? new Date(row.last_evaluated_fill_at) : null;
+      state.reason = row.reason ?? null;
+    }
+
+    const outcomesResult = await this.pool.query(
+      `
+      WITH broker_orders AS (
+        SELECT
+          bef.proposed_order_id,
+          SUM(COALESCE(bef.realized_pnl, 0) - COALESCE(bef.commission, 0)) AS pnl,
+          MAX(bef.executed_at) AS executed_at
+        FROM broker_execution_fills bef
+        WHERE bef.proposed_order_id IS NOT NULL
+        GROUP BY bef.proposed_order_id
+      )
+      SELECT po.strategy, broker_orders.proposed_order_id, broker_orders.pnl, broker_orders.executed_at
+      FROM broker_orders
+      JOIN proposed_orders po ON po.id = broker_orders.proposed_order_id
+      WHERE po.strategy = ANY($1)
+        AND po.strategy <> 'manual_ticket'
+        AND broker_orders.executed_at IS NOT NULL
+      ORDER BY broker_orders.executed_at ASC, broker_orders.proposed_order_id ASC
+      `,
+      [strategyIds]
+    );
+
+    const cooldownDuration = Math.max(0, cooldownMs);
+    for (const row of outcomesResult.rows) {
+      const strategyId = String(row.strategy);
+      const state = states.get(strategyId);
+      if (!state) continue;
+
+      const executedAt = row.executed_at instanceof Date ? row.executed_at : new Date(row.executed_at);
+      if (Number.isNaN(executedAt.getTime())) continue;
+      if (state.lastEvaluatedFillAt && executedAt <= state.lastEvaluatedFillAt) continue;
+      if (state.permanentlyDisabled) {
+        state.lastEvaluatedFillAt = executedAt;
+        state.changed = true;
+        continue;
+      }
+
+      const pnl = Number(row.pnl ?? 0);
+      if (pnl < 0) {
+        state.consecutiveLossCount += 1;
+      } else if (pnl > 0) {
+        state.consecutiveLossCount = 0;
+      }
+
+      if (state.consecutiveLossCount >= 3) {
+        if (state.cooldownCount >= 1) {
+          state.enabled = false;
+          state.permanentlyDisabled = true;
+          state.cooldownUntil = null;
+          state.reason = `Strategy OFF after second 3-loss streak; last pnl=${pnl.toFixed(2)}`;
+        } else {
+          state.cooldownCount += 1;
+          state.cooldownUntil = new Date(Date.now() + cooldownDuration);
+          state.reason = `Strategy cooldown after 3 consecutive losses; last pnl=${pnl.toFixed(2)}`;
+        }
+        state.consecutiveLossCount = 0;
+      }
+
+      state.lastEvaluatedFillAt = executedAt;
+      state.changed = true;
+    }
+
+    for (const state of states.values()) {
+      if (!state.changed && existingResult.rows.some((row) => String(row.strategy_id) === state.strategyId)) continue;
+
+      await this.pool.query(
+        `
+        INSERT INTO strategy_runtime_state (
+          strategy_id, enabled, permanently_disabled, cooldown_until, consecutive_loss_count,
+          cooldown_count, last_evaluated_fill_at, last_state_change_at, reason, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, NOW())
+        ON CONFLICT (strategy_id) DO UPDATE SET
+          enabled = EXCLUDED.enabled,
+          permanently_disabled = EXCLUDED.permanently_disabled,
+          cooldown_until = EXCLUDED.cooldown_until,
+          consecutive_loss_count = EXCLUDED.consecutive_loss_count,
+          cooldown_count = EXCLUDED.cooldown_count,
+          last_evaluated_fill_at = EXCLUDED.last_evaluated_fill_at,
+          last_state_change_at = CASE
+            WHEN strategy_runtime_state.enabled IS DISTINCT FROM EXCLUDED.enabled
+              OR strategy_runtime_state.permanently_disabled IS DISTINCT FROM EXCLUDED.permanently_disabled
+              OR strategy_runtime_state.cooldown_until IS DISTINCT FROM EXCLUDED.cooldown_until
+            THEN NOW()
+            ELSE strategy_runtime_state.last_state_change_at
+          END,
+          reason = EXCLUDED.reason,
+          updated_at = NOW()
+        `,
+        [
+          state.strategyId,
+          state.enabled,
+          state.permanentlyDisabled,
+          state.cooldownUntil,
+          state.consecutiveLossCount,
+          state.cooldownCount,
+          state.lastEvaluatedFillAt,
+          state.reason
+        ]
+      );
+    }
+  }
+
+  async getStrategyRuntimeState(strategyId: string): Promise<StrategyRuntimeState> {
+    const result = await this.pool.query(
+      `
+      SELECT strategy_id, enabled, permanently_disabled, cooldown_until, consecutive_loss_count,
+        cooldown_count, reason
+      FROM strategy_runtime_state
+      WHERE strategy_id = $1
+      `,
+      [strategyId]
+    );
+
+    const row = result.rows[0];
+    if (!row) {
+      return {
+        strategyId,
+        enabled: true,
+        permanentlyDisabled: false,
+        consecutiveLossCount: 0,
+        cooldownCount: 0
+      };
+    }
+
+    return {
+      strategyId: String(row.strategy_id),
+      enabled: row.enabled !== false,
+      permanentlyDisabled: row.permanently_disabled === true,
+      cooldownUntil: row.cooldown_until ? new Date(row.cooldown_until) : undefined,
+      consecutiveLossCount: Number(row.consecutive_loss_count ?? 0),
+      cooldownCount: Number(row.cooldown_count ?? 0),
+      reason: row.reason ?? undefined
+    };
+  }
+
+  async getSymbolNetPnlSince(symbol: string, since: Date): Promise<number> {
+    const result = await this.pool.query(
+      `
+      SELECT COALESCE(SUM(COALESCE(realized_pnl, 0) - COALESCE(commission, 0)), 0) AS pnl
+      FROM broker_execution_fills
+      WHERE UPPER(symbol) = UPPER($1)
+        AND executed_at >= $2
+      `,
+      [symbol, since]
+    );
+
+    return Number(result.rows[0]?.pnl ?? 0);
   }
 
   async getSignalPerformance(input: {
