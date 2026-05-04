@@ -78,6 +78,10 @@ export interface SignalReportOverview {
   losses: number;
   open: number;
   winRate: number;
+  totalPnl?: number;
+  grossPnl?: number;
+  commissions?: number;
+  avgPnl?: number;
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
@@ -92,6 +96,10 @@ export interface SignalReportAggregate {
   losses: number;
   open: number;
   winRate: number;
+  totalPnl?: number;
+  grossPnl?: number;
+  commissions?: number;
+  avgPnl?: number;
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
@@ -106,6 +114,9 @@ export interface SignalReportTrade {
   side: Side;
   regime: string;
   confidence: number;
+  pnl?: number;
+  grossPnl?: number;
+  commissions?: number;
   pnlPct?: number;
   notes: string;
   executedAt: string;
@@ -114,6 +125,7 @@ export interface SignalReportTrade {
 export interface SignalReport {
   generatedAt: string;
   limit: number;
+  source: 'broker_fills';
   overview: SignalReportOverview;
   bySymbol: SignalReportAggregate[];
   byStrategy: SignalReportAggregate[];
@@ -795,33 +807,44 @@ export class SignalRepository {
   async getSignalReport(limit = 300): Promise<SignalReport> {
     const boundedLimit = Math.min(Math.max(limit, 20), 2000);
     const baseCte = `
-      WITH latest AS (
-        SELECT DISTINCT ON (so.proposed_order_id)
-          so.proposed_order_id,
-          so.pnl_pct,
-          so.notes,
-          so.hit_stop,
-          so.hit_take_profit,
-          so.evaluated_at
-        FROM signal_outcomes so
-        ORDER BY so.proposed_order_id, so.evaluated_at DESC
+      WITH broker_orders AS (
+        SELECT
+          COALESCE(bef.proposed_order_id, -bef.order_id) AS report_order_id,
+          MAX(bef.proposed_order_id) AS proposed_order_id,
+          MAX(bef.order_id) AS broker_numeric_order_id,
+          MAX(bef.symbol) AS instrument,
+          MAX(bef.side) AS side,
+          SUM(COALESCE(bef.realized_pnl, 0)) AS gross_pnl,
+          SUM(COALESCE(bef.commission, 0)) AS commissions,
+          SUM(COALESCE(bef.realized_pnl, 0) - COALESCE(bef.commission, 0)) AS pnl,
+          SUM(ABS(COALESCE(bef.shares, 0) * COALESCE(bef.price, bef.avg_price, 0))) AS notional,
+          MAX(bef.executed_at) AS executed_at
+        FROM broker_execution_fills bef
+        GROUP BY COALESCE(bef.proposed_order_id, -bef.order_id)
       ),
       base AS (
         SELECT
-          po.id AS order_id,
-          po.instrument,
+          COALESCE(po.id, broker_orders.report_order_id) AS order_id,
+          COALESCE(po.instrument, broker_orders.instrument, 'n/a') AS instrument,
           COALESCE(po.strategy, 'n/a') AS strategy,
-          po.side,
+          COALESCE(po.side, broker_orders.side, 'n/a') AS side,
           COALESCE(po.indicator_snapshot ->> 'regime', 'unknown') AS regime,
           po.confidence,
-          latest.pnl_pct,
-          COALESCE(latest.notes, 'n/a') AS notes,
-          COALESCE(latest.hit_stop, false) AS hit_stop,
-          COALESCE(latest.hit_take_profit, false) AS hit_take_profit,
-          COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) AS executed_at
-        FROM latest
-        JOIN proposed_orders po ON po.id = latest.proposed_order_id
-        ORDER BY COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) DESC
+          broker_orders.pnl,
+          broker_orders.gross_pnl,
+          broker_orders.commissions,
+          CASE
+            WHEN broker_orders.notional > 0 THEN (broker_orders.pnl / broker_orders.notional) * 100
+            ELSE NULL
+          END AS pnl_pct,
+          'broker_fill' AS notes,
+          false AS hit_stop,
+          false AS hit_take_profit,
+          broker_orders.executed_at
+        FROM broker_orders
+        LEFT JOIN proposed_orders po ON po.id = broker_orders.proposed_order_id
+        WHERE broker_orders.executed_at IS NOT NULL
+        ORDER BY broker_orders.executed_at DESC
         LIMIT $1
       )
     `;
@@ -831,9 +854,13 @@ export class SignalRepository {
       ${baseCte}
       SELECT
         COUNT(*)::int AS trades,
-        COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
-        COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
-        COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+        COUNT(*) FILTER (WHERE pnl > 0)::int AS wins,
+        COUNT(*) FILTER (WHERE pnl < 0)::int AS losses,
+        0::int AS open,
+        SUM(pnl) AS total_pnl,
+        SUM(gross_pnl) AS gross_pnl,
+        SUM(commissions) AS commissions,
+        AVG(pnl) AS avg_pnl,
         AVG(pnl_pct) AS avg_pnl_pct,
         percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct,
         AVG(confidence) AS avg_confidence,
@@ -861,12 +888,15 @@ export class SignalRepository {
         side,
         regime,
         confidence,
+        pnl,
+        gross_pnl,
+        commissions,
         pnl_pct,
         notes,
         executed_at
       FROM base
-      WHERE pnl_pct IS NOT NULL
-      ORDER BY pnl_pct ASC, executed_at DESC
+      WHERE pnl IS NOT NULL
+      ORDER BY pnl ASC, executed_at DESC
       LIMIT 12
       `,
       [boundedLimit]
@@ -879,12 +909,25 @@ export class SignalRepository {
     return {
       generatedAt: new Date().toISOString(),
       limit: boundedLimit,
+      source: 'broker_fills',
       overview: {
         trades,
         wins,
         losses: Number(overviewRow.losses ?? 0),
         open: Number(overviewRow.open ?? 0),
         winRate: trades > 0 ? wins / trades : 0,
+        totalPnl: overviewRow.total_pnl === null || overviewRow.total_pnl === undefined
+          ? undefined
+          : Number(overviewRow.total_pnl),
+        grossPnl: overviewRow.gross_pnl === null || overviewRow.gross_pnl === undefined
+          ? undefined
+          : Number(overviewRow.gross_pnl),
+        commissions: overviewRow.commissions === null || overviewRow.commissions === undefined
+          ? undefined
+          : Number(overviewRow.commissions),
+        avgPnl: overviewRow.avg_pnl === null || overviewRow.avg_pnl === undefined
+          ? undefined
+          : Number(overviewRow.avg_pnl),
         avgPnlPct: overviewRow.avg_pnl_pct === null || overviewRow.avg_pnl_pct === undefined
           ? undefined
           : Number(overviewRow.avg_pnl_pct),
@@ -908,6 +951,9 @@ export class SignalRepository {
         side: row.side as Side,
         regime: String(row.regime),
         confidence: Number(row.confidence ?? 0),
+        pnl: row.pnl === null || row.pnl === undefined ? undefined : Number(row.pnl),
+        grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
+        commissions: row.commissions === null || row.commissions === undefined ? undefined : Number(row.commissions),
         pnlPct: row.pnl_pct === null || row.pnl_pct === undefined ? undefined : Number(row.pnl_pct),
         notes: String(row.notes ?? 'n/a'),
         executedAt: new Date(row.executed_at).toISOString()
@@ -981,9 +1027,13 @@ export class SignalRepository {
       SELECT
         ${keySqlByDimension[dimension]} AS key,
         COUNT(*)::int AS trades,
-        COUNT(*) FILTER (WHERE pnl_pct > 0)::int AS wins,
-        COUNT(*) FILTER (WHERE pnl_pct < 0)::int AS losses,
-        COUNT(*) FILTER (WHERE notes = 'mark_to_market')::int AS open,
+        COUNT(*) FILTER (WHERE pnl > 0)::int AS wins,
+        COUNT(*) FILTER (WHERE pnl < 0)::int AS losses,
+        0::int AS open,
+        SUM(pnl) AS total_pnl,
+        SUM(gross_pnl) AS gross_pnl,
+        SUM(commissions) AS commissions,
+        AVG(pnl) AS avg_pnl,
         AVG(pnl_pct) AS avg_pnl_pct,
         percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct,
         AVG(confidence) AS avg_confidence,
@@ -1008,6 +1058,10 @@ export class SignalRepository {
         losses: Number(row.losses ?? 0),
         open: Number(row.open ?? 0),
         winRate: trades > 0 ? wins / trades : 0,
+        totalPnl: row.total_pnl === null || row.total_pnl === undefined ? undefined : Number(row.total_pnl),
+        grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
+        commissions: row.commissions === null || row.commissions === undefined ? undefined : Number(row.commissions),
+        avgPnl: row.avg_pnl === null || row.avg_pnl === undefined ? undefined : Number(row.avg_pnl),
         avgPnlPct: row.avg_pnl_pct === null || row.avg_pnl_pct === undefined ? undefined : Number(row.avg_pnl_pct),
         medianPnlPct: row.median_pnl_pct === null || row.median_pnl_pct === undefined ? undefined : Number(row.median_pnl_pct),
         avgConfidence: row.avg_confidence === null || row.avg_confidence === undefined ? undefined : Number(row.avg_confidence),

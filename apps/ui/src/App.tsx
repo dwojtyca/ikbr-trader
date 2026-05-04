@@ -173,6 +173,10 @@ type ReportOverview = {
   losses: number;
   open: number;
   winRate: number;
+  totalPnl?: number;
+  grossPnl?: number;
+  commissions?: number;
+  avgPnl?: number;
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
@@ -187,6 +191,10 @@ type ReportAggregate = {
   losses: number;
   open: number;
   winRate: number;
+  totalPnl?: number;
+  grossPnl?: number;
+  commissions?: number;
+  avgPnl?: number;
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
@@ -201,6 +209,9 @@ type ReportTrade = {
   side: 'BUY' | 'SELL';
   regime: string;
   confidence: number;
+  pnl?: number;
+  grossPnl?: number;
+  commissions?: number;
   pnlPct?: number;
   notes: string;
   executedAt: string;
@@ -209,6 +220,7 @@ type ReportTrade = {
 type SignalReportResponse = {
   generatedAt: string;
   limit: number;
+  source?: 'broker_fills';
   overview: ReportOverview;
   bySymbol: ReportAggregate[];
   byStrategy: ReportAggregate[];
@@ -339,16 +351,16 @@ export function App() {
 
   const proposedCount = useMemo(() => orders.filter((o) => o.status === 'PROPOSED').length, [orders]);
   const reportWeakestSide = useMemo(() => {
-    const settledRows = (report?.bySide ?? []).filter((row) => row.trades > 0 && row.avgPnlPct !== undefined);
-    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+    const settledRows = (report?.bySide ?? []).filter((row) => row.trades > 0 && row.totalPnl !== undefined);
+    return settledRows.sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
   }, [report?.bySide]);
   const reportWeakestStrategy = useMemo(() => {
-    const settledRows = (report?.byStrategy ?? []).filter((row) => row.trades >= 2 && row.avgPnlPct !== undefined);
-    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+    const settledRows = (report?.byStrategy ?? []).filter((row) => row.trades >= 2 && row.totalPnl !== undefined);
+    return settledRows.sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
   }, [report?.byStrategy]);
   const reportWeakestSymbol = useMemo(() => {
-    const settledRows = (report?.bySymbol ?? []).filter((row) => row.trades >= 2 && row.avgPnlPct !== undefined);
-    return settledRows.sort((a, b) => (a.avgPnlPct ?? 0) - (b.avgPnlPct ?? 0))[0];
+    const settledRows = (report?.bySymbol ?? []).filter((row) => row.trades >= 2 && row.totalPnl !== undefined);
+    return settledRows.sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
   }, [report?.bySymbol]);
   const hasOrderFilters = useMemo(
     () => Object.values(orderFilters).some((value) => value.trim() !== ''),
@@ -719,7 +731,7 @@ export function App() {
         <h1>IKBR Trader Console</h1>
         <p>
           {route === 'report'
-            ? 'Raport skuteczności strategii na bazie zrealizowanych signal outcomes.'
+            ? 'Raport skuteczności strategii na bazie rzeczywistych filli IBKR.'
             : 'Ingestion, signal engine i execution w jednym panelu operatorskim.'}
         </p>
         <div className="nav-row">
@@ -745,7 +757,7 @@ export function App() {
               </button>
             </div>
             <div className="meta-row">
-              <span>{report ? `Recent evaluated trades: ${report.limit}` : 'Report not loaded yet'}</span>
+              <span>{report ? `Recent broker execution groups: ${report.limit}` : 'Report not loaded yet'}</span>
               {reportError ? <span className="error">{reportError}</span> : null}
             </div>
           </section>
@@ -755,17 +767,17 @@ export function App() {
               <section className="panel">
                 <div className="panel-head">
                   <h2>Overview</h2>
-                  <span>{report.overview.trades} evaluated trades</span>
+                  <span>{report.overview.trades} broker execution groups</span>
                 </div>
                 <div className="metrics-grid">
-                  <MetricCard label="Trades" value={formatNum(report.overview.trades, 0)} />
-                  <MetricCard label="Win Rate" value={formatPct(report.overview.winRate)} tone={report.overview.avgPnlPct} />
+                  <MetricCard label="Executions" value={formatNum(report.overview.trades, 0)} />
+                  <MetricCard label="Net PnL" value={formatNum(report.overview.totalPnl)} tone={report.overview.totalPnl} />
+                  <MetricCard label="Commissions" value={formatNum(report.overview.commissions)} tone={report.overview.commissions ? -Math.abs(report.overview.commissions) : undefined} />
+                  <MetricCard label="Avg Net PnL" value={formatNum(report.overview.avgPnl)} tone={report.overview.avgPnl} />
+                  <MetricCard label="Win Rate" value={formatPct(report.overview.winRate)} tone={report.overview.totalPnl} />
                   <MetricCard label="Avg PnL %" value={formatPnlPct(report.overview.avgPnlPct)} tone={report.overview.avgPnlPct} />
                   <MetricCard label="Median PnL %" value={formatPnlPct(report.overview.medianPnlPct)} tone={report.overview.medianPnlPct} />
                   <MetricCard label="Avg Confidence" value={formatPct(report.overview.avgConfidence)} />
-                  <MetricCard label="Take Profit Hits" value={formatNum(report.overview.takeProfitHits, 0)} />
-                  <MetricCard label="Stop Hits" value={formatNum(report.overview.stopHits, 0)} tone={report.overview.stopHits > report.overview.takeProfitHits ? -1 : 1} />
-                  <MetricCard label="Open / MTM" value={formatNum(report.overview.open, 0)} />
                 </div>
               </section>
 
@@ -777,20 +789,20 @@ export function App() {
                 <div className="report-grid">
                   <div className="metric-card">
                     <small>Weakest Side</small>
-                    <strong className={toToneClass(reportWeakestSide?.avgPnlPct)}>
-                      {reportWeakestSide ? `${reportWeakestSide.key} (${formatPnlPct(reportWeakestSide.avgPnlPct)})` : '-'}
+                    <strong className={toToneClass(reportWeakestSide?.totalPnl)}>
+                      {reportWeakestSide ? `${reportWeakestSide.key} (${formatNum(reportWeakestSide.totalPnl)})` : '-'}
                     </strong>
                   </div>
                   <div className="metric-card">
                     <small>Weakest Strategy</small>
-                    <strong className={toToneClass(reportWeakestStrategy?.avgPnlPct)}>
-                      {reportWeakestStrategy ? `${reportWeakestStrategy.key} (${formatPnlPct(reportWeakestStrategy.avgPnlPct)})` : '-'}
+                    <strong className={toToneClass(reportWeakestStrategy?.totalPnl)}>
+                      {reportWeakestStrategy ? `${reportWeakestStrategy.key} (${formatNum(reportWeakestStrategy.totalPnl)})` : '-'}
                     </strong>
                   </div>
                   <div className="metric-card">
                     <small>Weakest Symbol</small>
-                    <strong className={toToneClass(reportWeakestSymbol?.avgPnlPct)}>
-                      {reportWeakestSymbol ? `${reportWeakestSymbol.key} (${formatPnlPct(reportWeakestSymbol.avgPnlPct)})` : '-'}
+                    <strong className={toToneClass(reportWeakestSymbol?.totalPnl)}>
+                      {reportWeakestSymbol ? `${reportWeakestSymbol.key} (${formatNum(reportWeakestSymbol.totalPnl)})` : '-'}
                     </strong>
                   </div>
                 </div>
@@ -843,6 +855,8 @@ export function App() {
                         <th>Side</th>
                         <th>Regime</th>
                         <th>Confidence</th>
+                        <th>Net PnL</th>
+                        <th>Commission</th>
                         <th>PnL %</th>
                         <th>Outcome</th>
                         <th>Executed At</th>
@@ -851,7 +865,7 @@ export function App() {
                     <tbody>
                       {report.worstTrades.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="muted">No evaluated trades yet</td>
+                          <td colSpan={11} className="muted">No broker fills yet</td>
                         </tr>
                       ) : (
                         report.worstTrades.map((trade) => (
@@ -862,6 +876,8 @@ export function App() {
                             <td>{trade.side}</td>
                             <td>{trade.regime}</td>
                             <td>{formatPct(trade.confidence)}</td>
+                            <td className={toToneClass(trade.pnl)}>{formatNum(trade.pnl)}</td>
+                            <td>{formatNum(trade.commissions)}</td>
                             <td className={toToneClass(trade.pnlPct)}>{formatPnlPct(trade.pnlPct)}</td>
                             <td>{trade.notes}</td>
                             <td>{formatTs(trade.executedAt)}</td>
@@ -1351,22 +1367,22 @@ function ReportAggregateTable({ rows }: { rows: ReportAggregate[] }) {
         <thead>
           <tr>
             <th>Key</th>
-            <th>Trades</th>
+            <th>Executions</th>
             <th>Wins</th>
             <th>Losses</th>
-            <th>Open</th>
+            <th>Net PnL</th>
+            <th>Commissions</th>
+            <th>Avg Net PnL</th>
             <th>Win Rate</th>
             <th>Avg PnL %</th>
             <th>Median PnL %</th>
             <th>Avg Confidence</th>
-            <th>TP Hits</th>
-            <th>Stop Hits</th>
           </tr>
         </thead>
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={11} className="muted">No data</td>
+              <td colSpan={10} className="muted">No data</td>
             </tr>
           ) : (
             rows.map((row) => (
@@ -1375,13 +1391,13 @@ function ReportAggregateTable({ rows }: { rows: ReportAggregate[] }) {
                 <td>{formatNum(row.trades, 0)}</td>
                 <td>{formatNum(row.wins, 0)}</td>
                 <td>{formatNum(row.losses, 0)}</td>
-                <td>{formatNum(row.open, 0)}</td>
+                <td className={toToneClass(row.totalPnl)}>{formatNum(row.totalPnl)}</td>
+                <td>{formatNum(row.commissions)}</td>
+                <td className={toToneClass(row.avgPnl)}>{formatNum(row.avgPnl)}</td>
                 <td>{formatPct(row.winRate)}</td>
                 <td className={toToneClass(row.avgPnlPct)}>{formatPnlPct(row.avgPnlPct)}</td>
                 <td className={toToneClass(row.medianPnlPct)}>{formatPnlPct(row.medianPnlPct)}</td>
                 <td>{formatPct(row.avgConfidence)}</td>
-                <td>{formatNum(row.takeProfitHits, 0)}</td>
-                <td>{formatNum(row.stopHits, 0)}</td>
               </tr>
             ))
           )}

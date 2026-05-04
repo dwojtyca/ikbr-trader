@@ -1462,6 +1462,7 @@ export class TwsExecutionClient {
     const timer = setTimeout(() => {
       this.submittedAutoCancelTimers.delete(orderId);
       this.onLog(`execution submitted-timeout auto-cancel orderId=${orderId} after=${timeoutMs}ms`);
+      const cancelMessage = this.buildCancelMessage(orderId, `Auto-cancel submitted-timeout after ${timeoutMs}ms without fill`);
 
       void this.cancelBrokerOrder(String(orderId))
         .then((result) => {
@@ -1470,7 +1471,7 @@ export class TwsExecutionClient {
             this.onBrokerOrderStatus?.({
               brokerOrderId: String(orderId),
               status: 'CANCELLED',
-              message: this.buildCancelMessage(orderId, `Auto-cancel submitted-timeout after ${timeoutMs}ms without fill`)
+              message: cancelMessage
             });
           }
         })

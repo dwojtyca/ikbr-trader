@@ -198,6 +198,8 @@ app.post('/bootstrap', async () => {
     'historical backfill completed'
   );
 
+  twsClient.clearSubscriptions();
+  activeSubscriptions = [];
   twsClient.addSubscriptions(subscriptions);
   activeSubscriptions = subscriptions;
   lastBootstrapAt = new Date();
