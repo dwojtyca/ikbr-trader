@@ -13,7 +13,6 @@ const schema = z.object({
   WATCHLIST_SYMBOLS: z.string().default('AAPL,MSFT,XOM'),
   SIGNAL_EVENT_DRIVEN: z.string().default('true'),
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
-  SIGNAL_HOLD_REJECT_DEDUP_MS: z.coerce.number().int().min(0).default(900000),
   SIGNAL_PROPOSAL_TTL_MS: z.coerce.number().int().min(0).default(120000),
   ACCOUNT_EQUITY: z.coerce.number().default(100000),
   SIGNAL_MAX_MARKET_STATE_AGE_MS: z.coerce.number().int().min(0).default(90000),

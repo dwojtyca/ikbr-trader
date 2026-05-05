@@ -191,6 +191,10 @@ type ReportAggregate = {
   losses: number;
   open: number;
   winRate: number;
+  strategyEnabled?: boolean;
+  strategyPermanentlyDisabled?: boolean;
+  strategyCooldownUntil?: string;
+  strategyReason?: string;
   totalPnl?: number;
   grossPnl?: number;
   commissions?: number;
@@ -321,6 +325,7 @@ export function App() {
   const [accountSummary, setAccountSummary] = useState<AccountSummaryResponse | null>(null);
   const [report, setReport] = useState<SignalReportResponse | null>(null);
   const [loadingReport, setLoadingReport] = useState(false);
+  const [strategyToggleBusy, setStrategyToggleBusy] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
   const [watchlistExpanded, setWatchlistExpanded] = useState(false);
   const [orderFilters, setOrderFilters] = useState<OrderFilters>({
@@ -488,6 +493,27 @@ export function App() {
       if (!silent) setReport(null);
     } finally {
       if (!silent) setLoadingReport(false);
+    }
+  }
+
+  async function toggleStrategy(row: ReportAggregate) {
+    if (!hasStrategyRuntime(row)) return;
+
+    const enabled = !isStrategyRuntimeOn(row);
+    setStrategyToggleBusy(row.key);
+    setReportError(null);
+
+    try {
+      await requestJson(`/api/signal/signals/strategies/${encodeURIComponent(row.key)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      });
+      await refreshReport({ silent: true });
+    } catch (error) {
+      setReportError((error as Error).message);
+    } finally {
+      setStrategyToggleBusy(null);
     }
   }
 
@@ -821,7 +847,12 @@ export function App() {
                   <h2>By Strategy</h2>
                   <span>Profile-level outcome summary</span>
                 </div>
-                <ReportAggregateTable rows={report.byStrategy} />
+                <ReportAggregateTable
+                  rows={report.byStrategy}
+                  showStrategyStatus
+                  onStrategyToggle={toggleStrategy}
+                  strategyToggleBusy={strategyToggleBusy}
+                />
               </section>
 
               <section className="panel">
@@ -1360,13 +1391,66 @@ function MetricCard({ label, value, tone }: { label: string; value: string; tone
   );
 }
 
-function ReportAggregateTable({ rows }: { rows: ReportAggregate[] }) {
+function formatStrategyStatus(row: ReportAggregate): { label: string; tone?: number; title?: string } {
+  if (!hasStrategyRuntime(row)) {
+    return { label: 'n/a' };
+  }
+
+  const reason = row.strategyReason;
+  if (row.strategyPermanentlyDisabled || row.strategyEnabled === false) {
+    return { label: 'OFF', tone: -1, title: reason };
+  }
+
+  if (row.strategyCooldownUntil) {
+    const until = new Date(row.strategyCooldownUntil);
+    if (!Number.isNaN(until.getTime()) && until.getTime() > Date.now()) {
+      return { label: 'COOLDOWN', tone: -1, title: reason ? `${reason} | until ${formatTs(row.strategyCooldownUntil)}` : `until ${formatTs(row.strategyCooldownUntil)}` };
+    }
+  }
+
+  return { label: 'ON', tone: 1, title: reason };
+}
+
+function hasStrategyRuntime(row: ReportAggregate): boolean {
+  return row.strategyEnabled !== undefined
+    || row.strategyPermanentlyDisabled !== undefined
+    || row.strategyCooldownUntil !== undefined
+    || row.strategyReason !== undefined;
+}
+
+function isStrategyRuntimeOn(row: ReportAggregate): boolean {
+  if (!hasStrategyRuntime(row)) return false;
+  if (row.strategyPermanentlyDisabled || row.strategyEnabled !== true) return false;
+
+  if (row.strategyCooldownUntil) {
+    const until = new Date(row.strategyCooldownUntil);
+    if (!Number.isNaN(until.getTime()) && until.getTime() > Date.now()) return false;
+  }
+
+  return true;
+}
+
+type ReportAggregateTableProps = {
+  rows: ReportAggregate[];
+  showStrategyStatus?: boolean;
+  onStrategyToggle?: (row: ReportAggregate) => void;
+  strategyToggleBusy?: string | null;
+};
+
+function ReportAggregateTable({
+  rows,
+  showStrategyStatus = false,
+  onStrategyToggle,
+  strategyToggleBusy
+}: ReportAggregateTableProps) {
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
             <th>Key</th>
+            {showStrategyStatus ? <th>Status</th> : null}
+            {showStrategyStatus ? <th>Action</th> : null}
             <th>Executions</th>
             <th>Wins</th>
             <th>Losses</th>
@@ -1382,24 +1466,53 @@ function ReportAggregateTable({ rows }: { rows: ReportAggregate[] }) {
         <tbody>
           {rows.length === 0 ? (
             <tr>
-              <td colSpan={10} className="muted">No data</td>
+              <td colSpan={showStrategyStatus ? 13 : 11} className="muted">No data</td>
             </tr>
           ) : (
-            rows.map((row) => (
-              <tr key={row.key}>
-                <td>{row.key}</td>
-                <td>{formatNum(row.trades, 0)}</td>
-                <td>{formatNum(row.wins, 0)}</td>
-                <td>{formatNum(row.losses, 0)}</td>
-                <td className={toToneClass(row.totalPnl)}>{formatNum(row.totalPnl)}</td>
-                <td>{formatNum(row.commissions)}</td>
-                <td className={toToneClass(row.avgPnl)}>{formatNum(row.avgPnl)}</td>
-                <td>{formatPct(row.winRate)}</td>
-                <td className={toToneClass(row.avgPnlPct)}>{formatPnlPct(row.avgPnlPct)}</td>
-                <td className={toToneClass(row.medianPnlPct)}>{formatPnlPct(row.medianPnlPct)}</td>
-                <td>{formatPct(row.avgConfidence)}</td>
-              </tr>
-            ))
+            rows.map((row) => {
+              const strategyStatus = formatStrategyStatus(row);
+              const strategyRuntimeOn = isStrategyRuntimeOn(row);
+              const canToggle = showStrategyStatus && hasStrategyRuntime(row) && Boolean(onStrategyToggle);
+
+              return (
+                <tr key={row.key}>
+                  <td>{row.key}</td>
+                  {showStrategyStatus ? (
+                    <td title={strategyStatus.title}>
+                      <span className={toToneClass(strategyStatus.tone)}>{strategyStatus.label}</span>
+                    </td>
+                  ) : null}
+                  {showStrategyStatus ? (
+                    <td>
+                      {canToggle ? (
+                        <label className="strategy-switch" title={strategyRuntimeOn ? 'Turn strategy off' : 'Turn strategy on'}>
+                          <input
+                            type="checkbox"
+                            checked={strategyRuntimeOn}
+                            disabled={strategyToggleBusy === row.key}
+                            aria-label={`${strategyRuntimeOn ? 'Disable' : 'Enable'} ${row.key}`}
+                            onChange={() => onStrategyToggle?.(row)}
+                          />
+                          <span className="strategy-switch-track" aria-hidden="true" />
+                        </label>
+                      ) : (
+                        <span className="muted">-</span>
+                      )}
+                    </td>
+                  ) : null}
+                  <td>{formatNum(row.trades, 0)}</td>
+                  <td>{formatNum(row.wins, 0)}</td>
+                  <td>{formatNum(row.losses, 0)}</td>
+                  <td className={toToneClass(row.totalPnl)}>{formatNum(row.totalPnl)}</td>
+                  <td>{formatNum(row.commissions)}</td>
+                  <td className={toToneClass(row.avgPnl)}>{formatNum(row.avgPnl)}</td>
+                  <td>{formatPct(row.winRate)}</td>
+                  <td className={toToneClass(row.avgPnlPct)}>{formatPnlPct(row.avgPnlPct)}</td>
+                  <td className={toToneClass(row.medianPnlPct)}>{formatPnlPct(row.medianPnlPct)}</td>
+                  <td>{formatPct(row.avgConfidence)}</td>
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>

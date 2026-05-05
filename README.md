@@ -347,7 +347,7 @@ Ta sekcja opisuje faktycznie zaimplementowana logike po zmianach z 2026-04-29. G
 ### Pipeline sygnalu
 
 1. `ingestion` zapisuje swiece 1m do Postgresa i dla kazdej gotowej swiecy wywoluje `POST /signals/on-candle` z `symbol` oraz `candleTs`.
-2. `signal-engine` sprawdza, czy dla `instrument + generated_from_candle_ts` byl juz zapisany sygnal. Jesli tak, zwraca `already_processed_for_candle`.
+2. `signal-engine` uruchamia analize dla kazdego callbacku `/signals/on-candle`; wynik jest zapisywany do `proposed_orders` takze wtedy, gdy istnieje juz wpis dla tego samego `instrument + generated_from_candle_ts`.
 3. Dla symbolu pobierane sa swiece:
    - 1m: `SIGNAL_MIN_CANDLES + 80`
    - 1h: do `160`
@@ -492,10 +492,9 @@ Momentum breakdown:
 
 ### Reguly zapisu do proposed_orders
 
-Nie kazdy wynik symbolu trafia do tabeli:
+Kazdy wynik `runForSymbol()` trafia do tabeli, tak aby UI `Orders` moglo sluzyc do debugowania pelnego strumienia decyzji:
 
-- `REJECTED/HOLD` z powodami `No edge`, `Liquidity filter rejected signal` albo `Spread filter rejected signal` nie sa zapisywane
-- duplikaty `REJECTED/HOLD` z tym samym instrumentem i reason sa deduplikowane przez `SIGNAL_HOLD_REJECT_DEDUP_MS`
+- kazdy callback `/signals/on-candle` uruchamia silnik i zapisuje wynik, nawet jesli dany instrument mial juz wpis dla tej samej swiecy
 - nowe `PROPOSED` dla instrumentu oznacza starsze nieprzetwarzane `PROPOSED` tego instrumentu jako `SUPERSEDED`
 - stare nieprzetworzone `PROPOSED` przechodza w `EXPIRED` po `SIGNAL_PROPOSAL_TTL_MS`
 

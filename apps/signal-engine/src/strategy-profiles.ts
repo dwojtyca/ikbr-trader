@@ -4,7 +4,6 @@ export type ProfileStyle = 'trend' | 'range' | 'breakout';
 
 export interface StrategyProfile {
   id: string;
-  enabled: boolean;
   assetClass: AssetClass;
   regime: MarketRegime;
   style: ProfileStyle;
@@ -21,7 +20,6 @@ export interface StrategyProfile {
 const PROFILES: StrategyProfile[] = [
   {
     id: 'stocks_trend_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'trend',
     style: 'trend',
@@ -36,7 +34,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_trend_pullback_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'trend',
     style: 'trend',
@@ -51,7 +48,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_trend_breakout_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'trend',
     style: 'breakout',
@@ -66,7 +62,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_range_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'range',
     style: 'range',
@@ -81,7 +76,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_range_reversal_v2',
-    enabled: true,
     assetClass: 'stock',
     regime: 'range',
     style: 'range',
@@ -96,7 +90,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_high_vol_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'high_volatility',
     style: 'trend',
@@ -111,7 +104,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_high_vol_compression_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'high_volatility',
     style: 'breakout',
@@ -126,7 +118,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'stocks_high_vol_mean_reversion_v1',
-    enabled: true,
     assetClass: 'stock',
     regime: 'high_volatility',
     style: 'range',
@@ -141,7 +132,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'commodities_trend_v1',
-    enabled: true,
     assetClass: 'commodity',
     regime: 'trend',
     style: 'breakout',
@@ -156,7 +146,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'commodities_breakout_v1',
-    enabled: true,
     assetClass: 'commodity',
     regime: 'trend',
     style: 'breakout',
@@ -171,7 +160,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'commodities_range_v1',
-    enabled: true,
     assetClass: 'commodity',
     regime: 'range',
     style: 'range',
@@ -186,7 +174,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'commodities_range_conservative_v1',
-    enabled: true,
     assetClass: 'commodity',
     regime: 'range',
     style: 'range',
@@ -201,7 +188,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'commodities_high_vol_v1',
-    enabled: true,
     assetClass: 'commodity',
     regime: 'high_volatility',
     style: 'breakout',
@@ -216,7 +202,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_trend_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'trend',
     style: 'trend',
@@ -231,7 +216,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_trend_pullback_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'trend',
     style: 'trend',
@@ -246,7 +230,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_breakout_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'trend',
     style: 'breakout',
@@ -261,7 +244,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_range_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'range',
     style: 'range',
@@ -276,7 +258,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_range_reversion_v2',
-    enabled: true,
     assetClass: 'index',
     regime: 'range',
     style: 'range',
@@ -291,7 +272,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_high_vol_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'high_volatility',
     style: 'trend',
@@ -306,7 +286,6 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: 'indices_high_vol_defensive_v1',
-    enabled: true,
     assetClass: 'index',
     regime: 'high_volatility',
     style: 'range',
@@ -332,13 +311,13 @@ export function inferAssetClass(symbol: string): AssetClass {
 }
 
 export function pickStrategyProfile(assetClass: AssetClass, regime: MarketRegime): StrategyProfile {
-  const found = PROFILES.find((profile) => profile.enabled && profile.assetClass === assetClass && profile.regime === regime);
+  const found = PROFILES.find((profile) => profile.assetClass === assetClass && profile.regime === regime);
   if (found) return found;
   return PROFILES[0];
 }
 
 export function pickStrategyProfiles(assetClass: AssetClass, regime: MarketRegime): StrategyProfile[] {
-  return PROFILES.filter((profile) => profile.enabled && profile.assetClass === assetClass && profile.regime === regime);
+  return PROFILES.filter((profile) => profile.assetClass === assetClass && profile.regime === regime);
 }
 
 export function listStrategyProfiles(): StrategyProfile[] {

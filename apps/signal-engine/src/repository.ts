@@ -106,6 +106,10 @@ export interface SignalReportAggregate {
   losses: number;
   open: number;
   winRate: number;
+  strategyEnabled?: boolean;
+  strategyPermanentlyDisabled?: boolean;
+  strategyCooldownUntil?: string;
+  strategyReason?: string;
   totalPnl?: number;
   grossPnl?: number;
   commissions?: number;
@@ -615,6 +619,34 @@ export class SignalRepository {
     };
   }
 
+  async setStrategyManualEnabled(strategyId: string, enabled: boolean): Promise<StrategyRuntimeState> {
+    const permanentlyDisabled = !enabled;
+    const reason = enabled ? 'Manual ON from report' : 'Manual OFF from report';
+
+    await this.pool.query(
+      `
+      INSERT INTO strategy_runtime_state (
+        strategy_id, enabled, permanently_disabled, cooldown_until, consecutive_loss_count,
+        cooldown_count, last_evaluated_fill_at, last_state_change_at, reason, updated_at
+      )
+      VALUES ($1, $2, $3, NULL, 0, 0, NOW(), NOW(), $4, NOW())
+      ON CONFLICT (strategy_id) DO UPDATE SET
+        enabled = EXCLUDED.enabled,
+        permanently_disabled = EXCLUDED.permanently_disabled,
+        cooldown_until = NULL,
+        consecutive_loss_count = 0,
+        cooldown_count = 0,
+        last_evaluated_fill_at = COALESCE(strategy_runtime_state.last_evaluated_fill_at, NOW()),
+        last_state_change_at = NOW(),
+        reason = EXCLUDED.reason,
+        updated_at = NOW()
+      `,
+      [strategyId, enabled, permanentlyDisabled, reason]
+    );
+
+    return this.getStrategyRuntimeState(strategyId);
+  }
+
   async getSymbolNetPnlSince(symbol: string, since: Date): Promise<number> {
     const result = await this.pool.query(
       `
@@ -799,21 +831,6 @@ export class SignalRepository {
     return Number(result.rowCount ?? 0);
   }
 
-  async hasSignalForInstrumentCandle(instrument: string, candleTs: Date): Promise<boolean> {
-    const result = await this.pool.query(
-      `
-      SELECT 1
-      FROM proposed_orders
-      WHERE instrument = $1
-        AND generated_from_candle_ts = $2
-      LIMIT 1
-      `,
-      [instrument, candleTs]
-    );
-
-    return Boolean(result.rows[0]);
-  }
-
   async getRecentSignals(limit: number): Promise<ProposedOrder[]> {
     const result = await this.pool.query(
       `
@@ -829,28 +846,6 @@ export class SignalRepository {
     );
 
     return result.rows.map((row) => this.mapRow(row as ProposedOrderRow));
-  }
-
-  async hasRecentDuplicateHoldReject(instrument: string, reason: string, windowMs: number): Promise<boolean> {
-    if (windowMs <= 0) return false;
-    if (!instrument.trim() || !reason.trim()) return false;
-
-    const result = await this.pool.query(
-      `
-      SELECT 1
-      FROM proposed_orders
-      WHERE instrument = $1
-        AND side = 'HOLD'
-        AND status = 'REJECTED'
-        AND reason = $2
-        AND created_at >= NOW() - (($3::BIGINT || ' milliseconds')::interval)
-      ORDER BY created_at DESC
-      LIMIT 1
-      `,
-      [instrument, reason, windowMs]
-    );
-
-    return Boolean(result.rows[0]);
   }
 
   async refreshSignalOutcomes(limit = 500): Promise<number> {
@@ -1030,7 +1025,7 @@ export class SignalRepository {
     }));
   }
 
-  async getSignalReport(limit = 300): Promise<SignalReport> {
+  async getSignalReport(limit = 300, strategyIds: string[] = []): Promise<SignalReport> {
     const boundedLimit = Math.min(Math.max(limit, 20), 2000);
     const baseCte = `
       WITH broker_orders AS (
@@ -1099,7 +1094,7 @@ export class SignalRepository {
 
     const aggregateResults = await Promise.all([
       this.queryReportAggregate(baseCte, boundedLimit, 'instrument'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'strategy'),
+      this.queryReportAggregate(baseCte, boundedLimit, 'strategy', strategyIds),
       this.queryReportAggregate(baseCte, boundedLimit, 'side'),
       this.queryReportAggregate(baseCte, boundedLimit, 'regime')
     ]);
@@ -1238,7 +1233,8 @@ export class SignalRepository {
   private async queryReportAggregate(
     baseCte: string,
     limit: number,
-    dimension: 'instrument' | 'strategy' | 'side' | 'regime'
+    dimension: 'instrument' | 'strategy' | 'side' | 'regime',
+    strategyIds: string[] = []
   ): Promise<SignalReportAggregate[]> {
     const keySqlByDimension = {
       instrument: 'instrument',
@@ -1246,10 +1242,72 @@ export class SignalRepository {
       side: 'side',
       regime: 'regime'
     } satisfies Record<typeof dimension, string>;
+    const strategyStatusJoin = dimension === 'strategy' ? 'srs.strategy_id = aggregate.key' : 'false';
+
+    if (dimension === 'strategy' && strategyIds.length > 0) {
+      const aggregateLimit = Math.max(100, strategyIds.length + 12);
+      const result = await this.pool.query(
+        `
+        ${baseCte},
+        aggregate AS (
+        SELECT
+          strategy AS key,
+          COUNT(*)::int AS trades,
+          COUNT(*) FILTER (WHERE pnl > 0)::int AS wins,
+          COUNT(*) FILTER (WHERE pnl < 0)::int AS losses,
+          0::int AS open,
+          SUM(pnl) AS total_pnl,
+          SUM(gross_pnl) AS gross_pnl,
+          SUM(commissions) AS commissions,
+          AVG(pnl) AS avg_pnl,
+          AVG(pnl_pct) AS avg_pnl_pct,
+          percentile_cont(0.5) WITHIN GROUP (ORDER BY pnl_pct) AS median_pnl_pct,
+          AVG(confidence) AS avg_confidence,
+          COUNT(*) FILTER (WHERE hit_take_profit)::int AS take_profit_hits,
+          COUNT(*) FILTER (WHERE hit_stop)::int AS stop_hits
+        FROM base
+        GROUP BY 1
+        ),
+        aggregate_keys AS (
+          SELECT unnest($2::text[]) AS key
+          UNION
+          SELECT key FROM aggregate
+        )
+        SELECT
+          aggregate_keys.key,
+          COALESCE(aggregate.trades, 0)::int AS trades,
+          COALESCE(aggregate.wins, 0)::int AS wins,
+          COALESCE(aggregate.losses, 0)::int AS losses,
+          COALESCE(aggregate.open, 0)::int AS open,
+          aggregate.total_pnl,
+          aggregate.gross_pnl,
+          aggregate.commissions,
+          aggregate.avg_pnl,
+          aggregate.avg_pnl_pct,
+          aggregate.median_pnl_pct,
+          aggregate.avg_confidence,
+          COALESCE(aggregate.take_profit_hits, 0)::int AS take_profit_hits,
+          COALESCE(aggregate.stop_hits, 0)::int AS stop_hits,
+          srs.enabled AS strategy_enabled,
+          srs.permanently_disabled AS strategy_permanently_disabled,
+          srs.cooldown_until AS strategy_cooldown_until,
+          srs.reason AS strategy_reason
+        FROM aggregate_keys
+        LEFT JOIN aggregate ON aggregate.key = aggregate_keys.key
+        LEFT JOIN strategy_runtime_state srs ON srs.strategy_id = aggregate_keys.key
+        ORDER BY trades DESC, aggregate_keys.key ASC
+        LIMIT ${aggregateLimit}
+        `,
+        [limit, strategyIds]
+      );
+
+      return this.mapReportAggregateRows(result.rows);
+    }
 
     const result = await this.pool.query(
       `
-      ${baseCte}
+      ${baseCte},
+      aggregate AS (
       SELECT
         ${keySqlByDimension[dimension]} AS key,
         COUNT(*)::int AS trades,
@@ -1267,13 +1325,26 @@ export class SignalRepository {
         COUNT(*) FILTER (WHERE hit_stop)::int AS stop_hits
       FROM base
       GROUP BY 1
+      )
+      SELECT
+        aggregate.*,
+        srs.enabled AS strategy_enabled,
+        srs.permanently_disabled AS strategy_permanently_disabled,
+        srs.cooldown_until AS strategy_cooldown_until,
+        srs.reason AS strategy_reason
+      FROM aggregate
+      LEFT JOIN strategy_runtime_state srs ON ${strategyStatusJoin}
       ORDER BY trades DESC, key ASC
       LIMIT 12
       `,
       [limit]
     );
 
-    return result.rows.map((row) => {
+    return this.mapReportAggregateRows(result.rows);
+  }
+
+  private mapReportAggregateRows(rows: any[]): SignalReportAggregate[] {
+    return rows.map((row) => {
       const trades = Number(row.trades ?? 0);
       const wins = Number(row.wins ?? 0);
 
@@ -1284,6 +1355,14 @@ export class SignalRepository {
         losses: Number(row.losses ?? 0),
         open: Number(row.open ?? 0),
         winRate: trades > 0 ? wins / trades : 0,
+        strategyEnabled: row.strategy_enabled === null || row.strategy_enabled === undefined ? undefined : row.strategy_enabled !== false,
+        strategyPermanentlyDisabled: row.strategy_permanently_disabled === null || row.strategy_permanently_disabled === undefined
+          ? undefined
+          : row.strategy_permanently_disabled === true,
+        strategyCooldownUntil: row.strategy_cooldown_until === null || row.strategy_cooldown_until === undefined
+          ? undefined
+          : new Date(row.strategy_cooldown_until).toISOString(),
+        strategyReason: row.strategy_reason ?? undefined,
         totalPnl: row.total_pnl === null || row.total_pnl === undefined ? undefined : Number(row.total_pnl),
         grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
         commissions: row.commissions === null || row.commissions === undefined ? undefined : Number(row.commissions),

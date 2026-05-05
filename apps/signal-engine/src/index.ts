@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
+import { z } from 'zod';
 import { ProposedOrder } from '@ikbr/shared';
 import { config } from './config.js';
 import { SignalRepository } from './repository.js';
@@ -11,6 +12,7 @@ const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
+const strategyToggleSchema = z.object({ enabled: z.boolean() });
 const engine = new SignalEngine(repo, {
   minCandles: config.SIGNAL_MIN_CANDLES,
   maxSpreadBps: config.MAX_SPREAD_BPS,
@@ -42,36 +44,11 @@ const engine = new SignalEngine(repo, {
   }
 });
 
-const LOW_VALUE_HOLD_REJECT_PREFIXES = [
-  'No edge for ',
-  'Liquidity filter rejected signal',
-  'Spread filter rejected signal'
-];
 let lastSignalRunStartedAt: Date | null = null;
 let lastSignalRunFinishedAt: Date | null = null;
 let lastSignalRunSource: 'manual' | 'candle' | 'startup' | null = null;
 let lastSignalRunSymbols: string[] = [];
 let lastSignalGeneratedCount = 0;
-
-function shouldPersistOrder(order: ProposedOrder): boolean {
-  if (order.status !== 'REJECTED') return true;
-  if (order.side !== 'HOLD') return true;
-
-  const reason = (order.reason ?? '').trim();
-  if (!reason) return true;
-
-  return !LOW_VALUE_HOLD_REJECT_PREFIXES.some((prefix) => reason.startsWith(prefix));
-}
-
-async function shouldSkipDuplicatePersist(order: ProposedOrder): Promise<boolean> {
-  if (config.SIGNAL_HOLD_REJECT_DEDUP_MS <= 0) return false;
-  if (order.status !== 'REJECTED' || order.side !== 'HOLD') return false;
-
-  const reason = (order.reason ?? '').trim();
-  if (!reason) return false;
-
-  return repo.hasRecentDuplicateHoldReject(order.instrument, reason, config.SIGNAL_HOLD_REJECT_DEDUP_MS);
-}
 
 async function runAndPersist(
   symbols = config.watchlistSymbols,
@@ -102,28 +79,6 @@ async function runAndPersist(
         strategy: 'adaptive_profile_v1',
         generatedFromCandleTs
       };
-    }
-
-    if (!shouldPersistOrder(order)) {
-      app.log.debug(
-        { symbol, reason: order.reason, status: order.status, side: order.side },
-        'skip persisting low-value HOLD/REJECT signal'
-      );
-      continue;
-    }
-
-    if (await shouldSkipDuplicatePersist(order)) {
-      app.log.debug(
-        {
-          symbol,
-          reason: order.reason,
-          status: order.status,
-          side: order.side,
-          dedupWindowMs: config.SIGNAL_HOLD_REJECT_DEDUP_MS
-        },
-        'skip persisting duplicate HOLD/REJECT signal'
-      );
-      continue;
     }
 
     const id = await repo.insertProposedOrder(order);
@@ -166,10 +121,6 @@ app.post('/signals/on-candle', async (request) => {
     throw new Error(`Invalid candleTs: ${body.candleTs}`);
   }
 
-  if (await repo.hasSignalForInstrumentCandle(symbol, candleTs)) {
-    return { generated: 0, skipped: true, reason: 'already_processed_for_candle' };
-  }
-
   const results = await runAndPersist([symbol], candleTs, 'candle');
   return { generated: results.length, skipped: false, results };
 });
@@ -197,8 +148,11 @@ app.get('/signals/outcomes/summary', async (request) => {
 app.get('/signals/report', async (request) => {
   const query = (request.query ?? {}) as { limit?: string };
   const limit = Number(query.limit ?? 300);
+  const profiles = listStrategyProfiles();
+  const strategyIds = profiles.map((profile) => profile.id);
   await repo.refreshSignalOutcomes(500);
-  return repo.getSignalReport(Number.isFinite(limit) ? Math.min(Math.max(limit, 20), 2000) : 300);
+  await repo.syncStrategyRuntimeStates(strategyIds, config.SIGNAL_STRATEGY_COOLDOWN_MS);
+  return repo.getSignalReport(Number.isFinite(limit) ? Math.min(Math.max(limit, 20), 2000) : 300, strategyIds);
 });
 
 app.get('/signals/strategies', async () => {
@@ -216,6 +170,26 @@ app.get('/signals/strategies', async () => {
   );
 
   return { strategies };
+});
+
+app.post('/signals/strategies/:strategyId', async (request, reply) => {
+  const params = request.params as { strategyId?: string };
+  const strategyId = params.strategyId?.trim();
+  const profiles = listStrategyProfiles();
+
+  if (!strategyId || !profiles.some((profile) => profile.id === strategyId)) {
+    reply.status(404);
+    return { error: 'strategy_not_found' };
+  }
+
+  const parsed = strategyToggleSchema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    reply.status(400);
+    return { error: 'invalid_body', issues: parsed.error.issues };
+  }
+
+  const runtime = await repo.setStrategyManualEnabled(strategyId, parsed.data.enabled);
+  return { strategyId, runtime };
 });
 
 async function main(): Promise<void> {
