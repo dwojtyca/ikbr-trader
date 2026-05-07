@@ -249,8 +249,17 @@ export class TwsClient {
   private async resolveContract(instrument: WatchlistInstrument): Promise<InstrumentSubscription> {
     const symbol = instrument.symbol;
     const directConid = toNum(instrument.conid);
+    const directContract = this.buildContractFromInstrument(instrument, directConid);
     if (directConid) {
-      const details = await this.requestContractDetails(symbol, this.buildContractFromInstrument(instrument, directConid));
+      if (instrument.secType && instrument.exchange && instrument.currency) {
+        return {
+          symbol,
+          conid: String(directConid),
+          contract: this.withDefaults(directContract)
+        };
+      }
+
+      const details = await this.requestContractDetails(symbol, directContract);
       const summary = pickContract(details);
       const conid = toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
 

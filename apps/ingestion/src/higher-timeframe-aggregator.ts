@@ -11,10 +11,14 @@ interface MutableCandle {
   volume: number;
 }
 
-type HigherTimeframe = '5m' | '1h';
+type HigherTimeframe = '5m' | '1h' | '4h' | '12h' | '1d';
 
 function timeframeMs(timeframe: HigherTimeframe): number {
-  return timeframe === '5m' ? 5 * 60_000 : 60 * 60_000;
+  if (timeframe === '5m') return 5 * 60_000;
+  if (timeframe === '1h') return 60 * 60_000;
+  if (timeframe === '4h') return 4 * 60 * 60_000;
+  if (timeframe === '12h') return 12 * 60 * 60_000;
+  return 24 * 60 * 60_000;
 }
 
 function floorToTimeframe(ts: Date, timeframe: HigherTimeframe): Date {
@@ -27,16 +31,17 @@ export class HigherTimeframeAggregator {
 
   ingest(closedOneMinute: Candle): Candle[] {
     const out: Candle[] = [];
-    out.push(...this.ingestFor('5m', closedOneMinute));
-    out.push(...this.ingestFor('1h', closedOneMinute));
+    for (const timeframe of ['5m', '1h', '4h', '12h', '1d'] as const) {
+      out.push(...this.ingestFor(timeframe, closedOneMinute));
+    }
     return out;
   }
 
   flushAll(): Candle[] {
     const out: Candle[] = [];
     for (const [key, bucket] of this.buckets.entries()) {
-      const timeframe = key.includes(':5m:') ? '5m' : '1h';
-      out.push({ ...bucket, timeframe });
+      const timeframe = key.split(':')[1] as HigherTimeframe | undefined;
+      if (timeframe) out.push({ ...bucket, timeframe });
     }
     this.buckets.clear();
     return out;

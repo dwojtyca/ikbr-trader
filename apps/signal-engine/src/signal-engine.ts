@@ -1,4 +1,4 @@
-import { AssetClass, IndicatorSnapshot, MarketRegime, ProposedOrder, RiskLimits, Side } from '@ikbr/shared';
+import { AssetClass, Candle, CandleTimeframe, IndicatorSnapshot, isStrategyAllowed, MarketRegime, ProposedOrder, RiskLimits, Side, TimeframeIndicatorSnapshot } from '@ikbr/shared';
 import { lastAtr, lastBollinger, lastDonchian, lastEma, lastMacd, lastObvSlope, lastRsi } from './indicators.js';
 import { ExposureSnapshot, LatestFilledOrderContext, SignalPerformanceStats, SignalRepository } from './repository.js';
 import { inferAssetClass, listStrategyProfiles, pickStrategyProfiles, StrategyProfile } from './strategy-profiles.js';
@@ -36,10 +36,14 @@ interface SignalEngineOptions {
   fractionalQuantityStep: number;
   minStopBpsByAssetClass: Record<AssetClass, number>;
   maxMarketStateAgeMs: number;
+  baseCurrency: string;
   assetClassBySymbol: Record<string, AssetClass>;
+  currencyBySymbol: Record<string, string>;
+  priceMultiplierBySymbol: Record<string, number>;
   executionBaseUrl: string;
   strategyCooldownMs: number;
   symbolAddLossLimit: number;
+  strategyAllowlistMode: 'enforce' | 'discover';
   riskLimits: RiskLimits;
 }
 
@@ -75,7 +79,12 @@ interface ManagedExitContext {
   generatedFromCandleTs?: Date;
 }
 
-const STOCK_RANGE_OPEN_DISABLED = true;
+interface StrategyCandidate {
+  profile: StrategyProfile;
+  decision: DecisionScore;
+}
+
+const STOCK_RANGE_OPEN_DISABLED = false;
 const MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT = 0.35;
 const MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT = 0.8;
 const STRATEGY_IDS = listStrategyProfiles().map((profile) => profile.id);
@@ -89,6 +98,12 @@ export class SignalEngine {
   async runForSymbol(symbol: string, exposureSnapshot?: ExposureSnapshot, generatedFromCandleTs?: Date): Promise<ProposedOrder> {
     const candles = await this.repo.getRecentCandles(symbol, '1m', this.options.minCandles + 80);
     const candles1h = await this.repo.getRecentCandles(symbol, '1h', 160);
+    const [candles5m, candles4h, candles12h, candles1d] = await Promise.all([
+      this.repo.getRecentCandles(symbol, '5m', 160),
+      this.repo.getRecentCandles(symbol, '4h', 120),
+      this.repo.getRecentCandles(symbol, '12h', 90),
+      this.repo.getRecentCandles(symbol, '1d', 260)
+    ]);
 
     if (candles.length < this.options.minCandles) {
       return this.rejectedOrder(symbol, undefined, 'Insufficient candles for indicators', undefined, 'HOLD', 'adaptive_profile_v1', generatedFromCandleTs);
@@ -130,7 +145,14 @@ export class SignalEngine {
       obvSlope,
       trendFilterValue,
       trendFilterSource: trendFrom1h !== undefined ? 'EMA50_1h' : 'EMA200_1m',
-      assetClass
+      assetClass,
+      timeframes: {
+        '5m': this.buildTimeframeSnapshot(candles5m),
+        '1h': this.buildTimeframeSnapshot(candles1h),
+        '4h': this.buildTimeframeSnapshot(candles4h),
+        '12h': this.buildTimeframeSnapshot(candles12h),
+        '1d': this.buildTimeframeSnapshot(candles1d)
+      }
     };
 
     if (
@@ -153,9 +175,10 @@ export class SignalEngine {
     }
 
     const regime = this.detectRegime(assetClass, latest.close, indicators);
+    indicators.regime = regime;
     await this.repo.syncStrategyRuntimeStates(STRATEGY_IDS, this.options.strategyCooldownMs);
-    const profile = await this.pickActiveProfile(assetClass, regime);
-    if (!profile) {
+    const activeProfiles = await this.getActiveProfiles(assetClass, regime);
+    if (activeProfiles.length === 0) {
       return this.rejectedOrder(
         symbol,
         latest.conid,
@@ -167,26 +190,9 @@ export class SignalEngine {
       );
     }
 
-    indicators.regime = regime;
-    indicators.strategyProfile = profile.id;
-
-    const applyVolumeFilter = profile.requireVolume && this.options.volumeFilterMode === 'strict';
-
-    if (applyVolumeFilter && volumes[volumes.length - 1] < this.options.minVolume1m) {
-      return this.rejectedOrder(
-        symbol,
-        latest.conid,
-        `Liquidity filter rejected signal for profile ${profile.id}: low 1m volume`,
-        indicators,
-        'HOLD',
-        profile.id,
-        generatedFromCandleTs
-      );
-    }
-
     const marketState = await this.repo.getMarketState(latest.conid);
     if (!marketState) {
-      return this.rejectedOrder(symbol, latest.conid, 'No market state in Redis for conid', indicators, 'HOLD', profile.id, generatedFromCandleTs);
+      return this.rejectedOrder(symbol, latest.conid, 'No market state in Redis for conid', indicators, 'HOLD', activeProfiles[0].id, generatedFromCandleTs);
     }
 
     const marketStateTs = new Date(marketState.ts);
@@ -201,30 +207,11 @@ export class SignalEngine {
         `Execution feasibility rejected: stale market state age ${Date.now() - marketStateTs.getTime()}ms`,
         indicators,
         'HOLD',
-        profile.id,
+        activeProfiles[0].id,
         generatedFromCandleTs
       );
     }
 
-    const spread =
-      marketState.spread ??
-      (marketState.ask !== undefined && marketState.bid !== undefined ? marketState.ask - marketState.bid : undefined);
-    const spreadBps = spread ? Math.abs(safeDiv(spread, latest.close) * 10000) : 0;
-    const spreadLimitBps = this.options.maxSpreadBps * profile.spreadFactor;
-
-    if (spreadBps > spreadLimitBps) {
-      return this.rejectedOrder(
-        symbol,
-        latest.conid,
-        `Spread filter rejected signal (${spreadBps.toFixed(2)} bps > ${spreadLimitBps.toFixed(2)} bps)`,
-        indicators,
-        'HOLD',
-        profile.id,
-        generatedFromCandleTs
-      );
-    }
-
-    const decision = this.scoreDecision(profile, latest.close, indicators);
     const riskSnapshot = exposureSnapshot ?? (await this.repo.getExposureSnapshot(this.options.executionBaseUrl));
     const exposure = riskSnapshot.exposure;
     const openPositions = riskSnapshot.openPositions;
@@ -242,8 +229,8 @@ export class SignalEngine {
         existingPositionQty,
         positionAverageCost: positionContext?.averageCost,
         positionMarketPrice: positionContext?.marketPrice,
-        indicators,
-        profile,
+        indicators: { ...indicators, strategyProfile: activeProfiles[0].id },
+        profile: activeProfiles[0],
         marketState,
         generatedFromCandleTs
       });
@@ -252,6 +239,37 @@ export class SignalEngine {
         return managedExit;
       }
     }
+
+    const spread =
+      marketState.spread ??
+      (marketState.ask !== undefined && marketState.bid !== undefined ? marketState.ask - marketState.bid : undefined);
+    const spreadBps = spread ? Math.abs(safeDiv(spread, latest.close) * 10000) : 0;
+
+    const selected = this.selectStrategyCandidate({
+      symbol,
+      assetClass,
+      profiles: activeProfiles,
+      price: latest.close,
+      indicators,
+      volume: volumes[volumes.length - 1],
+      spreadBps,
+      existingPositionQty
+    });
+    if (!selected.candidate) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        selected.reason,
+        indicators,
+        'HOLD',
+        activeProfiles[0].id,
+        generatedFromCandleTs
+      );
+    }
+
+    const { profile, decision } = selected.candidate;
+    indicators.strategyProfile = profile.id;
+    const spreadLimitBps = this.options.maxSpreadBps * profile.spreadFactor;
 
     if (decision.side === 'HOLD') {
       return this.rejectedOrder(
@@ -342,13 +360,33 @@ export class SignalEngine {
       return this.rejectedOrder(symbol, latest.conid, 'Risk per unit is zero', indicators, decision.side, profile.id, generatedFromCandleTs);
     }
 
+    const priceMultiplier = this.priceMultiplierForSymbol(symbol);
+    const fxToBase = this.fxToBaseForSymbol(symbol, riskSnapshot);
+    if (fxToBase === undefined) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `FX rejected: no conversion rate for ${this.currencyForSymbol(symbol)} to account base`,
+        indicators,
+        decision.side,
+        profile.id,
+        generatedFromCandleTs
+      );
+    }
+
+    const notionalEntry = entry * priceMultiplier * fxToBase;
+    const riskPerUnitCash = riskPerUnit * priceMultiplier * fxToBase;
+    if (notionalEntry <= 0 || riskPerUnitCash <= 0) {
+      return this.rejectedOrder(symbol, latest.conid, 'Notional-adjusted risk per unit is zero', indicators, decision.side, profile.id, generatedFromCandleTs);
+    }
+
     const quantityStep = this.quantityStepForSymbol(symbol);
     const effectiveAccountEquity =
       riskSnapshot.accountEquity && Number.isFinite(riskSnapshot.accountEquity) && riskSnapshot.accountEquity > 0
         ? riskSnapshot.accountEquity
         : this.options.riskLimits.accountEquity;
     const maxRiskCash = (effectiveAccountEquity * this.options.riskLimits.maxRiskPerTradePct) / 100;
-    const riskBasedQuantity = this.roundDownToQuantityStep((maxRiskCash / riskPerUnit) * profile.quantityFactor, quantityStep);
+    const riskBasedQuantity = this.roundDownToQuantityStep((maxRiskCash / riskPerUnitCash) * profile.quantityFactor, quantityStep);
 
     if (riskBasedQuantity < quantityStep) {
       return this.rejectedOrder(
@@ -418,10 +456,10 @@ export class SignalEngine {
         );
       }
 
-      const quantityCapByExposure = this.roundDownToQuantityStep(availableExposure / entry, quantityStep);
-      const quantityCapByNotional = this.roundDownToQuantityStep(maxNotionalPerTrade / entry, quantityStep);
-      const quantityCapByDirectionalExposure = this.roundDownToQuantityStep(availableDirectionalExposure / entry, quantityStep);
-      const quantityCapBySymbolExposure = this.roundDownToQuantityStep(availableSymbolExposure / entry, quantityStep);
+      const quantityCapByExposure = this.roundDownToQuantityStep(availableExposure / notionalEntry, quantityStep);
+      const quantityCapByNotional = this.roundDownToQuantityStep(maxNotionalPerTrade / notionalEntry, quantityStep);
+      const quantityCapByDirectionalExposure = this.roundDownToQuantityStep(availableDirectionalExposure / notionalEntry, quantityStep);
+      const quantityCapBySymbolExposure = this.roundDownToQuantityStep(availableSymbolExposure / notionalEntry, quantityStep);
       quantity = this.roundDownToQuantityStep(
         Math.min(
           riskBasedQuantity,
@@ -445,7 +483,7 @@ export class SignalEngine {
         );
       }
 
-      const newNotional = quantity * entry;
+      const newNotional = quantity * notionalEntry;
       if (currentDirectionalExposure + newNotional > maxDirectionalExposure) {
         return this.rejectedOrder(
           symbol,
@@ -540,18 +578,117 @@ export class SignalEngine {
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   }
 
-  private async pickActiveProfile(assetClass: AssetClass, regime: MarketRegime): Promise<StrategyProfile | null> {
+  private async getActiveProfiles(assetClass: AssetClass, regime: MarketRegime): Promise<StrategyProfile[]> {
     const candidates = pickStrategyProfiles(assetClass, regime);
     const now = Date.now();
+    const active: StrategyProfile[] = [];
 
     for (const profile of candidates) {
       const state = await this.repo.getStrategyRuntimeState(profile.id);
       if (!state.enabled || state.permanentlyDisabled) continue;
       if (state.cooldownUntil && state.cooldownUntil.getTime() > now) continue;
-      return profile;
+      active.push(profile);
     }
 
-    return null;
+    return active;
+  }
+
+  private buildTimeframeSnapshot(candles: Candle[]): TimeframeIndicatorSnapshot | undefined {
+    if (candles.length < 20) return undefined;
+
+    const closes = candles.map((candle) => candle.close);
+    const highs = candles.map((candle) => candle.high);
+    const lows = candles.map((candle) => candle.low);
+    const latest = candles[candles.length - 1];
+    const ema20 = lastEma(closes, 20);
+    const ema50 = lastEma(closes, 50);
+    const ema200 = lastEma(closes, 200);
+    const macd = lastMacd(closes);
+    const bb = lastBollinger(closes, 20);
+    const atr14 = lastAtr(highs, lows, closes, 14);
+    let trend: TimeframeIndicatorSnapshot['trend'] = 'neutral';
+    if (ema20 !== undefined && ema50 !== undefined && latest.close > ema50 && ema20 > ema50) trend = 'bullish';
+    if (ema20 !== undefined && ema50 !== undefined && latest.close < ema50 && ema20 < ema50) trend = 'bearish';
+
+    return {
+      close: latest.close,
+      ema20,
+      ema50,
+      ema200,
+      rsi14: lastRsi(closes, 14),
+      atr14,
+      macdHist: macd.histogram,
+      bbWidthPct: bb.widthPct,
+      volume: latest.volume,
+      trend,
+      priceVsEma50Bps: ema50 !== undefined ? safeDiv(latest.close - ema50, latest.close, 0) * 10000 : undefined
+    };
+  }
+
+  private selectStrategyCandidate(input: {
+    symbol: string;
+    assetClass: AssetClass;
+    profiles: StrategyProfile[];
+    price: number;
+    indicators: IndicatorSnapshot;
+    volume: number;
+    spreadBps: number;
+    existingPositionQty: number;
+  }): { candidate?: StrategyCandidate; reason: string } {
+    let best: StrategyCandidate | undefined;
+    const rejections: string[] = [];
+
+    for (const profile of input.profiles) {
+      const profileIndicators: IndicatorSnapshot = {
+        ...input.indicators,
+        strategyProfile: profile.id
+      };
+      const applyVolumeFilter = profile.requireVolume && this.options.volumeFilterMode === 'strict';
+      if (applyVolumeFilter && input.volume < this.options.minVolume1m) {
+        rejections.push(`Liquidity filter rejected ${profile.id}: low 1m volume`);
+        continue;
+      }
+
+      const spreadLimitBps = this.options.maxSpreadBps * profile.spreadFactor;
+      if (input.spreadBps > spreadLimitBps) {
+        rejections.push(`Spread filter rejected ${profile.id} (${input.spreadBps.toFixed(2)} bps > ${spreadLimitBps.toFixed(2)} bps)`);
+        continue;
+      }
+
+      const decision = this.scoreDecision(profile, input.price, profileIndicators);
+      if (decision.side === 'HOLD') {
+        rejections.push(`No edge for ${profile.id}: buy=${decision.buyScore.toFixed(2)}, sell=${decision.sellScore.toFixed(2)}`);
+        continue;
+      }
+
+      const closesOrReducesPosition =
+        (decision.side === 'BUY' && input.existingPositionQty < -1e-12) ||
+        (decision.side === 'SELL' && input.existingPositionQty > 1e-12);
+
+      if (!closesOrReducesPosition && this.options.strategyAllowlistMode === 'enforce' && !isStrategyAllowed(profile.id, input.symbol, decision.side)) {
+        rejections.push(`Allowlist rejected: ${profile.id}/${input.symbol.toUpperCase()}/${decision.side} is not configured`);
+        continue;
+      }
+
+      const qualityRejection = closesOrReducesPosition
+        ? null
+        : this.evaluateEntryQuality(input.symbol, input.assetClass, profile, decision, input.price, profileIndicators);
+      if (qualityRejection) {
+        rejections.push(`${profile.id}: ${qualityRejection}`);
+        continue;
+      }
+
+      if (!best || decision.score > best.decision.score) {
+        best = { profile, decision };
+      }
+    }
+
+    return {
+      candidate: best,
+      reason: best
+        ? `Selected ${best.profile.id}`
+        : rejections.slice(0, 5).join(' | ') || 'Strategy gate rejected: no profile produced an allowed signal'
+    };
   }
 
   private evaluateEntryQuality(
@@ -565,18 +702,26 @@ export class SignalEngine {
     if (decision.side !== 'BUY' && decision.side !== 'SELL') return null;
 
     if (profile.style === 'trend') {
-      if (decision.side === 'BUY' && (indicators.rsi14 ?? 50) > 68) {
+      const buyRsiLimit = profile.assetClass === 'index'
+        ? 72
+        : 70;
+      const sellRsiLimit = profile.assetClass === 'index'
+        ? 30
+        : 34;
+
+      if (decision.side === 'BUY' && (indicators.rsi14 ?? 50) > buyRsiLimit) {
         return `Entry quality rejected: trend BUY is overextended (RSI14=${indicators.rsi14?.toFixed(2)})`;
       }
 
-      if (decision.side === 'SELL' && (indicators.rsi14 ?? 50) < 36) {
+      if (decision.side === 'SELL' && (indicators.rsi14 ?? 50) < sellRsiLimit) {
         return `Entry quality rejected: trend SELL is overextended (RSI14=${indicators.rsi14?.toFixed(2)})`;
       }
 
       if (assetClass === 'stock' && decision.side === 'BUY') {
         const has1hTrend = indicators.trendFilterSource === 'EMA50_1h';
         const aligned1h = price > (indicators.trendFilterValue ?? price);
-        if (!has1hTrend || !aligned1h) {
+        const alignedLocalTrend = price > indicators.ema200! && indicators.ema20! > indicators.ema50!;
+        if (!((has1hTrend && aligned1h) || alignedLocalTrend)) {
           return `Entry quality rejected: stock trend BUY lacks 1h trend alignment (${symbol})`;
         }
       }
@@ -592,8 +737,13 @@ export class SignalEngine {
     }
 
     if (profile.style === 'range') {
-      const lowerZoneTop = indicators.bbLower! + (indicators.bbMiddle! - indicators.bbLower!) * 0.38;
-      const upperZoneBottom = indicators.bbUpper! - (indicators.bbUpper! - indicators.bbMiddle!) * 0.38;
+      const zoneFactor = assetClass === 'stock'
+        ? 0.58
+        : assetClass === 'commodity'
+          ? 0.55
+          : 0.52;
+      const lowerZoneTop = indicators.bbLower! + (indicators.bbMiddle! - indicators.bbLower!) * zoneFactor;
+      const upperZoneBottom = indicators.bbUpper! - (indicators.bbUpper! - indicators.bbMiddle!) * zoneFactor;
       const rsiPrev = indicators.rsi14Prev;
       const rsiNow = indicators.rsi14!;
       const macdImproving = indicators.macdHistPrev !== undefined && indicators.macdHist !== undefined
@@ -605,18 +755,20 @@ export class SignalEngine {
 
       if (decision.side === 'BUY') {
         const rsiReversal = rsiPrev !== undefined
-          ? (rsiPrev <= 42 && rsiNow > rsiPrev) || rsiNow <= 36
-          : rsiNow <= 40;
-        if (!(price <= lowerZoneTop && rsiReversal && macdImproving)) {
+          ? (rsiPrev <= 45 && rsiNow > rsiPrev) || rsiNow <= 38
+          : rsiNow <= 42;
+        const rsiExtreme = rsiNow <= (assetClass === 'stock' ? 38 : 40);
+        if (!(price <= lowerZoneTop && rsiReversal && (macdImproving || rsiExtreme))) {
           return `Entry quality rejected: range BUY lacks lower-band reversal (price=${price.toFixed(4)}, RSI14=${rsiNow.toFixed(2)})`;
         }
       }
 
       if (decision.side === 'SELL') {
         const rsiReversal = rsiPrev !== undefined
-          ? (rsiPrev >= 58 && rsiNow < rsiPrev) || rsiNow >= 64
-          : rsiNow >= 60;
-        if (!(price >= upperZoneBottom && rsiReversal && macdWeakening)) {
+          ? (rsiPrev >= 55 && rsiNow < rsiPrev) || rsiNow >= 62
+          : rsiNow >= 58;
+        const rsiExtreme = rsiNow >= (assetClass === 'stock' ? 62 : 60);
+        if (!(price >= upperZoneBottom && rsiReversal && (macdWeakening || rsiExtreme))) {
           return `Entry quality rejected: range SELL lacks upper-band reversal (price=${price.toFixed(4)}, RSI14=${rsiNow.toFixed(2)})`;
         }
       }
@@ -705,9 +857,9 @@ export class SignalEngine {
     const macdMagnitude = Math.abs(indicators.macdHist ?? 0);
 
     const thresholds = {
-      stock: { atrHigh: 0.012, bbHigh: 0.05, trendBps: 22 },
-      commodity: { atrHigh: 0.018, bbHigh: 0.06, trendBps: 18 },
-      index: { atrHigh: 0.01, bbHigh: 0.045, trendBps: 16 }
+      stock: { atrHigh: 0.01, bbHigh: 0.045, trendBps: 18 },
+      commodity: { atrHigh: 0.014, bbHigh: 0.052, trendBps: 14 },
+      index: { atrHigh: 0.0085, bbHigh: 0.04, trendBps: 12 }
     }[assetClass];
 
     if (atrPct >= thresholds.atrHigh || bbWidthPct >= thresholds.bbHigh) {
@@ -891,13 +1043,16 @@ export class SignalEngine {
       }
     }
 
-    if (profile.assetClass === 'stock') {
+    if (profile.assetClass === 'stock' && profile.style !== 'range') {
       if ((indicators.macdHist ?? 0) <= 0) buyScore *= 0.82;
       if ((indicators.macdHist ?? 0) >= 0) sellScore *= 0.94;
       if ((indicators.rsi14 ?? 50) > 66) buyScore *= 0.88;
       if ((indicators.rsi14 ?? 50) < 34) sellScore *= 0.9;
       if (price < indicators.ema20!) buyScore *= 0.85;
       if (price > indicators.ema20!) sellScore *= 0.94;
+    } else if (profile.assetClass === 'stock') {
+      if ((indicators.rsi14 ?? 50) > 54) buyScore *= 0.88;
+      if ((indicators.rsi14 ?? 50) < 46) sellScore *= 0.9;
     }
 
     if (profile.regime === 'high_volatility') {
@@ -950,10 +1105,10 @@ export class SignalEngine {
       ? Math.max(0, Math.floor((latestCandleTs.getTime() - latestFilled.executedAt.getTime()) / 60000))
       : 0;
     const maxHoldMinutes = profile.style === 'range'
-      ? 30
+      ? 60
       : profile.style === 'trend'
-        ? 120
-        : 90;
+        ? 240
+        : 150;
 
     const longMomentumBroken =
       latestClose < (indicators.trendFilterValue ?? latestClose) &&
@@ -983,7 +1138,7 @@ export class SignalEngine {
     const profitProtectTriggered =
       pnlPct !== undefined &&
       pnlPct > 0 &&
-      (rMultiple === undefined || rMultiple >= 0.5) &&
+      (rMultiple === undefined || rMultiple >= 0.7) &&
       (
         (isLong && latestClose < indicators.ema20! && (indicators.macdHist ?? 0) < (indicators.macdHistPrev ?? indicators.macdHist ?? 0)) ||
         (!isLong && latestClose > indicators.ema20! && (indicators.macdHist ?? 0) > (indicators.macdHistPrev ?? indicators.macdHist ?? 0))
@@ -1059,6 +1214,24 @@ export class SignalEngine {
     return this.options.fractionalSymbols.has(symbol.toUpperCase())
       ? this.options.fractionalQuantityStep
       : 1;
+  }
+
+  private priceMultiplierForSymbol(symbol: string): number {
+    const multiplier = this.options.priceMultiplierBySymbol[symbol.toUpperCase()];
+    return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+  }
+
+  private currencyForSymbol(symbol: string): string {
+    return (this.options.currencyBySymbol[symbol.toUpperCase()] ?? this.options.baseCurrency).trim().toUpperCase();
+  }
+
+  private fxToBaseForSymbol(symbol: string, riskSnapshot: ExposureSnapshot): number | undefined {
+    const currency = this.currencyForSymbol(symbol);
+    const baseCurrency = this.options.baseCurrency.trim().toUpperCase();
+    if (currency === baseCurrency) return 1;
+
+    const rate = riskSnapshot.fxToBaseByCurrency?.[currency];
+    return Number.isFinite(rate) && Number(rate) > 0 ? Number(rate) : undefined;
   }
 
   private roundDownToQuantityStep(value: number, step: number): number {

@@ -103,6 +103,7 @@ function buildIndicatorSummary(order: ClaimedOrder): {
   assetClass?: IndicatorSnapshot['assetClass'];
   regime?: IndicatorSnapshot['regime'];
   strategyProfile?: string;
+  timeframes?: IndicatorSnapshot['timeframes'];
 } | null {
   const indicators = order.indicators;
   if (!indicators) return null;
@@ -119,7 +120,8 @@ function buildIndicatorSummary(order: ClaimedOrder): {
     trendFilterSource: indicators.trendFilterSource,
     assetClass: indicators.assetClass,
     regime: indicators.regime,
-    strategyProfile: indicators.strategyProfile
+    strategyProfile: indicators.strategyProfile,
+    timeframes: indicators.timeframes
   };
 }
 

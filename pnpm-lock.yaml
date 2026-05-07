@@ -8,6 +8,43 @@ importers:
 
   .: {}
 
+  apps/backtest-engine:
+    dependencies:
+      '@ikbr/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@ikbr/signal-engine':
+        specifier: workspace:*
+        version: link:../signal-engine
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.6.1
+      fastify:
+        specifier: ^5.0.0
+        version: 5.8.5
+      ib:
+        specifier: ^0.2.8
+        version: 0.2.9
+      pg:
+        specifier: ^8.13.0
+        version: 8.20.0
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^22.7.4
+        version: 22.19.17
+      '@types/pg':
+        specifier: ^8.11.10
+        version: 8.20.0
+      tsx:
+        specifier: ^4.19.1
+        version: 4.21.0
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   apps/execution-engine:
     dependencies:
       '@ikbr/shared':

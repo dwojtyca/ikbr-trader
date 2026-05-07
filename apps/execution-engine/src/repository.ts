@@ -52,6 +52,7 @@ interface ProposedOrderRow {
 export interface CumulativeRealizedPnlSummary {
   pnl: number;
   missingCommissionReports: number;
+  missingFxRates: number;
   complete: boolean;
 }
 
@@ -138,6 +139,7 @@ export class ExecutionRepository {
     const baseCurrency = options.baseCurrency.trim().toUpperCase();
     let realizedPnL = 0;
     let missingCommissionReports = 0;
+    let missingFxRates = 0;
 
     for (const row of result.rows as Array<{
       exec_id: string;
@@ -151,7 +153,10 @@ export class ExecutionRepository {
         options.fxToBaseByCurrency?.[pnlCurrency] ?? (pnlCurrency === baseCurrency ? 1 : NaN),
         NaN
       );
-      const convertedFx = Number.isFinite(fxToBase) && fxToBase > 0 ? fxToBase : 1;
+      if (!Number.isFinite(fxToBase) || fxToBase <= 0) {
+        missingFxRates += 1;
+        continue;
+      }
       const commission = this.toFiniteNumber(row.commission, 0);
       const realized = this.normalizeBrokerRealizedPnl(row.realized_pnl);
 
@@ -159,13 +164,14 @@ export class ExecutionRepository {
         missingCommissionReports += 1;
       }
 
-      realizedPnL += (realized - commission) * convertedFx;
+      realizedPnL += (realized - commission) * fxToBase;
     }
 
     return {
       pnl: realizedPnL,
       missingCommissionReports,
-      complete: result.rowCount !== 0 && missingCommissionReports === 0
+      missingFxRates,
+      complete: result.rowCount !== 0 && missingCommissionReports === 0 && missingFxRates === 0
     };
   }
 

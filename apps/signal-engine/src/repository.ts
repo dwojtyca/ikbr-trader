@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
-import { Candle, IndicatorSnapshot, ProposedOrder, ProposedOrderStatus, RiskCheckStatus, Side } from '@ikbr/shared';
+import { Candle, CandleTimeframe, IndicatorSnapshot, ProposedOrder, ProposedOrderStatus, RiskCheckStatus, Side } from '@ikbr/shared';
 
 interface StoredMarketState {
   conid: string;
@@ -143,6 +143,7 @@ export interface SignalReport {
   overview: SignalReportOverview;
   bySymbol: SignalReportAggregate[];
   byStrategy: SignalReportAggregate[];
+  byStrategySymbolSide: SignalReportAggregate[];
   bySide: SignalReportAggregate[];
   byRegime: SignalReportAggregate[];
   worstTrades: SignalReportTrade[];
@@ -154,6 +155,7 @@ export interface ExposureSnapshot {
   source: 'execution' | 'db';
   positionsBySymbol: Record<string, number>;
   accountEquity?: number;
+  fxToBaseByCurrency?: Record<string, number>;
   longExposure?: number;
   shortExposure?: number;
   positionContextsBySymbol?: Record<string, {
@@ -184,7 +186,7 @@ export class SignalRepository {
   ) {}
 
   async init(): Promise<void> {
-    for (const table of ['candles_1m', 'candles_5m', 'candles_1h'] as const) {
+    for (const table of ['candles_1m', 'candles_5m', 'candles_1h', 'candles_4h', 'candles_12h', 'candles_1d'] as const) {
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
           conid TEXT NOT NULL,
@@ -314,9 +316,13 @@ export class SignalRepository {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+
+    await this.pool.query(`
+      DROP TABLE IF EXISTS strategy_symbol_policy;
+    `);
   }
 
-  async getRecentCandles(symbol: string, timeframe: Candle['timeframe'], limit: number): Promise<Candle[]> {
+  async getRecentCandles(symbol: string, timeframe: CandleTimeframe, limit: number): Promise<Candle[]> {
     const table = this.tableForTimeframe(timeframe);
     const result = await this.pool.query(
       `
@@ -1095,6 +1101,7 @@ export class SignalRepository {
     const aggregateResults = await Promise.all([
       this.queryReportAggregate(baseCte, boundedLimit, 'instrument'),
       this.queryReportAggregate(baseCte, boundedLimit, 'strategy', strategyIds),
+      this.queryReportAggregate(baseCte, boundedLimit, 'strategy_symbol_side'),
       this.queryReportAggregate(baseCte, boundedLimit, 'side'),
       this.queryReportAggregate(baseCte, boundedLimit, 'regime')
     ]);
@@ -1163,8 +1170,9 @@ export class SignalRepository {
       },
       bySymbol: aggregateResults[0],
       byStrategy: aggregateResults[1],
-      bySide: aggregateResults[2],
-      byRegime: aggregateResults[3],
+      byStrategySymbolSide: aggregateResults[2],
+      bySide: aggregateResults[3],
+      byRegime: aggregateResults[4],
       worstTrades: worstTradesResult.rows.map((row) => ({
         orderId: Number(row.order_id),
         instrument: String(row.instrument),
@@ -1233,12 +1241,13 @@ export class SignalRepository {
   private async queryReportAggregate(
     baseCte: string,
     limit: number,
-    dimension: 'instrument' | 'strategy' | 'side' | 'regime',
+    dimension: 'instrument' | 'strategy' | 'strategy_symbol_side' | 'side' | 'regime',
     strategyIds: string[] = []
   ): Promise<SignalReportAggregate[]> {
     const keySqlByDimension = {
       instrument: 'instrument',
       strategy: 'strategy',
+      strategy_symbol_side: "strategy || ' / ' || instrument || ' / ' || side",
       side: 'side',
       regime: 'regime'
     } satisfies Record<typeof dimension, string>;
@@ -1304,6 +1313,7 @@ export class SignalRepository {
       return this.mapReportAggregateRows(result.rows);
     }
 
+    const aggregateLimit = dimension === 'strategy_symbol_side' ? 50 : 12;
     const result = await this.pool.query(
       `
       ${baseCte},
@@ -1335,7 +1345,7 @@ export class SignalRepository {
       FROM aggregate
       LEFT JOIN strategy_runtime_state srs ON ${strategyStatusJoin}
       ORDER BY trades DESC, key ASC
-      LIMIT 12
+      LIMIT ${aggregateLimit}
       `,
       [limit]
     );
@@ -1406,6 +1416,7 @@ export class SignalRepository {
             marketValue?: number | string;
             unrealizedPnL?: number | string;
           }>;
+          fxToBaseByCurrency?: Record<string, number | string | undefined>;
         };
 
         const exposure = Number(payload?.totals?.grossExposure);
@@ -1445,6 +1456,11 @@ export class SignalRepository {
           source: 'execution',
           positionsBySymbol,
           accountEquity: Number.isFinite(accountEquity) && accountEquity > 0 ? accountEquity : undefined,
+          fxToBaseByCurrency: Object.fromEntries(
+            Object.entries(payload.fxToBaseByCurrency ?? {})
+              .map(([currency, rate]) => [currency.toUpperCase(), Number(rate)])
+              .filter(([, rate]) => Number.isFinite(rate) && Number(rate) > 0)
+          ),
           longExposure: Number.isFinite(longExposure) ? longExposure : undefined,
           shortExposure: Number.isFinite(shortExposure) ? shortExposure : undefined,
           positionContextsBySymbol
@@ -1495,6 +1511,9 @@ export class SignalRepository {
   private tableForTimeframe(timeframe: Candle['timeframe']): string {
     if (timeframe === '1m') return 'candles_1m';
     if (timeframe === '5m') return 'candles_5m';
-    return 'candles_1h';
+    if (timeframe === '1h') return 'candles_1h';
+    if (timeframe === '4h') return 'candles_4h';
+    if (timeframe === '12h') return 'candles_12h';
+    return 'candles_1d';
   }
 }

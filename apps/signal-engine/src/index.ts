@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 import { z } from 'zod';
-import { ProposedOrder } from '@ikbr/shared';
+import { listStrategyAllowlist, ProposedOrder } from '@ikbr/shared';
 import { config } from './config.js';
 import { SignalRepository } from './repository.js';
 import { SignalEngine } from './signal-engine.js';
@@ -31,10 +31,14 @@ const engine = new SignalEngine(repo, {
     commodity: config.SIGNAL_MIN_STOP_BPS_COMMODITY
   },
   maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
+  baseCurrency: config.baseCurrency,
   assetClassBySymbol: config.assetClassOverrides,
+  currencyBySymbol: config.currencyBySymbol,
+  priceMultiplierBySymbol: config.priceMultiplierOverrides,
   executionBaseUrl: config.EXECUTION_BASE_URL,
   strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
   symbolAddLossLimit: config.SIGNAL_SYMBOL_ADD_LOSS_LIMIT,
+  strategyAllowlistMode: 'enforce',
   riskLimits: {
     accountEquity: config.ACCOUNT_EQUITY,
     maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,
@@ -191,6 +195,10 @@ app.post('/signals/strategies/:strategyId', async (request, reply) => {
   const runtime = await repo.setStrategyManualEnabled(strategyId, parsed.data.enabled);
   return { strategyId, runtime };
 });
+
+app.get('/signals/strategy-allowlist', async () => ({
+  allowlist: listStrategyAllowlist()
+}));
 
 async function main(): Promise<void> {
   await repo.init();

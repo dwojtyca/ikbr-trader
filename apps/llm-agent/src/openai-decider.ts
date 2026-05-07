@@ -25,6 +25,7 @@ export interface DecisionContext {
     assetClass?: IndicatorSnapshot['assetClass'];
     regime?: IndicatorSnapshot['regime'];
     strategyProfile?: string;
+    timeframes?: IndicatorSnapshot['timeframes'];
   } | null;
   accountSummary: {
     accountId: string;
@@ -104,6 +105,9 @@ export class OpenAiDecider {
       '- As a rule of thumb, OPEN_OR_ADD trades above roughly 8% of netLiquidation or that clearly dominate existing portfolio concentration should usually be rejected unless there is exceptional support.',
       '- If the order closes or reduces an existing position, that can be a positive factor.',
       '- Treat indicatorSummary as a compact technical snapshot from the signal engine.',
+      '- indicatorSummary.timeframes contains compact 5m/1h/4h/12h/1d confirmation snapshots; use higher timeframe alignment as stronger evidence than the latest 1m candle alone.',
+      '- For new longs, 4h/1d bullish or neutral alignment is supportive; bearish higher timeframes should lower conviction unless the strategy is explicitly mean-reversion.',
+      '- For new shorts, 4h/1d bearish or neutral alignment is supportive; bullish higher timeframes should lower conviction unless the strategy is explicitly mean-reversion.',
       '- Global technical heuristics: for longs, ema20 > ema50 and ema50 >= ema200 is supportive; for shorts, ema20 < ema50 and ema50 <= ema200 is supportive.',
       '- Global technical heuristics: a positive macdHist supports longs; a negative macdHist supports shorts. A contradictory MACD reading weakens conviction.',
       '- Global technical heuristics: RSI above 70 should make you more cautious about opening new longs; RSI below 30 should make you more cautious about opening new shorts.',

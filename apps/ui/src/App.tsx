@@ -180,6 +180,9 @@ type ReportOverview = {
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
+  profitFactor?: number;
+  maxDrawdown?: number;
+  symbolsTraded?: number;
   takeProfitHits: number;
   stopHits: number;
 };
@@ -202,6 +205,9 @@ type ReportAggregate = {
   avgPnlPct?: number;
   medianPnlPct?: number;
   avgConfidence?: number;
+  profitFactor?: number;
+  maxDrawdown?: number;
+  symbolsTraded?: number;
   takeProfitHits: number;
   stopHits: number;
 };
@@ -224,13 +230,45 @@ type ReportTrade = {
 type SignalReportResponse = {
   generatedAt: string;
   limit: number;
-  source?: 'broker_fills';
+  source?: 'broker_fills' | 'backtest';
+  runId?: number;
+  runMode?: 'bot' | 'isolated';
   overview: ReportOverview;
   bySymbol: ReportAggregate[];
   byStrategy: ReportAggregate[];
+  byStrategySymbolSide?: ReportAggregate[];
   bySide: ReportAggregate[];
   byRegime: ReportAggregate[];
   worstTrades: ReportTrade[];
+};
+
+type BacktestDataset = {
+  id: number;
+  dateFrom: string;
+  dateTo: string;
+  status: string;
+  symbols: string[];
+  candlesCount: number;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+};
+
+type BacktestRun = {
+  id: number;
+  datasetId: number;
+  mode: 'bot' | 'isolated';
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  totalPnl?: number;
+  trades?: number;
+  winRate?: number;
+  progressCurrent?: number;
+  progressTotal?: number;
+  progressLabel?: string;
+  progressUpdatedAt?: string;
 };
 
 async function requestJson<T>(input: RequestInfo, init?: RequestInit): Promise<T> {
@@ -290,6 +328,11 @@ function formatPnlPct(value?: number | null): string {
   return `${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}%`;
 }
 
+function dateInputValue(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 function formatCancelReasonLabel(value?: Order['cancelReasonCode']): string {
   switch (value) {
     case 'submitted_timeout':
@@ -324,9 +367,23 @@ export function App() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [accountSummary, setAccountSummary] = useState<AccountSummaryResponse | null>(null);
   const [report, setReport] = useState<SignalReportResponse | null>(null);
+  const [backtestReport, setBacktestReport] = useState<SignalReportResponse | null>(null);
+  const [backtestDataset, setBacktestDataset] = useState<BacktestDataset | null>(null);
+  const [backtestRuns, setBacktestRuns] = useState<BacktestRun[]>([]);
+  const [selectedBacktestRunId, setSelectedBacktestRunId] = useState<string>('');
+  const [backtestDateFrom, setBacktestDateFrom] = useState(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 60);
+    return dateInputValue(date);
+  });
+  const [backtestDateTo, setBacktestDateTo] = useState(() => dateInputValue(new Date()));
   const [loadingReport, setLoadingReport] = useState(false);
+  const [loadingBacktest, setLoadingBacktest] = useState(false);
+  const [backtestJobRunning, setBacktestJobRunning] = useState(false);
+  const [backtestRunJobRunning, setBacktestRunJobRunning] = useState(false);
   const [strategyToggleBusy, setStrategyToggleBusy] = useState<string | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
   const [watchlistExpanded, setWatchlistExpanded] = useState(false);
   const [orderFilters, setOrderFilters] = useState<OrderFilters>({
     instrument: '',
@@ -345,9 +402,11 @@ export function App() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [expandedAiOrderRows, setExpandedAiOrderRows] = useState<Record<string, boolean>>({});
   const [openActionMenuRowKey, setOpenActionMenuRowKey] = useState<string | null>(null);
-  const [route, setRoute] = useState<'console' | 'report'>(() =>
-    window.location.pathname === '/report' ? 'report' : 'console'
-  );
+  const [route, setRoute] = useState<'console' | 'report' | 'backtest'>(() => {
+    if (window.location.pathname === '/report') return 'report';
+    if (window.location.pathname === '/backtest') return 'backtest';
+    return 'console';
+  });
 
   const [lastAction, setLastAction] = useState<string>('Ready');
   const [lastError, setLastError] = useState<string | null>(null);
@@ -371,6 +430,19 @@ export function App() {
     () => Object.values(orderFilters).some((value) => value.trim() !== ''),
     [orderFilters]
   );
+  const visibleBacktestRun = useMemo(() => {
+    const running = backtestRuns.find((run) => run.status === 'running');
+    if (running) return running;
+    if (selectedBacktestRunId) return backtestRuns.find((run) => String(run.id) === selectedBacktestRunId);
+    return backtestRuns[0];
+  }, [backtestRuns, selectedBacktestRunId]);
+  const visibleBacktestProgressPct = useMemo(() => {
+    if (!visibleBacktestRun?.progressTotal || visibleBacktestRun.progressTotal <= 0) return undefined;
+    return Math.max(
+      0,
+      Math.min(100, ((visibleBacktestRun.progressCurrent ?? 0) / visibleBacktestRun.progressTotal) * 100)
+    );
+  }, [visibleBacktestRun]);
   const ingestionStatusExtra = useMemo(() => {
     const parts = [watchlist?.connected ? 'socket:on' : 'socket:off'];
     const tickAge = formatAgeShort(ingestionHealth?.lastTickAt ?? null);
@@ -496,6 +568,108 @@ export function App() {
     }
   }
 
+  async function refreshBacktestStatus(options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) setLoadingBacktest(true);
+    setBacktestError(null);
+    try {
+      const [datasetResponse, runsResponse] = await Promise.all([
+        requestJson<{ dataset: BacktestDataset | null; historyJobRunning: boolean }>('/api/backtest/backtest/dataset'),
+        requestJson<{ runs: BacktestRun[]; runJobRunning: boolean }>('/api/backtest/backtest/runs')
+      ]);
+      setBacktestDataset(datasetResponse.dataset);
+      setBacktestJobRunning(datasetResponse.historyJobRunning);
+      setBacktestRuns(runsResponse.runs);
+      setBacktestRunJobRunning(runsResponse.runJobRunning);
+
+      const completed = runsResponse.runs.find((run) => run.status === 'completed');
+      const selectedRunExists = selectedBacktestRunId
+        ? runsResponse.runs.some((run) => String(run.id) === selectedBacktestRunId)
+        : false;
+
+      if (selectedBacktestRunId && !selectedRunExists) {
+        setSelectedBacktestRunId('');
+        setBacktestReport(null);
+      } else if (!selectedBacktestRunId && completed) {
+        setSelectedBacktestRunId(String(completed.id));
+      }
+    } catch (error) {
+      setBacktestError((error as Error).message);
+    } finally {
+      if (!silent) setLoadingBacktest(false);
+    }
+  }
+
+  async function refreshBacktestReport(runId?: string, options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) setLoadingBacktest(true);
+    setBacktestError(null);
+    try {
+      const suffix = runId ? `?runId=${encodeURIComponent(runId)}` : '';
+      const data = await requestJson<SignalReportResponse>(`/api/backtest/backtest/report${suffix}`);
+      setBacktestReport(data);
+      if (data.runId) setSelectedBacktestRunId(String(data.runId));
+    } catch (error) {
+      setBacktestError((error as Error).message);
+      if (!silent) setBacktestReport(null);
+    } finally {
+      if (!silent) setLoadingBacktest(false);
+    }
+  }
+
+  async function fetchBacktestHistory() {
+    setLoadingBacktest(true);
+    setBacktestError(null);
+    setSelectedBacktestRunId('');
+    setBacktestReport(null);
+    try {
+      await requestJson('/api/backtest/backtest/history', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ dateFrom: backtestDateFrom, dateTo: backtestDateTo })
+      });
+      await refreshBacktestStatus({ silent: true });
+    } catch (error) {
+      setBacktestError((error as Error).message);
+    } finally {
+      setLoadingBacktest(false);
+    }
+  }
+
+  async function resumeBacktestHistory() {
+    setLoadingBacktest(true);
+    setBacktestError(null);
+    try {
+      await requestJson('/api/backtest/backtest/history/resume', {
+        method: 'POST'
+      });
+      await refreshBacktestStatus({ silent: true });
+    } catch (error) {
+      setBacktestError((error as Error).message);
+    } finally {
+      setLoadingBacktest(false);
+    }
+  }
+
+  async function runBacktest(mode: 'bot' | 'isolated') {
+    setLoadingBacktest(true);
+    setBacktestError(null);
+    try {
+      const response = await requestJson<{ run: BacktestRun; runJobRunning: boolean }>('/api/backtest/backtest/run', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode })
+      });
+      setSelectedBacktestRunId(String(response.run.id));
+      setBacktestReport(null);
+      await refreshBacktestStatus({ silent: true });
+    } catch (error) {
+      setBacktestError((error as Error).message);
+    } finally {
+      setLoadingBacktest(false);
+    }
+  }
+
   async function toggleStrategy(row: ReportAggregate) {
     if (!hasStrategyRuntime(row)) return;
 
@@ -543,8 +717,8 @@ export function App() {
     }
   }
 
-  function navigate(nextRoute: 'console' | 'report'): void {
-    const nextPath = nextRoute === 'report' ? '/report' : '/';
+  function navigate(nextRoute: 'console' | 'report' | 'backtest'): void {
+    const nextPath = nextRoute === 'report' ? '/report' : nextRoute === 'backtest' ? '/backtest' : '/';
     if (window.location.pathname !== nextPath) {
       window.history.pushState({}, '', nextPath);
     }
@@ -640,7 +814,9 @@ export function App() {
 
   useEffect(() => {
     const onPopState = () => {
-      setRoute(window.location.pathname === '/report' ? 'report' : 'console');
+      if (window.location.pathname === '/report') setRoute('report');
+      else if (window.location.pathname === '/backtest') setRoute('backtest');
+      else setRoute('console');
     };
 
     window.addEventListener('popstate', onPopState);
@@ -673,6 +849,10 @@ export function App() {
   useEffect(() => {
     if (route === 'report') {
       void refreshReport();
+      return;
+    }
+    if (route === 'backtest') {
+      void refreshBacktestStatus();
       return;
     }
     void refreshAll();
@@ -751,6 +931,24 @@ export function App() {
     return () => clearInterval(interval);
   }, [route]);
 
+  useEffect(() => {
+    if (route !== 'backtest') return;
+    const interval = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void refreshBacktestStatus({ silent: true })
+        .then(() => {
+          const selectedRun = backtestRuns.find((run) => String(run.id) === selectedBacktestRunId);
+          if (selectedRun?.status === 'completed') {
+            return refreshBacktestReport(selectedBacktestRunId, { silent: true });
+          }
+          return undefined;
+        })
+        .catch(() => {});
+    }, backtestRunJobRunning || backtestJobRunning ? 2000 : 5000);
+
+    return () => clearInterval(interval);
+  }, [route, selectedBacktestRunId, backtestRuns, backtestRunJobRunning, backtestJobRunning]);
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -758,6 +956,8 @@ export function App() {
         <p>
           {route === 'report'
             ? 'Raport skuteczności strategii na bazie rzeczywistych filli IBKR.'
+            : route === 'backtest'
+              ? 'Backtest strategii na odseparowanych danych historycznych.'
             : 'Ingestion, signal engine i execution w jednym panelu operatorskim.'}
         </p>
         <div className="nav-row">
@@ -767,10 +967,110 @@ export function App() {
           <button type="button" className={`nav-link ${route === 'report' ? 'active' : ''}`} onClick={() => navigate('report')}>
             Report
           </button>
+          <button type="button" className={`nav-link ${route === 'backtest' ? 'active' : ''}`} onClick={() => navigate('backtest')}>
+            Backtest
+          </button>
         </div>
       </header>
 
-      {route === 'report' ? (
+      {route === 'backtest' ? (
+        <>
+          <section className="panel controls">
+            <div className="panel-head">
+              <h2>Backtest Dataset</h2>
+              <span>{backtestJobRunning ? 'history fetch running...' : backtestDataset ? `dataset ${backtestDataset.status}` : 'no dataset'}</span>
+            </div>
+            <div className="filters-row">
+              <input type="date" value={backtestDateFrom} onChange={(event) => setBacktestDateFrom(event.target.value)} />
+              <input type="date" value={backtestDateTo} onChange={(event) => setBacktestDateTo(event.target.value)} />
+              <button disabled={loadingBacktest || backtestJobRunning || backtestRunJobRunning} onClick={() => void fetchBacktestHistory()}>
+                Fetch History
+              </button>
+              <button
+                disabled={loadingBacktest || backtestJobRunning || backtestRunJobRunning || backtestDataset?.status !== 'failed'}
+                onClick={() => void resumeBacktestHistory()}
+              >
+                Resume History
+              </button>
+              <button disabled={loadingBacktest || backtestJobRunning || backtestRunJobRunning || backtestDataset?.status !== 'ready'} onClick={() => void runBacktest('bot')}>
+                Run Bot Backtest
+              </button>
+              <button disabled={loadingBacktest || backtestJobRunning || backtestRunJobRunning || backtestDataset?.status !== 'ready'} onClick={() => void runBacktest('isolated')}>
+                Run Strategy Lab
+              </button>
+              <button disabled={loadingBacktest} onClick={() => void refreshBacktestStatus()}>
+                Refresh
+              </button>
+            </div>
+            <div className="meta-row">
+              <span>
+                {backtestDataset
+                  ? `${formatTs(backtestDataset.dateFrom)} - ${formatTs(backtestDataset.dateTo)}, candles: ${formatNum(backtestDataset.candlesCount, 0)}`
+                  : 'Fetch historical data before running a backtest.'}
+              </span>
+              {backtestDataset?.error ? <span className="error">{backtestDataset.error}</span> : null}
+              {backtestError ? <span className="error">{backtestError}</span> : null}
+            </div>
+          </section>
+
+          <section className="panel controls">
+            <div className="panel-head">
+              <h2>Backtest Report</h2>
+              <span>{backtestRunJobRunning ? 'run running...' : backtestReport ? `last refresh ${formatTs(backtestReport.generatedAt)}` : 'not available'}</span>
+            </div>
+            <div className="filters-row">
+              <select
+                value={selectedBacktestRunId}
+                onChange={(event) => {
+                  setSelectedBacktestRunId(event.target.value);
+                  if (event.target.value) void refreshBacktestReport(event.target.value);
+                }}
+              >
+                <option value="">latest completed</option>
+                {backtestRuns.map((run) => (
+                  <option key={run.id} value={run.id}>
+                    #{run.id} {run.mode} {run.status} {run.finishedAt ? formatTs(run.finishedAt) : formatTs(run.startedAt)}
+                  </option>
+                ))}
+              </select>
+              <button disabled={loadingBacktest || !backtestRuns.some((run) => run.status === 'completed')} onClick={() => void refreshBacktestReport(selectedBacktestRunId)}>
+                Refresh Report
+              </button>
+            </div>
+            <div className="meta-row">
+              <span>{backtestReport ? `${backtestReport.runMode ?? 'backtest'} trades: ${backtestReport.limit}` : 'Run a completed backtest to see the report.'}</span>
+            </div>
+            {visibleBacktestRun?.progressTotal ? (
+              <div className="progress-panel">
+                <div className="progress-meta">
+                  <span>
+                    #{visibleBacktestRun.id} {visibleBacktestRun.mode} {visibleBacktestRun.status}
+                    {visibleBacktestRun.progressLabel ? ` - ${visibleBacktestRun.progressLabel}` : ''}
+                  </span>
+                  <span>
+                    {formatNum(visibleBacktestRun.progressCurrent ?? 0, 0)} / {formatNum(visibleBacktestRun.progressTotal, 0)}
+                    {visibleBacktestProgressPct !== undefined ? ` (${formatNum(visibleBacktestProgressPct, 1)}%)` : ''}
+                  </span>
+                </div>
+                <div className="progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={visibleBacktestProgressPct ?? 0}>
+                  <div style={{ width: `${visibleBacktestProgressPct ?? 0}%` }} />
+                </div>
+                {visibleBacktestRun.progressUpdatedAt ? (
+                  <div className="progress-updated">updated {formatTs(visibleBacktestRun.progressUpdatedAt)}</div>
+                ) : null}
+              </div>
+            ) : null}
+          </section>
+
+          {backtestReport ? (
+            <ReportDetails report={backtestReport} strategyToggleBusy={strategyToggleBusy} />
+          ) : (
+            <section className="panel">
+              <div className="muted">Backtest report unavailable.</div>
+            </section>
+          )}
+        </>
+      ) : route === 'report' ? (
         <>
           <section className="panel controls">
             <div className="panel-head">
@@ -853,6 +1153,14 @@ export function App() {
                   onStrategyToggle={toggleStrategy}
                   strategyToggleBusy={strategyToggleBusy}
                 />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Strategy/Symbol/Side</h2>
+                  <span>Combination-level edge map</span>
+                </div>
+                <ReportAggregateTable rows={report.byStrategySymbolSide ?? []} enableNetPnlSort />
               </section>
 
               <section className="panel">
@@ -1391,6 +1699,155 @@ function MetricCard({ label, value, tone }: { label: string; value: string; tone
   );
 }
 
+function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportResponse; strategyToggleBusy?: string | null }) {
+  const weakestSide = report.bySide
+    .filter((row) => row.trades > 0 && row.totalPnl !== undefined)
+    .sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
+  const weakestStrategy = report.byStrategy
+    .filter((row) => row.trades >= 2 && row.totalPnl !== undefined)
+    .sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
+  const weakestSymbol = report.bySymbol
+    .filter((row) => row.trades >= 2 && row.totalPnl !== undefined)
+    .sort((a, b) => (a.totalPnl ?? 0) - (b.totalPnl ?? 0))[0];
+
+  return (
+    <>
+      <section className="panel">
+        <div className="panel-head">
+          <h2>Overview</h2>
+          <span>{report.overview.trades} executions</span>
+        </div>
+        <div className="metrics-grid">
+          <MetricCard label="Executions" value={formatNum(report.overview.trades, 0)} />
+          <MetricCard label="Net PnL" value={formatNum(report.overview.totalPnl)} tone={report.overview.totalPnl} />
+          <MetricCard label="Commissions" value={formatNum(report.overview.commissions)} tone={report.overview.commissions ? -Math.abs(report.overview.commissions) : undefined} />
+          <MetricCard label="Avg Net PnL" value={formatNum(report.overview.avgPnl)} tone={report.overview.avgPnl} />
+          <MetricCard label="Win Rate" value={formatPct(report.overview.winRate)} tone={report.overview.totalPnl} />
+          <MetricCard label="Avg PnL %" value={formatPnlPct(report.overview.avgPnlPct)} tone={report.overview.avgPnlPct} />
+          <MetricCard label="Median PnL %" value={formatPnlPct(report.overview.medianPnlPct)} tone={report.overview.medianPnlPct} />
+          <MetricCard label="Avg Confidence" value={formatPct(report.overview.avgConfidence)} />
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>Highlights</h2>
+          <span>Quick read on current weak spots</span>
+        </div>
+        <div className="report-grid">
+          <div className="metric-card">
+            <small>Weakest Side</small>
+            <strong className={toToneClass(weakestSide?.totalPnl)}>
+              {weakestSide ? `${weakestSide.key} (${formatNum(weakestSide.totalPnl)})` : '-'}
+            </strong>
+          </div>
+          <div className="metric-card">
+            <small>Weakest Strategy</small>
+            <strong className={toToneClass(weakestStrategy?.totalPnl)}>
+              {weakestStrategy ? `${weakestStrategy.key} (${formatNum(weakestStrategy.totalPnl)})` : '-'}
+            </strong>
+          </div>
+          <div className="metric-card">
+            <small>Weakest Symbol</small>
+            <strong className={toToneClass(weakestSymbol?.totalPnl)}>
+              {weakestSymbol ? `${weakestSymbol.key} (${formatNum(weakestSymbol.totalPnl)})` : '-'}
+            </strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Symbol</h2>
+          <span>Most active symbols in current sample</span>
+        </div>
+        <ReportAggregateTable rows={report.bySymbol} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Strategy</h2>
+          <span>Profile-level outcome summary</span>
+        </div>
+        <ReportAggregateTable rows={report.byStrategy} showStrategyStatus strategyToggleBusy={strategyToggleBusy} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Strategy/Symbol/Side</h2>
+          <span>Combination-level edge map</span>
+        </div>
+        <ReportAggregateTable rows={report.byStrategySymbolSide ?? []} enableNetPnlSort />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Side</h2>
+          <span>BUY vs SELL quality check</span>
+        </div>
+        <ReportAggregateTable rows={report.bySide} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Regime</h2>
+          <span>How each market regime is behaving</span>
+        </div>
+        <ReportAggregateTable rows={report.byRegime} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>Worst Trades</h2>
+          <span>Lowest PnL trades from current sample</span>
+        </div>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Order ID</th>
+                <th>Symbol</th>
+                <th>Strategy</th>
+                <th>Side</th>
+                <th>Regime</th>
+                <th>Confidence</th>
+                <th>Net PnL</th>
+                <th>Commission</th>
+                <th>PnL %</th>
+                <th>Outcome</th>
+                <th>Executed At</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.worstTrades.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="muted">No fills yet</td>
+                </tr>
+              ) : (
+                report.worstTrades.map((trade) => (
+                  <tr key={trade.orderId}>
+                    <td>{trade.orderId}</td>
+                    <td>{trade.instrument}</td>
+                    <td>{trade.strategy}</td>
+                    <td>{trade.side}</td>
+                    <td>{trade.regime}</td>
+                    <td>{formatPct(trade.confidence)}</td>
+                    <td className={toToneClass(trade.pnl)}>{formatNum(trade.pnl)}</td>
+                    <td>{formatNum(trade.commissions)}</td>
+                    <td className={toToneClass(trade.pnlPct)}>{formatPnlPct(trade.pnlPct)}</td>
+                    <td>{trade.notes}</td>
+                    <td>{formatTs(trade.executedAt)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </>
+  );
+}
+
 function formatStrategyStatus(row: ReportAggregate): { label: string; tone?: number; title?: string } {
   if (!hasStrategyRuntime(row)) {
     return { label: 'n/a' };
@@ -1433,6 +1890,7 @@ function isStrategyRuntimeOn(row: ReportAggregate): boolean {
 type ReportAggregateTableProps = {
   rows: ReportAggregate[];
   showStrategyStatus?: boolean;
+  enableNetPnlSort?: boolean;
   onStrategyToggle?: (row: ReportAggregate) => void;
   strategyToggleBusy?: string | null;
 };
@@ -1440,9 +1898,26 @@ type ReportAggregateTableProps = {
 function ReportAggregateTable({
   rows,
   showStrategyStatus = false,
+  enableNetPnlSort = false,
   onStrategyToggle,
   strategyToggleBusy
 }: ReportAggregateTableProps) {
+  const [netPnlSort, setNetPnlSort] = useState<'asc' | 'desc' | null>(null);
+  const visibleRows = useMemo(() => {
+    if (!enableNetPnlSort || !netPnlSort) return rows;
+
+    const direction = netPnlSort === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      const pnlDiff = ((a.totalPnl ?? 0) - (b.totalPnl ?? 0)) * direction;
+      if (pnlDiff !== 0) return pnlDiff;
+      return a.key.localeCompare(b.key);
+    });
+  }, [enableNetPnlSort, netPnlSort, rows]);
+
+  const toggleNetPnlSort = () => {
+    setNetPnlSort((current) => (current === 'desc' ? 'asc' : 'desc'));
+  };
+
   return (
     <div className="table-wrap">
       <table>
@@ -1454,22 +1929,33 @@ function ReportAggregateTable({
             <th>Executions</th>
             <th>Wins</th>
             <th>Losses</th>
-            <th>Net PnL</th>
+            <th aria-sort={enableNetPnlSort ? (netPnlSort === null ? 'none' : netPnlSort === 'asc' ? 'ascending' : 'descending') : undefined}>
+              {enableNetPnlSort ? (
+                <button type="button" className="sort-header-button" onClick={toggleNetPnlSort}>
+                  Net PnL <span>{netPnlSort === 'asc' ? '^' : netPnlSort === 'desc' ? 'v' : '-'}</span>
+                </button>
+              ) : (
+                'Net PnL'
+              )}
+            </th>
             <th>Commissions</th>
             <th>Avg Net PnL</th>
             <th>Win Rate</th>
             <th>Avg PnL %</th>
             <th>Median PnL %</th>
+            <th>Profit Factor</th>
+            <th>Max DD</th>
+            <th>Symbols</th>
             <th>Avg Confidence</th>
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
+          {visibleRows.length === 0 ? (
             <tr>
-              <td colSpan={showStrategyStatus ? 13 : 11} className="muted">No data</td>
+              <td colSpan={showStrategyStatus ? 16 : 14} className="muted">No data</td>
             </tr>
           ) : (
-            rows.map((row) => {
+            visibleRows.map((row) => {
               const strategyStatus = formatStrategyStatus(row);
               const strategyRuntimeOn = isStrategyRuntimeOn(row);
               const canToggle = showStrategyStatus && hasStrategyRuntime(row) && Boolean(onStrategyToggle);
@@ -1509,6 +1995,9 @@ function ReportAggregateTable({
                   <td>{formatPct(row.winRate)}</td>
                   <td className={toToneClass(row.avgPnlPct)}>{formatPnlPct(row.avgPnlPct)}</td>
                   <td className={toToneClass(row.medianPnlPct)}>{formatPnlPct(row.medianPnlPct)}</td>
+                  <td>{row.profitFactor === 999 ? '∞' : formatNum(row.profitFactor)}</td>
+                  <td className={toToneClass(row.maxDrawdown)}>{formatNum(row.maxDrawdown)}</td>
+                  <td>{formatNum(row.symbolsTraded, 0)}</td>
                   <td>{formatPct(row.avgConfidence)}</td>
                 </tr>
               );

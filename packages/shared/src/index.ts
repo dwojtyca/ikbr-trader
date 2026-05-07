@@ -13,11 +13,12 @@ export type MarketRegime = 'trend' | 'range' | 'high_volatility';
 export type PositionEffect = 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
 export type DecisionSource = 'signal' | 'llm' | 'user' | 'user_override';
 export type AiDecision = 'EXECUTE' | 'REJECT';
+export type CandleTimeframe = '1m' | '5m' | '1h' | '4h' | '12h' | '1d';
 
 export interface Candle {
   conid: string;
   symbol: string;
-  timeframe: '1m' | '5m' | '1h';
+  timeframe: CandleTimeframe;
   ts: Date;
   open: number;
   high: number;
@@ -76,6 +77,21 @@ export interface IndicatorSnapshot {
   assetClass?: AssetClass;
   regime?: MarketRegime;
   strategyProfile?: string;
+  timeframes?: Partial<Record<Exclude<CandleTimeframe, '1m'>, TimeframeIndicatorSnapshot>>;
+}
+
+export interface TimeframeIndicatorSnapshot {
+  close?: number;
+  ema20?: number;
+  ema50?: number;
+  ema200?: number;
+  rsi14?: number;
+  atr14?: number;
+  macdHist?: number;
+  bbWidthPct?: number;
+  volume?: number;
+  trend?: 'bullish' | 'bearish' | 'neutral';
+  priceVsEma50Bps?: number;
 }
 
 export interface RiskLimits {
@@ -171,3 +187,6 @@ export function deriveOrderDiagnostics(order: Pick<
     cancelReasonDetail: detail
   };
 }
+
+export * from './strategy-profiles.js';
+export * from './strategy-allowlist.js';

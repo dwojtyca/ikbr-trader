@@ -280,7 +280,8 @@ app.get('/execution/account/summary', async (request) => {
       },
       diagnostics: {
         cumulativeRealizedPnLComplete: cumulative.complete,
-        cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports
+        cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports,
+        cumulativeRealizedPnLMissingFxRates: cumulative.missingFxRates
       }
     };
   }
@@ -313,7 +314,8 @@ app.get('/execution/account/summary', async (request) => {
     },
     diagnostics: {
       cumulativeRealizedPnLComplete: cumulative.complete,
-      cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports
+      cumulativeRealizedPnLMissingCommissionReports: cumulative.missingCommissionReports,
+      cumulativeRealizedPnLMissingFxRates: cumulative.missingFxRates
     }
   };
 });

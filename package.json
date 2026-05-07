@@ -13,6 +13,7 @@
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",
     "dev:llm": "pnpm --filter @ikbr/llm-agent dev",
+    "dev:backtest": "pnpm --filter @ikbr/backtest-engine dev",
     "dev:ui": "pnpm --filter @ikbr/ui dev"
   },
   "packageManager": "pnpm@9.5.0",

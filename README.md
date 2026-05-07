@@ -5,6 +5,7 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 - `apps/signal-engine` - silnik sygnałów (EMA20/50, RSI14, ATR14, risk model, zapis proposed orders)
 - `apps/execution-engine` - wykonanie zleceń przez TWS Socket API na bazie `proposed_orders` lub ręcznego ticketu
 - `apps/llm-agent` - autonomiczny agent LLM analizujący `PROPOSED` + newsy i decydujący `EXECUTE` / `REJECT`
+- `apps/backtest-engine` - osobny serwis backtestu z odseparowaną bazą historycznych świec i wyników symulacji
 - `packages/shared` - wspólne typy domenowe
 
 ## Quick start
@@ -24,7 +25,8 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 5. `pnpm dev:signal`
 6. `pnpm dev:execution`
 7. `pnpm dev:llm`
-8. `pnpm dev:ui`
+8. `pnpm dev:backtest`
+9. `pnpm dev:ui`
 
 ## TWS / IB Gateway setup
 
@@ -54,6 +56,7 @@ Najważniejsze zmienne środowiskowe:
 - `WATCHLIST_SYMBOLS` - symbole do subskrypcji i liczenia sygnałów
 - `SIGNAL_ASSET_CLASS_OVERRIDES` - ręczne mapowanie klasy aktywa (`AAPL:stock,GC:commodity,SPY:index`)
 - `MAX_RISK_PER_TRADE_PCT`, `MAX_EXPOSURE_PCT`, `MAX_OPEN_POSITIONS` - limity ryzyka
+- `BACKTEST_POSTGRES_URL`, `POSTGRES_ADMIN_URL`, `BACKTEST_IB_CLIENT_ID`, `BACKTEST_COMMISSION_BPS` - parametry odseparowanego backtestu
 
 ## Etap 1 (zaimplementowane)
 
@@ -127,6 +130,7 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - `/api/ingestion/* -> http://127.0.0.1:3101/*`
 - `/api/signal/* -> http://127.0.0.1:3102/*`
 - `/api/execution/* -> http://127.0.0.1:3103/*`
+- `/api/backtest/* -> http://127.0.0.1:3104/*`
 - Główne akcje w UI:
 - `Ingestion Bootstrap`
 - `Run Signals Once`
@@ -137,6 +141,20 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - Widoki:
 - watchlista (symbol, conid, last/bid/ask/spread, ostatnia świeca 1m)
 - tabela `proposed_orders` z metadanymi AI (`Decision Source`, `AI Decision`, `AI Model`, `AI Reason`)
+
+## Backtest
+
+- Backtest działa przez osobny serwis `apps/backtest-engine` na porcie `3104`.
+- Dane historyczne i wyniki są zapisywane w osobnej bazie `ikbr_trader_backtest`; nie mieszają się z live `proposed_orders`, fillami ani tabelami świec.
+- Ekran `http://localhost:5173/backtest` pozwala:
+- wybrać zakres dat i uruchomić jednorazowe pobranie świec 1m z IBKR dla aktualnej watchlisty,
+- usunąć poprzedni historyczny dataset przy starcie nowego pobrania,
+- uruchomić `Run Bot Backtest` na całym zapisanym zbiorze historycznym,
+- uruchomić `Run Strategy Lab`, który testuje każdą strategię izolowanie na tym samym datasnecie, z osobnym wirtualnym portfelem i bez blokowania przez wcześniejszy profil z tej samej grupy,
+- wybrać run i obejrzeć raport w układzie takim jak `/report`.
+- Symulator używa istniejącego `SignalEngine`, więc decyzje przechodzą przez te same profile strategii, scoring, filtry, sizing, TP/SL i cooldowny co live signal-engine.
+- LLM nie jest wołany w backteście; sygnały `PASS` są wykonywane deterministycznie przez symulator.
+- Model wykonania jest konserwatywny: limit musi zostać dotknięty przez kolejne świece, prowizja domyślnie wynosi `BACKTEST_COMMISSION_BPS=5`, a gdy TP i SL są dotknięte w tej samej świecy, wygrywa gorszy wynik, czyli SL.
 
 ## LLM Agent (autonomiczny execution gate)
 

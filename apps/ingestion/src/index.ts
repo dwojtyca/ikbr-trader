@@ -165,6 +165,9 @@ app.post('/bootstrap', async () => {
   let backfilledCandles1m = 0;
   let backfilledCandles5m = 0;
   let backfilledCandles1h = 0;
+  let backfilledCandles4h = 0;
+  let backfilledCandles12h = 0;
+  let backfilledCandles1d = 0;
   const backfillBySymbol: Array<{ symbol: string; conid: string; candles1m: number }> = [];
 
   for (const entry of historical) {
@@ -183,6 +186,9 @@ app.post('/bootstrap', async () => {
         await repo.upsertCandle(higherCandle);
         if (higherCandle.timeframe === '5m') backfilledCandles5m += 1;
         if (higherCandle.timeframe === '1h') backfilledCandles1h += 1;
+        if (higherCandle.timeframe === '4h') backfilledCandles4h += 1;
+        if (higherCandle.timeframe === '12h') backfilledCandles12h += 1;
+        if (higherCandle.timeframe === '1d') backfilledCandles1d += 1;
       }
     }
   }
@@ -193,6 +199,9 @@ app.post('/bootstrap', async () => {
       backfilledCandles1m,
       backfilledCandles5m,
       backfilledCandles1h,
+      backfilledCandles4h,
+      backfilledCandles12h,
+      backfilledCandles1d,
       symbols: backfillBySymbol
     },
     'historical backfill completed'
@@ -217,6 +226,9 @@ app.post('/bootstrap', async () => {
       candles1m: backfilledCandles1m,
       candles5m: backfilledCandles5m,
       candles1h: backfilledCandles1h,
+      candles4h: backfilledCandles4h,
+      candles12h: backfilledCandles12h,
+      candles1d: backfilledCandles1d,
       bySymbol: backfillBySymbol
     },
     subscribed: subscriptions

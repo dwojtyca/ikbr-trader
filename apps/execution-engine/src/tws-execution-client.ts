@@ -1170,21 +1170,22 @@ export class TwsExecutionClient {
       cushion: this.pickAccountMetric(valuesByKey, 'Cushion')
     };
 
-    const pnlFxToBaseByCurrency = this.buildPnLFxToBaseByCurrency(valuesByKey, positions, metrics.unrealizedPnL);
+    const baseCurrency = this.config.currency.trim().toUpperCase();
+    const pnlFxToBaseByCurrency = this.buildPnLFxToBaseByCurrency(valuesByKey, positions, baseCurrency, metrics.unrealizedPnL);
     let unrealizedPnLFromPositionsBase = 0;
     let realizedPnLFromPositionsBase = 0;
 
     for (const position of positions) {
       const currency = position.currency?.trim().toUpperCase();
-      const fxToBase = currency ? pnlFxToBaseByCurrency.get(currency) ?? 1 : 1;
+      const fxToBase = currency ? pnlFxToBaseByCurrency.get(currency) : undefined;
 
-      if (position.unrealizedPnL !== undefined && Number.isFinite(position.unrealizedPnL)) {
+      if (fxToBase !== undefined && position.unrealizedPnL !== undefined && Number.isFinite(position.unrealizedPnL)) {
         const value = position.unrealizedPnL * fxToBase;
         position.unrealizedPnLBase = value;
         unrealizedPnLFromPositionsBase += value;
       }
 
-      if (position.realizedPnL !== undefined && Number.isFinite(position.realizedPnL)) {
+      if (fxToBase !== undefined && position.realizedPnL !== undefined && Number.isFinite(position.realizedPnL)) {
         const value = position.realizedPnL * fxToBase;
         position.realizedPnLBase = value;
         realizedPnLFromPositionsBase += value;
@@ -1213,8 +1214,10 @@ export class TwsExecutionClient {
   private buildPnLFxToBaseByCurrency(
     valuesByKey: Map<string, Map<string, string>>,
     positions: AccountPositionSnapshot[],
+    baseCurrency: string,
     targetUnrealizedBase?: number
   ): Map<string, number> {
+    const normalizedBaseCurrency = baseCurrency.trim().toUpperCase();
     const byCurrencyLocalUnrealized = new Map<string, number>();
     for (const position of positions) {
       const currency = position.currency?.trim().toUpperCase();
@@ -1223,10 +1226,7 @@ export class TwsExecutionClient {
       byCurrencyLocalUnrealized.set(currency, current + (position.unrealizedPnL ?? 0));
     }
 
-    const out = new Map<string, number>();
-    for (const currency of byCurrencyLocalUnrealized.keys()) {
-      out.set(currency, 1);
-    }
+    const out = new Map<string, number>([[normalizedBaseCurrency, 1]]);
 
     const exchangeRates = valuesByKey.get('ExchangeRate');
     if (!exchangeRates || byCurrencyLocalUnrealized.size === 0) {
@@ -1234,6 +1234,7 @@ export class TwsExecutionClient {
     }
 
     const candidates = Array.from(byCurrencyLocalUnrealized.entries())
+      .filter(([currency]) => currency !== normalizedBaseCurrency)
       .map(([currency, localUnrealized]) => ({
         currency,
         localUnrealized,
@@ -1245,7 +1246,10 @@ export class TwsExecutionClient {
       return out;
     }
 
-    const target = Number.isFinite(targetUnrealizedBase ?? NaN) ? Number(targetUnrealizedBase) : undefined;
+    const baseLocalUnrealized = byCurrencyLocalUnrealized.get(normalizedBaseCurrency) ?? 0;
+    const target = Number.isFinite(targetUnrealizedBase ?? NaN)
+      ? Number(targetUnrealizedBase) - baseLocalUnrealized
+      : undefined;
     const combos = candidates.length <= 10 ? (1 << candidates.length) : 0;
 
     if (target === undefined || combos === 0) {

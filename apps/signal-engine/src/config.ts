@@ -34,10 +34,41 @@ const schema = z.object({
   SIGNAL_MIN_STOP_BPS_COMMODITY: z.coerce.number().min(0).default(14),
   SIGNAL_STRATEGY_COOLDOWN_MS: z.coerce.number().int().min(0).default(12 * 60 * 60 * 1000),
   SIGNAL_SYMBOL_ADD_LOSS_LIMIT: z.coerce.number().min(0).default(1000),
-  SIGNAL_ASSET_CLASS_OVERRIDES: z.string().default('')
+  SIGNAL_ASSET_CLASS_OVERRIDES: z.string().default(''),
+  WATCHLIST_CONTRACT_OVERRIDES: z.string().default(''),
+  IB_CURRENCY: z.string().default('USD'),
+  SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default('')
 });
 
 const env = schema.parse(process.env);
+
+type ContractOverrideKey = 'currency';
+
+function parseWatchlistSymbols(raw: string): string[] {
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function parseContractCurrencies(raw: string, symbols: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  const allowed = new Set(symbols.map((symbol) => symbol.toUpperCase()));
+
+  for (const entry of raw.split(';').map((value) => value.trim()).filter(Boolean)) {
+    const [symbolRaw, pairsRaw = ''] = entry.split(':', 2);
+    const symbol = symbolRaw.trim().toUpperCase();
+    if (!symbol || !allowed.has(symbol)) continue;
+
+    for (const pair of pairsRaw.split('|').map((value) => value.trim()).filter(Boolean)) {
+      const [keyRaw, valueRaw = ''] = pair.split('=', 2);
+      const key = keyRaw.trim().toLowerCase() as ContractOverrideKey;
+      const value = valueRaw.trim().toUpperCase();
+      if (key === 'currency' && value) {
+        out[symbol] = value;
+      }
+    }
+  }
+
+  return out;
+}
 
 function parseAssetClassOverrides(raw: string): Record<string, 'stock' | 'commodity' | 'index'> {
   const entries = raw
@@ -58,12 +89,26 @@ function parseAssetClassOverrides(raw: string): Record<string, 'stock' | 'commod
   return out;
 }
 
+function parsePriceMultiplierOverrides(raw: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const entry of raw.split(',').map((value) => value.trim()).filter(Boolean)) {
+    const [symbolRaw, multiplierRaw] = entry.split(':').map((value) => value.trim());
+    const multiplier = Number(multiplierRaw);
+    if (!symbolRaw || !Number.isFinite(multiplier) || multiplier <= 0) continue;
+    out[symbolRaw.toUpperCase()] = multiplier;
+  }
+  return out;
+}
+
 export const config = {
   ...env,
-  watchlistSymbols: env.WATCHLIST_SYMBOLS.split(',').map((s) => s.trim()).filter(Boolean),
+  watchlistSymbols: parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
   signalEventDriven: env.SIGNAL_EVENT_DRIVEN.toLowerCase() === 'true',
   volumeFilterMode: env.IB_MARKET_DATA_TYPE === 1 ? 'strict' as const : 'off' as const,
   assetClassOverrides: parseAssetClassOverrides(env.SIGNAL_ASSET_CLASS_OVERRIDES),
+  currencyBySymbol: parseContractCurrencies(env.WATCHLIST_CONTRACT_OVERRIDES, parseWatchlistSymbols(env.WATCHLIST_SYMBOLS)),
+  baseCurrency: env.IB_CURRENCY,
+  priceMultiplierOverrides: parsePriceMultiplierOverrides(env.SIGNAL_PRICE_MULTIPLIER_OVERRIDES),
   fractionalSymbols: new Set(
     env.SIGNAL_FRACTIONAL_SYMBOLS.split(',')
       .map((s) => s.trim().toUpperCase())

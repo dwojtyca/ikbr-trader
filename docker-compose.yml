@@ -106,6 +106,25 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  backtest-engine:
+    <<: *app-image
+    command: pnpm --filter @ikbr/backtest-engine start
+    env_file:
+      - .env
+    environment:
+      BACKTEST_PORT: 3104
+      POSTGRES_ADMIN_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      BACKTEST_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader_backtest
+      IB_SOCKET_HOST: host.docker.internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3104:3104"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   ui:
     <<: *app-image
     command: pnpm --filter @ikbr/ui dev
@@ -115,11 +134,13 @@ services:
       INGESTION_PROXY_TARGET: http://ingestion:3101
       SIGNAL_PROXY_TARGET: http://signal-engine:3102
       EXECUTION_PROXY_TARGET: http://execution-engine:3103
+      BACKTEST_PROXY_TARGET: http://backtest-engine:3104
     depends_on:
       - ingestion
       - signal-engine
       - execution-engine
       - llm-agent
+      - backtest-engine
     ports:
       - "5173:5173"
     restart: unless-stopped
