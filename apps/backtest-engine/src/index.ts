@@ -1,6 +1,5 @@
 import Fastify from 'fastify';
 import { z } from 'zod';
-import { listStrategyAllowlist } from '@ikbr/shared';
 import { config, type WatchlistInstrument } from './config.js';
 import { HistoricalClient, type InstrumentSubscription } from './historical-client.js';
 import { FrankfurterFxClient } from './fx-client.js';
@@ -322,8 +321,7 @@ app.post('/backtest/run', async (request, reply) => {
           (line) => app.log.info({ scope: 'strategy-lab', runId: run.id }, line)
         )
         : await (async () => {
-          const allowedSymbols = Array.from(new Set(listStrategyAllowlist().map((entry) => entry.symbol.toUpperCase())));
-          const data = await repo.loadBacktestData(allowedSymbols.length > 0 ? allowedSymbols : undefined);
+          const data = await repo.loadBacktestData();
           return new BacktestSimulator(repo, run.id, data, simulatorOptions()).run({
             total: data.candles1m.length,
             label: 'bot backtest',

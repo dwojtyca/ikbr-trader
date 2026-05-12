@@ -727,7 +727,6 @@ export class BacktestSimulator {
     if (normalized.includes('indicator values')) return 'indicator_unavailable';
     if (normalized.includes('no active profile')) return 'regime_or_profile_mismatch';
     if (normalized.includes('no edge')) return 'no_edge';
-    if (normalized.includes('allowlist rejected')) return 'allowlist';
     if (normalized.includes('spread filter')) return 'spread';
     if (normalized.includes('liquidity filter') || normalized.includes('low 1m volume')) return 'volume';
     if (normalized.includes('entry quality')) return 'entry_quality';

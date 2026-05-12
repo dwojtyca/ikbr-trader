@@ -200,4 +200,3 @@ export function deriveOrderDiagnostics(order: Pick<
 }
 
 export * from './strategy-profiles.js';
-export * from './strategy-allowlist.js';

@@ -2,7 +2,7 @@ import Fastify from 'fastify';
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
 import { z } from 'zod';
-import { listStrategyAllowlist, ProposedOrder } from '@ikbr/shared';
+import { ProposedOrder } from '@ikbr/shared';
 import { config } from './config.js';
 import { SignalRepository } from './repository.js';
 import { SignalEngine } from './signal-engine.js';
@@ -194,10 +194,6 @@ app.post('/signals/strategies/:strategyId', async (request, reply) => {
   const runtime = await repo.setStrategyManualEnabled(strategyId, parsed.data.enabled);
   return { strategyId, runtime };
 });
-
-app.get('/signals/strategy-allowlist', async () => ({
-  allowlist: listStrategyAllowlist()
-}));
 
 async function main(): Promise<void> {
   await repo.init();
