@@ -643,20 +643,30 @@ export class BacktestRepository {
       )
     ]);
 
-    const fills = fillsResult.rows.map((row) => ({
-      orderId: Number(row.order_id),
-      instrument: String(row.instrument),
-      strategy: String(row.strategy),
-      side: String(row.side),
-      regime: String(row.regime),
-      confidence: Number(row.confidence),
-      pnl: Number(row.net_pnl),
-      grossPnl: Number(row.gross_pnl),
-      commissions: Number(row.commission),
-      pnlPct: Number(row.pnl_pct),
-      notes: String(row.exit_reason),
-      executedAt: new Date(row.exit_at).toISOString()
-    }));
+    const fills = fillsResult.rows.map((row) => {
+      const indicators = typeof row.indicator_snapshot === 'string'
+        ? JSON.parse(row.indicator_snapshot)
+        : row.indicator_snapshot;
+
+      return {
+        orderId: Number(row.order_id),
+        instrument: String(row.instrument),
+        strategy: String(row.strategy),
+        side: String(row.side),
+        regime: String(row.regime),
+        directionalRegime: String(indicators?.directionalRegime ?? row.regime ?? 'unknown'),
+        volatilityRegime: String(indicators?.volatilityRegime ?? 'unknown'),
+        regimeScore: indicators?.regimeScore === undefined ? undefined : Number(indicators.regimeScore),
+        regimeConfidence: indicators?.regimeConfidence === undefined ? undefined : Number(indicators.regimeConfidence),
+        confidence: Number(row.confidence),
+        pnl: Number(row.net_pnl),
+        grossPnl: Number(row.gross_pnl),
+        commissions: Number(row.commission),
+        pnlPct: Number(row.pnl_pct),
+        notes: String(row.exit_reason),
+        executedAt: new Date(row.exit_at).toISOString()
+      };
+    });
 
     const stateByStrategy = new Map<string, any>();
     for (const row of statesResult.rows) stateByStrategy.set(String(row.strategy_id), row);
@@ -702,6 +712,8 @@ export class BacktestRepository {
           avgPnlPct: average(rows.map((row) => row.pnlPct)),
           medianPnlPct: pctMedian(rows.map((row) => row.pnlPct)),
           avgConfidence: average(rows.map((row) => row.confidence)),
+          avgRegimeScore: average(rows.map((row) => row.regimeScore).filter((value): value is number => value !== undefined)),
+          avgRegimeConfidence: average(rows.map((row) => row.regimeConfidence).filter((value): value is number => value !== undefined)),
           profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 999 : undefined,
           maxDrawdown,
           symbolsTraded: new Set(rows.map((row) => row.instrument)).size,
@@ -745,6 +757,8 @@ export class BacktestRepository {
         avgPnlPct: average(fills.map((row) => row.pnlPct)),
         medianPnlPct: pctMedian(fills.map((row) => row.pnlPct)),
         avgConfidence: average(fills.map((row) => row.confidence)),
+        avgRegimeScore: average(fills.map((row) => row.regimeScore).filter((value): value is number => value !== undefined)),
+        avgRegimeConfidence: average(fills.map((row) => row.regimeConfidence).filter((value): value is number => value !== undefined)),
         takeProfitHits: fills.filter((row) => row.notes === 'take_profit').length,
         stopHits: fills.filter((row) => row.notes === 'stop').length
       },
@@ -753,6 +767,8 @@ export class BacktestRepository {
       byStrategySymbolSide: aggregate((fill) => `${fill.strategy} / ${fill.instrument} / ${fill.side}`),
       bySide: aggregate((fill) => fill.side),
       byRegime: aggregate((fill) => fill.regime),
+      byDirectionalRegime: aggregate((fill) => fill.directionalRegime),
+      byVolatilityRegime: aggregate((fill) => fill.volatilityRegime),
       diagnostics,
       worstTrades: [...fills].sort((a, b) => a.pnl - b.pnl).slice(0, 25)
     };

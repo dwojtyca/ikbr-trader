@@ -102,6 +102,13 @@ function buildIndicatorSummary(order: ClaimedOrder): {
   trendFilterSource?: IndicatorSnapshot['trendFilterSource'];
   assetClass?: IndicatorSnapshot['assetClass'];
   regime?: IndicatorSnapshot['regime'];
+  directionalRegime?: IndicatorSnapshot['directionalRegime'];
+  volatilityRegime?: IndicatorSnapshot['volatilityRegime'];
+  regimeScore?: IndicatorSnapshot['regimeScore'];
+  regimeConfidence?: IndicatorSnapshot['regimeConfidence'];
+  regimeReasons?: IndicatorSnapshot['regimeReasons'];
+  timeframeTrendScores?: IndicatorSnapshot['timeframeTrendScores'];
+  timeframeTrendVotes?: IndicatorSnapshot['timeframeTrendVotes'];
   strategyProfile?: string;
   timeframes?: IndicatorSnapshot['timeframes'];
 } | null {
@@ -120,6 +127,13 @@ function buildIndicatorSummary(order: ClaimedOrder): {
     trendFilterSource: indicators.trendFilterSource,
     assetClass: indicators.assetClass,
     regime: indicators.regime,
+    directionalRegime: indicators.directionalRegime,
+    volatilityRegime: indicators.volatilityRegime,
+    regimeScore: indicators.regimeScore,
+    regimeConfidence: indicators.regimeConfidence,
+    regimeReasons: indicators.regimeReasons,
+    timeframeTrendScores: indicators.timeframeTrendScores,
+    timeframeTrendVotes: indicators.timeframeTrendVotes,
     strategyProfile: indicators.strategyProfile,
     timeframes: indicators.timeframes
   };

@@ -9,7 +9,46 @@ export type ProposedOrderStatus =
   | 'SUPERSEDED'
   | 'EXPIRED';
 export type AssetClass = 'stock' | 'commodity' | 'index';
-export type MarketRegime = 'trend' | 'range' | 'high_volatility';
+export type MarketRegime =
+  // Directional upside regime: higher timeframes mostly agree that price is trending up.
+  | 'bull_trend'
+  // Directional downside regime: higher timeframes mostly agree that price is trending down.
+  | 'bear_trend'
+  // Non-directional regime: no reliable multi-timeframe trend consensus and volatility is not extreme.
+  | 'range'
+  // Volatility expansion regime: ATR/Bollinger width is elevated, but direction is not clean enough for bull_trend/bear_trend.
+  | 'high_volatility'
+  // Compression regime: volatility is muted and price is likely consolidating before a larger move.
+  | 'low_volatility';
+export type DirectionalRegime =
+  // Upside directional bias confirmed by the weighted timeframe trend model.
+  | 'bull_trend'
+  // Downside directional bias confirmed by the weighted timeframe trend model.
+  | 'bear_trend'
+  // No durable directional bias.
+  | 'range';
+export type VolatilityRegime =
+  // Volatility is compressed relative to fixed asset-class thresholds.
+  | 'low_volatility'
+  // Volatility is neither compressed nor expanded.
+  | 'normal_volatility'
+  // Volatility is expanded relative to fixed asset-class thresholds.
+  | 'high_volatility';
+export interface TimeframeTrendVotes {
+  bullish: number;
+  bearish: number;
+  neutral: number;
+}
+export interface RegimeAnalysis {
+  regime: MarketRegime;
+  directionalRegime: DirectionalRegime;
+  volatilityRegime: VolatilityRegime;
+  score: number;
+  confidence: number;
+  reasons: string[];
+  timeframeTrendScores: Partial<Record<CandleTimeframe, number>>;
+  timeframeTrendVotes: TimeframeTrendVotes;
+}
 export type PositionEffect = 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
 export type DecisionSource = 'signal' | 'llm' | 'user' | 'user_override';
 export type AiDecision = 'EXECUTE' | 'REJECT';
@@ -79,6 +118,13 @@ export interface IndicatorSnapshot {
   trendFilterSource?: 'EMA50_1h' | 'EMA200_1m';
   assetClass?: AssetClass;
   regime?: MarketRegime;
+  directionalRegime?: DirectionalRegime;
+  volatilityRegime?: VolatilityRegime;
+  regimeScore?: number;
+  regimeConfidence?: number;
+  regimeReasons?: string[];
+  timeframeTrendScores?: Partial<Record<CandleTimeframe, number>>;
+  timeframeTrendVotes?: TimeframeTrendVotes;
   strategyProfile?: string;
   timeframes?: Partial<Record<Exclude<CandleTimeframe, '1m'>, TimeframeIndicatorSnapshot>>;
 }

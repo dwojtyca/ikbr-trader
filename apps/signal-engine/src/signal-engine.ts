@@ -3,8 +3,8 @@ import {
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
-  MarketRegime,
   ProposedOrder,
+  RegimeAnalysis,
   RiskLimits,
   Side,
   TimeframeIndicatorSnapshot
@@ -149,8 +149,16 @@ export class SignalEngine {
       return this.rejectedOrder(symbol, latest.conid, 'Indicator values are not available', indicators, 'HOLD', generatedFromCandleTs);
     }
 
-    const regime = this.detectRegime(assetClass, latest.close, indicators);
+    const regimeAnalysis = this.detectRegime(assetClass, latest.close, indicators);
+    const regime = regimeAnalysis.regime;
     indicators.regime = regime;
+    indicators.directionalRegime = regimeAnalysis.directionalRegime;
+    indicators.volatilityRegime = regimeAnalysis.volatilityRegime;
+    indicators.regimeScore = regimeAnalysis.score;
+    indicators.regimeConfidence = regimeAnalysis.confidence;
+    indicators.regimeReasons = regimeAnalysis.reasons;
+    indicators.timeframeTrendScores = regimeAnalysis.timeframeTrendScores;
+    indicators.timeframeTrendVotes = regimeAnalysis.timeframeTrendVotes;
     indicators.strategyProfile = STRATEGY_ID;
     await this.repo.syncStrategyRuntimeStates([STRATEGY_ID], this.options.strategyCooldownMs);
 
@@ -232,10 +240,11 @@ export class SignalEngine {
     });
 
     if (!signal) {
+      const strategyReason = this.strategy.getLastRejectionReason();
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        `${STRATEGY_ID}: no signal for assetClass=${assetClass}, regime=${regime}`,
+        `${STRATEGY_ID}: ${strategyReason ?? `no signal for assetClass=${assetClass}, regime=${regime}`}`,
         indicators,
         'HOLD',
         generatedFromCandleTs
@@ -470,8 +479,8 @@ export class SignalEngine {
     return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   }
 
-  private detectRegime(assetClass: AssetClass, price: number, indicators: IndicatorSnapshot): MarketRegime {
-    return this.marketRegimeDetector.detect(assetClass, price, indicators);
+  private detectRegime(assetClass: AssetClass, price: number, indicators: IndicatorSnapshot): RegimeAnalysis {
+    return this.marketRegimeDetector.detectDetailed(assetClass, price, indicators);
   }
 
   private buildTimeframeSnapshot(candles: Candle[]): TimeframeIndicatorSnapshot | undefined {

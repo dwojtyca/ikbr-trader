@@ -24,6 +24,13 @@ export interface DecisionContext {
     trendFilterSource?: IndicatorSnapshot['trendFilterSource'];
     assetClass?: IndicatorSnapshot['assetClass'];
     regime?: IndicatorSnapshot['regime'];
+    directionalRegime?: IndicatorSnapshot['directionalRegime'];
+    volatilityRegime?: IndicatorSnapshot['volatilityRegime'];
+    regimeScore?: IndicatorSnapshot['regimeScore'];
+    regimeConfidence?: IndicatorSnapshot['regimeConfidence'];
+    regimeReasons?: IndicatorSnapshot['regimeReasons'];
+    timeframeTrendScores?: IndicatorSnapshot['timeframeTrendScores'];
+    timeframeTrendVotes?: IndicatorSnapshot['timeframeTrendVotes'];
     strategyProfile?: string;
     timeframes?: IndicatorSnapshot['timeframes'];
   } | null;
@@ -105,6 +112,8 @@ export class OpenAiDecider {
       '- As a rule of thumb, OPEN_OR_ADD trades above roughly 8% of netLiquidation or that clearly dominate existing portfolio concentration should usually be rejected unless there is exceptional support.',
       '- If the order closes or reduces an existing position, that can be a positive factor.',
       '- Treat indicatorSummary as a compact technical snapshot from the signal engine.',
+      '- indicatorSummary.regime is the composite regime; indicatorSummary.directionalRegime and volatilityRegime separate direction from volatility.',
+      '- indicatorSummary.regimeScore, regimeConfidence, timeframeTrendScores, timeframeTrendVotes, and regimeReasons explain how strongly the signal engine classified the market context.',
       '- indicatorSummary.timeframes contains compact 5m/1h/4h/12h/1d/1w confirmation snapshots; use higher timeframe alignment as stronger evidence than the latest 1m candle alone.',
       '- For new longs, 4h/1d/1w bullish or neutral alignment is supportive; bearish higher timeframes should lower conviction unless the strategy is explicitly mean-reversion.',
       '- For new shorts, 4h/1d/1w bearish or neutral alignment is supportive; bullish higher timeframes should lower conviction unless the strategy is explicitly mean-reversion.',
@@ -114,9 +123,11 @@ export class OpenAiDecider {
       '- If positionEffect is CLOSE_OR_REDUCE, be more permissive than for OPEN_OR_ADD because reducing risk is usually beneficial.',
       '- Global technical heuristics: high bbWidthPct or large atr14 implies elevated volatility; require stronger confirmation and cleaner news before approving new OPEN_OR_ADD trades.',
       '- If indicatorSummary regime or strategyProfile conflicts with the proposed side, lower conviction.',
-      '- When indicatorSummary.regime is trend: prioritize trend-following alignment, allow strong continuation entries, and distrust mean-reversion arguments against the dominant EMA structure.',
+      '- When indicatorSummary.regime is bull_trend: prioritize long trend-following alignment, allow strong continuation entries, and distrust mean-reversion arguments against the dominant bullish EMA structure.',
+      '- When indicatorSummary.regime is bear_trend: prioritize short trend-following alignment, be skeptical of new longs, and distrust bullish continuation arguments against the dominant bearish EMA structure.',
       '- When indicatorSummary.regime is range: be skeptical of breakout continuation, prefer mean-reversion logic, and treat stretched RSI or price extremes as stronger reversal evidence than EMA alignment alone.',
       '- When indicatorSummary.regime is high_volatility: raise the bar for OPEN_OR_ADD trades, require cleaner agreement between side, momentum, and news, and be quicker to reject marginal setups.',
+      '- When indicatorSummary.regime is low_volatility: treat price as compressed or consolidating; require a clear catalyst, breakout, or volume expansion before approving momentum entries.',
       '- When strategyProfile suggests range behavior, do not overvalue trend continuation signals; when strategyProfile suggests trend or breakout behavior, do not overvalue contrarian RSI alone.',
       '- If risk of immediate adverse move seems elevated, REJECT.',
       '- If signal quality, position context, and recent news are supportive, EXECUTE.',

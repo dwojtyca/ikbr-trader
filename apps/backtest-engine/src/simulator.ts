@@ -725,10 +725,34 @@ export class BacktestSimulator {
     const normalized = reason.toLowerCase();
     if (normalized.includes('insufficient candles')) return 'insufficient_candles';
     if (normalized.includes('indicator values')) return 'indicator_unavailable';
-    if (normalized.includes('no active profile')) return 'regime_or_profile_mismatch';
+    if (
+      normalized.includes('no active profile') ||
+      normalized.includes('regime_not_trend') ||
+      normalized.includes('regime_not_bull_trend') ||
+      normalized.includes('asset_class_not_stock')
+    ) return 'regime_or_profile_mismatch';
     if (normalized.includes('no edge')) return 'no_edge';
     if (normalized.includes('spread filter')) return 'spread';
     if (normalized.includes('liquidity filter') || normalized.includes('low 1m volume')) return 'volume';
+    if (normalized.includes('volume_not_confirmed') || normalized.includes('volume_baseline_unavailable')) return 'volume';
+    if (
+      normalized.includes('higher_timeframe') ||
+      normalized.includes('daily_momentum_not_positive') ||
+      normalized.includes('daily_momentum_too_weak') ||
+      normalized.includes('intraday_momentum_too_weak')
+    ) return 'higher_timeframe';
+    if (
+      normalized.includes('no_confirmed_breakout') ||
+      normalized.includes('no_donchian_breakout') ||
+      normalized.includes('prior_high_unavailable') ||
+      normalized.includes('breakout_candle') ||
+      normalized.includes('breakout_close') ||
+      normalized.includes('breakout_body') ||
+      normalized.includes('breakout_upper_wick')
+    ) return 'breakout';
+    if (normalized.includes('overextended') || normalized.includes('rsi_overheated')) return 'overextended';
+    if (normalized.includes('volatility_not_compressed')) return 'compression';
+    if (normalized.includes('planned_reward_too_small')) return 'reward_to_cost';
     if (normalized.includes('entry quality')) return 'entry_quality';
     if (normalized.includes('confidence too low')) return 'confidence';
     if (normalized.includes('sizing rejected')) return 'sizing';

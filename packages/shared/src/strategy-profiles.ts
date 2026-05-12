@@ -21,7 +21,7 @@ const PROFILES: StrategyProfile[] = [
   {
     id: "momentum_breakout_long_v1",
     assetClass: "stock",
-    regime: "trend",
+    regime: "bull_trend",
     style: "breakout",
     entryScore: 0.58,
     decisionEdge: 0.08,

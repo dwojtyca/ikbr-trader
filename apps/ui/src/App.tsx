@@ -85,7 +85,18 @@ type Order = {
   executedAt?: string;
   createdAt?: string;
   indicators?: {
-    regime?: 'trend' | 'range' | 'high_volatility';
+    regime?: 'bull_trend' | 'bear_trend' | 'range' | 'high_volatility' | 'low_volatility';
+    directionalRegime?: 'bull_trend' | 'bear_trend' | 'range';
+    volatilityRegime?: 'low_volatility' | 'normal_volatility' | 'high_volatility';
+    regimeScore?: number;
+    regimeConfidence?: number;
+    regimeReasons?: string[];
+    timeframeTrendScores?: Partial<Record<'1m' | '5m' | '1h' | '4h' | '12h' | '1d' | '1w', number>>;
+    timeframeTrendVotes?: {
+      bullish: number;
+      bearish: number;
+      neutral: number;
+    };
     strategyProfile?: string;
   };
   brokerWarning?: string;

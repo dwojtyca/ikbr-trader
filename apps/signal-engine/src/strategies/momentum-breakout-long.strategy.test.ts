@@ -4,28 +4,28 @@ import type { Candle } from '@ikbr/shared';
 import { MomentumBreakoutLongStrategy } from './momentum-breakout-long.strategy.js';
 import type { StrategyContext } from './strategy.types.js';
 
-function candle(index: number, close: number): Candle {
+function candle(index: number, close: number, volume = 10000): Candle {
   return {
     conid: '123',
     symbol: 'AAPL',
     timeframe: '1m',
     ts: new Date(Date.UTC(2024, 0, 1, 9, 30 + index)),
-    open: close - 0.2,
-    high: close + 0.5,
-    low: close - 0.8,
+    open: close - 0.7,
+    high: close + 0.2,
+    low: close - 1.0,
     close,
-    volume: 10000
+    volume
   };
 }
 
 function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext {
   const candles = Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1));
-  const latestCandle = candle(25, 105);
+  const latestCandle = candle(25, 105, 12500);
   return {
     symbol: 'AAPL',
     conid: '123',
     assetClass: 'stock',
-    regime: 'trend',
+    regime: 'bull_trend',
     latestCandle,
     indicators: {
       ema20: 103,
@@ -34,7 +34,32 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
       rsi14: 64,
       atr14: 1.2,
       dcUpper20: 105,
-      bbWidthPct: 0.025
+      bbWidthPct: 0.025,
+      return20mPct: 0.9,
+      return60mPct: 1.7,
+      timeframes: {
+        '1h': {
+          close: 104,
+          ema20: 103,
+          ema50: 101,
+          trend: 'bullish',
+          return4Pct: 0.8
+        },
+        '4h': {
+          close: 103,
+          ema20: 102,
+          ema50: 100,
+          trend: 'bullish',
+          return18Pct: 2
+        },
+        '1d': {
+          close: 102,
+          ema20: 101,
+          ema50: 99,
+          trend: 'bullish',
+          return20Pct: 14
+        }
+      }
     },
     candlesByTimeframe: {
       '1m': [...candles, latestCandle]
@@ -69,12 +94,77 @@ test('MomentumBreakoutLongStrategy rejects overbought RSI', () => {
   }));
 
   assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'rsi_overheated');
 });
 
-test('MomentumBreakoutLongStrategy rejects non-trend regime', () => {
+test('MomentumBreakoutLongStrategy rejects non-bull-trend regime', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 
   const signal = strategy.generateSignal(baseContext({ regime: 'range' }));
 
   assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'regime_not_bull_trend');
+});
+
+test('MomentumBreakoutLongStrategy rejects weak higher timeframe alignment', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+
+  const context = baseContext();
+  const signal = strategy.generateSignal({
+    ...context,
+    indicators: {
+      ...context.indicators,
+      timeframes: {
+        ...context.indicators.timeframes,
+        '1h': {
+          ...context.indicators.timeframes?.['1h'],
+          trend: 'neutral'
+        }
+      }
+    }
+  });
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'higher_timeframe_1h_not_bullish');
+});
+
+test('MomentumBreakoutLongStrategy rejects unconfirmed volume', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+
+  const signal = strategy.generateSignal(baseContext({
+    latestCandle: candle(25, 105, 9000),
+    candlesByTimeframe: {
+      '1m': [
+        ...Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1)),
+        candle(25, 105, 9000)
+      ]
+    }
+  }));
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'volume_not_confirmed');
+});
+
+test('MomentumBreakoutLongStrategy rejects weak breakout candle quality', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+  const weakCandle: Candle = {
+    ...candle(25, 105, 12500),
+    open: 104.95,
+    high: 105.6,
+    low: 104.2,
+    close: 105
+  };
+
+  const signal = strategy.generateSignal(baseContext({
+    latestCandle: weakCandle,
+    candlesByTimeframe: {
+      '1m': [
+        ...Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1)),
+        weakCandle
+      ]
+    }
+  }));
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'breakout_close_not_near_high');
 });
