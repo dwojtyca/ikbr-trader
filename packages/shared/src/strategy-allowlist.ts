@@ -7,38 +7,7 @@ export interface StrategyAllowlistEntry {
   reason?: string;
 }
 
-export const STRATEGY_ALLOWLIST: StrategyAllowlistEntry[] = [
-  {
-    strategyId: "indices_breakout_v1",
-    symbol: "ETFDAX",
-    side: "BUY",
-    reason: "Backtest promoted from historical run",
-  },
-  {
-    strategyId: "indices_breakout_v1",
-    symbol: "ETFSP500",
-    side: "BUY",
-    reason: "Backtest promoted from historical run",
-  },
-  {
-    strategyId: "indices_trend_pullback_v1",
-    symbol: "ETFBSPXPL",
-    side: "BUY",
-    reason: "Backtest promoted from historical run",
-  },
-  {
-    strategyId: "indices_trend_v1",
-    symbol: "ETFBSPXPL",
-    side: "BUY",
-    reason: "Backtest promoted from historical run",
-  },
-  {
-    strategyId: "stocks_trend_breakout_v1",
-    symbol: "TSLA",
-    side: "SELL",
-    reason: "Backtest promoted from historical run",
-  },
-];
+export const STRATEGY_ALLOWLIST: StrategyAllowlistEntry[] = [];
 
 export function strategyAllowlistKey(
   strategyId: string,
@@ -76,4 +45,15 @@ export function allowedStrategiesForSymbolSide(
     (entry) =>
       entry.symbol.toUpperCase() === normalizedSymbol && entry.side === side,
   ).map((entry) => entry.strategyId);
+}
+
+export function allowedStrategiesForSymbol(symbol: string): string[] {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  return Array.from(
+    new Set(
+      STRATEGY_ALLOWLIST.filter(
+        (entry) => entry.symbol.toUpperCase() === normalizedSymbol,
+      ).map((entry) => entry.strategyId),
+    ),
+  );
 }

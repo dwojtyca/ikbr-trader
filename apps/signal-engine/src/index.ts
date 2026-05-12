@@ -38,7 +38,6 @@ const engine = new SignalEngine(repo, {
   executionBaseUrl: config.EXECUTION_BASE_URL,
   strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
   symbolAddLossLimit: config.SIGNAL_SYMBOL_ADD_LOSS_LIMIT,
-  strategyAllowlistMode: 'enforce',
   riskLimits: {
     accountEquity: config.ACCOUNT_EQUITY,
     maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,
@@ -80,7 +79,7 @@ async function runAndPersist(
         timestamp: new Date().toISOString(),
         riskCheckStatus: 'REJECT',
         status: 'REJECTED',
-        strategy: 'adaptive_profile_v1',
+        strategy: 'momentum_breakout_long_v1',
         generatedFromCandleTs
       };
     }
