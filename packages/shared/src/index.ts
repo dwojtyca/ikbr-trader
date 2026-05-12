@@ -13,7 +13,7 @@ export type MarketRegime = 'trend' | 'range' | 'high_volatility';
 export type PositionEffect = 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
 export type DecisionSource = 'signal' | 'llm' | 'user' | 'user_override';
 export type AiDecision = 'EXECUTE' | 'REJECT';
-export type CandleTimeframe = '1m' | '5m' | '1h' | '4h' | '12h' | '1d';
+export type CandleTimeframe = '1m' | '5m' | '1h' | '4h' | '12h' | '1d' | '1w';
 
 export interface Candle {
   conid: string;
@@ -72,6 +72,9 @@ export interface IndicatorSnapshot {
   dcUpper20?: number;
   dcLower20?: number;
   obvSlope?: number;
+  return5mPct?: number;
+  return20mPct?: number;
+  return60mPct?: number;
   trendFilterValue?: number;
   trendFilterSource?: 'EMA50_1h' | 'EMA200_1m';
   assetClass?: AssetClass;
@@ -92,6 +95,14 @@ export interface TimeframeIndicatorSnapshot {
   volume?: number;
   trend?: 'bullish' | 'bearish' | 'neutral';
   priceVsEma50Bps?: number;
+  return3Pct?: number;
+  return4Pct?: number;
+  return12Pct?: number;
+  return18Pct?: number;
+  return20Pct?: number;
+  return24Pct?: number;
+  return30Pct?: number;
+  return48Pct?: number;
 }
 
 export interface RiskLimits {

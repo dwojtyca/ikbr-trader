@@ -11,14 +11,15 @@ interface MutableCandle {
   volume: number;
 }
 
-type HigherTimeframe = '5m' | '1h' | '4h' | '12h' | '1d';
+type HigherTimeframe = '5m' | '1h' | '4h' | '12h' | '1d' | '1w';
 
 function timeframeMs(timeframe: HigherTimeframe): number {
   if (timeframe === '5m') return 5 * 60_000;
   if (timeframe === '1h') return 60 * 60_000;
   if (timeframe === '4h') return 4 * 60 * 60_000;
   if (timeframe === '12h') return 12 * 60 * 60_000;
-  return 24 * 60 * 60_000;
+  if (timeframe === '1d') return 24 * 60 * 60_000;
+  return 7 * 24 * 60 * 60_000;
 }
 
 function floorToTimeframe(ts: Date, timeframe: HigherTimeframe): Date {
@@ -31,7 +32,7 @@ export class HigherTimeframeAggregator {
 
   ingest(closedOneMinute: Candle): Candle[] {
     const out: Candle[] = [];
-    for (const timeframe of ['5m', '1h', '4h', '12h', '1d'] as const) {
+    for (const timeframe of ['5m', '1h', '4h', '12h', '1d', '1w'] as const) {
       out.push(...this.ingestFor(timeframe, closedOneMinute));
     }
     return out;

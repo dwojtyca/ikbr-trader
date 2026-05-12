@@ -168,6 +168,7 @@ app.post('/bootstrap', async () => {
   let backfilledCandles4h = 0;
   let backfilledCandles12h = 0;
   let backfilledCandles1d = 0;
+  let backfilledCandles1w = 0;
   const backfillBySymbol: Array<{ symbol: string; conid: string; candles1m: number }> = [];
 
   for (const entry of historical) {
@@ -189,6 +190,7 @@ app.post('/bootstrap', async () => {
         if (higherCandle.timeframe === '4h') backfilledCandles4h += 1;
         if (higherCandle.timeframe === '12h') backfilledCandles12h += 1;
         if (higherCandle.timeframe === '1d') backfilledCandles1d += 1;
+        if (higherCandle.timeframe === '1w') backfilledCandles1w += 1;
       }
     }
   }
@@ -202,6 +204,7 @@ app.post('/bootstrap', async () => {
       backfilledCandles4h,
       backfilledCandles12h,
       backfilledCandles1d,
+      backfilledCandles1w,
       symbols: backfillBySymbol
     },
     'historical backfill completed'
@@ -229,6 +232,7 @@ app.post('/bootstrap', async () => {
       candles4h: backfilledCandles4h,
       candles12h: backfilledCandles12h,
       candles1d: backfilledCandles1d,
+      candles1w: backfilledCandles1w,
       bySymbol: backfillBySymbol
     },
     subscribed: subscriptions

@@ -71,6 +71,16 @@ export interface BacktestFillRecord {
   exitReason: string;
 }
 
+export interface BacktestSignalDiagnosticRecord {
+  runId: number;
+  strategy: string;
+  instrument: string;
+  side: string;
+  stage: string;
+  reasonGroup: string;
+  samples: number;
+}
+
 export interface BacktestFxRate {
   date: string;
   baseCurrency: string;
@@ -94,5 +104,6 @@ export interface LoadedBacktestData {
   candles4h: Candle[];
   candles12h: Candle[];
   candles1d: Candle[];
+  candles1w: Candle[];
   fxRates: BacktestFxRate[];
 }

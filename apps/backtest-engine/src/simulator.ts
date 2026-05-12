@@ -1,9 +1,9 @@
 import { Worker } from 'node:worker_threads';
 import { SignalEngine } from '@ikbr/signal-engine/signal-engine';
 import type { Candle, ProposedOrder, Side } from '@ikbr/shared';
-import { listStrategyProfiles, type StrategyProfile } from '@ikbr/shared';
+import { inferAssetClass, listStrategyProfiles, type StrategyProfile } from '@ikbr/shared';
 import type { BacktestRepository } from './repository.js';
-import type { LoadedBacktestData } from './types.js';
+import type { BacktestSignalDiagnosticRecord, LoadedBacktestData } from './types.js';
 
 export interface SimulatorOptions {
   minCandles: number;
@@ -37,7 +37,6 @@ export interface SimulatorOptions {
     maxNotionalPerTradePct: number;
     maxOpenPositions: number;
   };
-  forcedStrategyId?: string;
 }
 
 interface StrategyState {
@@ -76,6 +75,7 @@ interface Position {
   entryAt: Date;
   orderId: number;
   strategy: string;
+  runtimeKey: string;
   confidence: number;
   regime: string;
   side: Side;
@@ -104,6 +104,13 @@ interface StrategyWorkerMessage {
     wins: number;
     winRate: number;
   };
+}
+
+interface StrategyWorkItem {
+  profile: StrategyProfile;
+  profileIndex: number;
+  symbols: string[];
+  eventCount: number;
 }
 
 function yieldToEventLoop(): Promise<void> {
@@ -160,12 +167,13 @@ function binarySearchLastAtOrBefore(candles: Candle[], ts: Date): number {
 export class BacktestSimulator {
   private readonly candles1mBySymbol: Map<string, Candle[]>;
   private readonly candles1hBySymbol: Map<string, Candle[]>;
-  private readonly candlesByTimeframe: Record<'1m' | '5m' | '1h' | '4h' | '12h' | '1d', Map<string, Candle[]>>;
+  private readonly candlesByTimeframe: Record<'1m' | '5m' | '1h' | '4h' | '12h' | '1d' | '1w', Map<string, Candle[]>>;
   private readonly currentIndexBySymbol = new Map<string, number>();
   private readonly positions = new Map<string, Position>();
   private readonly pendingOrders: PendingOrder[] = [];
   private readonly strategyStates = new Map<string, StrategyState>();
   private readonly closedTrades: ClosedTrade[] = [];
+  private readonly diagnostics = new Map<string, BacktestSignalDiagnosticRecord>();
   private currentCandle?: Candle;
   private currentTime?: Date;
   private currentEquity: number;
@@ -184,19 +192,18 @@ export class BacktestSimulator {
       '1h': this.candles1hBySymbol,
       '4h': groupCandles(data.candles4h),
       '12h': groupCandles(data.candles12h),
-      '1d': groupCandles(data.candles1d)
+      '1d': groupCandles(data.candles1d),
+      '1w': groupCandles(data.candles1w)
     };
     this.currentEquity = options.riskLimits.accountEquity;
     for (const profile of listStrategyProfiles()) {
       this.strategyStates.set(profile.id, {
         strategyId: profile.id,
-        enabled: options.forcedStrategyId ? profile.id === options.forcedStrategyId : true,
+        enabled: true,
         permanentlyDisabled: false,
         consecutiveLossCount: 0,
         cooldownCount: 0,
-        reason: options.forcedStrategyId && profile.id !== options.forcedStrategyId
-          ? `Isolated run for ${options.forcedStrategyId}`
-          : undefined
+        reason: undefined
       });
     }
   }
@@ -223,7 +230,6 @@ export class BacktestSimulator {
       executionBaseUrl: 'backtest',
       strategyCooldownMs: this.options.strategyCooldownMs,
       symbolAddLossLimit: this.options.symbolAddLossLimit,
-      strategyAllowlistMode: this.options.forcedStrategyId ? 'discover' : 'enforce',
       riskLimits: this.options.riskLimits
     } as any);
 
@@ -255,8 +261,17 @@ export class BacktestSimulator {
       await this.processPendingOrders(event.candle);
       await this.processBracketExit(event.candle);
 
+      if (this.hasPendingOrderForSymbol(event.candle.symbol)) {
+        continue;
+      }
+
       const order = await signalEngine.runForSymbol(event.candle.symbol, await this.getExposureSnapshot(), event.candle.ts);
-      if (order.riskCheckStatus !== 'PASS' || order.side === 'HOLD' || order.quantity <= 0) continue;
+      this.recordDiagnostic(order, 'analyzed', 'all');
+      if (order.riskCheckStatus !== 'PASS' || order.side === 'HOLD' || order.quantity <= 0) {
+        this.recordDiagnostic(order, 'rejected', this.classifyRejection(order.reason));
+        continue;
+      }
+      this.recordDiagnostic(order, 'proposed', 'pass');
 
       const orderId = await this.repo.insertOrder({
         runId: this.runId,
@@ -289,6 +304,7 @@ export class BacktestSimulator {
     await progress?.onProgress?.({ current: progressBase + events.length, total: progressTotal, label: progressLabel });
     await this.closeOpenPositionsAtDatasetEnd();
     await this.persistStrategyStates();
+    await this.persistDiagnostics();
 
     const totalPnl = this.closedTrades.reduce((sum, trade) => sum + trade.pnl, 0);
     const wins = this.closedTrades.filter((trade) => trade.pnl > 0).length;
@@ -392,30 +408,16 @@ export class BacktestSimulator {
       if (!this.strategyStates.has(strategyId)) {
         this.strategyStates.set(strategyId, {
           strategyId,
-          enabled: this.options.forcedStrategyId ? strategyId === this.options.forcedStrategyId : true,
+          enabled: true,
           permanentlyDisabled: false,
           consecutiveLossCount: 0,
-          cooldownCount: 0,
-          reason: this.options.forcedStrategyId && strategyId !== this.options.forcedStrategyId
-            ? `Isolated run for ${this.options.forcedStrategyId}`
-            : undefined
+          cooldownCount: 0
         });
       }
     }
   }
 
   async getStrategyRuntimeState(strategyId: string): Promise<StrategyState> {
-    if (this.options.forcedStrategyId && strategyId !== this.options.forcedStrategyId) {
-      return {
-        strategyId,
-        enabled: false,
-        permanentlyDisabled: false,
-        consecutiveLossCount: 0,
-        cooldownCount: 0,
-        reason: `Isolated run for ${this.options.forcedStrategyId}`
-      };
-    }
-
     const state = this.strategyStates.get(strategyId) ?? {
       strategyId,
       enabled: true,
@@ -481,12 +483,14 @@ export class BacktestSimulator {
       }
 
       if (isOrderTouched(pending.order, candle)) {
+        this.recordDiagnostic(pending.order, 'filled', 'entry_filled');
         await this.fillOrder(pending, candle);
         continue;
       }
 
       pending.remainingCandles -= 1;
       if (pending.remainingCandles <= 0) {
+        this.recordDiagnostic(pending.order, 'cancelled', 'limit_not_filled');
         await this.repo.updateOrderStatus(pending.id, 'CANCELLED', 'backtest_limit_not_filled');
       } else {
         remaining.push(pending);
@@ -505,8 +509,10 @@ export class BacktestSimulator {
 
     await this.repo.updateOrderStatus(pending.id, 'FILLED', 'backtest_entry_filled');
 
-    if (order.positionEffect === 'CLOSE_OR_REDUCE' && existing) {
-      await this.closePosition(existing, fillPrice, candle.ts, 'managed_exit', pending.id);
+    if (order.positionEffect === 'CLOSE_OR_REDUCE') {
+      if (existing) {
+        await this.closePosition(existing, fillPrice, candle.ts, 'managed_exit', pending.id);
+      }
       return;
     }
 
@@ -538,6 +544,7 @@ export class BacktestSimulator {
         entryAt: existing?.entryAt ?? candle.ts,
         orderId: pending.id,
         strategy: order.strategy ?? 'n/a',
+        runtimeKey: this.strategyRuntimeKey(order.strategy ?? 'n/a', order.instrument, order.side),
         confidence: order.confidence,
         regime: order.indicators?.regime ?? 'n/a',
         side: qty < 0 ? 'SELL' : 'BUY',
@@ -619,7 +626,7 @@ export class BacktestSimulator {
       exitedAt: exitAt
     });
     this.currentEquity += netPnl;
-    this.updateStrategyRuntime(position.strategy, netPnl, exitAt);
+    this.updateStrategyRuntime(position.runtimeKey, netPnl, exitAt, exitReason, pnlPct);
   }
 
   private async closeOpenPositionsAtDatasetEnd(): Promise<void> {
@@ -630,14 +637,29 @@ export class BacktestSimulator {
     }
   }
 
-  private updateStrategyRuntime(strategyId: string, netPnl: number, exitedAt: Date): void {
-    const state = this.strategyStates.get(strategyId);
-    if (!state) return;
+  private hasPendingOrderForSymbol(symbol: string): boolean {
+    const key = symbol.toUpperCase();
+    return this.pendingOrders.some((pending) => pending.order.instrument.toUpperCase() === key);
+  }
 
-    if (netPnl > 0) {
+  private updateStrategyRuntime(strategyId: string, netPnl: number, exitedAt: Date, exitReason: string, pnlPct: number): void {
+    let state = this.strategyStates.get(strategyId);
+    if (!state) {
+      state = {
+        strategyId,
+        enabled: true,
+        permanentlyDisabled: false,
+        consecutiveLossCount: 0,
+        cooldownCount: 0
+      };
+      this.strategyStates.set(strategyId, state);
+    }
+
+    const flatCostExit = exitReason === 'managed_exit' && pnlPct > -0.16;
+    if (netPnl > 0 || flatCostExit) {
       state.consecutiveLossCount = 0;
       if (!state.permanentlyDisabled) {
-        state.reason = 'Backtest win reset loss streak';
+        state.reason = flatCostExit ? 'Backtest flat managed exit reset loss streak' : 'Backtest win reset loss streak';
       }
       return;
     }
@@ -661,10 +683,12 @@ export class BacktestSimulator {
     state.consecutiveLossCount = 0;
   }
 
+  private strategyRuntimeKey(strategyId: string, symbol: string, side: Side): string {
+    return `${strategyId}|${symbol.toUpperCase()}|${side}`;
+  }
+
   private async persistStrategyStates(): Promise<void> {
-    const states = this.options.forcedStrategyId
-      ? Array.from(this.strategyStates.values()).filter((state) => state.strategyId === this.options.forcedStrategyId)
-      : Array.from(this.strategyStates.values());
+    const states = Array.from(this.strategyStates.values());
 
     await this.repo.upsertStrategyStates(this.runId, states.map((state) => ({
       strategyId: state.strategyId,
@@ -673,6 +697,51 @@ export class BacktestSimulator {
       cooldownUntil: state.cooldownUntil,
       reason: state.reason
     })));
+  }
+
+  private recordDiagnostic(order: ProposedOrder, stage: string, reasonGroup: string): void {
+    const strategy = order.strategy ?? order.indicators?.strategyProfile ?? 'n/a';
+    const instrument = (order.instrument || 'n/a').toUpperCase();
+    const side = order.side ?? 'HOLD';
+    const key = `${strategy}|${instrument}|${side}|${stage}|${reasonGroup}`;
+    const existing = this.diagnostics.get(key);
+    if (existing) {
+      existing.samples += 1;
+      return;
+    }
+
+    this.diagnostics.set(key, {
+      runId: this.runId,
+      strategy,
+      instrument,
+      side,
+      stage,
+      reasonGroup,
+      samples: 1
+    });
+  }
+
+  private classifyRejection(reason: string): string {
+    const normalized = reason.toLowerCase();
+    if (normalized.includes('insufficient candles')) return 'insufficient_candles';
+    if (normalized.includes('indicator values')) return 'indicator_unavailable';
+    if (normalized.includes('no active profile')) return 'regime_or_profile_mismatch';
+    if (normalized.includes('no edge')) return 'no_edge';
+    if (normalized.includes('allowlist rejected')) return 'allowlist';
+    if (normalized.includes('spread filter')) return 'spread';
+    if (normalized.includes('liquidity filter') || normalized.includes('low 1m volume')) return 'volume';
+    if (normalized.includes('entry quality')) return 'entry_quality';
+    if (normalized.includes('confidence too low')) return 'confidence';
+    if (normalized.includes('sizing rejected')) return 'sizing';
+    if (normalized.includes('risk overlay') || normalized.includes('risk check failed')) return 'risk';
+    if (normalized.includes('symbol add blocked')) return 'symbol_loss_limit';
+    if (normalized.includes('fx rejected')) return 'fx';
+    if (normalized.includes('stale market state') || normalized.includes('no market state')) return 'market_state';
+    return 'other';
+  }
+
+  private async persistDiagnostics(): Promise<void> {
+    await this.repo.upsertSignalDiagnostics(Array.from(this.diagnostics.values()));
   }
 
   private latestPrice(symbol: string): number | undefined {
@@ -760,8 +829,7 @@ export async function runIsolatedStrategyBacktest(
       label: `initializing ${label}`
     });
     const simulator = new BacktestSimulator(repo, runId, data, {
-      ...options,
-      forcedStrategyId: profile.id
+      ...options
     });
     const metrics = await simulator.run({
       baseCurrent: profileIndex * eventsPerStrategy,
@@ -792,16 +860,32 @@ export async function runParallelIsolatedStrategyBacktest(
   repo: BacktestRepository,
   runId: number,
   postgresUrl: string,
-  datasetCandleCount: number,
   options: SimulatorOptions,
   concurrency: number,
   onProgress?: (line: string) => void
 ): Promise<{ totalPnl: number; trades: number; wins: number; winRate: number }> {
   const profiles = listStrategyProfiles();
-  const eventsPerStrategy = datasetCandleCount;
-  const totalEvents = profiles.length * eventsPerStrategy;
-  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), profiles.length));
-  const progressByStrategy = new Map<string, number>(profiles.map((profile) => [profile.id, 0]));
+  const summaries = await repo.listCandleSymbolSummaries();
+  const candleCountBySymbol = new Map(summaries.map((summary) => [summary.symbol.toUpperCase(), summary.candles]));
+  const symbolsByAssetClass = new Map<string, string[]>();
+
+  for (const summary of summaries) {
+    const symbol = summary.symbol.toUpperCase();
+    const assetClass = options.assetClassBySymbol[symbol] ?? inferAssetClass(symbol);
+    symbolsByAssetClass.set(assetClass, [...(symbolsByAssetClass.get(assetClass) ?? []), symbol]);
+  }
+
+  const workItems: StrategyWorkItem[] = profiles
+    .map((profile, profileIndex) => {
+      const symbols = symbolsByAssetClass.get(profile.assetClass) ?? [];
+      const eventCount = symbols.reduce((sum, symbol) => sum + (candleCountBySymbol.get(symbol) ?? 0), 0);
+      return { profile, profileIndex, symbols, eventCount };
+    })
+    .filter((item) => item.eventCount > 0);
+
+  const totalEvents = workItems.reduce((sum, item) => sum + item.eventCount, 0);
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), workItems.length));
+  const progressByStrategy = new Map<string, number>(workItems.map((item) => [item.profile.id, 0]));
   const activeStrategies = new Set<string>();
 
   let nextProfileIndex = 0;
@@ -823,15 +907,17 @@ export async function runParallelIsolatedStrategyBacktest(
     });
   };
 
-  const runProfile = (profile: StrategyProfile, profileIndex: number): Promise<{ totalPnl: number; trades: number; wins: number; winRate: number }> => {
+  const runProfile = (item: StrategyWorkItem): Promise<{ totalPnl: number; trades: number; wins: number; winRate: number }> => {
     return new Promise((resolve, reject) => {
+      const profile = item.profile;
       const worker = new Worker(new URL('./strategy-lab-worker.js', import.meta.url), {
         workerData: {
           postgresUrl,
           runId,
           strategyId: profile.id,
-          strategyIndex: profileIndex,
+          strategyIndex: item.profileIndex,
           strategyTotal: profiles.length,
+          symbols: item.symbols,
           options
         }
       });
@@ -840,14 +926,14 @@ export async function runParallelIsolatedStrategyBacktest(
 
       worker.on('message', (message: StrategyWorkerMessage) => {
         if (message.type === 'progress') {
-          progressByStrategy.set(profile.id, Math.max(0, Math.min(eventsPerStrategy, message.current ?? 0)));
+          progressByStrategy.set(profile.id, Math.max(0, Math.min(item.eventCount, message.current ?? 0)));
           void publishProgress();
           return;
         }
 
         if (message.type === 'completed' && message.metrics) {
           metrics = message.metrics;
-          progressByStrategy.set(profile.id, eventsPerStrategy);
+          progressByStrategy.set(profile.id, item.eventCount);
           void publishProgress();
         }
       });
@@ -869,15 +955,16 @@ export async function runParallelIsolatedStrategyBacktest(
   };
 
   const workerLoop = async (slot: number): Promise<void> => {
-    while (nextProfileIndex < profiles.length) {
-      const profileIndex = nextProfileIndex;
+    while (nextProfileIndex < workItems.length) {
+      const itemIndex = nextProfileIndex;
       nextProfileIndex += 1;
-      const profile = profiles[profileIndex];
+      const item = workItems[itemIndex];
+      const profile = item.profile;
       activeStrategies.add(profile.id);
-      onProgress?.(`isolated strategy ${profile.id} started slot=${slot + 1}/${workerCount}`);
+      onProgress?.(`isolated strategy ${profile.id} started slot=${slot + 1}/${workerCount} symbols=${item.symbols.length} events=${item.eventCount}`);
       await publishProgress();
 
-      const metrics = await runProfile(profile, profileIndex);
+      const metrics = await runProfile(item);
       totalPnl += metrics.totalPnl;
       trades += metrics.trades;
       wins += metrics.wins;
@@ -888,7 +975,7 @@ export async function runParallelIsolatedStrategyBacktest(
   await repo.updateRunProgress(runId, {
     current: 0,
     total: totalEvents,
-    label: `starting ${workerCount} workers`
+    label: `starting ${workerCount} workers with symbol-filtered datasets`
   });
 
   await Promise.all(Array.from({ length: workerCount }, (_, index) => workerLoop(index)));

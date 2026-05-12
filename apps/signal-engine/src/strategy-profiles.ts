@@ -1,5 +1,6 @@
 export {
   inferAssetClass,
+  findStrategyProfile,
   listStrategyProfiles,
   pickStrategyProfile,
   pickStrategyProfiles

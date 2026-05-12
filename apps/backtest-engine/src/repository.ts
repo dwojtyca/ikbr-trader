@@ -8,6 +8,7 @@ import type {
   BacktestFxRate,
   BacktestOrderRecord,
   BacktestRun,
+  BacktestSignalDiagnosticRecord,
   LoadedBacktestData
 } from './types.js';
 
@@ -150,6 +151,9 @@ export class BacktestRepository {
       CREATE TABLE IF NOT EXISTS backtest_candles_1d (LIKE backtest_candles_1m INCLUDING ALL);
     `);
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS backtest_candles_1w (LIKE backtest_candles_1m INCLUDING ALL);
+    `);
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_fx_rates (
         rate_date DATE NOT NULL,
         base_currency TEXT NOT NULL,
@@ -231,6 +235,18 @@ export class BacktestRepository {
         PRIMARY KEY (run_id, strategy_id)
       );
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS backtest_signal_diagnostics (
+        run_id BIGINT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
+        strategy TEXT NOT NULL,
+        instrument TEXT NOT NULL,
+        side TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        reason_group TEXT NOT NULL,
+        samples BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (run_id, strategy, instrument, side, stage, reason_group)
+      );
+    `);
     await this.pool.query(`ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'bot';`);
     await this.pool.query(`ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS progress_current BIGINT NOT NULL DEFAULT 0;`);
     await this.pool.query(`ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS progress_total BIGINT;`);
@@ -238,13 +254,14 @@ export class BacktestRepository {
     await this.pool.query(`ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS progress_updated_at TIMESTAMPTZ;`);
     await this.pool.query('CREATE INDEX IF NOT EXISTS backtest_orders_run_idx ON backtest_orders(run_id, created_at DESC);');
     await this.pool.query('CREATE INDEX IF NOT EXISTS backtest_fills_run_idx ON backtest_fills(run_id, exit_at DESC);');
+    await this.pool.query('CREATE INDEX IF NOT EXISTS backtest_signal_diagnostics_run_idx ON backtest_signal_diagnostics(run_id, samples DESC);');
   }
 
   async resetHistoricalData(dateFrom: Date, dateTo: Date, symbols: string[]): Promise<BacktestDataset> {
     await this.pool.query(`
-      TRUNCATE backtest_fills, backtest_orders, backtest_strategy_state, backtest_runs,
+      TRUNCATE backtest_signal_diagnostics, backtest_fills, backtest_orders, backtest_strategy_state, backtest_runs,
                backtest_candles_1m, backtest_candles_5m, backtest_candles_1h,
-               backtest_candles_4h, backtest_candles_12h, backtest_candles_1d, backtest_fx_rates,
+               backtest_candles_4h, backtest_candles_12h, backtest_candles_1d, backtest_candles_1w, backtest_fx_rates,
                backtest_datasets
       RESTART IDENTITY CASCADE;
     `);
@@ -374,12 +391,13 @@ export class BacktestRepository {
   }
 
   async rebuildAggregates(): Promise<void> {
-    await this.pool.query('TRUNCATE backtest_candles_5m, backtest_candles_1h, backtest_candles_4h, backtest_candles_12h, backtest_candles_1d;');
+    await this.pool.query('TRUNCATE backtest_candles_5m, backtest_candles_1h, backtest_candles_4h, backtest_candles_12h, backtest_candles_1d, backtest_candles_1w;');
     await this.aggregateCandles('backtest_candles_5m', 300);
     await this.aggregateCandles('backtest_candles_1h', 3600);
     await this.aggregateCandles('backtest_candles_4h', 4 * 3600);
     await this.aggregateCandles('backtest_candles_12h', 12 * 3600);
     await this.aggregateCandles('backtest_candles_1d', 24 * 3600);
+    await this.aggregateCandles('backtest_candles_1w', 7 * 24 * 3600);
   }
 
   async latestDataset(): Promise<BacktestDataset | null> {
@@ -415,16 +433,20 @@ export class BacktestRepository {
     );
   }
 
-  async loadBacktestData(): Promise<LoadedBacktestData> {
+  async loadBacktestData(symbols?: string[]): Promise<LoadedBacktestData> {
     const dataset = await this.latestDataset();
     if (!dataset || dataset.status !== 'ready') throw new Error('No ready historical dataset. Fetch history first.');
-    const [oneMinute, fiveMinute, oneHour, fourHour, twelveHour, oneDay, fxRates] = await Promise.all([
-      this.pool.query('SELECT * FROM backtest_candles_1m ORDER BY ts ASC, symbol ASC'),
-      this.pool.query('SELECT * FROM backtest_candles_5m ORDER BY ts ASC, symbol ASC'),
-      this.pool.query('SELECT * FROM backtest_candles_1h ORDER BY ts ASC, symbol ASC'),
-      this.pool.query('SELECT * FROM backtest_candles_4h ORDER BY ts ASC, symbol ASC'),
-      this.pool.query('SELECT * FROM backtest_candles_12h ORDER BY ts ASC, symbol ASC'),
-      this.pool.query('SELECT * FROM backtest_candles_1d ORDER BY ts ASC, symbol ASC'),
+    const normalizedSymbols = Array.from(new Set((symbols ?? []).map((symbol) => symbol.trim().toUpperCase()).filter(Boolean)));
+    const symbolFilter = normalizedSymbols.length > 0 ? ' WHERE symbol = ANY($1::text[])' : '';
+    const symbolParams = normalizedSymbols.length > 0 ? [normalizedSymbols] : [];
+    const [oneMinute, fiveMinute, oneHour, fourHour, twelveHour, oneDay, oneWeek, fxRates] = await Promise.all([
+      this.pool.query(`SELECT * FROM backtest_candles_1m${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_5m${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_1h${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_4h${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_12h${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_1d${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
+      this.pool.query(`SELECT * FROM backtest_candles_1w${symbolFilter} ORDER BY ts ASC, symbol ASC`, symbolParams),
       this.pool.query('SELECT * FROM backtest_fx_rates ORDER BY rate_date ASC, quote_currency ASC')
     ]);
     return {
@@ -435,6 +457,7 @@ export class BacktestRepository {
       candles4h: fourHour.rows.map((row) => mapCandle(row, '4h')),
       candles12h: twelveHour.rows.map((row) => mapCandle(row, '12h')),
       candles1d: oneDay.rows.map((row) => mapCandle(row, '1d')),
+      candles1w: oneWeek.rows.map((row) => mapCandle(row, '1w')),
       fxRates: fxRates.rows.map(mapFxRate)
     };
   }
@@ -561,6 +584,38 @@ export class BacktestRepository {
     }
   }
 
+  async upsertSignalDiagnostics(records: BacktestSignalDiagnosticRecord[]): Promise<void> {
+    const filtered = records.filter((record) => record.samples > 0);
+    if (filtered.length === 0) return;
+
+    const chunkSize = 500;
+    for (let offset = 0; offset < filtered.length; offset += chunkSize) {
+      const chunk = filtered.slice(offset, offset + chunkSize);
+      const values: unknown[] = [];
+      const placeholders = chunk.map((record, index) => {
+        const base = index * 7;
+        values.push(
+          record.runId,
+          record.strategy,
+          record.instrument.toUpperCase(),
+          record.side,
+          record.stage,
+          record.reasonGroup,
+          Math.max(0, Math.floor(record.samples))
+        );
+        return `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7})`;
+      });
+
+      await this.pool.query(
+        `INSERT INTO backtest_signal_diagnostics (run_id, strategy, instrument, side, stage, reason_group, samples)
+         VALUES ${placeholders.join(',')}
+         ON CONFLICT (run_id, strategy, instrument, side, stage, reason_group) DO UPDATE SET
+           samples=backtest_signal_diagnostics.samples + EXCLUDED.samples`,
+        values
+      );
+    }
+  }
+
   async getReport(runId?: number): Promise<any> {
     const selectedRun = runId
       ? (await this.pool.query('SELECT * FROM backtest_runs WHERE id=$1', [runId])).rows[0]
@@ -568,7 +623,7 @@ export class BacktestRepository {
     if (!selectedRun) throw new Error('No completed backtest run found.');
 
     const selectedRunId = Number(selectedRun.id);
-    const [fillsResult, statesResult] = await Promise.all([
+    const [fillsResult, statesResult, diagnosticsResult] = await Promise.all([
       this.pool.query(
         `SELECT f.*, o.indicator_snapshot
          FROM backtest_fills f
@@ -577,7 +632,15 @@ export class BacktestRepository {
          ORDER BY f.exit_at DESC`,
         [selectedRunId]
       ),
-      this.pool.query('SELECT * FROM backtest_strategy_state WHERE run_id=$1', [selectedRunId])
+      this.pool.query('SELECT * FROM backtest_strategy_state WHERE run_id=$1', [selectedRunId]),
+      this.pool.query(
+        `SELECT strategy, instrument, side, stage, reason_group, samples
+         FROM backtest_signal_diagnostics
+         WHERE run_id=$1
+         ORDER BY samples DESC
+         LIMIT 500`,
+        [selectedRunId]
+      )
     ]);
 
     const fills = fillsResult.rows.map((row) => ({
@@ -654,6 +717,14 @@ export class BacktestRepository {
 
     const wins = fills.filter((row) => row.pnl > 0).length;
     const totalPnl = fills.reduce((sum, row) => sum + row.pnl, 0);
+    const diagnostics = diagnosticsResult.rows.map((row) => ({
+      strategy: String(row.strategy),
+      instrument: String(row.instrument),
+      side: String(row.side),
+      stage: String(row.stage),
+      reasonGroup: String(row.reason_group),
+      samples: Number(row.samples ?? 0)
+    }));
 
     return {
       generatedAt: new Date().toISOString(),
@@ -682,6 +753,7 @@ export class BacktestRepository {
       byStrategySymbolSide: aggregate((fill) => `${fill.strategy} / ${fill.instrument} / ${fill.side}`),
       bySide: aggregate((fill) => fill.side),
       byRegime: aggregate((fill) => fill.regime),
+      diagnostics,
       worstTrades: [...fills].sort((a, b) => a.pnl - b.pnl).slice(0, 25)
     };
   }

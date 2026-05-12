@@ -8,6 +8,7 @@ type WorkerData = {
   strategyId: string;
   strategyIndex: number;
   strategyTotal: number;
+  symbols: string[];
   options: SimulatorOptions;
 };
 
@@ -16,10 +17,9 @@ const input = workerData as WorkerData;
 const repo = new BacktestRepository(input.postgresUrl);
 
 try {
-  const data = await repo.loadBacktestData();
+  const data = await repo.loadBacktestData(input.symbols);
   const simulator = new BacktestSimulator(repo, input.runId, data, {
-    ...input.options,
-    forcedStrategyId: input.strategyId
+    ...input.options
   });
   const label = `${input.strategyIndex + 1}/${input.strategyTotal} ${input.strategyId}`;
   const metrics = await simulator.run({

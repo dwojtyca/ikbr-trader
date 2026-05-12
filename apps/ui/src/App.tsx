@@ -227,6 +227,15 @@ type ReportTrade = {
   executedAt: string;
 };
 
+type SignalDiagnostic = {
+  strategy: string;
+  instrument: string;
+  side: string;
+  stage: string;
+  reasonGroup: string;
+  samples: number;
+};
+
 type SignalReportResponse = {
   generatedAt: string;
   limit: number;
@@ -239,6 +248,7 @@ type SignalReportResponse = {
   byStrategySymbolSide?: ReportAggregate[];
   bySide: ReportAggregate[];
   byRegime: ReportAggregate[];
+  diagnostics?: SignalDiagnostic[];
   worstTrades: ReportTrade[];
 };
 
@@ -1756,6 +1766,16 @@ function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportRes
         </div>
       </section>
 
+      {report.diagnostics && report.diagnostics.length > 0 ? (
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Signal Funnel</h2>
+            <span>Why candidates did or did not become trades</span>
+          </div>
+          <SignalDiagnosticsTable rows={report.diagnostics} />
+        </section>
+      ) : null}
+
       <section className="panel">
         <div className="panel-head">
           <h2>By Symbol</h2>
@@ -2002,6 +2022,45 @@ function ReportAggregateTable({
                 </tr>
               );
             })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SignalDiagnosticsTable({ rows }: { rows: SignalDiagnostic[] }) {
+  const visibleRows = [...rows].sort((a, b) => b.samples - a.samples).slice(0, 80);
+
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Stage</th>
+            <th>Reason</th>
+            <th>Samples</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleRows.length === 0 ? (
+            <tr>
+              <td colSpan={6} className="muted">No diagnostics</td>
+            </tr>
+          ) : (
+            visibleRows.map((row) => (
+              <tr key={`${row.strategy}|${row.instrument}|${row.side}|${row.stage}|${row.reasonGroup}`}>
+                <td>{row.strategy}</td>
+                <td>{row.instrument}</td>
+                <td>{row.side}</td>
+                <td>{row.stage}</td>
+                <td>{row.reasonGroup}</td>
+                <td>{formatNum(row.samples, 0)}</td>
+              </tr>
+            ))
           )}
         </tbody>
       </table>

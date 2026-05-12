@@ -5,7 +5,7 @@ export class MarketRepository {
   constructor(private readonly pool: Pool) {}
 
   async init(): Promise<void> {
-    for (const timeframe of ['1m', '5m', '1h', '4h', '12h', '1d'] as const) {
+    for (const timeframe of ['1m', '5m', '1h', '4h', '12h', '1d', '1w'] as const) {
       const table = this.tableForTimeframe(timeframe);
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
@@ -128,6 +128,7 @@ export class MarketRepository {
     if (timeframe === '1h') return 'candles_1h';
     if (timeframe === '4h') return 'candles_4h';
     if (timeframe === '12h') return 'candles_12h';
-    return 'candles_1d';
+    if (timeframe === '1d') return 'candles_1d';
+    return 'candles_1w';
   }
 }

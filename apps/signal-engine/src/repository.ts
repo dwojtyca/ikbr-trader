@@ -186,7 +186,7 @@ export class SignalRepository {
   ) {}
 
   async init(): Promise<void> {
-    for (const table of ['candles_1m', 'candles_5m', 'candles_1h', 'candles_4h', 'candles_12h', 'candles_1d'] as const) {
+    for (const table of ['candles_1m', 'candles_5m', 'candles_1h', 'candles_4h', 'candles_12h', 'candles_1d', 'candles_1w'] as const) {
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
           conid TEXT NOT NULL,
@@ -1514,6 +1514,7 @@ export class SignalRepository {
     if (timeframe === '1h') return 'candles_1h';
     if (timeframe === '4h') return 'candles_4h';
     if (timeframe === '12h') return 'candles_12h';
-    return 'candles_1d';
+    if (timeframe === '1d') return 'candles_1d';
+    return 'candles_1w';
   }
 }
