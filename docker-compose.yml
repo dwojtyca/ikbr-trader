@@ -38,11 +38,11 @@ services:
     env_file:
       - .env
     environment:
-      PORT: 3101
+      INGESTION_PORT: 3101
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
       IB_SOCKET_HOST: host.docker.internal
-      SIGNAL_ENGINE_BASE_URL: http://signal-engine:3102
+      INGESTION_SIGNAL_ENGINE_BASE_URL: http://signal-engine:3102
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,7 +63,7 @@ services:
       SIGNAL_PORT: 3102
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
-      EXECUTION_BASE_URL: http://execution-engine:3103
+      SIGNAL_EXECUTION_BASE_URL: http://execution-engine:3103
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,7 +98,7 @@ services:
       - .env
     environment:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
-      EXECUTION_BASE_URL: http://execution-engine:3103
+      LLM_AGENT_EXECUTION_BASE_URL: http://execution-engine:3103
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,7 +113,7 @@ services:
       - .env
     environment:
       BACKTEST_PORT: 3104
-      POSTGRES_ADMIN_URL: postgresql://postgres:postgres@postgres:5432/postgres
+      BACKTEST_POSTGRES_ADMIN_URL: postgresql://postgres:postgres@postgres:5432/postgres
       BACKTEST_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader_backtest
       IB_SOCKET_HOST: host.docker.internal
     depends_on:
@@ -131,10 +131,10 @@ services:
     environment:
       UI_HOST: 0.0.0.0
       UI_PORT: 5173
-      INGESTION_PROXY_TARGET: http://ingestion:3101
-      SIGNAL_PROXY_TARGET: http://signal-engine:3102
-      EXECUTION_PROXY_TARGET: http://execution-engine:3103
-      BACKTEST_PROXY_TARGET: http://backtest-engine:3104
+      UI_INGESTION_PROXY_TARGET: http://ingestion:3101
+      UI_SIGNAL_PROXY_TARGET: http://signal-engine:3102
+      UI_EXECUTION_PROXY_TARGET: http://execution-engine:3103
+      UI_BACKTEST_PROXY_TARGET: http://backtest-engine:3104
     depends_on:
       - ingestion
       - signal-engine

@@ -23,7 +23,7 @@ const optionalTrimmedString = z.preprocess(
 const schema = z.object({
   BACKTEST_PORT: z.coerce.number().default(3104),
   LOG_LEVEL: z.string().default("info"),
-  POSTGRES_ADMIN_URL: z
+  BACKTEST_POSTGRES_ADMIN_URL: z
     .string()
     .default("postgresql://postgres:postgres@localhost:5432/postgres"),
   BACKTEST_POSTGRES_URL: z
@@ -33,20 +33,20 @@ const schema = z.object({
     ),
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
-  BACKTEST_IB_CLIENT_ID: z.coerce.number().default(104),
+  BACKTEST_INGESTION_CLIENT_ID: z.coerce.number().default(104),
   IB_EXCHANGE: z.string().default("SMART"),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default("USD"),
   WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
   WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
-  ACCOUNT_EQUITY: z.coerce.number().default(100000),
-  MAX_RISK_PER_TRADE_PCT: z.coerce.number().default(0.5),
-  MAX_EXPOSURE_PCT: z.coerce.number().default(25),
-  MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
-  MAX_OPEN_POSITIONS: z.coerce.number().default(5),
-  MAX_SPREAD_BPS: z.coerce.number().default(12),
-  MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),
+  SIGNAL_ACCOUNT_EQUITY: z.coerce.number().default(100000),
+  SIGNAL_MAX_RISK_PER_TRADE_PCT: z.coerce.number().default(0.5),
+  SIGNAL_MAX_EXPOSURE_PCT: z.coerce.number().default(25),
+  SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
+  SIGNAL_MAX_OPEN_POSITIONS: z.coerce.number().default(5),
+  SIGNAL_MAX_SPREAD_BPS: z.coerce.number().default(12),
+  SIGNAL_MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),
   SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(0.55),
   SIGNAL_LMT_ENTRY_MODE: z.enum(["touch", "last", "mid"]).default("touch"),
   SIGNAL_LMT_ENTRY_BUFFER_BPS: z.coerce.number().min(0).default(0),

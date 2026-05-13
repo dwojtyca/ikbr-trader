@@ -39,7 +39,7 @@ export class MarketAuxClient {
 
   async getNewsForSymbol(symbol: string, windowHours: number, maxItems: number): Promise<MarketNewsItem[]> {
     if (!this.options.apiKey) {
-      throw new Error('MARKETAUX_API_KEY is not configured');
+      throw new Error('LLM_AGENT_MARKETAUX_API_KEY is not configured');
     }
 
     const url = new URL(this.options.baseUrl);

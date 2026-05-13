@@ -18,8 +18,8 @@ const strategies = [new MomentumBreakoutLongStrategy()];
 const engine = new SignalEngine(repo, {
   strategies,
   minCandles: config.SIGNAL_MIN_CANDLES,
-  maxSpreadBps: config.MAX_SPREAD_BPS,
-  minVolume1m: config.MIN_CANDLE_VOLUME_1M,
+  maxSpreadBps: config.SIGNAL_MAX_SPREAD_BPS,
+  minVolume1m: config.SIGNAL_MIN_CANDLE_VOLUME_1M,
   volumeFilterMode: config.volumeFilterMode,
   minConfidence: config.SIGNAL_MIN_CONFIDENCE,
   lmtEntryMode: config.SIGNAL_LMT_ENTRY_MODE,
@@ -35,14 +35,14 @@ const engine = new SignalEngine(repo, {
   baseCurrency: config.baseCurrency,
   currencyBySymbol: config.currencyBySymbol,
   priceMultiplierBySymbol: config.priceMultiplierOverrides,
-  executionBaseUrl: config.EXECUTION_BASE_URL,
+  executionBaseUrl: config.SIGNAL_EXECUTION_BASE_URL,
   strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
   riskLimits: {
-    accountEquity: config.ACCOUNT_EQUITY,
-    maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,
-    maxExposurePct: config.MAX_EXPOSURE_PCT,
-    maxNotionalPerTradePct: config.MAX_NOTIONAL_PER_TRADE_PCT,
-    maxOpenPositions: config.MAX_OPEN_POSITIONS,
+    accountEquity: config.SIGNAL_ACCOUNT_EQUITY,
+    maxRiskPerTradePct: config.SIGNAL_MAX_RISK_PER_TRADE_PCT,
+    maxExposurePct: config.SIGNAL_MAX_EXPOSURE_PCT,
+    maxNotionalPerTradePct: config.SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT,
+    maxOpenPositions: config.SIGNAL_MAX_OPEN_POSITIONS,
   },
 });
 
@@ -65,7 +65,7 @@ async function runAndPersist(
   const results: Array<{ id: number; order: ProposedOrder }> = [];
   await repo.expireStalePendingSignals(config.SIGNAL_PROPOSAL_TTL_MS);
   const exposureSnapshot = await repo.getExposureSnapshot(
-    config.EXECUTION_BASE_URL,
+    config.SIGNAL_EXECUTION_BASE_URL,
   );
   for (const symbol of symbols) {
     let order: ProposedOrder;

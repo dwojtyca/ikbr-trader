@@ -1,6 +1,7 @@
 # ikbr-trader
 
 Szkielet systemu tradingowego pod IBKR z podziałem na:
+
 - `apps/ingestion` - sesja TWS/IB Gateway Socket API, subskrypcje market data, agregacja 1m candles, zapis do Postgresa, cache rynku w Redisie
 - `apps/signal-engine` - silnik sygnałów (EMA20/50, RSI14, ATR14, risk model, zapis proposed orders)
 - `apps/execution-engine` - wykonanie zleceń przez TWS Socket API na bazie `proposed_orders` lub ręcznego ticketu
@@ -38,6 +39,7 @@ Szkielet systemu tradingowego pod IBKR z podziałem na:
 6. Uruchom ingestion i wykonaj `POST /bootstrap`.
 
 Przy uruchomieniu przez Docker Compose:
+
 - kontenery `ingestion` i `execution-engine` łączą się do TWS przez `host.docker.internal` (nie przez `127.0.0.1` z `.env`).
 - jeśli widzisz `TWS connect timeout waiting for nextValidId`, sprawdź w TWS:
 - `Enable ActiveX and Socket Clients` jest włączone
@@ -45,18 +47,18 @@ Przy uruchomieniu przez Docker Compose:
 - odznaczone `Allow connections from localhost only` (dla połączeń z kontenera)
 
 Najważniejsze zmienne środowiskowe:
-- `PORT` - port ingestion (`3101`)
+
+- `INGESTION_PORT` - port ingestion (`3101`)
 - `SIGNAL_PORT` - port signal-engine (`3102`)
 - `EXECUTION_PORT` - port execution-engine (`3103`)
-- `IB_SOCKET_HOST`, `IB_SOCKET_PORT`, `IB_CLIENT_ID` - połączenie do TWS/IB Gateway (Socket API)
+- `IB_SOCKET_HOST`, `IB_SOCKET_PORT`, `INGESTION_CLIENT_ID` - połączenie do TWS/IB Gateway (Socket API)
 - `EXECUTION_CLIENT_ID` - osobny client ID dla execution socket
 - `IB_MARKET_DATA_TYPE` - typ danych rynkowych (`1` live, `2` frozen, `3` delayed, `4` delayed frozen)
-- `EXECUTION_DEFAULT_TIF`, `EXECUTION_ORDER_TIMEOUT_MS`, `EXECUTION_SUBMITTED_AUTO_CANCEL_MS`, `EXECUTION_RETRY_AS_MKT_ON_CODE_110`, `EXECUTION_MIN_TICK_OVERRIDES` - parametry wykonania zleceń
-- `LLM_AGENT_*`, `OPENAI_API_KEY`, `MARKETAUX_API_KEY` - parametry autonomicznego agenta LLM
+- `EXECUTION_DEFAULT_TIF`, `EXECUTION_ORDER_TIMEOUT_MS`, `EXECUTION_SUBMITTED_AUTO_CANCEL_MS`, `EXECUTION_RETRY_AS_MKT_ON_CODE_110` - parametry wykonania zleceń
+- `LLM_AGENT_*`, `LLM_AGENT_OPENAI_API_KEY`, `LLM_AGENT_MARKETAUX_API_KEY` - parametry autonomicznego agenta LLM
 - `WATCHLIST_SYMBOLS` - symbole do subskrypcji i liczenia sygnałów
-- `SIGNAL_ASSET_CLASS_OVERRIDES` - ręczne mapowanie klasy aktywa (`AAPL:stock,GC:commodity,SPY:index`)
-- `MAX_RISK_PER_TRADE_PCT`, `MAX_EXPOSURE_PCT`, `MAX_OPEN_POSITIONS` - limity ryzyka
-- `BACKTEST_POSTGRES_URL`, `POSTGRES_ADMIN_URL`, `BACKTEST_IB_CLIENT_ID`, `BACKTEST_COMMISSION_BPS` - parametry odseparowanego backtestu
+- `SIGNAL_MAX_RISK_PER_TRADE_PCT`, `SIGNAL_MAX_EXPOSURE_PCT`, `SIGNAL_MAX_OPEN_POSITIONS` - limity ryzyka
+- `BACKTEST_POSTGRES_URL`, `BACKTEST_POSTGRES_ADMIN_URL`, `BACKTEST_INGESTION_CLIENT_ID`, `BACKTEST_COMMISSION_BPS` - parametry odseparowanego backtestu
 
 ## Etap 1 (zaimplementowane)
 
@@ -169,7 +171,7 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - Każda decyzja trafia do `llm_order_decisions` (audit trail).
 - Fail-closed: przy błędzie LLM/news/API order dostaje `REJECTED` z technicznym powodem.
 - Cooldown na symbol (`LLM_AGENT_SYMBOL_COOLDOWN_MS`) ogranicza spam decyzji na tym samym tickerze.
-- Uwaga: przy `LLM_AGENT_ENABLED=true` i brakujących `OPENAI_API_KEY` / `MARKETAUX_API_KEY` agent będzie odrzucał `PROPOSED` (fail-closed).
+- Uwaga: przy `LLM_AGENT_ENABLED=true` i brakujących `LLM_AGENT_OPENAI_API_KEY` / `LLM_AGENT_MARKETAUX_API_KEY` agent będzie odrzucał `PROPOSED` (fail-closed).
 
 ## Istotne uwagi IBKR
 
@@ -177,7 +179,7 @@ curl -X POST http://127.0.0.1:3103/execution/execute-ticket \
 - Dodaj `127.0.0.1` do `Trusted IPs` i używaj poprawnego portu socket (paper zwykle `4002`, live zwykle `4001`).
 - Limity market data lines i snapshotów ograniczają rozmiar watchlisty.
 - Obsługiwane typy orderów i routing trzeba potwierdzić manualnie w TWS przed automatyzacją.
-- Ingestion i Execution muszą mieć różne client IDs (`IB_CLIENT_ID` vs `EXECUTION_CLIENT_ID`).
+- Ingestion i Execution muszą mieć różne client IDs (`INGESTION_CLIENT_ID` vs `EXECUTION_CLIENT_ID`).
 
 ## Najbliższe kroki (Etap 3/4)
 
@@ -237,20 +239,19 @@ Logika doboru strategii:
 - profil strategii dobierany jest z `strategy-profiles.ts`, np. `stocks_trend_v1`, `indices_range_v1`, `commodities_trend_v1`
 - score BUY/SELL musi przekroczyc `entryScore` profilu oraz przewage `decisionEdge`
 - confidence jest dodatkowo karane za spread
-- sizing bazuje na `MAX_RISK_PER_TRADE_PCT`, ATR stop distance, `quantityFactor`, limitach notional/exposure i live snapshotcie konta
+- sizing bazuje na `SIGNAL_MAX_RISK_PER_TRADE_PCT`, ATR stop distance, `quantityFactor`, limitach notional/exposure i live snapshotcie konta
 - dla `OPEN_OR_ADD` bot zaklada bracket order z TP/SL
 - dla `CLOSE_OR_REDUCE` bot zamyka/redukuje pozycje bez bracketu
 - przy pozycji otwartej bot moze wygenerowac managed exit po czasie lub po zalamaniu momentum
 
 Istotne aktualne parametry:
 
-- `MAX_RISK_PER_TRADE_PCT=0.35`
-- `MAX_NOTIONAL_PER_TRADE_PCT=5`
-- `MAX_EXPOSURE_PCT=25`
-- `MAX_OPEN_POSITIONS=5`
+- `SIGNAL_MAX_RISK_PER_TRADE_PCT=0.35`
+- `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT=5`
+- `SIGNAL_MAX_EXPOSURE_PCT=25`
+- `SIGNAL_MAX_OPEN_POSITIONS=5`
 - `SIGNAL_MIN_CONFIDENCE=0.55`
-- `ATR_STOP_MULT=1.5`
-- `ATR_TP_MULT=3`
+- `stopAtrMult` i `takeProfitR` w `MomentumBreakoutLongStrategy`
 - `SIGNAL_MAX_MARKET_STATE_AGE_MS=45000`
 - `SIGNAL_FRACTIONAL_SYMBOLS=` - pozycje powinny byc calkowite, co jest potrzebne dla IBKR socket API przy tych instrumentach
 
@@ -258,7 +259,7 @@ Istotne aktualne parametry:
 
 1. Zbyt niska selektywnosc przy obecnym rozmiarze pozycji.
 
-   `MAX_NOTIONAL_PER_TRADE_PCT=5` oznacza, ze pojedynczy sygnal moze dostac istotny kapital. To nie musi byc problemem, jezeli filtr wejsc ma dodatnia expectancy. Obecne wyniki sugeruja jednak, ze kapital jest czasem alokowany do setupow rozciagnietych lub niskiej jakosci. Wniosek: nie zmniejszac limitow, tylko podniesc prog jakosci sygnalu, ktory dopuszcza uzycie pelnego size.
+   `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT=5` oznacza, ze pojedynczy sygnal moze dostac istotny kapital. To nie musi byc problemem, jezeli filtr wejsc ma dodatnia expectancy. Obecne wyniki sugeruja jednak, ze kapital jest czasem alokowany do setupow rozciagnietych lub niskiej jakosci. Wniosek: nie zmniejszac limitow, tylko podniesc prog jakosci sygnalu, ktory dopuszcza uzycie pelnego size.
 
 2. Stop distance jest czesto zbyt waski wobec szumu intraday.
 
@@ -271,7 +272,6 @@ Istotne aktualne parametry:
 4. Profil `stocks_trend_v1` ma ujemna probke.
 
    W `signal_outcomes`:
-
    - `stocks_trend_v1 BUY`: `13` probek, avg `-0.0108%`, mediana `-0.1944%`, `3` wygrane / `10` przegranych
    - `stocks_trend_v1 SELL`: `12` probek, avg `-0.0508%`, mediana `-0.2546%`, `5` wygranych / `7` przegranych
 
@@ -295,7 +295,7 @@ Istotne aktualne parametry:
 
 ### Rekomendowane zmiany pod poprawe expectancy
 
-Zalozenie operacyjne: `MAX_NOTIONAL_PER_TRADE_PCT` i `MAX_RISK_PER_TRADE_PCT` zostaja bez zmian. Ponizsze zmiany nie maja sluzyc prostemu "ucinaniu strat" przez mniejsza ekspozycje. Celem jest zwiekszenie oczekiwanej wartosci transakcji: mniej wejsc po slabym setupie, wiekszy udzial transakcji z dodatnim R, lepsze prowadzenie zwyciezcow i alokacja kapitalu do profili, ktore faktycznie maja przewage.
+Zalozenie operacyjne: `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` zostaja bez zmian. Ponizsze zmiany nie maja sluzyc prostemu "ucinaniu strat" przez mniejsza ekspozycje. Celem jest zwiekszenie oczekiwanej wartosci transakcji: mniej wejsc po slabym setupie, wiekszy udzial transakcji z dodatnim R, lepsze prowadzenie zwyciezcow i alokacja kapitalu do profili, ktore faktycznie maja przewage.
 
 Priorytet 1 - poprawic jakosc wejsc, nie zmniejszac size:
 
@@ -310,13 +310,13 @@ Priorytet 2 - poprawic profil zysku przez wyjscia:
 
 - podniesc minimalny stop dla akcji z obecnych kilkunastu bps do ok. `30-50 bps`
 - dla indeksow/ETF ustawic minimalny stop ok. `15-25 bps`
-- rozwazyc `ATR_STOP_MULT=2.0` oraz `ATR_TP_MULT=3.5-4.0`, pod warunkiem ze backtest/forward test poprawia expectancy po kosztach
+- testowac warianty `stopAtrMult` oraz `takeProfitR` w strategii, pod warunkiem ze backtest/forward test poprawia expectancy po kosztach
 - usunac agresywny time stop `30m` dla trendu albo podniesc go do `90-180m`
 - dla pozycji z zyskiem wprowadzic trailing stop po osiagnieciu `+0.5R`, zamiast zamykac tylko na sztywny czas
 - dla trendow testowac czesciowe TP: np. zamkniecie czesci pozycji przy `1R`, reszta prowadzona trailingiem do `2.5-4R`
 - dla range trzymac TP blizej srodka/przeciwnego pasma, a nie wymuszac jednego ATR modelu dla wszystkich symboli
 
-Szerszy stop nie jest tu mechanizmem "mniej strat", tylko sposobem na unikniecie wybijania poprawnych setupow przez normalny szum 1m. Przy stalym `MAX_RISK_PER_TRADE_PCT` sizing oparty o risk-per-unit powinien automatycznie dostosowac ilosc akcji.
+Szerszy stop nie jest tu mechanizmem "mniej strat", tylko sposobem na unikniecie wybijania poprawnych setupow przez normalny szum 1m. Przy stalym `SIGNAL_MAX_RISK_PER_TRADE_PCT` sizing oparty o risk-per-unit powinien automatycznie dostosowac ilosc akcji.
 
 Priorytet 3 - alokowac kapital do profili z przewaga:
 
@@ -360,7 +360,7 @@ Docelowo bot powinien byc bardziej selektywny i lepiej wykorzystywac zwyciezcow,
 
 ## Aktualna strategia po implementacji zmian
 
-Ta sekcja opisuje faktycznie zaimplementowana logike po zmianach z 2026-04-29. Globalne limity `MAX_NOTIONAL_PER_TRADE_PCT` i `MAX_RISK_PER_TRADE_PCT` pozostaja bez zmian. Optymalizacja polega na lepszym wyborze sygnalow, dynamicznym progu jakosci i innym prowadzeniu pozycji.
+Ta sekcja opisuje faktycznie zaimplementowana logike po zmianach z 2026-04-29. Globalne limity `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` pozostaja bez zmian. Optymalizacja polega na lepszym wyborze sygnalow, dynamicznym progu jakosci i innym prowadzeniu pozycji.
 
 ### Pipeline sygnalu
 
@@ -442,15 +442,15 @@ To nie zmniejsza globalnego size. Mechanizm wymaga mocniejszego sygnalu, zeby ka
 
 Sizing pozostaje oparty o:
 
-- live `accountEquity` z execution account summary, z fallbackiem do `ACCOUNT_EQUITY`
-- `MAX_RISK_PER_TRADE_PCT`
+- live `accountEquity` z execution account summary, z fallbackiem do `SIGNAL_ACCOUNT_EQUITY`
+- `SIGNAL_MAX_RISK_PER_TRADE_PCT`
 - odleglosc entry-stop (`riskPerUnit`)
 - `profile.quantityFactor`
-- `MAX_EXPOSURE_PCT`
-- `MAX_NOTIONAL_PER_TRADE_PCT`
+- `SIGNAL_MAX_EXPOSURE_PCT`
+- `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT`
 - limit ekspozycji kierunkowej
 - limit koncentracji symbolu
-- `MAX_OPEN_POSITIONS`
+- `SIGNAL_MAX_OPEN_POSITIONS`
 
 Ilość jest zaokraglana do kroku symbolu:
 
@@ -475,8 +475,8 @@ Opcjonalny buffer `SIGNAL_LMT_ENTRY_BUFFER_BPS` przesuwa entry:
 
 Stop i take profit:
 
-- stop = `ATR14 * ATR_STOP_MULT * profile.atrStopMultFactor`
-- take profit = `ATR14 * ATR_TP_MULT * profile.atrTpMultFactor`
+- stop = logika strategii, aktualnie wariant ATR przez `stopAtrMult`
+- take profit = minimum R-multiple przez `takeProfitR`
 - jesli stop jest mniejszy niz minimalny stop bps dla klasy aktywa, stop jest poszerzany do minimum, a TP jest przeliczane tak, by zachowac RR
 
 Dla `OPEN_OR_ADD` execution-engine zaklada bracket order. Dla `CLOSE_OR_REDUCE` nie zaklada bracketu, bo order zamyka lub redukuje pozycje.
@@ -527,9 +527,9 @@ Order nie trafia do modelu, jezeli:
 - `riskCheckStatus` nie jest `PASS`
 - symbol jest w cooldownie `LLM_AGENT_SYMBOL_COOLDOWN_MS`
 - nie mozna pobrac account summary i `LLM_AGENT_FAIL_CLOSED=true`
-- brakuje `MARKETAUX_API_KEY` i fail-closed jest wlaczony
+- brakuje `LLM_AGENT_MARKETAUX_API_KEY` i fail-closed jest wlaczony
 - MarketAux zwroci blad i fail-closed jest wlaczony
-- brakuje `OPENAI_API_KEY` i fail-closed jest wlaczony
+- brakuje `LLM_AGENT_OPENAI_API_KEY` i fail-closed jest wlaczony
 
 W trybie fail-closed taki order jest odrzucany jako `REJECTED`.
 

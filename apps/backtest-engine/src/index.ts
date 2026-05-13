@@ -45,8 +45,8 @@ function parseDateEnd(value: string): Date {
 async function simulatorOptions() {
   return {
     minCandles: config.SIGNAL_MIN_CANDLES,
-    maxSpreadBps: config.MAX_SPREAD_BPS,
-    minVolume1m: config.MIN_CANDLE_VOLUME_1M,
+    maxSpreadBps: config.SIGNAL_MAX_SPREAD_BPS,
+    minVolume1m: config.SIGNAL_MIN_CANDLE_VOLUME_1M,
     minConfidence: config.SIGNAL_MIN_CONFIDENCE,
     lmtEntryMode: config.SIGNAL_LMT_ENTRY_MODE,
     lmtEntryBufferBps: config.SIGNAL_LMT_ENTRY_BUFFER_BPS,
@@ -66,11 +66,11 @@ async function simulatorOptions() {
     syntheticSpreadBps: config.BACKTEST_SYNTHETIC_SPREAD_BPS,
     orderTtlCandles: config.BACKTEST_ORDER_TTL_CANDLES,
     riskLimits: {
-      accountEquity: config.ACCOUNT_EQUITY,
-      maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,
-      maxExposurePct: config.MAX_EXPOSURE_PCT,
-      maxNotionalPerTradePct: config.MAX_NOTIONAL_PER_TRADE_PCT,
-      maxOpenPositions: config.MAX_OPEN_POSITIONS,
+      accountEquity: config.SIGNAL_ACCOUNT_EQUITY,
+      maxRiskPerTradePct: config.SIGNAL_MAX_RISK_PER_TRADE_PCT,
+      maxExposurePct: config.SIGNAL_MAX_EXPOSURE_PCT,
+      maxNotionalPerTradePct: config.SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT,
+      maxOpenPositions: config.SIGNAL_MAX_OPEN_POSITIONS,
     },
   };
 }
@@ -115,7 +115,7 @@ function createHistoricalClient(): HistoricalClient {
     {
       host: config.IB_SOCKET_HOST,
       port: config.IB_SOCKET_PORT,
-      clientId: config.BACKTEST_IB_CLIENT_ID,
+      clientId: config.BACKTEST_INGESTION_CLIENT_ID,
       securityType: config.defaultSecurityType,
       exchange: config.IB_EXCHANGE,
       primaryExchange: config.IB_PRIMARY_EXCHANGE,
@@ -276,7 +276,7 @@ async function startHistoryResumeJob(
 }
 
 await ensureBacktestDatabase(
-  config.POSTGRES_ADMIN_URL,
+  config.BACKTEST_POSTGRES_ADMIN_URL,
   config.BACKTEST_POSTGRES_URL,
 );
 const repo = new BacktestRepository(config.BACKTEST_POSTGRES_URL);
@@ -424,12 +424,7 @@ app.post("/backtest/run", async (request, reply) => {
             )
           : await (async () => {
               const data = await repo.loadBacktestData();
-              return new BacktestSimulator(
-                repo,
-                run.id,
-                data,
-                options,
-              ).run({
+              return new BacktestSimulator(repo, run.id, data, options).run({
                 total: data.candles1m.length,
                 label: "bot backtest",
                 onProgress: (progress) =>

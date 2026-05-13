@@ -95,7 +95,7 @@ export class OpenAiDecider {
 
   async decide(context: DecisionContext): Promise<LlmDecision> {
     if (!this.options.apiKey) {
-      throw new Error('OPENAI_API_KEY is not configured');
+      throw new Error('LLM_AGENT_OPENAI_API_KEY is not configured');
     }
 
     const systemPrompt = [

@@ -3,10 +3,10 @@ import react from '@vitejs/plugin-react';
 
 const host = process.env.UI_HOST ?? '127.0.0.1';
 const port = Number(process.env.UI_PORT ?? 5173);
-const ingestionProxyTarget = process.env.INGESTION_PROXY_TARGET ?? 'http://127.0.0.1:3101';
-const signalProxyTarget = process.env.SIGNAL_PROXY_TARGET ?? 'http://127.0.0.1:3102';
-const executionProxyTarget = process.env.EXECUTION_PROXY_TARGET ?? 'http://127.0.0.1:3103';
-const backtestProxyTarget = process.env.BACKTEST_PROXY_TARGET ?? 'http://127.0.0.1:3104';
+const ingestionProxyTarget = process.env.UI_INGESTION_PROXY_TARGET ?? 'http://127.0.0.1:3101';
+const signalProxyTarget = process.env.UI_SIGNAL_PROXY_TARGET ?? 'http://127.0.0.1:3102';
+const executionProxyTarget = process.env.UI_EXECUTION_PROXY_TARGET ?? 'http://127.0.0.1:3103';
+const backtestProxyTarget = process.env.UI_BACKTEST_PROXY_TARGET ?? 'http://127.0.0.1:3104';
 
 export default defineConfig({
   plugins: [react()],

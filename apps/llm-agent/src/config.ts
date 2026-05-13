@@ -11,7 +11,7 @@ const optionalTrimmedString = z.preprocess(
 const schema = z.object({
   LOG_LEVEL: z.string().default('info'),
   POSTGRES_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/ikbr_trader'),
-  EXECUTION_BASE_URL: z.string().default('http://localhost:3103'),
+  LLM_AGENT_EXECUTION_BASE_URL: z.string().default('http://localhost:3103'),
   LLM_AGENT_ENABLED: z.string().default('true'),
   LLM_AGENT_POLL_MS: z.coerce.number().int().min(200).default(1500),
   LLM_AGENT_CLAIM_STALE_MS: z.coerce.number().int().min(1000).default(120000),
@@ -22,10 +22,10 @@ const schema = z.object({
   LLM_AGENT_PROMPT_VERSION: z.string().default('llm_agent_v1'),
   LLM_AGENT_HTTP_TIMEOUT_MS: z.coerce.number().int().min(1000).default(10000),
   LLM_AGENT_MAX_NEWS_ITEMS: z.coerce.number().int().min(0).max(50).default(12),
-  OPENAI_API_KEY: optionalTrimmedString,
-  OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
-  MARKETAUX_API_KEY: optionalTrimmedString,
-  MARKETAUX_BASE_URL: z.string().default('https://api.marketaux.com/v1/news/all')
+  LLM_AGENT_OPENAI_API_KEY: optionalTrimmedString,
+  LLM_AGENT_OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
+  LLM_AGENT_MARKETAUX_API_KEY: optionalTrimmedString,
+  LLM_AGENT_MARKETAUX_BASE_URL: z.string().default('https://api.marketaux.com/v1/news/all')
 });
 
 const env = schema.parse(process.env);

@@ -8,15 +8,15 @@ import { ClaimedOrder, LlmAgentRepository } from './repository.js';
 
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const repo = new LlmAgentRepository(pool);
-const executionApi = new ExecutionApiClient(config.EXECUTION_BASE_URL, config.LLM_AGENT_HTTP_TIMEOUT_MS);
+const executionApi = new ExecutionApiClient(config.LLM_AGENT_EXECUTION_BASE_URL, config.LLM_AGENT_HTTP_TIMEOUT_MS);
 const marketaux = new MarketAuxClient({
-  apiKey: config.MARKETAUX_API_KEY,
-  baseUrl: config.MARKETAUX_BASE_URL,
+  apiKey: config.LLM_AGENT_MARKETAUX_API_KEY,
+  baseUrl: config.LLM_AGENT_MARKETAUX_BASE_URL,
   timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS
 });
 const decider = new OpenAiDecider({
-  apiKey: config.OPENAI_API_KEY,
-  baseUrl: config.OPENAI_BASE_URL,
+  apiKey: config.LLM_AGENT_OPENAI_API_KEY,
+  baseUrl: config.LLM_AGENT_OPENAI_BASE_URL,
   model: config.LLM_AGENT_MODEL,
   timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS,
   promptVersion: config.LLM_AGENT_PROMPT_VERSION
@@ -223,8 +223,8 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
   let news: MarketNewsItem[] = [];
   if (!marketaux.isConfigured()) {
     if (config.llmAgentFailClosed) {
-      await rejectFailClosed(order, 'AI reject (fail-closed): MARKETAUX_API_KEY is not configured', {
-        sourceError: 'MARKETAUX_API_KEY is missing'
+      await rejectFailClosed(order, 'AI reject (fail-closed): LLM_AGENT_MARKETAUX_API_KEY is not configured', {
+        sourceError: 'LLM_AGENT_MARKETAUX_API_KEY is missing'
       });
       return;
     }
@@ -245,12 +245,12 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
 
   if (!decider.isConfigured()) {
     if (config.llmAgentFailClosed) {
-      await rejectFailClosed(order, 'AI reject (fail-closed): OPENAI_API_KEY is not configured', {
-        sourceError: 'OPENAI_API_KEY is missing'
+      await rejectFailClosed(order, 'AI reject (fail-closed): LLM_AGENT_OPENAI_API_KEY is not configured', {
+        sourceError: 'LLM_AGENT_OPENAI_API_KEY is missing'
       });
       return;
     }
-    throw new Error('OPENAI_API_KEY is not configured');
+    throw new Error('LLM_AGENT_OPENAI_API_KEY is not configured');
   }
 
   let llmDecisionId: number | null = null;

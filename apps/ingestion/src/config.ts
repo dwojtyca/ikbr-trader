@@ -1,87 +1,100 @@
-import dotenv from 'dotenv';
-import { z } from 'zod';
-import { WatchlistInstrument } from './types.js';
+import dotenv from "dotenv";
+import { z } from "zod";
+import { WatchlistInstrument } from "./types.js";
 
 dotenv.config();
 
-const DEFAULT_SECURITY_TYPE = 'STK';
+const DEFAULT_SECURITY_TYPE = "STK";
 
 const optionalTrimmedString = z.preprocess(
-  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-  z.string().optional()
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().optional(),
 );
 
 const optionalNumberFromEnv = z.preprocess(
-  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
-  z.coerce.number().optional()
+  (value) =>
+    typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.coerce.number().optional(),
 );
 
 const schema = z.object({
-  PORT: z.coerce.number().default(3101),
-  LOG_LEVEL: z.string().default('info'),
-  IB_SOCKET_HOST: z.string().default('127.0.0.1'),
+  INGESTION_PORT: optionalNumberFromEnv,
+  LOG_LEVEL: z.string().default("info"),
+  IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
-  IB_CLIENT_ID: z.coerce.number().default(101),
-  IB_EXCHANGE: z.string().default('SMART'),
+  INGESTION_CLIENT_ID: z.coerce.number().default(101),
+  IB_EXCHANGE: z.string().default("SMART"),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
-  IB_CURRENCY: z.string().default('USD'),
+  IB_CURRENCY: z.string().default("USD"),
   IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
   IBKR_ACCOUNT_ID: optionalTrimmedString,
-  WATCHLIST_SYMBOLS: z.string().default('AAPL,MSFT,XOM'),
-  WATCHLIST_CONTRACT_OVERRIDES: z.string().default(''),
-  SIGNAL_ENGINE_BASE_URL: z.string().default('http://localhost:3102'),
-  INGESTION_TRIGGER_SIGNALS_ON_CANDLE: z.string().default('true'),
-  SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
+  WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
+  WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
+  INGESTION_SIGNAL_ENGINE_BASE_URL: z.string().default("http://localhost:3102"),
+  INGESTION_TRIGGER_SIGNALS_ON_CANDLE: z.string().default("true"),
   INGESTION_BACKFILL_1M_CANDLES: optionalNumberFromEnv,
-  POSTGRES_URL: z.string().default('postgresql://postgres:postgres@localhost:5432/ikbr_trader'),
-  REDIS_URL: z.string().default('redis://localhost:6379')
+  POSTGRES_URL: z
+    .string()
+    .default("postgresql://postgres:postgres@localhost:5432/ikbr_trader"),
+  REDIS_URL: z.string().default("redis://localhost:6379"),
 });
 
 const env = schema.parse(process.env);
 
-type OverrideKey = 'conid' | 'secType' | 'exchange' | 'primaryExchange' | 'currency';
+type OverrideKey =
+  | "conid"
+  | "secType"
+  | "exchange"
+  | "primaryExchange"
+  | "currency";
 
 function parseWatchlistSymbols(raw: string): string[] {
   return raw
-    .split(',')
+    .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
 function mapOverrideKey(raw: string): OverrideKey | undefined {
   const normalized = raw.trim().toLowerCase();
-  if (normalized === 'conid') return 'conid';
-  if (normalized === 'sectype') return 'secType';
-  if (normalized === 'exchange') return 'exchange';
-  if (normalized === 'primaryexchange' || normalized === 'primaryexch' || normalized === 'primary') return 'primaryExchange';
-  if (normalized === 'currency') return 'currency';
+  if (normalized === "conid") return "conid";
+  if (normalized === "sectype") return "secType";
+  if (normalized === "exchange") return "exchange";
+  if (
+    normalized === "primaryexchange" ||
+    normalized === "primaryexch" ||
+    normalized === "primary"
+  )
+    return "primaryExchange";
+  if (normalized === "currency") return "currency";
   return undefined;
 }
 
 function parseWatchlistContractOverrides(
   raw: string,
-  symbols: string[]
-): Map<string, Omit<WatchlistInstrument, 'symbol'>> {
-  const out = new Map<string, Omit<WatchlistInstrument, 'symbol'>>();
+  symbols: string[],
+): Map<string, Omit<WatchlistInstrument, "symbol">> {
+  const out = new Map<string, Omit<WatchlistInstrument, "symbol">>();
   const allowed = new Set(symbols.map((symbol) => symbol.toUpperCase()));
   const entries = raw
-    .split(';')
+    .split(";")
     .map((entry) => entry.trim())
     .filter(Boolean);
 
   for (const entry of entries) {
-    const [symbolRaw, pairsRaw = ''] = entry.split(':', 2);
+    const [symbolRaw, pairsRaw = ""] = entry.split(":", 2);
     const symbol = symbolRaw.trim().toUpperCase();
     if (!symbol || !allowed.has(symbol)) continue;
 
-    const patch: Omit<WatchlistInstrument, 'symbol'> = {};
+    const patch: Omit<WatchlistInstrument, "symbol"> = {};
     const pairs = pairsRaw
-      .split('|')
+      .split("|")
       .map((pair) => pair.trim())
       .filter(Boolean);
 
     for (const pair of pairs) {
-      const [keyRaw, valueRaw = ''] = pair.split('=', 2);
+      const [keyRaw, valueRaw = ""] = pair.split("=", 2);
       const key = mapOverrideKey(keyRaw);
       const value = valueRaw.trim();
       if (!key || !value) continue;
@@ -96,26 +109,37 @@ function parseWatchlistContractOverrides(
   return out;
 }
 
-function buildWatchlistInstruments(envValue: typeof env): WatchlistInstrument[] {
+function buildWatchlistInstruments(
+  envValue: typeof env,
+): WatchlistInstrument[] {
   const watchlistSymbols = parseWatchlistSymbols(envValue.WATCHLIST_SYMBOLS);
-  const overrides = parseWatchlistContractOverrides(envValue.WATCHLIST_CONTRACT_OVERRIDES, watchlistSymbols);
+  const overrides = parseWatchlistContractOverrides(
+    envValue.WATCHLIST_CONTRACT_OVERRIDES,
+    watchlistSymbols,
+  );
   return watchlistSymbols.map((symbol) => {
     const symbolKey = symbol.toUpperCase();
     const patch = overrides.get(symbolKey);
     return {
       symbol,
-      ...patch
+      ...patch,
     };
   });
 }
 
 const watchlistInstruments = buildWatchlistInstruments(env);
+const ingestionPort = env.INGESTION_PORT ?? 3101;
 
 export const config = {
   ...env,
+  ingestionPort,
   defaultSecurityType: DEFAULT_SECURITY_TYPE,
   watchlistSymbols: watchlistInstruments.map((item) => item.symbol),
   watchlistInstruments,
-  ingestionTriggerSignalsOnCandle: env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === 'true',
-  backfill1mCandles: Math.max(0, env.INGESTION_BACKFILL_1M_CANDLES ?? env.SIGNAL_MIN_CANDLES)
+  ingestionTriggerSignalsOnCandle:
+    env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === "true",
+  backfill1mCandles: Math.max(
+    0,
+    env.INGESTION_BACKFILL_1M_CANDLES ?? 220,
+  ),
 };
