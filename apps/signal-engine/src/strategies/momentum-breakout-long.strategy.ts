@@ -11,6 +11,7 @@ interface MomentumBreakoutParams {
   return20MaxPct: number;
   return60MinPct: number;
   return60MaxPct: number;
+  consolidationDriftMaxPct: number;
   rsiMax: number;
   bbWidthMaxPct: number;
   volumeMultiplier: number;
@@ -52,13 +53,33 @@ function previousHigh(candles: Candle[], lookback: number): number | undefined {
   return Math.max(...slice.map((candle) => candle.high));
 }
 
+function consolidationDriftPct(
+  candles: Candle[],
+  lookback: number,
+): number | undefined {
+  const slice = candles.slice(-(lookback + 1), -1);
+  if (slice.length < lookback) return undefined;
+  const firstClose = slice[0]?.close;
+  const lastClose = slice.at(-1)?.close;
+  if (
+    firstClose === undefined ||
+    lastClose === undefined ||
+    !Number.isFinite(firstClose) ||
+    !Number.isFinite(lastClose) ||
+    firstClose <= 0
+  )
+    return undefined;
+  return ((lastClose - firstClose) / firstClose) * 100;
+}
+
 function paramsForSecType(secType: SecType): MomentumBreakoutParams {
   return {
     dailyReturn20MinPct: 8,
     h1Return4MinPct: 1,
-    return20MaxPct: 1.8,
+    return20MaxPct: 1.2,
     return60MinPct: 0.2,
     return60MaxPct: 3,
+    consolidationDriftMaxPct: 0.8,
     rsiMax: 72,
     bbWidthMaxPct: 0.08,
     volumeMultiplier: 0.95,
@@ -175,6 +196,11 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     const breakoutBuffer = Math.max(atr14 * 0.015, close * 0.00025);
     const confirmedBreakout20 = close >= priorHigh20 + breakoutBuffer;
     if (!confirmedBreakout20) return this.reject("no_confirmed_breakout");
+    const preBreakoutDriftPct = consolidationDriftPct(candles1m, 20);
+    if (preBreakoutDriftPct === undefined)
+      return this.reject("consolidation_drift_unavailable");
+    if (preBreakoutDriftPct > params.consolidationDriftMaxPct)
+      return this.reject("pre_breakout_drift_too_high");
 
     const previousAverageVolume = averageVolume(candles1m.slice(0, -1), 20);
     if (previousAverageVolume === undefined || previousAverageVolume <= 0)
@@ -254,6 +280,8 @@ export class MomentumBreakoutLongStrategy implements Strategy {
         donchianUpper,
         priorHigh20,
         breakoutBuffer,
+        preBreakoutDriftPct,
+        consolidationDriftMaxPct: params.consolidationDriftMaxPct,
         entryMode,
         confirmedBreakout20,
         bbWidthPct: indicators.bbWidthPct,

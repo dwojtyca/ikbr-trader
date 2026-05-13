@@ -18,8 +18,12 @@ function candle(index: number, close: number, volume = 10000): Candle {
   };
 }
 
+function consolidationCandles(length = 25): Candle[] {
+  return Array.from({ length }, (_, index) => candle(index, 103 + Math.sin(index) * 0.03));
+}
+
 function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext {
-  const candles = Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1));
+  const candles = consolidationCandles();
   const latestCandle = candle(25, 105, 12500);
   return {
     symbol: 'AAPL',
@@ -85,30 +89,43 @@ test('MomentumBreakoutLongStrategy emits BUY signal for STK trend breakout', () 
 
 test('MomentumBreakoutLongStrategy emits BUY signal for IND trend breakout', () => {
   const strategy = new MomentumBreakoutLongStrategy();
-  const context = baseContext();
 
   const signal = strategy.generateSignal(baseContext({
-    secType: 'IND',
-    indicators: {
-      ...context.indicators,
-      return20mPct: 0.35,
-      return60mPct: 0.6,
-      timeframes: {
-        ...context.indicators.timeframes,
-        '1h': {
-          ...context.indicators.timeframes?.['1h'],
-          return4Pct: 0.6
-        },
-        '1d': {
-          ...context.indicators.timeframes?.['1d'],
-          return20Pct: 2
-        }
-      }
-    }
+    secType: 'IND'
   }));
 
   assert.ok(signal);
   assert.equal(signal.side, 'BUY');
+});
+
+test('MomentumBreakoutLongStrategy rejects overextended 20m move', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+
+  const signal = strategy.generateSignal(baseContext({
+    indicators: {
+      ...baseContext().indicators,
+      return20mPct: 1.25
+    }
+  }));
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'overextended_20m');
+});
+
+test('MomentumBreakoutLongStrategy rejects breakout after strong pre-breakout drift', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+  const driftingCandles = Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.12));
+  const latestCandle = candle(25, 105, 12500);
+
+  const signal = strategy.generateSignal(baseContext({
+    latestCandle,
+    candlesByTimeframe: {
+      '1m': [...driftingCandles, latestCandle]
+    }
+  }));
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'pre_breakout_drift_too_high');
 });
 
 test('MomentumBreakoutLongStrategy rejects trend continuation without 20-candle breakout', () => {
@@ -211,7 +228,7 @@ test('MomentumBreakoutLongStrategy rejects unconfirmed volume', () => {
     latestCandle: candle(25, 105, 9000),
     candlesByTimeframe: {
       '1m': [
-        ...Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1)),
+        ...consolidationCandles(),
         candle(25, 105, 9000)
       ]
     }
@@ -235,7 +252,7 @@ test('MomentumBreakoutLongStrategy rejects weak breakout candle quality', () => 
     latestCandle: weakCandle,
     candlesByTimeframe: {
       '1m': [
-        ...Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.1)),
+        ...consolidationCandles(),
         weakCandle
       ]
     }
