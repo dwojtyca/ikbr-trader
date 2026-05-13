@@ -1,7 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { SignalEngine } from "@ikbr/signal-engine/signal-engine";
 import { MomentumBreakoutLongStrategy } from "@ikbr/signal-engine/strategies/momentum-breakout-long.strategy";
-import type { Candle, ProposedOrder, Side } from "@ikbr/shared";
+import type { Candle, InstrumentContract, ProposedOrder, Side } from "@ikbr/shared";
 import {
   listStrategyProfiles,
   type StrategyProfile,
@@ -394,6 +394,30 @@ export class BacktestSimulator {
     );
     if (index < 0) return [];
     return rows.slice(Math.max(0, index - limit + 1), index + 1);
+  }
+
+  async getInstrumentContract(
+    symbol: string,
+    conid?: string,
+  ): Promise<InstrumentContract | null> {
+    const normalized = symbol.trim().toUpperCase();
+    if (!normalized) return null;
+
+    const candles = this.candles1mBySymbol.get(normalized) ?? [];
+    const latestConid = candles[candles.length - 1]?.conid;
+    const secTypeRaw =
+      this.options.secTypeBySymbol[normalized]?.trim().toUpperCase() ?? "STK";
+    const secType =
+      secTypeRaw === "IND" || secTypeRaw === "CMDTY" ? secTypeRaw : "STK";
+
+    return {
+      symbol: normalized,
+      conid: String(conid ?? latestConid ?? normalized),
+      secType,
+      currency: this.currencyForSymbol(normalized),
+      source: "override_fallback",
+      resolvedAt: this.currentTime ?? new Date(),
+    };
   }
 
   async getMarketState(conid: string): Promise<any> {
