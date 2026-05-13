@@ -1,12 +1,19 @@
-import type { AssetClass, Candle, CandleTimeframe, IndicatorSnapshot, MarketRegime, Side } from '@ikbr/shared';
-import type { ExposureSnapshot } from '../repository.js';
+import type {
+  AssetClass,
+  Candle,
+  CandleTimeframe,
+  IndicatorSnapshot,
+  MarketRegime,
+  Side,
+} from "@ikbr/shared";
+import type { ExposureSnapshot } from "../repository.js";
 
-export type StrategyDirection = 'LONG' | 'SHORT';
+export type StrategyDirection = "LONG" | "SHORT";
 
 export interface StrategySignal {
   strategyId: string;
   symbol: string;
-  side: Exclude<Side, 'HOLD'>;
+  side: Exclude<Side, "HOLD">;
   direction: StrategyDirection;
   confidenceScore: number;
   entryReason: string;
@@ -50,7 +57,7 @@ export interface ExitContext extends StrategyContext {
 export interface ExitSignal {
   strategyId: string;
   symbol: string;
-  side: Exclude<Side, 'HOLD'>;
+  side: Exclude<Side, "HOLD">;
   reason: string;
   confidenceScore: number;
   metadata?: Record<string, unknown>;
@@ -64,4 +71,5 @@ export interface Strategy {
   requiredTimeframes: readonly CandleTimeframe[];
   generateSignal(context: StrategyContext): StrategySignal | null;
   shouldExit?(context: ExitContext): ExitSignal | null;
+  getLastRejectionReason?(): string | undefined;
 }

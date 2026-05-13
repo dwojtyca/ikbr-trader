@@ -32,6 +32,20 @@ const PROFILES: StrategyProfile[] = [
     spreadFactor: 1,
     requireVolume: true,
   },
+  {
+    id: "momentum_breakout_long_v1",
+    assetClass: "index",
+    regime: "bull_trend",
+    style: "breakout",
+    entryScore: 0.58,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    atrStopMultFactor: 1,
+    atrTpMultFactor: 1,
+    quantityFactor: 1,
+    spreadFactor: 1,
+    requireVolume: true,
+  },
 ];
 
 const INDEX_SYMBOLS = new Set([

@@ -638,7 +638,7 @@ export class BacktestRepository {
          FROM backtest_signal_diagnostics
          WHERE run_id=$1
          ORDER BY samples DESC
-         LIMIT 500`,
+         LIMIT 1000`,
         [selectedRunId]
       )
     ]);

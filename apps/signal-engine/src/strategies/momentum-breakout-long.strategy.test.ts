@@ -36,14 +36,14 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
       dcUpper20: 105,
       bbWidthPct: 0.025,
       return20mPct: 0.9,
-      return60mPct: 1.7,
+      return60mPct: 1.2,
       timeframes: {
         '1h': {
           close: 104,
           ema20: 103,
           ema50: 101,
           trend: 'bullish',
-          return4Pct: 0.8
+          return4Pct: 1.2
         },
         '4h': {
           close: 103,
@@ -83,6 +83,61 @@ test('MomentumBreakoutLongStrategy emits BUY signal for stock trend breakout', (
   assert.ok(signal.takeProfit !== undefined && signal.takeProfit > 105);
 });
 
+test('MomentumBreakoutLongStrategy emits BUY signal for index trend breakout', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+  const context = baseContext();
+
+  const signal = strategy.generateSignal(baseContext({
+    assetClass: 'index',
+    indicators: {
+      ...context.indicators,
+      return20mPct: 0.35,
+      return60mPct: 0.6,
+      timeframes: {
+        ...context.indicators.timeframes,
+        '1h': {
+          ...context.indicators.timeframes?.['1h'],
+          return4Pct: 0.6
+        },
+        '1d': {
+          ...context.indicators.timeframes?.['1d'],
+          return20Pct: 2
+        }
+      }
+    }
+  }));
+
+  assert.ok(signal);
+  assert.equal(signal.side, 'BUY');
+});
+
+test('MomentumBreakoutLongStrategy rejects trend continuation without 20-candle breakout', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+  const candles = Array.from({ length: 25 }, (_, index) => candle(index, 100 + index * 0.03));
+  const latestCandle = candle(25, 100.9, 12500);
+  const context = baseContext({
+    latestCandle,
+    indicators: {
+      ...baseContext().indicators,
+      ema20: 100.8,
+      ema50: 100.1,
+      ema200: 96,
+      dcUpper20: 102,
+      return5mPct: 0.08,
+      return20mPct: 0.25,
+      return60mPct: 0.7
+    },
+    candlesByTimeframe: {
+      '1m': [...candles, latestCandle]
+    }
+  });
+
+  const signal = strategy.generateSignal(context);
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'no_confirmed_breakout');
+});
+
 test('MomentumBreakoutLongStrategy rejects overbought RSI', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 
@@ -106,7 +161,7 @@ test('MomentumBreakoutLongStrategy rejects non-bull-trend regime', () => {
   assert.equal(strategy.getLastRejectionReason(), 'regime_not_bull_trend');
 });
 
-test('MomentumBreakoutLongStrategy rejects weak higher timeframe alignment', () => {
+test('MomentumBreakoutLongStrategy accepts neutral 1h inside bull trend regime', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 
   const context = baseContext();
@@ -124,8 +179,29 @@ test('MomentumBreakoutLongStrategy rejects weak higher timeframe alignment', () 
     }
   });
 
+  assert.ok(signal);
+});
+
+test('MomentumBreakoutLongStrategy rejects bearish 1h alignment', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+
+  const context = baseContext();
+  const signal = strategy.generateSignal({
+    ...context,
+    indicators: {
+      ...context.indicators,
+      timeframes: {
+        ...context.indicators.timeframes,
+        '1h': {
+          ...context.indicators.timeframes?.['1h'],
+          trend: 'bearish'
+        }
+      }
+    }
+  });
+
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), 'higher_timeframe_1h_not_bullish');
+  assert.equal(strategy.getLastRejectionReason(), 'higher_timeframe_1h_bearish');
 });
 
 test('MomentumBreakoutLongStrategy rejects unconfirmed volume', () => {
