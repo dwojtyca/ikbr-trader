@@ -12,7 +12,6 @@ interface TwsExecutionConfig {
   orderTimeoutMs: number;
   submittedAutoCancelMs?: number;
   retryAsMktOnCode110?: boolean;
-  minTickOverrides?: Record<string, number>;
   contractFallbackByConid?: Record<
     string,
     {
@@ -58,7 +57,7 @@ interface ResolvedContract {
 
 interface EffectiveTick {
   tick?: number;
-  source: 'none' | 'minTick' | 'minTick_override' | 'wse_ladder' | 'wse_ladder_override';
+  source: 'none' | 'minTick' | 'wse_ladder';
 }
 
 interface PlannedOrder {
@@ -971,62 +970,21 @@ export class TwsExecutionClient {
 
   private determineEffectiveTick(contract: ContractShape, ticket: SignalTicket, rawMinTick?: number): EffectiveTick {
     const validMinTick = rawMinTick && Number.isFinite(rawMinTick) && rawMinTick > 0 ? rawMinTick : undefined;
-    const overrideTick = this.resolveMinTickOverride(ticket, contract);
-    const minTickWithOverride = validMinTick !== undefined
-      ? (overrideTick !== undefined ? Math.max(validMinTick, overrideTick) : validMinTick)
-      : overrideTick;
     const fallbackRefPrice = ticket.entry ?? ticket.stop ?? ticket.takeProfit;
     const refPrice = typeof fallbackRefPrice === 'number' && Number.isFinite(fallbackRefPrice) ? fallbackRefPrice : undefined;
 
     if (this.isWseContract(contract) && refPrice !== undefined && refPrice > 0) {
       const ladderTick = this.wseTickForPrice(refPrice);
-      if (minTickWithOverride === undefined) {
+      if (validMinTick === undefined || validMinTick < ladderTick) {
         return { tick: ladderTick, source: 'wse_ladder' };
       }
-      if (minTickWithOverride < ladderTick) {
-        return { tick: ladderTick, source: 'wse_ladder_override' };
-      }
-      if (overrideTick !== undefined && minTickWithOverride === overrideTick && (validMinTick === undefined || overrideTick > validMinTick)) {
-        return { tick: minTickWithOverride, source: 'minTick_override' };
-      }
-      return { tick: minTickWithOverride, source: 'minTick' };
+      return { tick: validMinTick, source: 'minTick' };
     }
 
-    if (minTickWithOverride !== undefined) {
-      if (overrideTick !== undefined && (validMinTick === undefined || overrideTick > validMinTick)) {
-        return { tick: minTickWithOverride, source: 'minTick_override' };
-      }
-      return { tick: minTickWithOverride, source: 'minTick' };
+    if (validMinTick !== undefined) {
+      return { tick: validMinTick, source: 'minTick' };
     }
     return { source: 'none' };
-  }
-
-  private resolveMinTickOverride(ticket: SignalTicket, contract: ContractShape): number | undefined {
-    const overrides = this.config.minTickOverrides;
-    if (!overrides) return undefined;
-
-    const conidCandidates = [
-      typeof contract.conId === 'number' ? String(contract.conId) : undefined,
-      ticket.conid
-    ]
-      .map((value) => (typeof value === 'string' ? value.trim() : undefined))
-      .filter((value): value is string => Boolean(value));
-
-    for (const conid of conidCandidates) {
-      const override = overrides[conid.toUpperCase()];
-      if (Number.isFinite(override) && override > 0) return override;
-    }
-
-    const symbolCandidates = [ticket.instrument, contract.symbol]
-      .map((value) => (typeof value === 'string' ? value.trim().toUpperCase() : undefined))
-      .filter((value): value is string => Boolean(value));
-
-    for (const symbol of symbolCandidates) {
-      const override = overrides[symbol];
-      if (Number.isFinite(override) && override > 0) return override;
-    }
-
-    return undefined;
   }
 
   private isWseContract(contract: ContractShape): boolean {

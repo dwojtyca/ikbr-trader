@@ -22,7 +22,7 @@ export interface DecisionContext {
     bbWidthPct?: number;
     trendFilterValue?: number;
     trendFilterSource?: IndicatorSnapshot['trendFilterSource'];
-    assetClass?: IndicatorSnapshot['assetClass'];
+    secType?: IndicatorSnapshot['secType'];
     regime?: IndicatorSnapshot['regime'];
     directionalRegime?: IndicatorSnapshot['directionalRegime'];
     volatilityRegime?: IndicatorSnapshot['volatilityRegime'];

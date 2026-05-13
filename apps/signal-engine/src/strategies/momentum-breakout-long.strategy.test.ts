@@ -24,7 +24,7 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
   return {
     symbol: 'AAPL',
     conid: '123',
-    assetClass: 'stock',
+    secType: 'STK',
     regime: 'bull_trend',
     latestCandle,
     indicators: {
@@ -68,7 +68,7 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
   };
 }
 
-test('MomentumBreakoutLongStrategy emits BUY signal for stock trend breakout', () => {
+test('MomentumBreakoutLongStrategy emits BUY signal for STK trend breakout', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 
   const signal = strategy.generateSignal(baseContext());
@@ -83,12 +83,12 @@ test('MomentumBreakoutLongStrategy emits BUY signal for stock trend breakout', (
   assert.ok(signal.takeProfit !== undefined && signal.takeProfit > 105);
 });
 
-test('MomentumBreakoutLongStrategy emits BUY signal for index trend breakout', () => {
+test('MomentumBreakoutLongStrategy emits BUY signal for IND trend breakout', () => {
   const strategy = new MomentumBreakoutLongStrategy();
   const context = baseContext();
 
   const signal = strategy.generateSignal(baseContext({
-    assetClass: 'index',
+    secType: 'IND',
     indicators: {
       ...context.indicators,
       return20mPct: 0.35,

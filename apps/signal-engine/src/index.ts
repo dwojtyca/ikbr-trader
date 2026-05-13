@@ -14,36 +14,31 @@ const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
 const strategyToggleSchema = z.object({ enabled: z.boolean() });
+const strategies = [new MomentumBreakoutLongStrategy()];
 const engine = new SignalEngine(repo, {
-  strategy: new MomentumBreakoutLongStrategy(),
+  strategies,
   minCandles: config.SIGNAL_MIN_CANDLES,
   maxSpreadBps: config.MAX_SPREAD_BPS,
   minVolume1m: config.MIN_CANDLE_VOLUME_1M,
   volumeFilterMode: config.volumeFilterMode,
-  atrStopMult: config.ATR_STOP_MULT,
-  atrTpMult: config.ATR_TP_MULT,
   minConfidence: config.SIGNAL_MIN_CONFIDENCE,
   lmtEntryMode: config.SIGNAL_LMT_ENTRY_MODE,
   lmtEntryBufferBps: config.SIGNAL_LMT_ENTRY_BUFFER_BPS,
   fractionalSymbols: config.fractionalSymbols,
   fractionalQuantityStep: config.SIGNAL_FRACTIONAL_QUANTITY_STEP,
-  minStopBpsByAssetClass: {
-    stock: config.SIGNAL_MIN_STOP_BPS_STOCK,
-    index: config.SIGNAL_MIN_STOP_BPS_INDEX,
-    commodity: config.SIGNAL_MIN_STOP_BPS_COMMODITY,
+  minStopBpsBySecType: {
+    STK: config.SIGNAL_MIN_STOP_BPS_STK,
+    IND: config.SIGNAL_MIN_STOP_BPS_IND,
+    CMDTY: config.SIGNAL_MIN_STOP_BPS_CMDTY,
   },
   maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
   baseCurrency: config.baseCurrency,
-  assetClassBySymbol: config.assetClassOverrides,
+  defaultSecType: config.IB_SECURITY_TYPE,
+  secTypeBySymbol: config.secTypeBySymbol,
   currencyBySymbol: config.currencyBySymbol,
   priceMultiplierBySymbol: config.priceMultiplierOverrides,
   executionBaseUrl: config.EXECUTION_BASE_URL,
   strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
-  symbolAddLossLimit: config.SIGNAL_SYMBOL_ADD_LOSS_LIMIT,
-  maxSymbolExposureShareOfLimit:
-    config.SIGNAL_MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT,
-  maxDirectionalExposureShareOfLimit:
-    config.SIGNAL_MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT,
   riskLimits: {
     accountEquity: config.ACCOUNT_EQUITY,
     maxRiskPerTradePct: config.MAX_RISK_PER_TRADE_PCT,

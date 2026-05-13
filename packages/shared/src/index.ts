@@ -8,7 +8,7 @@ export type ProposedOrderStatus =
   | 'CANCELLED'
   | 'SUPERSEDED'
   | 'EXPIRED';
-export type AssetClass = 'stock' | 'commodity' | 'index';
+export type SecType = string;
 export type MarketRegime =
   // Directional upside regime: higher timeframes mostly agree that price is trending up.
   | 'bull_trend'
@@ -116,7 +116,7 @@ export interface IndicatorSnapshot {
   return60mPct?: number;
   trendFilterValue?: number;
   trendFilterSource?: 'EMA50_1h' | 'EMA200_1m';
-  assetClass?: AssetClass;
+  secType?: SecType;
   regime?: MarketRegime;
   directionalRegime?: DirectionalRegime;
   volatilityRegime?: VolatilityRegime;

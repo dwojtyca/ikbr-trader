@@ -1,4 +1,4 @@
-import type { AssetClass, Candle } from '@ikbr/shared';
+import type { SecType, Candle } from '@ikbr/shared';
 import type { Strategy, StrategyContext, StrategySignal } from './strategy.types.js';
 
 interface MomentumBreakoutParams {
@@ -14,6 +14,9 @@ interface MomentumBreakoutParams {
   bodyMin: number;
   upperWickMax: number;
   plannedRewardMinPct: number;
+  stopAtrMult: number;
+  structureStopAtrMult: number;
+  takeProfitR: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -39,8 +42,8 @@ function previousHigh(candles: Candle[], lookback: number): number | undefined {
   return Math.max(...slice.map((candle) => candle.high));
 }
 
-function paramsForAssetClass(assetClass: AssetClass): MomentumBreakoutParams {
-  if (assetClass === 'index') {
+function paramsForSecType(secType: SecType): MomentumBreakoutParams {
+  if (secType === 'IND') {
     return {
       dailyReturn20MinPct: 2,
       h1Return4MinPct: 0.5,
@@ -53,7 +56,10 @@ function paramsForAssetClass(assetClass: AssetClass): MomentumBreakoutParams {
       closeLocationMin: 0.58,
       bodyMin: 0.1,
       upperWickMax: 0.48,
-      plannedRewardMinPct: 0.25
+      plannedRewardMinPct: 0.25,
+      stopAtrMult: 1.8,
+      structureStopAtrMult: 3,
+      takeProfitR: 2
     };
   }
 
@@ -69,7 +75,10 @@ function paramsForAssetClass(assetClass: AssetClass): MomentumBreakoutParams {
     closeLocationMin: 0.6,
     bodyMin: 0.12,
     upperWickMax: 0.45,
-    plannedRewardMinPct: 0.6
+    plannedRewardMinPct: 0.6,
+    stopAtrMult: 1.8,
+    structureStopAtrMult: 3,
+    takeProfitR: 2
   };
 }
 
@@ -100,7 +109,7 @@ function candleQuality(candle: Candle): {
 
 export class MomentumBreakoutLongStrategy implements Strategy {
   readonly id = 'momentum_breakout_long_v1';
-  readonly assetClasses = ['stock', 'index'] as const;
+  readonly secTypes = ['STK', 'IND'] as const;
   readonly supportedDirections = ['LONG'] as const;
   readonly allowedRegimes = ['bull_trend'] as const;
   readonly requiredTimeframes = ['1m', '1h', '4h', '1d'] as const;
@@ -113,10 +122,10 @@ export class MomentumBreakoutLongStrategy implements Strategy {
   generateSignal(context: StrategyContext): StrategySignal | null {
     this.lastRejectionReason = undefined;
 
-    if (context.assetClass !== 'stock' && context.assetClass !== 'index') return this.reject('asset_class_not_supported');
+    if (context.secType !== 'STK' && context.secType !== 'IND') return this.reject('sec_type_not_supported');
     if (context.regime !== 'bull_trend') return this.reject('regime_not_bull_trend');
 
-    const params = paramsForAssetClass(context.assetClass);
+    const params = paramsForSecType(context.secType);
     const { indicators, latestCandle } = context;
     const close = latestCandle.close;
     const ema20 = indicators.ema20;
@@ -174,16 +183,16 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     if (quality.upperWickPct > params.upperWickMax) return this.reject('breakout_upper_wick_too_large');
 
     const consolidationLow = localConsolidationLow(candles1m, 20);
-    const atrStop = close - atr14 * 1.8;
+    const atrStop = close - atr14 * params.stopAtrMult;
     const structureStop =
       consolidationLow !== undefined && consolidationLow < close
-        ? Math.max(consolidationLow, close - atr14 * 3)
+        ? Math.max(consolidationLow, close - atr14 * params.structureStopAtrMult)
         : undefined;
     const stopLoss = Math.min(atrStop, structureStop ?? atrStop);
     if (!Number.isFinite(stopLoss) || stopLoss >= close) return this.reject('invalid_stop_loss');
 
     const riskPerShare = close - stopLoss;
-    const takeProfit = close + riskPerShare * 2;
+    const takeProfit = close + riskPerShare * params.takeProfitR;
     const plannedRewardPct = ((takeProfit - close) / close) * 100;
     if (plannedRewardPct < params.plannedRewardMinPct) return this.reject('planned_reward_too_small');
 
@@ -227,6 +236,9 @@ export class MomentumBreakoutLongStrategy implements Strategy {
         breakoutBodyPct: quality.bodyPct,
         breakoutUpperWickPct: quality.upperWickPct,
         plannedRewardPct,
+        stopAtrMult: params.stopAtrMult,
+        structureStopAtrMult: params.structureStopAtrMult,
+        takeProfitR: params.takeProfitR,
         regime: context.regime,
         directionalRegime: indicators.directionalRegime,
         volatilityRegime: indicators.volatilityRegime,

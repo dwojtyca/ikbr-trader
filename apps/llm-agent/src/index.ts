@@ -100,7 +100,7 @@ function buildIndicatorSummary(order: ClaimedOrder): {
   bbWidthPct?: number;
   trendFilterValue?: number;
   trendFilterSource?: IndicatorSnapshot['trendFilterSource'];
-  assetClass?: IndicatorSnapshot['assetClass'];
+  secType?: IndicatorSnapshot['secType'];
   regime?: IndicatorSnapshot['regime'];
   directionalRegime?: IndicatorSnapshot['directionalRegime'];
   volatilityRegime?: IndicatorSnapshot['volatilityRegime'];
@@ -125,7 +125,7 @@ function buildIndicatorSummary(order: ClaimedOrder): {
     bbWidthPct: indicators.bbWidthPct,
     trendFilterValue: indicators.trendFilterValue,
     trendFilterSource: indicators.trendFilterSource,
-    assetClass: indicators.assetClass,
+    secType: indicators.secType,
     regime: indicators.regime,
     directionalRegime: indicators.directionalRegime,
     volatilityRegime: indicators.volatilityRegime,

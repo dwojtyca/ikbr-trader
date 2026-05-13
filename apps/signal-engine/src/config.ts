@@ -12,6 +12,7 @@ const schema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   EXECUTION_BASE_URL: z.string().default("http://localhost:3103"),
   IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
+  IB_SECURITY_TYPE: z.string().default("STK"),
   WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
   SIGNAL_EVENT_DRIVEN: z.string().default("true"),
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
@@ -24,33 +25,19 @@ const schema = z.object({
   MAX_OPEN_POSITIONS: z.coerce.number().default(5),
   MAX_SPREAD_BPS: z.coerce.number().default(12),
   MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),
-  ATR_STOP_MULT: z.coerce.number().default(1.5),
-  ATR_TP_MULT: z.coerce.number().default(3),
   SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(0.55),
   SIGNAL_LMT_ENTRY_MODE: z.enum(["touch", "last", "mid"]).default("touch"),
   SIGNAL_LMT_ENTRY_BUFFER_BPS: z.coerce.number().min(0).default(0),
   SIGNAL_FRACTIONAL_SYMBOLS: z.string().default(""),
   SIGNAL_FRACTIONAL_QUANTITY_STEP: z.coerce.number().positive().default(0.0001),
-  SIGNAL_MIN_STOP_BPS_STOCK: z.coerce.number().min(0).default(12),
-  SIGNAL_MIN_STOP_BPS_INDEX: z.coerce.number().min(0).default(10),
-  SIGNAL_MIN_STOP_BPS_COMMODITY: z.coerce.number().min(0).default(14),
-  SIGNAL_MAX_SYMBOL_EXPOSURE_SHARE_OF_LIMIT: z.coerce
-    .number()
-    .min(0)
-    .max(1)
-    .default(0.35),
-  SIGNAL_MAX_DIRECTIONAL_EXPOSURE_SHARE_OF_LIMIT: z.coerce
-    .number()
-    .min(0)
-    .max(1)
-    .default(0.8),
+  SIGNAL_MIN_STOP_BPS_STK: z.coerce.number().min(0).default(12),
+  SIGNAL_MIN_STOP_BPS_IND: z.coerce.number().min(0).default(10),
+  SIGNAL_MIN_STOP_BPS_CMDTY: z.coerce.number().min(0).default(14),
   SIGNAL_STRATEGY_COOLDOWN_MS: z.coerce
     .number()
     .int()
     .min(0)
     .default(12 * 60 * 60 * 1000),
-  SIGNAL_SYMBOL_ADD_LOSS_LIMIT: z.coerce.number().min(0).default(1000),
-  SIGNAL_ASSET_CLASS_OVERRIDES: z.string().default(""),
   WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
   IB_CURRENCY: z.string().default("USD"),
   SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default(""),
@@ -58,7 +45,7 @@ const schema = z.object({
 
 const env = schema.parse(process.env);
 
-type ContractOverrideKey = "currency";
+type ContractOverrideKey = "currency" | "sectype";
 
 function parseWatchlistSymbols(raw: string): string[] {
   return raw
@@ -98,28 +85,36 @@ function parseContractCurrencies(
   return out;
 }
 
-function parseAssetClassOverrides(
+function parseContractSecTypes(
   raw: string,
-): Record<string, "stock" | "commodity" | "index"> {
-  const entries = raw
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
+  symbols: string[],
+  defaultSecType: string,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const allowed = new Set(symbols.map((symbol) => symbol.toUpperCase()));
+  for (const symbol of allowed) {
+    out[symbol] = defaultSecType.trim().toUpperCase();
+  }
 
-  const out: Record<string, "stock" | "commodity" | "index"> = {};
-  for (const entry of entries) {
-    const [symbolRaw, clsRaw] = entry.split(":").map((v) => v.trim());
-    if (!symbolRaw || !clsRaw) continue;
+  for (const entry of raw
+    .split(";")
+    .map((value) => value.trim())
+    .filter(Boolean)) {
+    const [symbolRaw, pairsRaw = ""] = entry.split(":", 2);
+    const symbol = symbolRaw.trim().toUpperCase();
+    if (!symbol || !allowed.has(symbol)) continue;
 
-    const normalizedClass = clsRaw.toLowerCase();
-    if (
-      normalizedClass !== "stock" &&
-      normalizedClass !== "commodity" &&
-      normalizedClass !== "index"
-    )
-      continue;
-
-    out[symbolRaw.toUpperCase()] = normalizedClass;
+    for (const pair of pairsRaw
+      .split("|")
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      const [keyRaw, valueRaw = ""] = pair.split("=", 2);
+      const key = keyRaw.trim().toLowerCase() as ContractOverrideKey;
+      const value = valueRaw.trim().toUpperCase();
+      if (key === "sectype" && value) {
+        out[symbol] = value;
+      }
+    }
   }
   return out;
 }
@@ -146,12 +141,14 @@ export const config = {
   signalEventDriven: env.SIGNAL_EVENT_DRIVEN.toLowerCase() === "true",
   volumeFilterMode:
     env.IB_MARKET_DATA_TYPE === 1 ? ("strict" as const) : ("off" as const),
-  assetClassOverrides: parseAssetClassOverrides(
-    env.SIGNAL_ASSET_CLASS_OVERRIDES,
-  ),
   currencyBySymbol: parseContractCurrencies(
     env.WATCHLIST_CONTRACT_OVERRIDES,
     parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
+  ),
+  secTypeBySymbol: parseContractSecTypes(
+    env.WATCHLIST_CONTRACT_OVERRIDES,
+    parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
+    env.IB_SECURITY_TYPE,
   ),
   baseCurrency: env.IB_CURRENCY,
   priceMultiplierOverrides: parsePriceMultiplierOverrides(

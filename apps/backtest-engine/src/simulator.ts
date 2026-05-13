@@ -1,8 +1,8 @@
 import { Worker } from "node:worker_threads";
 import { SignalEngine } from "@ikbr/signal-engine/signal-engine";
+import { MomentumBreakoutLongStrategy } from "@ikbr/signal-engine/strategies/momentum-breakout-long.strategy";
 import type { Candle, ProposedOrder, Side } from "@ikbr/shared";
 import {
-  inferAssetClass,
   listStrategyProfiles,
   type StrategyProfile,
 } from "@ikbr/shared";
@@ -16,26 +16,17 @@ export interface SimulatorOptions {
   minCandles: number;
   maxSpreadBps: number;
   minVolume1m: number;
-  atrStopMult: number;
-  atrTpMult: number;
   minConfidence: number;
   lmtEntryMode: "touch" | "last" | "mid";
   lmtEntryBufferBps: number;
   fractionalSymbols: Set<string>;
   fractionalQuantityStep: number;
-  minStopBpsByAssetClass: {
-    stock: number;
-    index: number;
-    commodity: number;
-  };
+  minStopBpsBySecType: Record<string, number>;
   baseCurrency: string;
   currencyBySymbol: Record<string, string>;
-  assetClassBySymbol: Record<string, "stock" | "commodity" | "index">;
+  secTypeBySymbol: Record<string, string>;
   priceMultiplierBySymbol: Record<string, number>;
   strategyCooldownMs: number;
-  symbolAddLossLimit: number;
-  maxSymbolExposureShareOfLimit: number;
-  maxDirectionalExposureShareOfLimit: number;
   commissionBps: number;
   syntheticSpreadBps: number;
   orderTtlCandles: number;
@@ -241,32 +232,26 @@ export class BacktestSimulator {
     const signalEngine = new SignalEngine(
       this as any,
       {
+        strategies: [new MomentumBreakoutLongStrategy()],
         minCandles: this.options.minCandles,
         maxSpreadBps: this.options.maxSpreadBps,
         minVolume1m: this.options.minVolume1m,
         volumeFilterMode: "off",
-        atrStopMult: this.options.atrStopMult,
-        atrTpMult: this.options.atrTpMult,
         minConfidence: this.options.minConfidence,
         lmtEntryMode: this.options.lmtEntryMode,
         lmtEntryBufferBps: this.options.lmtEntryBufferBps,
         fractionalSymbols: this.options.fractionalSymbols,
         fractionalQuantityStep: this.options.fractionalQuantityStep,
-        minStopBpsByAssetClass: this.options.minStopBpsByAssetClass,
+        minStopBpsBySecType: this.options.minStopBpsBySecType,
         maxMarketStateAgeMs: 0,
         baseCurrency: this.options.baseCurrency,
-        assetClassBySymbol: this.options.assetClassBySymbol,
+        secTypeBySymbol: this.options.secTypeBySymbol,
         currencyBySymbol: this.options.currencyBySymbol,
         priceMultiplierBySymbol: this.options.priceMultiplierBySymbol,
         executionBaseUrl: "backtest",
         strategyCooldownMs: this.options.strategyCooldownMs,
-        symbolAddLossLimit: this.options.symbolAddLossLimit,
-        maxSymbolExposureShareOfLimit:
-          this.options.maxSymbolExposureShareOfLimit,
-        maxDirectionalExposureShareOfLimit:
-          this.options.maxDirectionalExposureShareOfLimit,
         riskLimits: this.options.riskLimits,
-      } as any,
+      },
     );
 
     const events = this.data.candles1m
@@ -528,16 +513,6 @@ export class BacktestSimulator {
     }
 
     return state;
-  }
-
-  async getSymbolNetPnlSince(symbol: string, since: Date): Promise<number> {
-    const key = symbol.toUpperCase();
-    return this.closedTrades
-      .filter(
-        (trade) =>
-          trade.instrument.toUpperCase() === key && trade.exitedAt >= since,
-      )
-      .reduce((sum, trade) => sum + trade.pnl, 0);
   }
 
   async getSignalPerformance(input: {
@@ -1200,21 +1175,26 @@ export async function runParallelIsolatedStrategyBacktest(
   const candleCountBySymbol = new Map(
     summaries.map((summary) => [summary.symbol.toUpperCase(), summary.candles]),
   );
-  const symbolsByAssetClass = new Map<string, string[]>();
+  const symbolsBySecType = new Map<string, string[]>();
 
   for (const summary of summaries) {
     const symbol = summary.symbol.toUpperCase();
-    const assetClass =
-      options.assetClassBySymbol[symbol] ?? inferAssetClass(symbol);
-    symbolsByAssetClass.set(assetClass, [
-      ...(symbolsByAssetClass.get(assetClass) ?? []),
+    const secType = options.secTypeBySymbol[symbol] ?? "STK";
+    symbolsBySecType.set(secType, [
+      ...(symbolsBySecType.get(secType) ?? []),
       symbol,
     ]);
   }
 
   const workItems: StrategyWorkItem[] = profiles
     .map((profile, profileIndex) => {
-      const symbols = symbolsByAssetClass.get(profile.assetClass) ?? [];
+      const symbols = Array.from(
+        new Set(
+          profile.secType.flatMap(
+            (secType) => symbolsBySecType.get(secType) ?? [],
+          ),
+        ),
+      );
       const eventCount = symbols.reduce(
         (sum, symbol) => sum + (candleCountBySymbol.get(symbol) ?? 0),
         0,

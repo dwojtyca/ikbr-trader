@@ -21,7 +21,6 @@ const tws = new TwsExecutionClient(
     orderTimeoutMs: config.EXECUTION_ORDER_TIMEOUT_MS,
     submittedAutoCancelMs: config.EXECUTION_SUBMITTED_AUTO_CANCEL_MS,
     retryAsMktOnCode110: config.executionRetryAsMktOnCode110,
-    minTickOverrides: config.executionMinTickOverrides,
     contractFallbackByConid: config.contractFallbackByConid
   },
   (line) => app.log.info(line),

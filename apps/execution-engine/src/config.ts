@@ -24,8 +24,7 @@ const schema = z.object({
   EXECUTION_DEFAULT_TIF: z.string().default('DAY'),
   EXECUTION_ORDER_TIMEOUT_MS: z.coerce.number().default(15000),
   EXECUTION_SUBMITTED_AUTO_CANCEL_MS: z.coerce.number().int().min(0).default(0),
-  EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default('false'),
-  EXECUTION_MIN_TICK_OVERRIDES: z.string().default('')
+  EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default('false')
 });
 
 const env = schema.parse(process.env);
@@ -48,24 +47,6 @@ interface ContractFallback {
   exchange?: string;
   primaryExch?: string;
   currency?: string;
-}
-
-function parseExecutionMinTickOverrides(raw: string): Record<string, number> {
-  const out: Record<string, number> = {};
-  const entries = raw
-    .split(/[;,]/g)
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-
-  for (const entry of entries) {
-    const [keyRaw, valueRaw = ''] = entry.split('=', 2);
-    const key = keyRaw.trim();
-    const value = Number(valueRaw.trim());
-    if (!key || !Number.isFinite(value) || value <= 0) continue;
-    out[key.toUpperCase()] = value;
-  }
-
-  return out;
 }
 
 function parseContractFallbackByConid(raw: string): Record<string, ContractFallback> {
@@ -111,6 +92,5 @@ function parseContractFallbackByConid(raw: string): Record<string, ContractFallb
 export const config = {
   ...env,
   executionRetryAsMktOnCode110: env.EXECUTION_RETRY_AS_MKT_ON_CODE_110.toLowerCase() === 'true',
-  executionMinTickOverrides: parseExecutionMinTickOverrides(env.EXECUTION_MIN_TICK_OVERRIDES),
   contractFallbackByConid: parseContractFallbackByConid(env.WATCHLIST_CONTRACT_OVERRIDES)
 };

@@ -1,5 +1,5 @@
 import {
-  AssetClass,
+  SecType,
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
@@ -19,12 +19,12 @@ import {
   lastRsi,
 } from "./indicators.js";
 import { MarketRegimeDetector } from "./regime/market-regime-detector.js";
+import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
 import {
   ExposureSnapshot,
   SignalPerformanceStats,
   SignalRepository,
 } from "./repository.js";
-import { inferAssetClass } from "./strategy-profiles.js";
 import type { Strategy, StrategySignal } from "./strategies/strategy.types.js";
 
 function clamp(value: number, min: number, max: number): number {
@@ -47,30 +47,26 @@ function stepDecimals(step: number): number {
 }
 
 interface SignalEngineOptions {
-  strategy: Strategy;
+  strategies: readonly Strategy[];
   minCandles: number;
   maxSpreadBps: number;
   minVolume1m: number;
   volumeFilterMode: "strict" | "off";
-  atrStopMult: number;
-  atrTpMult: number;
   minConfidence: number;
   lmtEntryMode: "touch" | "last" | "mid";
   lmtEntryBufferBps: number;
   fractionalSymbols: Set<string>;
   fractionalQuantityStep: number;
-  minStopBpsByAssetClass: Record<AssetClass, number>;
+  minStopBpsBySecType: Record<SecType, number>;
   maxMarketStateAgeMs: number;
   baseCurrency: string;
-  assetClassBySymbol: Record<string, AssetClass>;
+  defaultSecType: SecType;
+  secTypeBySymbol: Record<string, SecType>;
   currencyBySymbol: Record<string, string>;
   priceMultiplierBySymbol: Record<string, number>;
   executionBaseUrl: string;
   strategyCooldownMs: number;
-  symbolAddLossLimit: number;
   riskLimits: RiskLimits;
-  maxSymbolExposureShareOfLimit: number;
-  maxDirectionalExposureShareOfLimit: number;
 }
 
 interface EntryPriceSelection {
@@ -85,14 +81,21 @@ interface ConfidenceFloor {
 
 export class SignalEngine {
   private readonly marketRegimeDetector = new MarketRegimeDetector();
+  private readonly portfolioManager: StrategyPortfolioManager;
 
   constructor(
     private readonly repo: SignalRepository,
     private readonly options: SignalEngineOptions,
-  ) {}
+  ) {
+    this.portfolioManager = new StrategyPortfolioManager(options.strategies);
+  }
 
   get strategyId(): string {
-    return this.options.strategy.id;
+    return this.portfolioManager.primaryStrategyId;
+  }
+
+  get strategyIds(): string[] {
+    return this.portfolioManager.strategyIds;
   }
 
   async runForSymbol(
@@ -131,7 +134,7 @@ export class SignalEngine {
     const highs = candles.map((candle) => candle.high);
     const lows = candles.map((candle) => candle.low);
     const volumes = candles.map((candle) => candle.volume);
-    const assetClass = this.resolveAssetClass(symbol);
+    const secType = this.resolveSecType(symbol);
 
     const trendFrom1h = lastEma(
       candles1h.map((candle) => candle.close),
@@ -166,7 +169,7 @@ export class SignalEngine {
       return60mPct: this.returnPct(closes, 60),
       trendFilterValue,
       trendFilterSource: trendFrom1h !== undefined ? "EMA50_1h" : "EMA200_1m",
-      assetClass,
+      secType,
       timeframes: {
         "5m": this.buildTimeframeSnapshot(candles5m),
         "1h": this.buildTimeframeSnapshot(candles1h),
@@ -189,7 +192,7 @@ export class SignalEngine {
     }
 
     const regimeAnalysis = this.detectRegime(
-      assetClass,
+      secType,
       latest.close,
       indicators,
     );
@@ -202,33 +205,35 @@ export class SignalEngine {
     indicators.regimeReasons = regimeAnalysis.reasons;
     indicators.timeframeTrendScores = regimeAnalysis.timeframeTrendScores;
     indicators.timeframeTrendVotes = regimeAnalysis.timeframeTrendVotes;
-    indicators.strategyProfile = this.options.strategy.id;
+    indicators.strategyProfile = this.portfolioManager.strategyIds.join(",");
     await this.repo.syncStrategyRuntimeStates(
-      [this.options.strategy.id],
+      this.portfolioManager.strategyIds,
       this.options.strategyCooldownMs,
     );
 
-    const runtimeState = await this.repo.getStrategyRuntimeState(
-      this.options.strategy.id,
-    );
-    if (!runtimeState.enabled || runtimeState.permanentlyDisabled) {
-      return this.rejectedOrder(
-        symbol,
-        latest.conid,
-        `${this.options.strategy.id} is disabled`,
-        indicators,
-        "HOLD",
-        generatedFromCandleTs,
-      );
+    const activeStrategyIds: string[] = [];
+    const disabledReasons: string[] = [];
+    for (const strategyId of this.portfolioManager.strategyIds) {
+      const runtimeState = await this.repo.getStrategyRuntimeState(strategyId);
+      if (!runtimeState.enabled || runtimeState.permanentlyDisabled) {
+        disabledReasons.push(`${strategyId} is disabled`);
+        continue;
+      }
+      if (
+        runtimeState.cooldownUntil &&
+        runtimeState.cooldownUntil.getTime() > Date.now()
+      ) {
+        disabledReasons.push(`${strategyId} is in cooldown`);
+        continue;
+      }
+      activeStrategyIds.push(strategyId);
     }
-    if (
-      runtimeState.cooldownUntil &&
-      runtimeState.cooldownUntil.getTime() > Date.now()
-    ) {
+
+    if (activeStrategyIds.length === 0) {
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        `${this.options.strategy.id} is in cooldown`,
+        disabledReasons.join("; ") || "No active strategies",
         indicators,
         "HOLD",
         generatedFromCandleTs,
@@ -303,38 +308,43 @@ export class SignalEngine {
       );
     }
 
-    const signal = this.options.strategy.generateSignal({
-      symbol,
-      conid: latest.conid,
-      assetClass,
-      regime,
-      latestCandle: latest,
-      indicators,
-      candlesByTimeframe: {
-        "1m": candles,
-        "5m": candles5m,
-        "1h": candles1h,
-        "4h": candles4h,
-        "12h": candles12h,
-        "1d": candles1d,
-        "1w": candles1w,
+    const portfolioResult = this.portfolioManager.run(
+      {
+        symbol,
+        conid: latest.conid,
+        secType,
+        regime,
+        latestCandle: latest,
+        indicators,
+        candlesByTimeframe: {
+          "1m": candles,
+          "5m": candles5m,
+          "1h": candles1h,
+          "4h": candles4h,
+          "12h": candles12h,
+          "1d": candles1d,
+          "1w": candles1w,
+        },
+        marketState,
+        currentPosition: {
+          quantity: existingPositionQty,
+          averageCost: positionContext?.averageCost,
+          marketPrice: positionContext?.marketPrice,
+          marketValue: positionContext?.marketValue,
+        },
+        exposureSnapshot: riskSnapshot,
       },
-      marketState,
-      currentPosition: {
-        quantity: existingPositionQty,
-        averageCost: positionContext?.averageCost,
-        marketPrice: positionContext?.marketPrice,
-        marketValue: positionContext?.marketValue,
-      },
-      exposureSnapshot: riskSnapshot,
-    });
+      new Set(activeStrategyIds),
+    );
+    const signal = portfolioResult.selected?.signal ?? null;
 
     if (!signal) {
-      const strategyReason = this.options.strategy.getLastRejectionReason?.();
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        `${this.options.strategy.id}: ${strategyReason ?? `no signal for assetClass=${assetClass}, regime=${regime}`}`,
+        portfolioResult.rejectionReasons.length > 0
+          ? portfolioResult.rejectionReasons.join("; ")
+          : `No strategy signal for secType=${secType}, regime=${regime}`,
         indicators,
         "HOLD",
         generatedFromCandleTs,
@@ -349,7 +359,6 @@ export class SignalEngine {
       marketState,
       riskSnapshot,
       existingPositionQty,
-      positionMarketValue: positionContext?.marketValue,
       spreadBps,
       generatedFromCandleTs,
     });
@@ -363,7 +372,6 @@ export class SignalEngine {
     marketState: { bid?: number; ask?: number; lastPrice: number };
     riskSnapshot: ExposureSnapshot;
     existingPositionQty: number;
-    positionMarketValue?: number;
     spreadBps: number;
     generatedFromCandleTs?: Date;
   }): Promise<ProposedOrder> {
@@ -375,7 +383,6 @@ export class SignalEngine {
       marketState,
       riskSnapshot,
       existingPositionQty,
-      positionMarketValue,
       spreadBps,
       generatedFromCandleTs,
     } = input;
@@ -397,39 +404,24 @@ export class SignalEngine {
       );
     }
 
-    if (this.options.symbolAddLossLimit > 0 && !closesOrReducesPosition) {
-      const dayPnl = await this.repo.getSymbolNetPnlSince(
-        symbol,
-        this.currentUtcDayStart(),
-      );
-      if (dayPnl <= -this.options.symbolAddLossLimit) {
-        return this.rejectedOrder(
-          symbol,
-          latest.conid,
-          `Symbol add blocked: daily realized PnL ${dayPnl.toFixed(2)} <= -${this.options.symbolAddLossLimit.toFixed(2)}`,
-          indicators,
-          signal.side,
-          generatedFromCandleTs,
-        );
-      }
-    }
-
     const entrySelection = this.selectEntryPrice(
       signal.side,
       latest.close,
       marketState,
     );
     const entry = signal.suggestedEntry ?? entrySelection.entry;
-    let stop =
-      signal.stopLoss ??
-      (signal.side === "BUY"
-        ? entry - indicators.atr14! * this.options.atrStopMult
-        : entry + indicators.atr14! * this.options.atrStopMult);
-    let takeProfit =
-      signal.takeProfit ??
-      (signal.side === "BUY"
-        ? entry + indicators.atr14! * this.options.atrTpMult
-        : entry - indicators.atr14! * this.options.atrTpMult);
+    if (signal.stopLoss === undefined || signal.takeProfit === undefined) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        "Strategy signal missing stopLoss or takeProfit",
+        indicators,
+        signal.side,
+        generatedFromCandleTs,
+      );
+    }
+    let stop = signal.stopLoss;
+    let takeProfit = signal.takeProfit;
 
     const rawRiskPerUnit = Math.abs(entry - stop);
     const rawRewardPerUnit = Math.abs(takeProfit - entry);
@@ -437,7 +429,8 @@ export class SignalEngine {
       rawRiskPerUnit > 0 ? safeDiv(rawRewardPerUnit, rawRiskPerUnit, 2) : 2;
     const minStopBps = Math.max(
       0,
-      this.options.minStopBpsByAssetClass[indicators.assetClass ?? "stock"] ??
+      this.options.minStopBpsBySecType[indicators.secType ?? "STK"] ??
+        this.options.minStopBpsBySecType.STK ??
         0,
     );
     const minRiskPerUnit = entry * (minStopBps / 10000);
@@ -521,25 +514,6 @@ export class SignalEngine {
     const maxNotionalPerTrade =
       (effectiveAccountEquity * maxNotionalPerTradePct) / 100;
     const availableExposure = Math.max(0, maxExposure - riskSnapshot.exposure);
-    const currentDirectionalExposure =
-      signal.side === "BUY"
-        ? Math.max(0, riskSnapshot.longExposure ?? 0)
-        : Math.max(0, riskSnapshot.shortExposure ?? 0);
-    const maxDirectionalExposure =
-      maxExposure * this.options.maxDirectionalExposureShareOfLimit;
-    const currentSymbolExposure = Math.abs(positionMarketValue ?? 0);
-    const maxSymbolExposure = Math.min(
-      maxNotionalPerTrade,
-      maxExposure * this.options.maxSymbolExposureShareOfLimit,
-    );
-    const availableDirectionalExposure = Math.max(
-      0,
-      maxDirectionalExposure - currentDirectionalExposure,
-    );
-    const availableSymbolExposure = Math.max(
-      0,
-      maxSymbolExposure - currentSymbolExposure,
-    );
 
     let quantity: number;
     let positionEffect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" = "OPEN_OR_ADD";
@@ -591,22 +565,8 @@ export class SignalEngine {
         maxNotionalPerTrade / notionalEntry,
         quantityStep,
       );
-      const quantityCapByDirectionalExposure = this.roundDownToQuantityStep(
-        availableDirectionalExposure / notionalEntry,
-        quantityStep,
-      );
-      const quantityCapBySymbolExposure = this.roundDownToQuantityStep(
-        availableSymbolExposure / notionalEntry,
-        quantityStep,
-      );
       quantity = this.roundDownToQuantityStep(
-        Math.min(
-          riskBasedQuantity,
-          quantityCapByExposure,
-          quantityCapByNotional,
-          quantityCapByDirectionalExposure,
-          quantityCapBySymbolExposure,
-        ),
+        Math.min(riskBasedQuantity, quantityCapByExposure, quantityCapByNotional),
         quantityStep,
       );
 
@@ -614,7 +574,7 @@ export class SignalEngine {
         return this.rejectedOrder(
           symbol,
           latest.conid,
-          `Sizing rejected by notional caps (riskQty=${riskBasedQuantity}, capExposureQty=${quantityCapByExposure}, capTradeQty=${quantityCapByNotional}, capDirectionalQty=${quantityCapByDirectionalExposure}, capSymbolQty=${quantityCapBySymbolExposure}, available=${availableExposure.toFixed(2)}, availableDirectional=${availableDirectionalExposure.toFixed(2)}, availableSymbol=${availableSymbolExposure.toFixed(2)}, maxTradeNotional=${maxNotionalPerTrade.toFixed(2)})`,
+          `Sizing rejected by notional caps (riskQty=${riskBasedQuantity}, capExposureQty=${quantityCapByExposure}, capTradeQty=${quantityCapByNotional}, available=${availableExposure.toFixed(2)}, maxTradeNotional=${maxNotionalPerTrade.toFixed(2)})`,
           indicators,
           signal.side,
           generatedFromCandleTs,
@@ -622,26 +582,6 @@ export class SignalEngine {
       }
 
       const newNotional = quantity * notionalEntry;
-      if (currentDirectionalExposure + newNotional > maxDirectionalExposure) {
-        return this.rejectedOrder(
-          symbol,
-          latest.conid,
-          `Risk overlay rejected: directional exposure too high (current=${currentDirectionalExposure.toFixed(2)}, new=${newNotional.toFixed(2)}, limit=${maxDirectionalExposure.toFixed(2)})`,
-          indicators,
-          signal.side,
-          generatedFromCandleTs,
-        );
-      }
-      if (currentSymbolExposure + newNotional > maxSymbolExposure) {
-        return this.rejectedOrder(
-          symbol,
-          latest.conid,
-          `Risk overlay rejected: symbol concentration too high (current=${currentSymbolExposure.toFixed(2)}, new=${newNotional.toFixed(2)}, limit=${maxSymbolExposure.toFixed(2)})`,
-          indicators,
-          signal.side,
-          generatedFromCandleTs,
-        );
-      }
       if (riskSnapshot.exposure + newNotional > maxExposure) {
         return this.rejectedOrder(
           symbol,
@@ -654,14 +594,15 @@ export class SignalEngine {
       }
     }
 
+    const strategyId = signal.strategyId;
     const profilePerformance = await this.repo.getSignalPerformance({
-      strategy: this.options.strategy.id,
+      strategy: strategyId,
       side: signal.side,
       limit: 40,
     });
     const symbolPerformance = await this.repo.getSignalPerformance({
       instrument: symbol,
-      strategy: this.options.strategy.id,
+      strategy: strategyId,
       side: signal.side,
       limit: 30,
     });
@@ -684,7 +625,7 @@ export class SignalEngine {
       return this.rejectedOrder(
         symbol,
         latest.conid,
-        `Confidence too low (${confidence.toFixed(2)} < ${confidenceFloor.value.toFixed(2)}) for ${this.options.strategy.id}${confidenceFloor.reason ? `; ${confidenceFloor.reason}` : ""}`,
+        `Confidence too low (${confidence.toFixed(2)} < ${confidenceFloor.value.toFixed(2)}) for ${strategyId}${confidenceFloor.reason ? `; ${confidenceFloor.reason}` : ""}`,
         indicators,
         signal.side,
         generatedFromCandleTs,
@@ -701,12 +642,12 @@ export class SignalEngine {
       entry,
       stop: positionEffect === "OPEN_OR_ADD" ? stop : undefined,
       takeProfit: positionEffect === "OPEN_OR_ADD" ? takeProfit : undefined,
-      reason: `${signal.entryReason}, strategy=${this.options.strategy.id}, regime=${indicators.regime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${entrySelection.source}`,
+      reason: `${signal.entryReason}, strategy=${strategyId}, regime=${indicators.regime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${entrySelection.source}`,
       confidence,
       timestamp: new Date().toISOString(),
       riskCheckStatus: "PASS",
       status: "PROPOSED",
-      strategy: this.options.strategy.id,
+      strategy: strategyId,
       indicators,
       generatedFromCandleTs,
     };
@@ -731,26 +672,19 @@ export class SignalEngine {
     );
   }
 
-  private resolveAssetClass(symbol: string): AssetClass {
-    const overridden = this.options.assetClassBySymbol[symbol.toUpperCase()];
+  private resolveSecType(symbol: string): SecType {
+    const overridden = this.options.secTypeBySymbol[symbol.toUpperCase()];
     if (overridden) return overridden;
-    return inferAssetClass(symbol);
-  }
-
-  private currentUtcDayStart(): Date {
-    const now = new Date();
-    return new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
-    );
+    return this.options.defaultSecType;
   }
 
   private detectRegime(
-    assetClass: AssetClass,
+    secType: SecType,
     price: number,
     indicators: IndicatorSnapshot,
   ): RegimeAnalysis {
     return this.marketRegimeDetector.detectDetailed(
-      assetClass,
+      secType,
       price,
       indicators,
     );
@@ -935,7 +869,7 @@ export class SignalEngine {
       timestamp: new Date().toISOString(),
       riskCheckStatus: "REJECT",
       status: "REJECTED",
-      strategy: this.options.strategy.id,
+      strategy: this.portfolioManager.primaryStrategyId,
       indicators,
       generatedFromCandleTs,
     };

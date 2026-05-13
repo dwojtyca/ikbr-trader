@@ -15,6 +15,11 @@
       "import": "./dist/signal-engine.js",
       "default": "./dist/signal-engine.js"
     },
+    "./strategies/momentum-breakout-long.strategy": {
+      "types": "./dist/strategies/momentum-breakout-long.strategy.d.ts",
+      "import": "./dist/strategies/momentum-breakout-long.strategy.js",
+      "default": "./dist/strategies/momentum-breakout-long.strategy.js"
+    },
     "./repository": {
       "types": "./dist/repository.d.ts",
       "import": "./dist/repository.js",

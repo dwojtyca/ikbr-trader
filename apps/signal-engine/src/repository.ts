@@ -653,20 +653,6 @@ export class SignalRepository {
     return this.getStrategyRuntimeState(strategyId);
   }
 
-  async getSymbolNetPnlSince(symbol: string, since: Date): Promise<number> {
-    const result = await this.pool.query(
-      `
-      SELECT COALESCE(SUM(COALESCE(realized_pnl, 0) - COALESCE(commission, 0)), 0) AS pnl
-      FROM broker_execution_fills
-      WHERE UPPER(symbol) = UPPER($1)
-        AND executed_at >= $2
-      `,
-      [symbol, since]
-    );
-
-    return Number(result.rows[0]?.pnl ?? 0);
-  }
-
   async getSignalPerformance(input: {
     instrument?: string;
     strategy: string;

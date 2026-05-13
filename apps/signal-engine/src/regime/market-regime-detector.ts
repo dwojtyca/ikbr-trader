@@ -1,5 +1,5 @@
 import type {
-  AssetClass,
+  SecType,
   CandleTimeframe,
   DirectionalRegime,
   IndicatorSnapshot,
@@ -50,8 +50,8 @@ const TIMEFRAME_WEIGHTS: Record<CandleTimeframe, number> = {
   '1w': 1.25
 };
 
-const THRESHOLDS: Record<AssetClass, RegimeThresholds> = {
-  stock: {
+const THRESHOLDS: Record<string, RegimeThresholds> = {
+  STK: {
     directionalScore: 4.5,
     strongDirectionalScore: 6.25,
     atrHigh: 0.012,
@@ -59,7 +59,7 @@ const THRESHOLDS: Record<AssetClass, RegimeThresholds> = {
     atrLow: 0.0025,
     bbLow: 0.012
   },
-  commodity: {
+  CMDTY: {
     directionalScore: 4,
     strongDirectionalScore: 5.5,
     atrHigh: 0.016,
@@ -67,7 +67,15 @@ const THRESHOLDS: Record<AssetClass, RegimeThresholds> = {
     atrLow: 0.003,
     bbLow: 0.014
   },
-  index: {
+  FUT: {
+    directionalScore: 4,
+    strongDirectionalScore: 5.5,
+    atrHigh: 0.016,
+    bbHigh: 0.06,
+    atrLow: 0.003,
+    bbLow: 0.014
+  },
+  IND: {
     directionalScore: 3.8,
     strongDirectionalScore: 5.25,
     atrHigh: 0.01,
@@ -76,6 +84,10 @@ const THRESHOLDS: Record<AssetClass, RegimeThresholds> = {
     bbLow: 0.01
   }
 };
+
+function thresholdsForSecType(secType: SecType): RegimeThresholds {
+  return THRESHOLDS[secType.toUpperCase()] ?? THRESHOLDS.STK;
+}
 
 function round(value: number, decimals = 4): number {
   const factor = 10 ** decimals;
@@ -194,12 +206,12 @@ function currentTimeframeSnapshot(price: number, indicators: IndicatorSnapshot):
 }
 
 function volatilityRegime(
-  assetClass: AssetClass,
+  secType: SecType,
   price: number,
   indicators: IndicatorSnapshot,
   reasons: string[]
 ): VolatilityRegime {
-  const thresholds = THRESHOLDS[assetClass];
+  const thresholds = thresholdsForSecType(secType);
   const atrPct = safeDiv(indicators.atr14 ?? 0, price, 0);
   const bbWidthPct = indicators.bbWidthPct ?? 0;
 
@@ -226,12 +238,12 @@ function compositeRegime(directional: DirectionalRegime, volatility: VolatilityR
 }
 
 export class MarketRegimeDetector {
-  detect(assetClass: AssetClass, price: number, indicators: IndicatorSnapshot): MarketRegime {
-    return this.detectDetailed(assetClass, price, indicators).regime;
+  detect(secType: SecType, price: number, indicators: IndicatorSnapshot): MarketRegime {
+    return this.detectDetailed(secType, price, indicators).regime;
   }
 
-  detectDetailed(assetClass: AssetClass, price: number, indicators: IndicatorSnapshot): RegimeAnalysis {
-    const thresholds = THRESHOLDS[assetClass];
+  detectDetailed(secType: SecType, price: number, indicators: IndicatorSnapshot): RegimeAnalysis {
+    const thresholds = thresholdsForSecType(secType);
     const reasons: string[] = [];
     const timeframeScores: TimeframeScore[] = [
       scoreTimeframe('1m', currentTimeframeSnapshot(price, indicators)),
@@ -266,7 +278,7 @@ export class MarketRegimeDetector {
       reasons.push(`direction range: score=${round(score)}, majorBullish=${majorBullish}, majorBearish=${majorBearish}`);
     }
 
-    const volRegime = volatilityRegime(assetClass, price, indicators, reasons);
+    const volRegime = volatilityRegime(secType, price, indicators, reasons);
     const maxScore = timeframeScores.reduce((sum, item) => sum + TIMEFRAME_WEIGHTS[item.timeframe] * 2.3, 0);
     const directionalConfidence = maxScore > 0 ? clamp(Math.abs(score) / maxScore, 0, 1) : 0;
     const confirmationConfidence = majorVotes.length > 0

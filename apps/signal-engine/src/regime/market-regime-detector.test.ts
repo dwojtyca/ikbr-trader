@@ -41,7 +41,7 @@ function baseIndicators(overrides: Partial<IndicatorSnapshot> = {}): IndicatorSn
 test('MarketRegimeDetector returns bull_trend when higher timeframes confirm upside direction', () => {
   const detector = new MarketRegimeDetector();
 
-  const regime = detector.detect('stock', 104, baseIndicators());
+  const regime = detector.detect('STK', 104, baseIndicators());
 
   assert.equal(regime, 'bull_trend');
 });
@@ -49,7 +49,7 @@ test('MarketRegimeDetector returns bull_trend when higher timeframes confirm ups
 test('MarketRegimeDetector returns bear_trend when higher timeframes confirm downside direction', () => {
   const detector = new MarketRegimeDetector();
 
-  const regime = detector.detect('stock', 96, baseIndicators({
+  const regime = detector.detect('STK', 96, baseIndicators({
     ema20: 97,
     ema50: 99,
     ema200: 104,
@@ -69,7 +69,7 @@ test('MarketRegimeDetector returns bear_trend when higher timeframes confirm dow
 test('MarketRegimeDetector returns high_volatility when volatility is elevated without directional consensus', () => {
   const detector = new MarketRegimeDetector();
 
-  const regime = detector.detect('stock', 100, baseIndicators({
+  const regime = detector.detect('STK', 100, baseIndicators({
     ema20: 100.2,
     ema50: 100,
     ema200: 99.8,
@@ -90,7 +90,7 @@ test('MarketRegimeDetector returns high_volatility when volatility is elevated w
 test('MarketRegimeDetector returns low_volatility when price is compressed without trend consensus', () => {
   const detector = new MarketRegimeDetector();
 
-  const regime = detector.detect('stock', 100, baseIndicators({
+  const regime = detector.detect('STK', 100, baseIndicators({
     ema20: 100.1,
     ema50: 100,
     ema200: 99.9,
@@ -111,7 +111,7 @@ test('MarketRegimeDetector returns low_volatility when price is compressed witho
 test('MarketRegimeDetector returns range when neither trend nor volatility conditions dominate', () => {
   const detector = new MarketRegimeDetector();
 
-  const regime = detector.detect('index', 5000, {
+  const regime = detector.detect('IND', 5000, {
     ema20: 5003,
     ema50: 5002,
     ema200: 5000,

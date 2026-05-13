@@ -1,5 +1,5 @@
 import type {
-  AssetClass,
+  SecType,
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
@@ -28,7 +28,7 @@ export interface StrategySignal {
 export interface StrategyContext {
   symbol: string;
   conid: string;
-  assetClass: AssetClass;
+  secType: SecType;
   regime: MarketRegime;
   latestCandle: Candle;
   indicators: IndicatorSnapshot;
@@ -65,7 +65,7 @@ export interface ExitSignal {
 
 export interface Strategy {
   id: string;
-  assetClasses: readonly AssetClass[];
+  secTypes: readonly SecType[];
   supportedDirections: readonly StrategyDirection[];
   allowedRegimes: readonly MarketRegime[];
   requiredTimeframes: readonly CandleTimeframe[];
