@@ -42,7 +42,7 @@ function parseDateEnd(value: string): Date {
   return date;
 }
 
-function simulatorOptions() {
+async function simulatorOptions() {
   return {
     minCandles: config.SIGNAL_MIN_CANDLES,
     maxSpreadBps: config.MAX_SPREAD_BPS,
@@ -59,7 +59,7 @@ function simulatorOptions() {
     },
     baseCurrency: config.IB_CURRENCY,
     currencyBySymbol: config.currencyBySymbol,
-    secTypeBySymbol: config.secTypeBySymbol,
+    secTypeBySymbol: await repo.getSecTypeBySymbol(),
     priceMultiplierBySymbol: config.priceMultiplierOverrides,
     strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
     commissionBps: config.BACKTEST_COMMISSION_BPS,
@@ -116,7 +116,7 @@ function createHistoricalClient(): HistoricalClient {
       host: config.IB_SOCKET_HOST,
       port: config.IB_SOCKET_PORT,
       clientId: config.BACKTEST_IB_CLIENT_ID,
-      securityType: config.IB_SECURITY_TYPE,
+      securityType: config.defaultSecurityType,
       exchange: config.IB_EXCHANGE,
       primaryExchange: config.IB_PRIMARY_EXCHANGE,
       currency: config.IB_CURRENCY,
@@ -166,6 +166,11 @@ async function startHistoryFetchJob(
   try {
     await client.connect();
     const subscriptions = await client.resolveContracts(instruments);
+    for (const subscription of subscriptions) {
+      if (subscription.instrumentContract) {
+        await repo.upsertInstrumentContract(subscription.instrumentContract);
+      }
+    }
     for (const sub of subscriptions) {
       await fetchSubscriptionRange(client, sub, dateFrom, dateTo);
     }
@@ -236,6 +241,11 @@ async function startHistoryResumeJob(
     const subscriptions = await client.resolveContracts(
       pending.map((item) => item.instrument),
     );
+    for (const subscription of subscriptions) {
+      if (subscription.instrumentContract) {
+        await repo.upsertInstrumentContract(subscription.instrumentContract);
+      }
+    }
     const rangeBySymbol = new Map(
       pending.map((item) => [item.instrument.symbol.toUpperCase(), item]),
     );
@@ -379,11 +389,12 @@ app.post("/backtest/run", async (request, reply) => {
     reply.code(400);
     return { error: "no_ready_dataset" };
   }
+  const options = await simulatorOptions();
   const run = await repo.createRun(
     dataset.id,
     {
       mode,
-      ...simulatorOptions(),
+      ...options,
       fractionalSymbols: Array.from(config.fractionalSymbols),
     },
     mode,
@@ -406,7 +417,7 @@ app.post("/backtest/run", async (request, reply) => {
               repo,
               run.id,
               config.BACKTEST_POSTGRES_URL,
-              simulatorOptions(),
+              options,
               config.BACKTEST_STRATEGY_LAB_CONCURRENCY,
               (line) =>
                 app.log.info({ scope: "strategy-lab", runId: run.id }, line),
@@ -417,7 +428,7 @@ app.post("/backtest/run", async (request, reply) => {
                 repo,
                 run.id,
                 data,
-                simulatorOptions(),
+                options,
               ).run({
                 total: data.candles1m.length,
                 label: "bot backtest",

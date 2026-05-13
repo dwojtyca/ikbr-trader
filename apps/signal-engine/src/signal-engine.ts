@@ -60,8 +60,6 @@ interface SignalEngineOptions {
   minStopBpsBySecType: Record<SecType, number>;
   maxMarketStateAgeMs: number;
   baseCurrency: string;
-  defaultSecType: SecType;
-  secTypeBySymbol: Record<string, SecType>;
   currencyBySymbol: Record<string, string>;
   priceMultiplierBySymbol: Record<string, number>;
   executionBaseUrl: string;
@@ -134,7 +132,21 @@ export class SignalEngine {
     const highs = candles.map((candle) => candle.high);
     const lows = candles.map((candle) => candle.low);
     const volumes = candles.map((candle) => candle.volume);
-    const secType = this.resolveSecType(symbol);
+    const instrumentContract = await this.repo.getInstrumentContract(
+      symbol,
+      latest.conid,
+    );
+    if (!instrumentContract) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        "Missing resolved contract metadata",
+        undefined,
+        "HOLD",
+        generatedFromCandleTs,
+      );
+    }
+    const secType = instrumentContract.secType.toUpperCase();
 
     const trendFrom1h = lastEma(
       candles1h.map((candle) => candle.close),
@@ -670,12 +682,6 @@ export class SignalEngine {
       indicators.dcLower20 !== undefined &&
       indicators.trendFilterValue !== undefined
     );
-  }
-
-  private resolveSecType(symbol: string): SecType {
-    const overridden = this.options.secTypeBySymbol[symbol.toUpperCase()];
-    if (overridden) return overridden;
-    return this.options.defaultSecType;
   }
 
   private detectRegime(

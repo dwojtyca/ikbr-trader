@@ -72,7 +72,7 @@ const twsClient = new TwsClient(
     host: config.IB_SOCKET_HOST,
     port: config.IB_SOCKET_PORT,
     clientId: config.IB_CLIENT_ID,
-    securityType: config.IB_SECURITY_TYPE,
+    securityType: config.defaultSecurityType,
     exchange: config.IB_EXCHANGE,
     primaryExchange: config.IB_PRIMARY_EXCHANGE,
     currency: config.IB_CURRENCY,
@@ -160,6 +160,11 @@ app.post('/bootstrap', async () => {
   }
 
   const subscriptions = await twsClient.resolveContracts(config.watchlistInstruments);
+  for (const subscription of subscriptions) {
+    if (subscription.instrumentContract) {
+      await repo.upsertInstrumentContract(subscription.instrumentContract);
+    }
+  }
   const historical = await twsClient.backfillRecentCandles1m(subscriptions, config.backfill1mCandles);
 
   let backfilledCandles1m = 0;

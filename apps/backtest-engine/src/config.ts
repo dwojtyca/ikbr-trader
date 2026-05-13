@@ -3,6 +3,8 @@ import { z } from "zod";
 
 dotenv.config();
 
+const DEFAULT_SECURITY_TYPE = "STK";
+
 export interface WatchlistInstrument {
   symbol: string;
   conid?: string;
@@ -32,7 +34,6 @@ const schema = z.object({
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   BACKTEST_IB_CLIENT_ID: z.coerce.number().default(104),
-  IB_SECURITY_TYPE: z.string().default("STK"),
   IB_EXCHANGE: z.string().default("SMART"),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default("USD"),
@@ -160,21 +161,6 @@ function buildCurrencyBySymbol(
   return out;
 }
 
-function buildSecTypeBySymbol(
-  instruments: WatchlistInstrument[],
-  defaultSecType: string,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const instrument of instruments) {
-    out[instrument.symbol.toUpperCase()] = (
-      instrument.secType ?? defaultSecType
-    )
-      .trim()
-      .toUpperCase();
-  }
-  return out;
-}
-
 function parsePriceMultiplierOverrides(raw: string): Record<string, number> {
   const out: Record<string, number> = {};
   for (const entry of raw
@@ -195,15 +181,12 @@ const watchlistInstruments = buildWatchlistInstruments();
 
 export const config = {
   ...env,
+  defaultSecurityType: DEFAULT_SECURITY_TYPE,
   watchlistInstruments,
   watchlistSymbols: parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
   currencyBySymbol: buildCurrencyBySymbol(
     watchlistInstruments,
     env.IB_CURRENCY,
-  ),
-  secTypeBySymbol: buildSecTypeBySymbol(
-    watchlistInstruments,
-    env.IB_SECURITY_TYPE,
   ),
   priceMultiplierOverrides: parsePriceMultiplierOverrides(
     env.SIGNAL_PRICE_MULTIPLIER_OVERRIDES,

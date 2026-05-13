@@ -4,6 +4,8 @@ import { WatchlistInstrument } from './types.js';
 
 dotenv.config();
 
+const DEFAULT_SECURITY_TYPE = 'STK';
+
 const optionalTrimmedString = z.preprocess(
   (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
   z.string().optional()
@@ -20,7 +22,6 @@ const schema = z.object({
   IB_SOCKET_HOST: z.string().default('127.0.0.1'),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   IB_CLIENT_ID: z.coerce.number().default(101),
-  IB_SECURITY_TYPE: z.string().default('STK'),
   IB_EXCHANGE: z.string().default('SMART'),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default('USD'),
@@ -112,6 +113,7 @@ const watchlistInstruments = buildWatchlistInstruments(env);
 
 export const config = {
   ...env,
+  defaultSecurityType: DEFAULT_SECURITY_TYPE,
   watchlistSymbols: watchlistInstruments.map((item) => item.symbol),
   watchlistInstruments,
   ingestionTriggerSignalsOnCandle: env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === 'true',

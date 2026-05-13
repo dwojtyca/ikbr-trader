@@ -76,6 +76,23 @@ export interface MarketState {
   ts: Date;
 }
 
+export interface InstrumentContract {
+  symbol: string;
+  conid: string;
+  secType: SecType;
+  exchange?: string;
+  primaryExchange?: string;
+  currency?: string;
+  localSymbol?: string;
+  tradingClass?: string;
+  minTick?: number;
+  displayName?: string;
+  contractJson?: Record<string, unknown>;
+  detailsJson?: Record<string, unknown>;
+  source: 'ibkr' | 'override_fallback';
+  resolvedAt?: Date;
+}
+
 export interface SignalTicket {
   instrument: string;
   conid?: string;

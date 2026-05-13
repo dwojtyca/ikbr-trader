@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { Redis } from 'ioredis';
-import { Candle, CandleTimeframe, IndicatorSnapshot, ProposedOrder, ProposedOrderStatus, RiskCheckStatus, Side } from '@ikbr/shared';
+import { Candle, CandleTimeframe, IndicatorSnapshot, InstrumentContract, ProposedOrder, ProposedOrderStatus, RiskCheckStatus, Side } from '@ikbr/shared';
 
 interface StoredMarketState {
   conid: string;
@@ -208,6 +208,30 @@ export class SignalRepository {
     }
 
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS instrument_contracts (
+        symbol TEXT PRIMARY KEY,
+        conid TEXT NOT NULL,
+        sec_type TEXT NOT NULL,
+        exchange TEXT,
+        primary_exchange TEXT,
+        currency TEXT,
+        local_symbol TEXT,
+        trading_class TEXT,
+        min_tick DOUBLE PRECISION,
+        display_name TEXT,
+        contract_json JSONB,
+        details_json JSONB,
+        source TEXT NOT NULL,
+        resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS instrument_contracts_conid_idx
+      ON instrument_contracts (conid);
+    `);
+
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS proposed_orders (
         id BIGSERIAL PRIMARY KEY,
         instrument TEXT NOT NULL,
@@ -359,6 +383,41 @@ export class SignalRepository {
     } catch {
       return null;
     }
+  }
+
+  async getInstrumentContract(symbol: string, conid?: string): Promise<InstrumentContract | null> {
+    const result = await this.pool.query(
+      `
+      SELECT symbol, conid, sec_type, exchange, primary_exchange, currency,
+             local_symbol, trading_class, min_tick, display_name,
+             contract_json, details_json, source, resolved_at
+      FROM instrument_contracts
+      WHERE UPPER(symbol) = UPPER($1)
+         OR ($2::text IS NOT NULL AND conid = $2::text)
+      ORDER BY CASE WHEN UPPER(symbol) = UPPER($1) THEN 0 ELSE 1 END
+      LIMIT 1
+      `,
+      [symbol, conid ?? null]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    return {
+      symbol: String(row.symbol),
+      conid: String(row.conid),
+      secType: String(row.sec_type),
+      exchange: row.exchange ?? undefined,
+      primaryExchange: row.primary_exchange ?? undefined,
+      currency: row.currency ?? undefined,
+      localSymbol: row.local_symbol ?? undefined,
+      tradingClass: row.trading_class ?? undefined,
+      minTick: row.min_tick === null || row.min_tick === undefined ? undefined : Number(row.min_tick),
+      displayName: row.display_name ?? undefined,
+      contractJson: row.contract_json ?? undefined,
+      detailsJson: row.details_json ?? undefined,
+      source: row.source === 'override_fallback' ? 'override_fallback' : 'ibkr',
+      resolvedAt: row.resolved_at ? new Date(row.resolved_at) : undefined
+    };
   }
 
   async getOpenExposureNotional(): Promise<number> {

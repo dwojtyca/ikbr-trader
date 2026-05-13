@@ -12,7 +12,6 @@ const schema = z.object({
   REDIS_URL: z.string().default("redis://localhost:6379"),
   EXECUTION_BASE_URL: z.string().default("http://localhost:3103"),
   IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
-  IB_SECURITY_TYPE: z.string().default("STK"),
   WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
   SIGNAL_EVENT_DRIVEN: z.string().default("true"),
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
@@ -45,7 +44,7 @@ const schema = z.object({
 
 const env = schema.parse(process.env);
 
-type ContractOverrideKey = "currency" | "sectype";
+type ContractOverrideKey = "currency";
 
 function parseWatchlistSymbols(raw: string): string[] {
   return raw
@@ -85,40 +84,6 @@ function parseContractCurrencies(
   return out;
 }
 
-function parseContractSecTypes(
-  raw: string,
-  symbols: string[],
-  defaultSecType: string,
-): Record<string, string> {
-  const out: Record<string, string> = {};
-  const allowed = new Set(symbols.map((symbol) => symbol.toUpperCase()));
-  for (const symbol of allowed) {
-    out[symbol] = defaultSecType.trim().toUpperCase();
-  }
-
-  for (const entry of raw
-    .split(";")
-    .map((value) => value.trim())
-    .filter(Boolean)) {
-    const [symbolRaw, pairsRaw = ""] = entry.split(":", 2);
-    const symbol = symbolRaw.trim().toUpperCase();
-    if (!symbol || !allowed.has(symbol)) continue;
-
-    for (const pair of pairsRaw
-      .split("|")
-      .map((value) => value.trim())
-      .filter(Boolean)) {
-      const [keyRaw, valueRaw = ""] = pair.split("=", 2);
-      const key = keyRaw.trim().toLowerCase() as ContractOverrideKey;
-      const value = valueRaw.trim().toUpperCase();
-      if (key === "sectype" && value) {
-        out[symbol] = value;
-      }
-    }
-  }
-  return out;
-}
-
 function parsePriceMultiplierOverrides(raw: string): Record<string, number> {
   const out: Record<string, number> = {};
   for (const entry of raw
@@ -144,11 +109,6 @@ export const config = {
   currencyBySymbol: parseContractCurrencies(
     env.WATCHLIST_CONTRACT_OVERRIDES,
     parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
-  ),
-  secTypeBySymbol: parseContractSecTypes(
-    env.WATCHLIST_CONTRACT_OVERRIDES,
-    parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
-    env.IB_SECURITY_TYPE,
   ),
   baseCurrency: env.IB_CURRENCY,
   priceMultiplierOverrides: parsePriceMultiplierOverrides(

@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import type { Candle } from '@ikbr/shared';
+import type { Candle, InstrumentContract } from '@ikbr/shared';
 import { listStrategyProfiles } from '@ikbr/shared';
 import type {
   BacktestCandleSymbolSummary,
@@ -164,6 +164,28 @@ export class BacktestRepository {
       );
     `);
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS backtest_instrument_contracts (
+        symbol TEXT PRIMARY KEY,
+        conid TEXT NOT NULL,
+        sec_type TEXT NOT NULL,
+        exchange TEXT,
+        primary_exchange TEXT,
+        currency TEXT,
+        local_symbol TEXT,
+        trading_class TEXT,
+        min_tick DOUBLE PRECISION,
+        display_name TEXT,
+        contract_json JSONB,
+        details_json JSONB,
+        source TEXT NOT NULL,
+        resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS backtest_instrument_contracts_conid_idx
+      ON backtest_instrument_contracts (conid);
+    `);
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_runs (
         id BIGSERIAL PRIMARY KEY,
         dataset_id BIGINT NOT NULL REFERENCES backtest_datasets(id) ON DELETE CASCADE,
@@ -311,6 +333,61 @@ export class BacktestRepository {
       firstTs: row.first_ts ? new Date(row.first_ts).toISOString() : undefined,
       lastTs: row.last_ts ? new Date(row.last_ts).toISOString() : undefined
     }));
+  }
+
+  async upsertInstrumentContract(contract: InstrumentContract): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO backtest_instrument_contracts (
+        symbol, conid, sec_type, exchange, primary_exchange, currency,
+        local_symbol, trading_class, min_tick, display_name,
+        contract_json, details_json, source, resolved_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+      ON CONFLICT (symbol)
+      DO UPDATE SET
+        conid = EXCLUDED.conid,
+        sec_type = EXCLUDED.sec_type,
+        exchange = EXCLUDED.exchange,
+        primary_exchange = EXCLUDED.primary_exchange,
+        currency = EXCLUDED.currency,
+        local_symbol = EXCLUDED.local_symbol,
+        trading_class = EXCLUDED.trading_class,
+        min_tick = EXCLUDED.min_tick,
+        display_name = EXCLUDED.display_name,
+        contract_json = EXCLUDED.contract_json,
+        details_json = EXCLUDED.details_json,
+        source = EXCLUDED.source,
+        resolved_at = NOW();
+      `,
+      [
+        contract.symbol.toUpperCase(),
+        contract.conid,
+        contract.secType,
+        contract.exchange ?? null,
+        contract.primaryExchange ?? null,
+        contract.currency ?? null,
+        contract.localSymbol ?? null,
+        contract.tradingClass ?? null,
+        contract.minTick ?? null,
+        contract.displayName ?? null,
+        contract.contractJson ?? null,
+        contract.detailsJson ?? null,
+        contract.source
+      ]
+    );
+  }
+
+  async getSecTypeBySymbol(): Promise<Record<string, string>> {
+    const result = await this.pool.query(`
+      SELECT symbol, sec_type
+      FROM backtest_instrument_contracts
+    `);
+    const out: Record<string, string> = {};
+    for (const row of result.rows) {
+      out[String(row.symbol).toUpperCase()] = String(row.sec_type).toUpperCase();
+    }
+    return out;
   }
 
   async insertCandles1m(candles: Candle[]): Promise<void> {

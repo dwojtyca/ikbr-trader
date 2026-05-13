@@ -1,3 +1,5 @@
+import type { InstrumentContract } from '@ikbr/shared';
+
 export interface TickEvent {
   conid: string;
   symbol: string;
@@ -22,4 +24,5 @@ export interface InstrumentSubscription {
   conid: string;
   contract?: Record<string, unknown>;
   displayName?: string;
+  instrumentContract?: InstrumentContract;
 }

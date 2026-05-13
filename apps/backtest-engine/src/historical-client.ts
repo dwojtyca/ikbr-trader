@@ -1,5 +1,5 @@
 import IB from 'ib';
-import type { Candle } from '@ikbr/shared';
+import type { Candle, InstrumentContract } from '@ikbr/shared';
 import type { WatchlistInstrument } from './config.js';
 
 interface HistoricalClientConfig {
@@ -17,6 +17,7 @@ export interface InstrumentSubscription {
   conid: string;
   contract?: Record<string, unknown>;
   displayName?: string;
+  instrumentContract?: InstrumentContract;
 }
 
 type ContractShape = Record<string, unknown>;
@@ -25,6 +26,7 @@ type ContractDetailsShape = {
   summary?: ContractShape;
   longName?: string;
   marketName?: string;
+  minTick?: number | string;
 };
 
 function toNum(value: unknown): number | undefined {
@@ -34,6 +36,12 @@ function toNum(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
+}
+
+function toStr(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function pickContract(details: ContractDetailsShape): ContractShape {
@@ -172,12 +180,39 @@ export class HistoricalClient {
     const directConid = toNum(instrument.conid);
     const directContract = this.buildContractFromInstrument(instrument, directConid);
 
-    if (directConid && instrument.secType && instrument.exchange && instrument.currency) {
-      return {
-        symbol,
-        conid: String(directConid),
-        contract: this.withDefaults(directContract)
-      };
+    if (directConid) {
+      try {
+        const details = await this.requestContractDetails(symbol, directContract);
+        const summary = pickContract(details);
+        const conid = toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
+        if (!conid) throw new Error(`No conId in contract details for ${symbol}`);
+
+        return {
+          symbol,
+          conid: String(conid),
+          contract: summary,
+          displayName: this.pickDisplayName(symbol, details),
+          instrumentContract: this.buildInstrumentContract(symbol, String(conid), summary, details, 'ibkr')
+        };
+      } catch (error) {
+        if (!instrument.secType || !instrument.exchange || !instrument.currency) {
+          throw error;
+        }
+        this.onLog(`contractDetails unavailable for ${symbol}; using WATCHLIST_CONTRACT_OVERRIDES fallback: ${(error as Error).message}`);
+        const fallbackContract = this.withDefaults(directContract);
+        return {
+          symbol,
+          conid: String(directConid),
+          contract: fallbackContract,
+          instrumentContract: this.buildInstrumentContract(
+            symbol,
+            String(directConid),
+            fallbackContract,
+            undefined,
+            'override_fallback'
+          )
+        };
+      }
     }
 
     const details = await this.requestContractDetails(symbol, directContract);
@@ -189,7 +224,33 @@ export class HistoricalClient {
       symbol,
       conid: String(conid),
       contract: summary,
-      displayName: this.pickDisplayName(symbol, details)
+      displayName: this.pickDisplayName(symbol, details),
+      instrumentContract: this.buildInstrumentContract(symbol, String(conid), summary, details, 'ibkr')
+    };
+  }
+
+  private buildInstrumentContract(
+    symbol: string,
+    conid: string,
+    contract: ContractShape,
+    details: ContractDetailsShape | undefined,
+    source: InstrumentContract['source']
+  ): InstrumentContract {
+    const displayName = details ? this.pickDisplayName(symbol, details) : undefined;
+    return {
+      symbol: symbol.toUpperCase(),
+      conid,
+      secType: toStr(contract.secType) ?? this.config.securityType,
+      exchange: toStr(contract.exchange),
+      primaryExchange: toStr(contract.primaryExch) ?? toStr(contract.primaryExchange),
+      currency: toStr(contract.currency) ?? this.config.currency,
+      localSymbol: toStr(contract.localSymbol),
+      tradingClass: toStr(contract.tradingClass),
+      minTick: toNum(details?.minTick),
+      displayName,
+      contractJson: contract,
+      detailsJson: details as Record<string, unknown> | undefined,
+      source
     };
   }
 

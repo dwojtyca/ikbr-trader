@@ -1,5 +1,5 @@
 import IB from 'ib';
-import { Candle } from '@ikbr/shared';
+import { Candle, InstrumentContract } from '@ikbr/shared';
 import { InstrumentSubscription, TickEvent, WatchlistInstrument } from './types.js';
 
 interface TwsClientConfig {
@@ -29,6 +29,7 @@ type ContractDetailsShape = {
   summary?: ContractShape;
   longName?: string;
   marketName?: string;
+  minTick?: number | string;
 };
 
 export interface HistoricalBackfillResult {
@@ -44,6 +45,12 @@ function toNum(value: unknown): number | undefined {
     if (Number.isFinite(parsed)) return parsed;
   }
   return undefined;
+}
+
+function toStr(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed || undefined;
 }
 
 function pickContract(details: ContractDetailsShape): ContractShape {
@@ -251,24 +258,37 @@ export class TwsClient {
     const directConid = toNum(instrument.conid);
     const directContract = this.buildContractFromInstrument(instrument, directConid);
     if (directConid) {
-      if (instrument.secType && instrument.exchange && instrument.currency) {
+      try {
+        const details = await this.requestContractDetails(symbol, directContract);
+        const summary = pickContract(details);
+        const conid = toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
+
+        return {
+          symbol,
+          conid: String(conid),
+          contract: summary,
+          displayName: this.pickDisplayName(symbol, details),
+          instrumentContract: this.buildInstrumentContract(symbol, String(conid), summary, details, 'ibkr')
+        };
+      } catch (error) {
+        if (!instrument.secType || !instrument.exchange || !instrument.currency) {
+          throw error;
+        }
+        this.onLog(`contractDetails unavailable for ${symbol}; using WATCHLIST_CONTRACT_OVERRIDES fallback: ${(error as Error).message}`);
+        const fallbackContract = this.withDefaults(directContract);
         return {
           symbol,
           conid: String(directConid),
-          contract: this.withDefaults(directContract)
+          contract: fallbackContract,
+          instrumentContract: this.buildInstrumentContract(
+            symbol,
+            String(directConid),
+            fallbackContract,
+            undefined,
+            'override_fallback'
+          )
         };
       }
-
-      const details = await this.requestContractDetails(symbol, directContract);
-      const summary = pickContract(details);
-      const conid = toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
-
-      return {
-        symbol,
-        conid: String(conid),
-        contract: summary,
-        displayName: this.pickDisplayName(symbol, details)
-      };
     }
 
     const details = await this.requestContractDetails(symbol, this.buildContractFromInstrument(instrument));
@@ -282,7 +302,33 @@ export class TwsClient {
       symbol,
       conid: String(conId),
       contract: summary,
-      displayName: this.pickDisplayName(symbol, details)
+      displayName: this.pickDisplayName(symbol, details),
+      instrumentContract: this.buildInstrumentContract(symbol, String(conId), summary, details, 'ibkr')
+    };
+  }
+
+  private buildInstrumentContract(
+    symbol: string,
+    conid: string,
+    contract: ContractShape,
+    details: ContractDetailsShape | undefined,
+    source: InstrumentContract['source']
+  ): InstrumentContract {
+    const displayName = details ? this.pickDisplayName(symbol, details) : undefined;
+    return {
+      symbol: symbol.toUpperCase(),
+      conid,
+      secType: toStr(contract.secType) ?? this.config.securityType,
+      exchange: toStr(contract.exchange),
+      primaryExchange: toStr(contract.primaryExch) ?? toStr(contract.primaryExchange),
+      currency: toStr(contract.currency) ?? this.config.currency,
+      localSymbol: toStr(contract.localSymbol),
+      tradingClass: toStr(contract.tradingClass),
+      minTick: toNum(details?.minTick),
+      displayName,
+      contractJson: contract,
+      detailsJson: details as Record<string, unknown> | undefined,
+      source
     };
   }
 

@@ -33,8 +33,6 @@ const engine = new SignalEngine(repo, {
   },
   maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
   baseCurrency: config.baseCurrency,
-  defaultSecType: config.IB_SECURITY_TYPE,
-  secTypeBySymbol: config.secTypeBySymbol,
   currencyBySymbol: config.currencyBySymbol,
   priceMultiplierBySymbol: config.priceMultiplierOverrides,
   executionBaseUrl: config.EXECUTION_BASE_URL,

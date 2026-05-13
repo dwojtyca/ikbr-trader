@@ -1,5 +1,5 @@
 import { Pool } from 'pg';
-import { Candle, MarketState } from '@ikbr/shared';
+import { Candle, InstrumentContract, MarketState } from '@ikbr/shared';
 
 export class MarketRepository {
   constructor(private readonly pool: Pool) {}
@@ -26,6 +26,73 @@ export class MarketRepository {
         ON ${table} (symbol, ts DESC);
       `);
     }
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS instrument_contracts (
+        symbol TEXT PRIMARY KEY,
+        conid TEXT NOT NULL,
+        sec_type TEXT NOT NULL,
+        exchange TEXT,
+        primary_exchange TEXT,
+        currency TEXT,
+        local_symbol TEXT,
+        trading_class TEXT,
+        min_tick DOUBLE PRECISION,
+        display_name TEXT,
+        contract_json JSONB,
+        details_json JSONB,
+        source TEXT NOT NULL,
+        resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS instrument_contracts_conid_idx
+      ON instrument_contracts (conid);
+    `);
+  }
+
+  async upsertInstrumentContract(contract: InstrumentContract): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO instrument_contracts (
+        symbol, conid, sec_type, exchange, primary_exchange, currency,
+        local_symbol, trading_class, min_tick, display_name,
+        contract_json, details_json, source, resolved_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
+      ON CONFLICT (symbol)
+      DO UPDATE SET
+        conid = EXCLUDED.conid,
+        sec_type = EXCLUDED.sec_type,
+        exchange = EXCLUDED.exchange,
+        primary_exchange = EXCLUDED.primary_exchange,
+        currency = EXCLUDED.currency,
+        local_symbol = EXCLUDED.local_symbol,
+        trading_class = EXCLUDED.trading_class,
+        min_tick = EXCLUDED.min_tick,
+        display_name = EXCLUDED.display_name,
+        contract_json = EXCLUDED.contract_json,
+        details_json = EXCLUDED.details_json,
+        source = EXCLUDED.source,
+        resolved_at = NOW();
+      `,
+      [
+        contract.symbol.toUpperCase(),
+        contract.conid,
+        contract.secType,
+        contract.exchange ?? null,
+        contract.primaryExchange ?? null,
+        contract.currency ?? null,
+        contract.localSymbol ?? null,
+        contract.tradingClass ?? null,
+        contract.minTick ?? null,
+        contract.displayName ?? null,
+        contract.contractJson ?? null,
+        contract.detailsJson ?? null,
+        contract.source
+      ]
+    );
   }
 
   async upsertCandle(candle: Candle): Promise<void> {
