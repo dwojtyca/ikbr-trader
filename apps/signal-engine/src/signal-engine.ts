@@ -8,6 +8,7 @@ import {
   RiskLimits,
   Side,
   TimeframeIndicatorSnapshot,
+  findStrategyProfile,
 } from "@ikbr/shared";
 import {
   emaSlopePct,
@@ -237,7 +238,17 @@ export class SignalEngine {
 
     const activeStrategyIds: string[] = [];
     const disabledReasons: string[] = [];
+    const symbolUpper = symbol.toUpperCase();
     for (const strategyId of this.portfolioManager.strategyIds) {
+      const profile = findStrategyProfile(strategyId);
+      if (
+        profile?.excludedSymbols?.some(
+          (excluded) => excluded.toUpperCase() === symbolUpper,
+        )
+      ) {
+        disabledReasons.push(`${strategyId} excluded for ${symbolUpper}`);
+        continue;
+      }
       const runtimeState = await this.repo.getStrategyRuntimeState(strategyId);
       if (!runtimeState.enabled || runtimeState.permanentlyDisabled) {
         disabledReasons.push(`${strategyId} is disabled`);
@@ -517,8 +528,13 @@ export class SignalEngine {
     const maxRiskCash =
       (effectiveAccountEquity * this.options.riskLimits.maxRiskPerTradePct) /
       100;
+    const strategyProfile = findStrategyProfile(signal.strategyId);
+    const quantityFactor =
+      strategyProfile?.quantityFactor && strategyProfile.quantityFactor > 0
+        ? strategyProfile.quantityFactor
+        : 1;
     const riskBasedQuantity = this.roundDownToQuantityStep(
-      maxRiskCash / riskPerUnitCash,
+      (maxRiskCash * quantityFactor) / riskPerUnitCash,
       quantityStep,
     );
     if (riskBasedQuantity < quantityStep) {
@@ -621,6 +637,18 @@ export class SignalEngine {
     }
 
     const strategyId = signal.strategyId;
+    const profile = findStrategyProfile(strategyId);
+    // Stage 9: enforce per-profile raw entry-score floor before regime/symbol modifiers.
+    if (profile && signal.confidenceScore < profile.entryScore) {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `Confidence below profile entryScore (${signal.confidenceScore.toFixed(2)} < ${profile.entryScore.toFixed(2)}) for ${strategyId}`,
+        indicators,
+        signal.side,
+        generatedFromCandleTs,
+      );
+    }
     const profilePerformance = await this.repo.getSignalPerformance({
       strategy: strategyId,
       side: signal.side,
@@ -632,8 +660,12 @@ export class SignalEngine {
       side: signal.side,
       limit: 30,
     });
+    const minConfidenceMultiplier =
+      profile?.minConfidenceMultiplier && profile.minConfidenceMultiplier > 0
+        ? profile.minConfidenceMultiplier
+        : 1;
     const confidenceFloor = this.buildConfidenceFloor(
-      this.options.minConfidence,
+      this.options.minConfidence * minConfidenceMultiplier,
       profilePerformance,
       symbolPerformance,
     );

@@ -24,9 +24,11 @@ function consolidationCandles(length = 25): Candle[] {
   );
 }
 
-function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext {
+function baseContext(
+  overrides: Partial<StrategyContext> = {},
+): StrategyContext {
   const candles = consolidationCandles();
-  const latestCandle = candle(25, 101, 12500);
+  const latestCandle = candle(25, 101, 16000);
   return {
     symbol: "AAPL",
     conid: "123",
@@ -39,6 +41,7 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
       ema50: 104,
       ema200: 110,
       rsi14: 36,
+      rsi14Prev: 42,
       atr14: 1.2,
       dcLower20: 101,
       bbWidthPct: 0.025,
@@ -50,7 +53,7 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
           ema20: 102,
           ema50: 104,
           trend: "bearish",
-          return4Pct: -1.2,
+          return4Pct: -1.8,
         },
         "4h": {
           close: 102,
@@ -104,10 +107,15 @@ test("MomentumBreakdownShortStrategy emits SELL signal for IND bear breakdown", 
 test("MomentumBreakdownShortStrategy rejects non-bear-trend directional regime", () => {
   const strategy = new MomentumBreakdownShortStrategy();
 
-  const signal = strategy.generateSignal(baseContext({ directionalRegime: "range" }));
+  const signal = strategy.generateSignal(
+    baseContext({ directionalRegime: "range" }),
+  );
 
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), "directional_regime_not_bear_trend");
+  assert.equal(
+    strategy.getLastRejectionReason(),
+    "directional_regime_not_bear_trend",
+  );
 });
 
 test("MomentumBreakdownShortStrategy rejects signals outside UTC strategy session", () => {
@@ -258,5 +266,8 @@ test("MomentumBreakdownShortStrategy rejects breakdown after strong pre-breakdow
   );
 
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), "pre_breakdown_drift_too_low");
+  assert.equal(
+    strategy.getLastRejectionReason(),
+    "pre_breakdown_drift_too_low",
+  );
 });

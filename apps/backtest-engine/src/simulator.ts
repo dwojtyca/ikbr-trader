@@ -1,7 +1,12 @@
 import { Worker } from "node:worker_threads";
 import { SignalEngine } from "@ikbr/signal-engine/signal-engine";
 import { createStrategies } from "@ikbr/signal-engine/strategies/strategy-registry";
-import type { Candle, InstrumentContract, ProposedOrder, Side } from "@ikbr/shared";
+import type {
+  Candle,
+  InstrumentContract,
+  ProposedOrder,
+  Side,
+} from "@ikbr/shared";
 import {
   listAllStrategyProfiles,
   listStrategyProfiles,
@@ -218,7 +223,8 @@ export class BacktestSimulator {
     };
     this.currentEquity = options.riskLimits.accountEquity;
     const activeStrategyIds = new Set(
-      options.strategyIds ?? listStrategyProfiles().map((profile) => profile.id),
+      options.strategyIds ??
+        listStrategyProfiles().map((profile) => profile.id),
     );
     for (const profile of listStrategyProfiles()) {
       if (!activeStrategyIds.has(profile.id)) continue;
@@ -233,38 +239,33 @@ export class BacktestSimulator {
     }
   }
 
-  async run(
-    progress?: RunProgressOptions,
-  ): Promise<{
+  async run(progress?: RunProgressOptions): Promise<{
     totalPnl: number;
     trades: number;
     wins: number;
     winRate: number;
   }> {
-    const signalEngine = new SignalEngine(
-      this as any,
-      {
-        strategies: createStrategies(this.options.strategyIds),
-        minCandles: this.options.minCandles,
-        maxSpreadBps: this.options.maxSpreadBps,
-        minVolume1m: this.options.minVolume1m,
-        volumeFilterMode: "off",
-        minConfidence: this.options.minConfidence,
-        lmtEntryMode: this.options.lmtEntryMode,
-        lmtEntryBufferBps: this.options.lmtEntryBufferBps,
-        fractionalSymbols: this.options.fractionalSymbols,
-        fractionalQuantityStep: this.options.fractionalQuantityStep,
-        minStopBpsBySecType: this.options.minStopBpsBySecType,
-        maxMarketStateAgeMs: 0,
-        baseCurrency: this.options.baseCurrency,
-        secTypeBySymbol: this.options.secTypeBySymbol,
-        currencyBySymbol: this.options.currencyBySymbol,
-        priceMultiplierBySymbol: this.options.priceMultiplierBySymbol,
-        executionBaseUrl: "backtest",
-        strategyCooldownMs: this.options.strategyCooldownMs,
-        riskLimits: this.options.riskLimits,
-      },
-    );
+    const signalEngine = new SignalEngine(this as any, {
+      strategies: createStrategies(this.options.strategyIds),
+      minCandles: this.options.minCandles,
+      maxSpreadBps: this.options.maxSpreadBps,
+      minVolume1m: this.options.minVolume1m,
+      volumeFilterMode: "off",
+      minConfidence: this.options.minConfidence,
+      lmtEntryMode: this.options.lmtEntryMode,
+      lmtEntryBufferBps: this.options.lmtEntryBufferBps,
+      fractionalSymbols: this.options.fractionalSymbols,
+      fractionalQuantityStep: this.options.fractionalQuantityStep,
+      minStopBpsBySecType: this.options.minStopBpsBySecType,
+      maxMarketStateAgeMs: 0,
+      baseCurrency: this.options.baseCurrency,
+      secTypeBySymbol: this.options.secTypeBySymbol,
+      currencyBySymbol: this.options.currencyBySymbol,
+      priceMultiplierBySymbol: this.options.priceMultiplierBySymbol,
+      executionBaseUrl: "backtest",
+      strategyCooldownMs: this.options.strategyCooldownMs,
+      riskLimits: this.options.riskLimits,
+    });
 
     const events = this.data.candles1m
       .map((candle) => ({ candle, key: candle.symbol.toUpperCase() }))

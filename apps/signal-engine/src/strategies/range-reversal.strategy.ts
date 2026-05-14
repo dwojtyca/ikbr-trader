@@ -21,6 +21,7 @@ interface RangeReversalParams {
   structureStopAtrMult: number;
   minRewardRisk: number;
   highVolMinRewardRisk: number;
+  plannedRewardMinPct: number;
   sessionUtcStartHour: number;
   sessionUtcEndHour: number;
 }
@@ -41,20 +42,26 @@ function clamp(value: number, min: number, max: number): number {
 
 function paramsForSecType(_secType: SecType): RangeReversalParams {
   return {
-    rsiLongMax: 42,
-    rsiShortMin: 58,
-    rangeWidthMinPct: 0.45,
-    rangeWidthMaxPct: 8,
-    edgeDistanceAtr: 0.45,
-    edgeDistancePct: 0.25,
+    // Stage 3: stricter entry filters to cut over-trading and improve win quality.
+    rsiLongMax: 32,
+    rsiShortMin: 68,
+    rangeWidthMinPct: 1.0,
+    rangeWidthMaxPct: 5,
+    edgeDistanceAtr: 0.25,
+    edgeDistancePct: 0.12,
     rejectionCloseLocationMin: 0.58,
     rejectionBodyMin: 0.08,
     wickMin: 0.18,
-    volumeMultiplier: 0.8,
-    stopAtrMult: 1.25,
-    structureStopAtrMult: 2.2,
-    minRewardRisk: 0.9,
-    highVolMinRewardRisk: 1.1,
+    volumeMultiplier: 1.1,
+    // Stage 6: looser stop to reduce noise wicks killing valid reversals.
+    stopAtrMult: 1.6,
+    structureStopAtrMult: 2.5,
+    // Stage 1 R:R fix: net edge requires reward >> risk to overcome ~2x commissions
+    // and ~33% historical win rate. Previous values (0.9 / 1.1) yielded negative EV.
+    minRewardRisk: 1.6,
+    highVolMinRewardRisk: 2.0,
+    // Reject setups whose planned reward is too small to overcome round-trip commissions.
+    plannedRewardMinPct: 0.4,
     sessionUtcStartHour: 8,
     sessionUtcEndHour: 20,
   };
@@ -292,6 +299,10 @@ export class RangeReversalStrategy implements Strategy {
       minRewardRisk,
     } = input;
     const latest = context.latestCandle;
+    // Stage 3: require the latest candle to actually pierce the lower band/Donchian edge.
+    if (latest.low > bbLower && latest.low > dcLower20) return null;
+    // Stage 6: require close to recover BACK above the lower band (not just wicked through).
+    if (latest.close < bbLower) return null;
     const edgeDistance = Math.min(
       Math.abs(close - bbLower),
       Math.abs(close - dcLower20),
@@ -302,15 +313,31 @@ export class RangeReversalStrategy implements Strategy {
     );
     if (edgeDistance > edgeThreshold) return null;
     if (rsi14 > params.rsiLongMax) return null;
+    // Stage 6: RSI must already be turning up from the oversold zone
+    // (avoid catching a falling knife where momentum is still down).
+    if (
+      context.indicators.rsi14Prev !== undefined &&
+      rsi14 <= context.indicators.rsi14Prev
+    )
+      return null;
     if (!quality.bullishBody) return null;
     if (quality.closeLocationPct < params.rejectionCloseLocationMin)
       return null;
     if (quality.bodyPct < params.rejectionBodyMin) return null;
     if (quality.lowerWickPct < params.wickMin) return null;
-    if (context.indicators.cmf20 !== undefined && context.indicators.cmf20 < -0.2)
+    if (
+      context.indicators.cmf20 !== undefined &&
+      context.indicators.cmf20 < -0.2
+    )
       return null;
     if (context.indicators.mfi14 !== undefined && context.indicators.mfi14 < 18)
       return null;
+    // Stage 4: do not buy reversals against a 1h downtrend.
+    const tf1hLong = context.indicators.timeframes?.["1h"];
+    if (tf1hLong?.trend === "bearish") return null;
+    // Stage 6: also reject longs against a 4h downtrend.
+    const tf4hLong = context.indicators.timeframes?.["4h"];
+    if (tf4hLong?.trend === "bearish") return null;
 
     const candles1m = context.candlesByTimeframe["1m"] ?? [];
     const swingLow = localLow(candles1m, 20);
@@ -322,17 +349,26 @@ export class RangeReversalStrategy implements Strategy {
     const stopLoss = Math.min(atrStop, structureStop ?? atrStop);
     if (!Number.isFinite(stopLoss) || stopLoss >= close) return null;
 
-    const takeProfit = Math.min(bbMiddle, close + (dcUpper20 - dcLower20) * 0.5);
+    const takeProfit = Math.min(
+      bbMiddle,
+      close + (dcUpper20 - dcLower20) * 0.5,
+    );
     if (!Number.isFinite(takeProfit) || takeProfit <= close) return null;
     const riskPerShare = close - stopLoss;
     const rewardPerShare = takeProfit - close;
     const rewardRisk = rewardPerShare / riskPerShare;
     if (rewardRisk < minRewardRisk) return null;
+    const rewardPct = (rewardPerShare / close) * 100;
+    if (rewardPct < params.plannedRewardMinPct) return null;
 
     const edgeScore = clamp(1 - edgeDistance / edgeThreshold, 0, 1) * 0.1;
     const rsiScore = clamp((params.rsiLongMax - rsi14) / 18, 0, 1) * 0.08;
     const rejectionScore =
-      clamp(quality.closeLocationPct - params.rejectionCloseLocationMin, 0, 0.35) *
+      clamp(
+        quality.closeLocationPct - params.rejectionCloseLocationMin,
+        0,
+        0.35,
+      ) *
         0.18 +
       clamp(quality.lowerWickPct - params.wickMin, 0, 0.45) * 0.12;
     const confidenceScore = clamp(
@@ -408,6 +444,10 @@ export class RangeReversalStrategy implements Strategy {
       minRewardRisk,
     } = input;
     const latest = context.latestCandle;
+    // Stage 3: require the latest candle to actually pierce the upper band/Donchian edge.
+    if (latest.high < bbUpper && latest.high < dcUpper20) return null;
+    // Stage 6: require close to recover BACK below the upper band (not just wicked through).
+    if (latest.close > bbUpper) return null;
     const edgeDistance = Math.min(
       Math.abs(close - bbUpper),
       Math.abs(close - dcUpper20),
@@ -418,15 +458,30 @@ export class RangeReversalStrategy implements Strategy {
     );
     if (edgeDistance > edgeThreshold) return null;
     if (rsi14 < params.rsiShortMin) return null;
+    // Stage 6: RSI must already be turning down from the overbought zone.
+    if (
+      context.indicators.rsi14Prev !== undefined &&
+      rsi14 >= context.indicators.rsi14Prev
+    )
+      return null;
     if (!quality.bearishBody) return null;
     if (1 - quality.closeLocationPct < params.rejectionCloseLocationMin)
       return null;
     if (quality.bodyPct < params.rejectionBodyMin) return null;
     if (quality.upperWickPct < params.wickMin) return null;
-    if (context.indicators.cmf20 !== undefined && context.indicators.cmf20 > 0.2)
+    if (
+      context.indicators.cmf20 !== undefined &&
+      context.indicators.cmf20 > 0.2
+    )
       return null;
     if (context.indicators.mfi14 !== undefined && context.indicators.mfi14 > 82)
       return null;
+    // Stage 4: do not short reversals against a 1h uptrend.
+    const tf1hShort = context.indicators.timeframes?.["1h"];
+    if (tf1hShort?.trend === "bullish") return null;
+    // Stage 6: also reject shorts against a 4h uptrend.
+    const tf4hShort = context.indicators.timeframes?.["4h"];
+    if (tf4hShort?.trend === "bullish") return null;
 
     const candles1m = context.candlesByTimeframe["1m"] ?? [];
     const swingHigh = localHigh(candles1m, 20);
@@ -438,12 +493,17 @@ export class RangeReversalStrategy implements Strategy {
     const stopLoss = Math.max(atrStop, structureStop ?? atrStop);
     if (!Number.isFinite(stopLoss) || stopLoss <= close) return null;
 
-    const takeProfit = Math.max(bbMiddle, close - (dcUpper20 - dcLower20) * 0.5);
+    const takeProfit = Math.max(
+      bbMiddle,
+      close - (dcUpper20 - dcLower20) * 0.5,
+    );
     if (!Number.isFinite(takeProfit) || takeProfit >= close) return null;
     const riskPerShare = stopLoss - close;
     const rewardPerShare = close - takeProfit;
     const rewardRisk = rewardPerShare / riskPerShare;
     if (rewardRisk < minRewardRisk) return null;
+    const rewardPct = (rewardPerShare / close) * 100;
+    if (rewardPct < params.plannedRewardMinPct) return null;
 
     const edgeScore = clamp(1 - edgeDistance / edgeThreshold, 0, 1) * 0.1;
     const rsiScore = clamp((rsi14 - params.rsiShortMin) / 18, 0, 1) * 0.08;

@@ -27,6 +27,7 @@ interface MomentumBreakdownParams {
   sessionUtcEndHour: number;
   maxDistanceBelowEma20Pct: number;
   maxDistanceBelowEma50Pct: number;
+  adxMin: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -80,18 +81,21 @@ function consolidationDriftPct(
 function paramsForSecType(_secType: SecType): MomentumBreakdownParams {
   return {
     dailyReturn20MaxPct: -8,
-    h1Return4MaxPct: -1,
+    // Stage 7: stronger 4h hourly context required.
+    h1Return4MaxPct: -1.5,
     return20MinPct: -1.2,
     return60MinPct: -3,
     return60MaxPct: -0.2,
     consolidationDriftMinPct: -0.8,
     rsiMin: 28,
     bbWidthMaxPct: 0.08,
-    volumeMultiplier: 0.95,
+    // Stage 9: bumped 1.3 → 1.5 — only real sell-offs survive (cuts commission drag).
+    volumeMultiplier: 1.5,
     closeLocationMin: 0.6,
     bodyMin: 0.12,
     lowerWickMax: 0.45,
-    plannedRewardMinPct: 0.6,
+    // Stage 9: bumped 1.0 → 1.4% — must clear ~0.13% commish + leave room for drift.
+    plannedRewardMinPct: 1.4,
     stopAtrMult: 1.5,
     structureStopAtrMult: 2.5,
     takeProfitR: 3,
@@ -100,6 +104,8 @@ function paramsForSecType(_secType: SecType): MomentumBreakdownParams {
     sessionUtcEndHour: 19,
     maxDistanceBelowEma20Pct: 1.5,
     maxDistanceBelowEma50Pct: 5,
+    // Stage 9: short only when there's actual directional movement.
+    adxMin: 20,
   };
 }
 
@@ -146,7 +152,10 @@ export class MomentumBreakdownShortStrategy implements Strategy {
   readonly secTypes = ["STK", "IND"] as const;
   readonly supportedDirections = ["SHORT"] as const;
   readonly allowedDirectionalRegimes = ["bear_trend"] as const;
-  readonly allowedVolatilityRegimes = ["normal_volatility", "high_volatility"] as const;
+  readonly allowedVolatilityRegimes = [
+    "normal_volatility",
+    "high_volatility",
+  ] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
   private lastRejectionReason: string | undefined;
 
@@ -195,6 +204,10 @@ export class MomentumBreakdownShortStrategy implements Strategy {
       return this.reject("missing_required_indicators");
     }
 
+    // Stage 9: require trending market for shorts — ADX < 20 = chop, commission drag dominates.
+    if (indicators.adx14 !== undefined && indicators.adx14 < params.adxMin)
+      return this.reject("adx_too_low");
+
     const h1 = indicators.timeframes?.["1h"];
     const h4 = indicators.timeframes?.["4h"];
     const d1 = indicators.timeframes?.["1d"];
@@ -222,6 +235,9 @@ export class MomentumBreakdownShortStrategy implements Strategy {
     if (distanceBelowEma50Pct > params.maxDistanceBelowEma50Pct)
       return this.reject("too_far_below_ema50");
     if (rsi14 <= params.rsiMin) return this.reject("rsi_oversold");
+    // Stage 7: require RSI to still be falling (momentum continuation, not exhaustion).
+    if (indicators.rsi14Prev !== undefined && rsi14 >= indicators.rsi14Prev)
+      return this.reject("rsi_not_falling");
     if ((indicators.return20mPct ?? 0) < params.return20MinPct)
       return this.reject("overextended_20m");
     if ((indicators.return60mPct ?? 0) < params.return60MinPct)

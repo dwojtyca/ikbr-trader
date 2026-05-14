@@ -84,7 +84,8 @@ function paramsForSecType(secType: SecType): MomentumBreakoutParams {
     consolidationDriftMaxPct: 0.8,
     rsiMax: 72,
     bbWidthMaxPct: 0.08,
-    volumeMultiplier: 0.95,
+    // Stage 8: real breakouts come with real volume; 0.95x avg let in noise breakouts.
+    volumeMultiplier: 1.2,
     closeLocationMin: 0.6,
     bodyMin: 0.12,
     upperWickMax: 0.45,
@@ -208,6 +209,12 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     if (close <= ema50) return this.reject("close_below_ema50");
     if (ema20 <= ema50) return this.reject("ema20_not_above_ema50");
     if (rsi14 >= params.rsiMax) return this.reject("rsi_overheated");
+    // Stage 8: require RSI to still be rising (momentum continuation, not exhaustion).
+    if (
+      indicators.rsi14Prev !== undefined &&
+      rsi14 <= indicators.rsi14Prev
+    )
+      return this.reject("rsi_not_rising");
     if ((indicators.return20mPct ?? 0) > params.return20MaxPct)
       return this.reject("overextended_20m");
     if ((indicators.return60mPct ?? 0) > params.return60MaxPct)

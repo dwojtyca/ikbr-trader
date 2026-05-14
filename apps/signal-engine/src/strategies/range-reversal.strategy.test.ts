@@ -29,7 +29,9 @@ function rangeCandles(length = 25): Candle[] {
   );
 }
 
-function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext {
+function baseContext(
+  overrides: Partial<StrategyContext> = {},
+): StrategyContext {
   const candles = rangeCandles();
   const latestCandle = candle(25, 100, {
     open: 99.4,
@@ -47,10 +49,11 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
     latestCandle,
     indicators: {
       atr14: 0.8,
-      rsi14: 38,
+      rsi14: 28,
+      rsi14Prev: 24,
       bbUpper: 103.5,
-      bbMiddle: 102,
-      bbLower: 99.7,
+      bbMiddle: 103,
+      bbLower: 99.9,
       dcUpper20: 104,
       dcLower20: 99,
       bbWidthPct: 0.04,
@@ -110,9 +113,10 @@ test("RangeReversalStrategy emits SELL signal near upper range edge", () => {
       latestCandle,
       indicators: {
         ...baseContext().indicators,
-        rsi14: 62,
-        bbUpper: 103.3,
-        bbMiddle: 101.5,
+        rsi14: 70,
+        rsi14Prev: 75,
+        bbUpper: 103.15,
+        bbMiddle: 100,
         bbLower: 99,
         cmf20: -0.02,
         mfi14: 68,
@@ -138,7 +142,9 @@ test("RangeReversalStrategy accepts high volatility range", () => {
       volatilityRegime: "high_volatility",
       indicators: {
         ...baseContext().indicators,
+        atr14: 0.6,
         volatilityRegime: "high_volatility",
+        bbMiddle: 103.5,
       },
     }),
   );
@@ -154,7 +160,10 @@ test("RangeReversalStrategy rejects non-range directional regime", () => {
   );
 
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), "directional_regime_not_range");
+  assert.equal(
+    strategy.getLastRejectionReason(),
+    "directional_regime_not_range",
+  );
 });
 
 test("RangeReversalStrategy rejects low volatility", () => {
