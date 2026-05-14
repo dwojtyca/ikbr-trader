@@ -1,28 +1,28 @@
-export type Side = 'BUY' | 'SELL' | 'HOLD';
-export type RiskCheckStatus = 'PASS' | 'REJECT';
+export type Side = "BUY" | "SELL" | "HOLD";
+export type RiskCheckStatus = "PASS" | "REJECT";
 export type ProposedOrderStatus =
-  | 'PROPOSED'
-  | 'REJECTED'
-  | 'SUBMITTED'
-  | 'FILLED'
-  | 'CANCELLED'
-  | 'SUPERSEDED'
-  | 'EXPIRED';
+  | "PROPOSED"
+  | "REJECTED"
+  | "SUBMITTED"
+  | "FILLED"
+  | "CANCELLED"
+  | "SUPERSEDED"
+  | "EXPIRED";
 export type SecType = string;
 export type DirectionalRegime =
   // Upside directional bias confirmed by the weighted timeframe trend model.
-  | 'bull_trend'
+  | "bull_trend"
   // Downside directional bias confirmed by the weighted timeframe trend model.
-  | 'bear_trend'
+  | "bear_trend"
   // No durable directional bias.
-  | 'range';
+  | "range";
 export type VolatilityRegime =
   // Volatility is compressed relative to fixed asset-class thresholds.
-  | 'low_volatility'
+  | "low_volatility"
   // Volatility is neither compressed nor expanded.
-  | 'normal_volatility'
+  | "normal_volatility"
   // Volatility is expanded relative to fixed asset-class thresholds.
-  | 'high_volatility';
+  | "high_volatility";
 export interface TimeframeTrendVotes {
   bullish: number;
   bearish: number;
@@ -37,10 +37,10 @@ export interface RegimeAnalysis {
   timeframeTrendScores: Partial<Record<CandleTimeframe, number>>;
   timeframeTrendVotes: TimeframeTrendVotes;
 }
-export type PositionEffect = 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
-export type DecisionSource = 'signal' | 'llm' | 'user' | 'user_override';
-export type AiDecision = 'EXECUTE' | 'REJECT';
-export type CandleTimeframe = '1m' | '5m' | '1h' | '4h' | '12h' | '1d' | '1w';
+export type PositionEffect = "OPEN_OR_ADD" | "CLOSE_OR_REDUCE";
+export type DecisionSource = "signal" | "llm" | "user" | "user_override";
+export type AiDecision = "EXECUTE" | "REJECT";
+export type CandleTimeframe = "1m" | "5m" | "1h" | "4h" | "12h" | "1d" | "1w";
 
 export interface Candle {
   conid: string;
@@ -77,7 +77,7 @@ export interface InstrumentContract {
   displayName?: string;
   contractJson?: Record<string, unknown>;
   detailsJson?: Record<string, unknown>;
-  source: 'ibkr' | 'override_fallback';
+  source: "ibkr" | "override_fallback";
   resolvedAt?: Date;
 }
 
@@ -86,7 +86,7 @@ export interface SignalTicket {
   conid?: string;
   side: Side;
   positionEffect?: PositionEffect;
-  orderType: 'MKT' | 'LMT' | 'STP';
+  orderType: "MKT" | "LMT" | "STP";
   quantity: number;
   entry?: number;
   stop?: number;
@@ -127,7 +127,7 @@ export interface IndicatorSnapshot {
   return20mPct?: number;
   return60mPct?: number;
   trendFilterValue?: number;
-  trendFilterSource?: 'EMA50_1h' | 'EMA200_1m';
+  trendFilterSource?: "EMA50_1h" | "EMA200_1m";
   secType?: SecType;
   directionalRegime?: DirectionalRegime;
   volatilityRegime?: VolatilityRegime;
@@ -137,7 +137,9 @@ export interface IndicatorSnapshot {
   timeframeTrendScores?: Partial<Record<CandleTimeframe, number>>;
   timeframeTrendVotes?: TimeframeTrendVotes;
   strategyProfile?: string;
-  timeframes?: Partial<Record<Exclude<CandleTimeframe, '1m'>, TimeframeIndicatorSnapshot>>;
+  timeframes?: Partial<
+    Record<Exclude<CandleTimeframe, "1m">, TimeframeIndicatorSnapshot>
+  >;
 }
 
 export interface TimeframeIndicatorSnapshot {
@@ -156,7 +158,7 @@ export interface TimeframeIndicatorSnapshot {
   mfi14?: number;
   bbWidthPct?: number;
   volume?: number;
-  trend?: 'bullish' | 'bearish' | 'neutral';
+  trend?: "bullish" | "bearish" | "neutral";
   priceVsEma50Bps?: number;
   ema50Slope10Pct?: number;
   return3Pct?: number;
@@ -171,7 +173,21 @@ export interface TimeframeIndicatorSnapshot {
 
 export interface RiskLimits {
   accountEquity: number;
+  /**
+   * Hard ceiling on risk per single trade as a percentage of equity.
+   * The engine guarantees that no single trade risks more than this,
+   * regardless of per-strategy quantityFactor.
+   */
   maxRiskPerTradePct: number;
+  /**
+   * Optional baseline target risk per trade as a percentage of equity.
+   * If unset, defaults to `maxRiskPerTradePct` (preserves legacy behavior
+   * where strategies sized to the cap).
+   * Per-strategy `quantityFactor` scales THIS target, then the result is
+   * clamped to `maxRiskPerTradePct`. This prevents quantityFactor > 1 from
+   * silently breaching the global per-trade risk cap.
+   */
+  targetRiskPerTradePct?: number;
   maxExposurePct: number;
   maxNotionalPerTradePct?: number;
   maxOpenPositions: number;
@@ -200,67 +216,83 @@ export interface ProposedOrder extends SignalTicket {
   supersededByOrderId?: number;
   brokerWarning?: string;
   cancelReasonCode?:
-    | 'submitted_timeout'
-    | 'locate_held'
-    | 'broker_not_ready'
-    | 'broker_rejected'
-    | 'manual_cancel'
-    | 'unknown';
+    | "submitted_timeout"
+    | "locate_held"
+    | "broker_not_ready"
+    | "broker_rejected"
+    | "manual_cancel"
+    | "unknown";
   cancelReasonDetail?: string;
 }
 
 function normalizeDiagnosticText(value?: string | null): string {
-  return String(value ?? '').trim();
+  return String(value ?? "").trim();
 }
 
 function isGenericBrokerStatusMessage(value: string): boolean {
   return /^Broker order status update: (PRESUBMITTED|SUBMITTED|PENDINGSUBMIT|PENDINGCANCEL|CANCELLED|APICANCELLED|INACTIVE|FILLED)\b/i.test(
-    value
+    value,
   );
 }
 
-export function deriveOrderDiagnostics(order: Pick<
+export function deriveOrderDiagnostics(
+  order: Pick<
+    ProposedOrder,
+    "status" | "executionMessage" | "lastError" | "sourceError" | "aiReason"
+  >,
+): Pick<
   ProposedOrder,
-  'status' | 'executionMessage' | 'lastError' | 'sourceError' | 'aiReason'
->): Pick<ProposedOrder, 'brokerWarning' | 'cancelReasonCode' | 'cancelReasonDetail'> {
+  "brokerWarning" | "cancelReasonCode" | "cancelReasonDetail"
+> {
   const candidates = [
     normalizeDiagnosticText(order.lastError),
     normalizeDiagnosticText(order.executionMessage),
     normalizeDiagnosticText(order.sourceError),
-    normalizeDiagnosticText(order.aiReason)
+    normalizeDiagnosticText(order.aiReason),
   ].filter(Boolean);
 
-  const warningSource = candidates.find((value) => /will not be placed at the exchange until/i.test(value));
+  const warningSource = candidates.find((value) =>
+    /will not be placed at the exchange until/i.test(value),
+  );
   const brokerWarning = warningSource
-    ? warningSource.match(/Order Message:\s*(.+)$/i)?.[1]?.trim() ?? warningSource
+    ? (warningSource.match(/Order Message:\s*(.+)$/i)?.[1]?.trim() ??
+      warningSource)
     : undefined;
 
-  if (order.status !== 'CANCELLED') {
+  if (order.status !== "CANCELLED") {
     return { brokerWarning };
   }
 
-  const specific = candidates.find((value) => !isGenericBrokerStatusMessage(value)) ?? candidates[0];
+  const specific =
+    candidates.find((value) => !isGenericBrokerStatusMessage(value)) ??
+    candidates[0];
   const detail = specific || undefined;
-  const text = (detail ?? '').toLowerCase();
+  const text = (detail ?? "").toLowerCase();
 
-  let cancelReasonCode: ProposedOrder['cancelReasonCode'] = 'unknown';
-  if (text.includes('submitted-timeout')) {
-    cancelReasonCode = 'submitted_timeout';
-  } else if (text.includes('locate-held') || text.includes('securities are located')) {
-    cancelReasonCode = 'locate_held';
-  } else if (text.includes('will not be placed at the exchange until')) {
-    cancelReasonCode = 'broker_not_ready';
-  } else if (text.includes('cancel requested orderid=')) {
-    cancelReasonCode = 'manual_cancel';
-  } else if (text.includes('broker rejected order') || text.includes('was not accepted by broker')) {
-    cancelReasonCode = 'broker_rejected';
+  let cancelReasonCode: ProposedOrder["cancelReasonCode"] = "unknown";
+  if (text.includes("submitted-timeout")) {
+    cancelReasonCode = "submitted_timeout";
+  } else if (
+    text.includes("locate-held") ||
+    text.includes("securities are located")
+  ) {
+    cancelReasonCode = "locate_held";
+  } else if (text.includes("will not be placed at the exchange until")) {
+    cancelReasonCode = "broker_not_ready";
+  } else if (text.includes("cancel requested orderid=")) {
+    cancelReasonCode = "manual_cancel";
+  } else if (
+    text.includes("broker rejected order") ||
+    text.includes("was not accepted by broker")
+  ) {
+    cancelReasonCode = "broker_rejected";
   }
 
   return {
     brokerWarning,
     cancelReasonCode,
-    cancelReasonDetail: detail
+    cancelReasonDetail: detail,
   };
 }
 
-export * from './strategy-profiles.js';
+export * from "./strategy-profiles.js";

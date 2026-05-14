@@ -40,6 +40,7 @@ export interface SimulatorOptions {
   riskLimits: {
     accountEquity: number;
     maxRiskPerTradePct: number;
+    targetRiskPerTradePct?: number;
     maxExposurePct: number;
     maxNotionalPerTradePct: number;
     maxOpenPositions: number;

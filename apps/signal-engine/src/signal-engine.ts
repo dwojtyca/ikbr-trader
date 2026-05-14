@@ -218,11 +218,7 @@ export class SignalEngine {
       );
     }
 
-    const regimeAnalysis = this.detectRegime(
-      secType,
-      latest.close,
-      indicators,
-    );
+    const regimeAnalysis = this.detectRegime(secType, latest.close, indicators);
     indicators.directionalRegime = regimeAnalysis.directionalRegime;
     indicators.volatilityRegime = regimeAnalysis.volatilityRegime;
     indicators.regimeScore = regimeAnalysis.score;
@@ -525,16 +521,26 @@ export class SignalEngine {
       riskSnapshot.accountEquity > 0
         ? riskSnapshot.accountEquity
         : this.options.riskLimits.accountEquity;
-    const maxRiskCash =
-      (effectiveAccountEquity * this.options.riskLimits.maxRiskPerTradePct) /
-      100;
     const strategyProfile = findStrategyProfile(signal.strategyId);
     const quantityFactor =
       strategyProfile?.quantityFactor && strategyProfile.quantityFactor > 0
         ? strategyProfile.quantityFactor
         : 1;
+    // Risk-budget semantics:
+    //   targetRiskPerTradePct is the per-trade baseline (defaults to maxRiskPerTradePct).
+    //   quantityFactor scales the target up/down per strategy.
+    //   The result is clamped to maxRiskPerTradePct so a misconfigured factor > 1
+    //   can never breach the global per-trade risk cap.
+    const targetRiskPct =
+      this.options.riskLimits.targetRiskPerTradePct ??
+      this.options.riskLimits.maxRiskPerTradePct;
+    const scaledRiskPct = Math.min(
+      targetRiskPct * quantityFactor,
+      this.options.riskLimits.maxRiskPerTradePct,
+    );
+    const effectiveRiskCash = (effectiveAccountEquity * scaledRiskPct) / 100;
     const riskBasedQuantity = this.roundDownToQuantityStep(
-      (maxRiskCash * quantityFactor) / riskPerUnitCash,
+      effectiveRiskCash / riskPerUnitCash,
       quantityStep,
     );
     if (riskBasedQuantity < quantityStep) {
@@ -608,7 +614,11 @@ export class SignalEngine {
         quantityStep,
       );
       quantity = this.roundDownToQuantityStep(
-        Math.min(riskBasedQuantity, quantityCapByExposure, quantityCapByNotional),
+        Math.min(
+          riskBasedQuantity,
+          quantityCapByExposure,
+          quantityCapByNotional,
+        ),
         quantityStep,
       );
 
@@ -735,11 +745,7 @@ export class SignalEngine {
     price: number,
     indicators: IndicatorSnapshot,
   ): RegimeAnalysis {
-    return this.marketRegimeDetector.detectDetailed(
-      secType,
-      price,
-      indicators,
-    );
+    return this.marketRegimeDetector.detectDetailed(secType, price, indicators);
   }
 
   private buildTimeframeSnapshot(

@@ -42,6 +42,12 @@ const schema = z.object({
   SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
   SIGNAL_ACCOUNT_EQUITY: z.coerce.number().default(100000),
   SIGNAL_MAX_RISK_PER_TRADE_PCT: z.coerce.number().default(0.5),
+  SIGNAL_TARGET_RISK_PER_TRADE_PCT: z
+    .preprocess(
+      (value) => (value === undefined || value === "" ? undefined : value),
+      z.coerce.number().positive().optional(),
+    )
+    .optional(),
   SIGNAL_MAX_EXPOSURE_PCT: z.coerce.number().default(25),
   SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
   SIGNAL_MAX_OPEN_POSITIONS: z.coerce.number().default(5),

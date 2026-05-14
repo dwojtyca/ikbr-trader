@@ -33,32 +33,25 @@ const PROFILES: StrategyProfile[] = [
     entryScore: 0.58,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
-    // Stage 8: bumped from 1.2 — strategy carries the portfolio (PF 1.86, +1617$ net).
     quantityFactor: 1.4,
     spreadFactor: 1,
     requireVolume: true,
-    // Stage 9 (Plan A): drop chronically losing symbols on this strategy.
-    // ALE: 14 trades, PF 0.52, -46$. PZU: 21 trades, PF 0.93, -8$ (run #92).
-    excludedSymbols: ["ALE", "PZU"],
+    // excludedSymbols: ["ALE", "PZU"],
   },
   {
     id: "momentum_breakdown_short_v1",
     secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
     directionalRegimes: ["bear_trend"],
-    // Stage 7: drop normal_volatility — historically only 13% of trades and PF 1.16
-    // (vs 1.47 for high_vol); commission drag erases the edge.
     volatilityRegimes: ["high_volatility"],
     style: "breakout",
     enabledInBot: true,
     entryScore: 0.58,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
-    // Stage 9: now that quantityFactor is actually consumed, scale up cautiously.
     quantityFactor: 1.2,
     spreadFactor: 1,
     requireVolume: true,
-    // Stage 9: MSFT short consistently negative (run #93: 9 trades, PF 0.77, -29$).
-    excludedSymbols: ["MSFT"],
+    // excludedSymbols: ["MSFT"],
   },
   {
     id: "range_reversal_v1",

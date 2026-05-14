@@ -141,7 +141,10 @@ export class MomentumBreakoutLongStrategy implements Strategy {
   readonly secTypes = ["STK", "IND"] as const;
   readonly supportedDirections = ["LONG"] as const;
   readonly allowedDirectionalRegimes = ["bull_trend"] as const;
-  readonly allowedVolatilityRegimes = ["normal_volatility", "high_volatility"] as const;
+  readonly allowedVolatilityRegimes = [
+    "normal_volatility",
+    "high_volatility",
+  ] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
   private lastRejectionReason: string | undefined;
 
@@ -210,10 +213,7 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     if (ema20 <= ema50) return this.reject("ema20_not_above_ema50");
     if (rsi14 >= params.rsiMax) return this.reject("rsi_overheated");
     // Stage 8: require RSI to still be rising (momentum continuation, not exhaustion).
-    if (
-      indicators.rsi14Prev !== undefined &&
-      rsi14 <= indicators.rsi14Prev
-    )
+    if (indicators.rsi14Prev !== undefined && rsi14 <= indicators.rsi14Prev)
       return this.reject("rsi_not_rising");
     if ((indicators.return20mPct ?? 0) > params.return20MaxPct)
       return this.reject("overextended_20m");
