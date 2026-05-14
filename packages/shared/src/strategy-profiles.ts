@@ -70,13 +70,15 @@ const PROFILES: StrategyProfile[] = [
     requireVolume: true,
   },
   {
-    id: "failed_bounce_short_v1",
-    secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
-    directionalRegimes: ["bear_trend"],
+    id: "gap_fade_short_v1",
+    secType: ["STK", "IND", "ETF"],
+    // Gap fades work in any directional regime, but most signal in bull/range
+    // (gap-ups are common; bear-trend gap-ups are rare exhaustion plays).
+    directionalRegimes: ["bull_trend", "range", "bear_trend"],
     volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "reversion",
-    enabledInBot: false,
-    entryScore: 0.58,
+    enabledInBot: true,
+    entryScore: 0.6,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
     quantityFactor: 1,

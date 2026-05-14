@@ -137,9 +137,38 @@ export interface IndicatorSnapshot {
   timeframeTrendScores?: Partial<Record<CandleTimeframe, number>>;
   timeframeTrendVotes?: TimeframeTrendVotes;
   strategyProfile?: string;
+  /**
+   * Intraday session metadata derived from 1m candles. Populated by the
+   * SignalEngine before strategies run. Optional because some symbols may
+   * not have a clear session boundary (e.g. 24/7 instruments).
+   */
+  intraday?: IntradaySessionSnapshot;
   timeframes?: Partial<
     Record<Exclude<CandleTimeframe, "1m">, TimeframeIndicatorSnapshot>
   >;
+}
+
+export interface IntradaySessionSnapshot {
+  /** Close of the previous trading session (last candle before today's session gap). */
+  prevSessionClose?: number;
+  /** Open of the first candle of the current session. */
+  sessionOpen?: number;
+  /** Timestamp of the first candle of the current session. */
+  sessionOpenTs?: Date | string;
+  /** Number of minutes elapsed since session open at the latest candle. */
+  minutesSinceSessionOpen?: number;
+  /** Overnight gap pct: (sessionOpen - prevSessionClose) / prevSessionClose * 100. */
+  gapPct?: number;
+  /** High of the first 30 minutes of the session (opening range). */
+  openingRange30High?: number;
+  /** Low of the first 30 minutes of the session (opening range). */
+  openingRange30Low?: number;
+  /** Session VWAP using typical price ((H+L+C)/3) weighted by volume. */
+  vwap?: number;
+  /** Distance of latest close from session VWAP, in basis points (signed). */
+  distanceFromVwapBps?: number;
+  /** Cumulative volume since session open. */
+  sessionVolume?: number;
 }
 
 export interface TimeframeIndicatorSnapshot {

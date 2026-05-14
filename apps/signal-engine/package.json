@@ -30,10 +30,10 @@
       "import": "./dist/strategies/range-reversal.strategy.js",
       "default": "./dist/strategies/range-reversal.strategy.js"
     },
-    "./strategies/failed-bounce-short.strategy": {
-      "types": "./dist/strategies/failed-bounce-short.strategy.d.ts",
-      "import": "./dist/strategies/failed-bounce-short.strategy.js",
-      "default": "./dist/strategies/failed-bounce-short.strategy.js"
+    "./strategies/gap-fade-short.strategy": {
+      "types": "./dist/strategies/gap-fade-short.strategy.d.ts",
+      "import": "./dist/strategies/gap-fade-short.strategy.js",
+      "default": "./dist/strategies/gap-fade-short.strategy.js"
     },
     "./strategies/strategy-registry": {
       "types": "./dist/strategies/strategy-registry.d.ts",

@@ -205,6 +205,7 @@ export class SignalEngine {
         "1d": this.buildTimeframeSnapshot(candles1d),
         "1w": this.buildTimeframeSnapshot(candles1w),
       },
+      intraday: this.buildIntradaySnapshot(candles),
     };
 
     if (!this.hasRequiredIndicators(indicators)) {
@@ -821,6 +822,91 @@ export class SignalEngine {
     const previous = closes[closes.length - 1 - lookback];
     if (!(previous > 0)) return undefined;
     return ((current - previous) / previous) * 100;
+  }
+
+  /**
+   * Detects current session boundaries using gaps in 1m candle timestamps.
+   * Returns intraday metadata (gap pct, session open, opening range, VWAP).
+   *
+   * Heuristic: scan from the latest candle backwards. The most recent gap
+   * larger than `sessionGapMinutes` (default 60) marks the start of the
+   * current session. The candle just before the gap is the previous session
+   * close.
+   *
+   * Returns `undefined` for fields that cannot be computed (e.g. when there
+   * are not enough candles, or no overnight gap exists in the buffer).
+   */
+  private buildIntradaySnapshot(
+    candles1m: Candle[],
+    sessionGapMinutes = 60,
+  ): IndicatorSnapshot["intraday"] {
+    if (candles1m.length < 2) return undefined;
+    const latest = candles1m[candles1m.length - 1];
+    const latestTs = new Date(latest.ts).getTime();
+
+    // Walk backwards to find the most recent inter-candle gap > threshold.
+    let sessionStartIndex: number | undefined;
+    let prevSessionCloseIndex: number | undefined;
+    const gapMs = sessionGapMinutes * 60_000;
+    for (let i = candles1m.length - 1; i > 0; i -= 1) {
+      const curTs = new Date(candles1m[i].ts).getTime();
+      const prevTs = new Date(candles1m[i - 1].ts).getTime();
+      if (curTs - prevTs >= gapMs) {
+        sessionStartIndex = i;
+        prevSessionCloseIndex = i - 1;
+        break;
+      }
+    }
+    if (sessionStartIndex === undefined) return undefined;
+
+    const sessionOpenCandle = candles1m[sessionStartIndex];
+    const prevCloseCandle = candles1m[prevSessionCloseIndex!];
+    const sessionOpen = sessionOpenCandle.open;
+    const prevSessionClose = prevCloseCandle.close;
+    const sessionOpenTs = sessionOpenCandle.ts;
+    const minutesSinceSessionOpen = Math.max(
+      0,
+      Math.floor((latestTs - new Date(sessionOpenTs).getTime()) / 60_000),
+    );
+    const gapPct =
+      prevSessionClose > 0
+        ? ((sessionOpen - prevSessionClose) / prevSessionClose) * 100
+        : undefined;
+
+    const sessionCandles = candles1m.slice(sessionStartIndex);
+    const orWindow = sessionCandles.slice(0, 30);
+    const openingRange30High =
+      orWindow.length > 0
+        ? Math.max(...orWindow.map((c) => c.high))
+        : undefined;
+    const openingRange30Low =
+      orWindow.length > 0 ? Math.min(...orWindow.map((c) => c.low)) : undefined;
+
+    let cumPv = 0;
+    let cumVol = 0;
+    for (const c of sessionCandles) {
+      const typical = (c.high + c.low + c.close) / 3;
+      cumPv += typical * c.volume;
+      cumVol += c.volume;
+    }
+    const vwap = cumVol > 0 ? cumPv / cumVol : undefined;
+    const distanceFromVwapBps =
+      vwap !== undefined && vwap > 0
+        ? ((latest.close - vwap) / vwap) * 10000
+        : undefined;
+
+    return {
+      prevSessionClose,
+      sessionOpen,
+      sessionOpenTs,
+      minutesSinceSessionOpen,
+      gapPct,
+      openingRange30High,
+      openingRange30Low,
+      vwap,
+      distanceFromVwapBps,
+      sessionVolume: cumVol > 0 ? cumVol : undefined,
+    };
   }
 
   private selectEntryPrice(

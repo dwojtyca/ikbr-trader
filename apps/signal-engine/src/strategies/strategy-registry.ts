@@ -1,5 +1,5 @@
 import { listStrategyProfiles } from "@ikbr/shared";
-import { FailedBounceShortStrategy } from "./failed-bounce-short.strategy.js";
+import { GapFadeShortStrategy } from "./gap-fade-short.strategy.js";
 import { MomentumBreakdownShortStrategy } from "./momentum-breakdown-short.strategy.js";
 import { MomentumBreakoutLongStrategy } from "./momentum-breakout-long.strategy.js";
 import { RangeReversalStrategy } from "./range-reversal.strategy.js";
@@ -9,7 +9,7 @@ const STRATEGY_FACTORIES = {
   momentum_breakout_long_v1: () => new MomentumBreakoutLongStrategy(),
   momentum_breakdown_short_v1: () => new MomentumBreakdownShortStrategy(),
   range_reversal_v1: () => new RangeReversalStrategy(),
-  failed_bounce_short_v1: () => new FailedBounceShortStrategy(),
+  gap_fade_short_v1: () => new GapFadeShortStrategy(),
 } satisfies Record<string, () => Strategy>;
 
 export type ImplementedStrategyId = keyof typeof STRATEGY_FACTORIES;
