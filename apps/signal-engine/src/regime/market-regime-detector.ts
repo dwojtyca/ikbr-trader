@@ -39,6 +39,13 @@ interface TimeframeScore {
   reasons: string[];
 }
 
+interface VolatilitySample {
+  timeframe: CandleTimeframe;
+  weight: number;
+  atrPct?: number;
+  bbWidthPct?: number;
+}
+
 const TIMEFRAME_WEIGHTS: Record<CandleTimeframe, number> = {
   '1m': 0.45,
   '5m': 0.75,
@@ -47,6 +54,13 @@ const TIMEFRAME_WEIGHTS: Record<CandleTimeframe, number> = {
   '12h': 1.25,
   '1d': 2.25,
   '1w': 1.25
+};
+
+const VOLATILITY_TIMEFRAME_WEIGHTS: Partial<Record<CandleTimeframe, number>> = {
+  '1m': 0.25,
+  '1h': 0.25,
+  '4h': 0.3,
+  '1d': 0.2
 };
 
 const THRESHOLDS: Record<string, RegimeThresholds> = {
@@ -211,21 +225,126 @@ function volatilityRegime(
   reasons: string[]
 ): VolatilityRegime {
   const thresholds = thresholdsForSecType(secType);
-  const atrPct = safeDiv(indicators.atr14 ?? 0, price, 0);
-  const bbWidthPct = indicators.bbWidthPct ?? 0;
+  const samples = volatilitySamples(price, indicators);
 
-  if (atrPct >= thresholds.atrHigh || bbWidthPct >= thresholds.bbHigh) {
-    reasons.push(`volatility high: atrPct=${round(atrPct)}, bbWidthPct=${round(bbWidthPct)}`);
+  if (samples.length === 0) {
+    reasons.push('volatility normal: no volatility samples');
+    return 'normal_volatility';
+  }
+
+  const totalWeight = samples.reduce((sum, sample) => sum + sample.weight, 0);
+  const weightedAtr = weightedAverage(samples, (sample) => sample.atrPct);
+  const weightedBb = weightedAverage(samples, (sample) => sample.bbWidthPct);
+  const highWeight = samples
+    .filter((sample) => isHighVolatilitySample(sample, thresholds))
+    .reduce((sum, sample) => sum + sample.weight, 0);
+  const lowWeight = samples
+    .filter((sample) => isLowVolatilitySample(sample, thresholds))
+    .reduce((sum, sample) => sum + sample.weight, 0);
+  const highShare = totalWeight > 0 ? highWeight / totalWeight : 0;
+  const lowShare = totalWeight > 0 ? lowWeight / totalWeight : 0;
+  const sampleSummary = samples
+    .map((sample) => {
+      const atr = sample.atrPct === undefined ? 'n/a' : round(sample.atrPct);
+      const bb = sample.bbWidthPct === undefined ? 'n/a' : round(sample.bbWidthPct);
+      return `${sample.timeframe}:atr=${atr},bb=${bb}`;
+    })
+    .join('|');
+
+  if (
+    highShare >= 0.4 ||
+    (weightedAtr ?? 0) >= thresholds.atrHigh * 0.85 ||
+    (weightedBb ?? 0) >= thresholds.bbHigh * 0.85
+  ) {
+    reasons.push(
+      `volatility high: atrPct=${round(weightedAtr ?? 0)}, bbWidthPct=${round(weightedBb ?? 0)}, highShare=${round(highShare)}, samples=${sampleSummary}`
+    );
     return 'high_volatility';
   }
 
-  if (atrPct <= thresholds.atrLow && bbWidthPct > 0 && bbWidthPct <= thresholds.bbLow) {
-    reasons.push(`volatility low: atrPct=${round(atrPct)}, bbWidthPct=${round(bbWidthPct)}`);
+  if (
+    lowShare >= 0.55 &&
+    (weightedAtr ?? Number.POSITIVE_INFINITY) <= thresholds.atrLow * 1.25 &&
+    (weightedBb ?? Number.POSITIVE_INFINITY) <= thresholds.bbLow * 1.25
+  ) {
+    reasons.push(
+      `volatility low: atrPct=${round(weightedAtr ?? 0)}, bbWidthPct=${round(weightedBb ?? 0)}, lowShare=${round(lowShare)}, samples=${sampleSummary}`
+    );
     return 'low_volatility';
   }
 
-  reasons.push(`volatility normal: atrPct=${round(atrPct)}, bbWidthPct=${round(bbWidthPct)}`);
+  reasons.push(
+    `volatility normal: atrPct=${round(weightedAtr ?? 0)}, bbWidthPct=${round(weightedBb ?? 0)}, highShare=${round(highShare)}, lowShare=${round(lowShare)}, samples=${sampleSummary}`
+  );
   return 'normal_volatility';
+}
+
+function volatilitySamples(price: number, indicators: IndicatorSnapshot): VolatilitySample[] {
+  const current = currentTimeframeSnapshot(price, indicators);
+  const snapshots: Array<[CandleTimeframe, TimeframeIndicatorSnapshot | undefined]> = [
+    ['1m', current],
+    ['1h', indicators.timeframes?.['1h']],
+    ['4h', indicators.timeframes?.['4h']],
+    ['1d', indicators.timeframes?.['1d']]
+  ];
+
+  return snapshots.flatMap(([timeframe, snapshot]) => {
+    if (!snapshot) return [];
+    const weight = VOLATILITY_TIMEFRAME_WEIGHTS[timeframe];
+    if (weight === undefined) return [];
+    const close = snapshot.close ?? (timeframe === '1m' ? price : undefined);
+    const atrPct =
+      close !== undefined && snapshot.atr14 !== undefined
+        ? safeDiv(snapshot.atr14, close, Number.NaN)
+        : Number.NaN;
+    const bbWidthPct = snapshot.bbWidthPct;
+    const hasAtr = Number.isFinite(atrPct);
+    const hasBb = bbWidthPct !== undefined && Number.isFinite(bbWidthPct);
+    if (!hasAtr && !hasBb) return [];
+    return [{
+      timeframe,
+      weight,
+      atrPct: hasAtr ? atrPct : undefined,
+      bbWidthPct: hasBb ? bbWidthPct : undefined
+    }];
+  });
+}
+
+function weightedAverage(
+  samples: VolatilitySample[],
+  selector: (sample: VolatilitySample) => number | undefined
+): number | undefined {
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (const sample of samples) {
+    const value = selector(sample);
+    if (value === undefined || !Number.isFinite(value)) continue;
+    weightedSum += value * sample.weight;
+    weightSum += sample.weight;
+  }
+  return weightSum > 0 ? weightedSum / weightSum : undefined;
+}
+
+function isHighVolatilitySample(
+  sample: VolatilitySample,
+  thresholds: RegimeThresholds
+): boolean {
+  return (
+    (sample.atrPct !== undefined && sample.atrPct >= thresholds.atrHigh) ||
+    (sample.bbWidthPct !== undefined && sample.bbWidthPct >= thresholds.bbHigh)
+  );
+}
+
+function isLowVolatilitySample(
+  sample: VolatilitySample,
+  thresholds: RegimeThresholds
+): boolean {
+  const atrLow = sample.atrPct !== undefined && sample.atrPct <= thresholds.atrLow;
+  const bbLow =
+    sample.bbWidthPct !== undefined &&
+    sample.bbWidthPct > 0 &&
+    sample.bbWidthPct <= thresholds.bbLow;
+  return atrLow && bbLow;
 }
 
 export class MarketRegimeDetector {

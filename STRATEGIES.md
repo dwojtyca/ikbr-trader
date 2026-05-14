@@ -1,522 +1,207 @@
 # Strategy Documentation
 
-## Active Strategy Set
+This document describes the strategies currently implemented in `apps/signal-engine/src/strategies`.
 
-The default bot/backtest strategy set is driven by `packages/shared/src/strategy-profiles.ts`.
+The default bot/backtest strategy set is controlled by `packages/shared/src/strategy-profiles.ts`.
 
-Currently active:
+## Current Strategy Set
+
+Active by default:
 
 - `momentum_breakout_long_v1`
+- `momentum_breakdown_short_v1`
+- `range_reversal_v1`
+
+Implemented but disabled in the default bot/backtest portfolio:
+
 - `failed_bounce_short_v1`
 
-Implemented but not active by default:
+`failed_bounce_short_v1` remains available for strategy lab / isolated strategy testing through `listAllStrategyProfiles()`.
 
-- `momentum_breakdown_short_v1`
+## Market Context Model
+
+Strategies no longer use a single composite `regime`.
+
+The signal engine classifies market context with two independent dimensions:
+
+```text
+directionalRegime:
+  bull_trend
+  bear_trend
+  range
+
+volatilityRegime:
+  low_volatility
+  normal_volatility
+  high_volatility
+```
+
+`directionalRegime` is multi-timeframe. It scores:
+
+- `1m`
+- `5m`
+- `1h`
+- `4h`
+- `12h`
+- `1d`
+- `1w`
+
+It uses:
+
+- trend label from EMA20/EMA50 and close vs EMA50
+- close vs EMA50
+- EMA20 vs EMA50
+- close vs EMA200
+- MACD histogram sign
+- return20Pct
+
+Higher timeframes have larger weights. `1h`, `4h`, `1d`, and `1w` are treated as major confirmation timeframes.
+
+`volatilityRegime` is multi-timeframe and uses weighted samples from:
+
+```text
+1m weight 0.25
+1h weight 0.25
+4h weight 0.30
+1d weight 0.20
+```
+
+It uses:
+
+- ATR14 divided by close
+- Bollinger Band width percentage
+
+This prevents one isolated `1m` spike from immediately classifying the whole symbol as `high_volatility`.
+
+## Indicators
+
+The signal engine calculates indicators in `apps/signal-engine/src/indicators.ts`.
+
+The project uses `indicatorts` for:
+
+- EMA
+- SMA
+- RSI
+- ATR
+- MACD
+- Bollinger Bands
+- Donchian Channel
+- CMF
+- MFI
+- OBV
+
+ADX is implemented manually in the signal engine.
+
+The main 1m indicator snapshot includes:
+
+- EMA20, EMA50, EMA200, SMA200
+- RSI14 and previous RSI14
+- ATR14
+- ADX14
+- MACD line, signal, histogram, previous histograms
+- CMF20 and previous CMF20
+- MFI14 and previous MFI14
+- Bollinger Bands and BB width
+- Donchian upper/lower 20
+- OBV slope
+- 5m/20m/60m returns
+- multi-timeframe snapshots for `5m`, `1h`, `4h`, `12h`, `1d`, `1w`
+
+Each higher timeframe snapshot includes:
+
+- close
+- EMA20, EMA50, EMA200, SMA200
+- RSI14
+- ATR14
+- ADX14
+- MACD histogram and previous histograms
+- CMF20
+- MFI14
+- BB width
+- volume
+- trend label
+- price vs EMA50
+- EMA50 slope over 10 candles
+- returns over several lookbacks
 
 ---
 
-## failed_bounce_short_v1
+# momentum_breakout_long_v1
 
-### Purpose
+## Status
 
-`failed_bounce_short_v1` is a short strategy designed to detect a failed relief rally inside a broader bearish trend.
-
-The strategy does not short panic breakdowns. It waits for price to bounce into a resistance area, lose momentum, and close back below short-term trend resistance before generating a short candidate.
-
-Expected market structure:
+Active in bot/backtest by default.
 
 ```text
-bear trend -> short-term bounce -> retest of EMA20/EMA50 -> rejection -> continuation lower
+enabledInBot = true
 ```
 
-The strategy is intended for regulated markets and liquid instruments:
+## Purpose
 
-- stocks
-- indexes
-- ETFs
-- commodities
+Long-only breakout strategy for bullish trend continuation.
 
-For live trading, the execution/risk layer must still validate short availability, borrow cost, margin, event risk, spread, liquidity, and whether an inverse ETF is preferable to direct shorting.
+The hypothesis:
 
-### Indicator Set
+```text
+Strong instruments in a confirmed bull trend often continue higher after a short consolidation and a confirmed breakout through the recent 20-candle high.
+```
 
-Trend:
+This strategy should not trade low-volatility sideways markets. It expects trend alignment, enough momentum, and a real breakout candle.
+
+## Supported Instruments
+
+```text
+secTypes:
+  STK
+  IND
+```
+
+## Supported Direction
+
+```text
+LONG only
+side = BUY
+```
+
+## Required Market Context
+
+```text
+directionalRegime:
+  bull_trend
+
+volatilityRegime:
+  normal_volatility
+  high_volatility
+```
+
+Rejects:
+
+```text
+directionalRegime != bull_trend
+volatilityRegime == low_volatility
+```
+
+## Required Timeframes
+
+```text
+1m
+1h
+4h
+1d
+```
+
+## Core Conditions
+
+Required current snapshot indicators:
 
 - EMA20
 - EMA50
 - EMA200
-- SMA200
-
-Momentum:
-
 - RSI14
-- MACD histogram
-
-Volatility:
-
 - ATR14
-- Bollinger Bands width
+- Donchian upper 20
 
-Volume / money flow:
-
-- CMF20
-- MFI14
-- optional OBV slope
-
-### Required Regime
-
-The strategy only runs in:
-
-```text
-bear_trend
-```
-
-If the regime detector does not classify the instrument as `bear_trend`, the strategy must reject the setup.
-
-### Bear Trend Detection
-
-The D1 trend is the primary trend filter.
-
-Required daily conditions:
-
-```text
-D1 close < D1 SMA200
-D1 close < D1 EMA50
-D1 EMA20 < D1 EMA50
-D1 EMA50 slope over last 10 candles < 0
-D1 ADX14 >= 22
-```
-
-The intraday/current snapshot must also be aligned:
-
-```text
-close < EMA200
-close < EMA50
-EMA20 < EMA50
-close < EMA20 after rejection
-```
-
-This combination avoids shorting normal pullbacks inside a broader bull trend.
-
-### Bounce Detection
-
-A valid bounce means price has moved back toward real resistance without invalidating the bearish trend.
-
-Accepted resistance zones:
-
-```text
-EMA20/EMA50 area
-previous pivot support retested from below
-Bollinger middle or upper band
-```
-
-The setup candle, not the trigger candle, must retest one of those zones:
-
-```text
-setupCandle.high >= resistanceLevel * (1 - resistanceTolerancePct)
-```
-
-Default:
-
-```text
-resistanceTolerancePct = 0.35
-```
-
-This prevents shorting a random EMA touch without evidence that price actually rejected supply.
-
-### Failed Bounce Confirmation
-
-The strategy separates setup from trigger.
-
-Setup candle requirements:
-
-```text
-setup candle touches resistance
-setup candle has visible upper wick
-setup candle closes away from the high
-```
-
-Trigger candle requirements:
-
-```text
-close < open
-close < setupCandle.low
-close near lower part of candle range
-body is not too small
-```
-
-The emitted order is a stop entry:
-
-```text
-entryOrderType = STP
-entryStop = triggerCandle.low - max(0.05 * ATR14, close * 3 bps)
-```
-
-So the strategy only enters if price continues below the confirmation candle instead of shorting immediately at the first EMA touch.
-
-Current default constraints:
-
-```text
-closeLocationMin = 0.55
-bodyMin = 0.10
-upperWickMin = 0.12
-```
-
-Interpretation:
-
-- close near low confirms seller control,
-- bearish body confirms bounce failure,
-- upper wick confirms rejection from resistance.
-
-### Momentum Filters
-
-RSI:
-
-```text
-rsiMin = 30
-rsiMax = 50
-```
-
-Reject if:
-
-```text
-RSI14 <= 30
-RSI14 >= 50
-```
-
-Reasoning:
-
-- RSI below 30 often means the move is already too extended.
-- RSI above 58 suggests the bounce may still have strength.
-
-MACD:
-
-The histogram must weaken for two consecutive bars:
-
-```text
-macdHist < macdHistPrev < macdHistPrev2
-```
-
-### Money Flow Filters
-
-CMF20:
-
-Bearish money flow improves the setup:
-
-```text
-CMF20 < 0
-```
-
-Hard reject:
-
-```text
-CMF20 > 0.08
-```
-
-MFI14:
-
-Weakening MFI improves the setup:
-
-```text
-MFI14 < MFI14Prev
-```
-
-Hard reject:
-
-```text
-MFI14 > 65
-```
-
-These filters reduce false positives where price appears to reject EMA resistance, but real money flow still supports the bounce.
-
-### Volatility Filters
-
-The strategy uses Bollinger Band width and ATR.
-
-Reject if Bollinger width is too wide:
-
-```text
-bbWidthPct > 0.10
-```
-
-Reasoning:
-
-- Very wide bands often mean news, panic, or unstable volatility.
-- Failed bounce setups should occur after controlled counter-trend movement, not during chaotic repricing.
-
-ATR is used for stop construction and risk normalization.
-
-ADX is used as a trend filter:
-
-```text
-D1 ADX14 >= 22
-```
-
-This is mandatory because failed-bounce shorts tend to degrade quickly in chop/range.
-
-### Overextension Filters
-
-The strategy must avoid shorting too late after a selloff.
-
-Current filters:
-
-```text
-return20mPct >= -1.4
-return60mPct >= -2.5
-distanceBelowEma20Pct <= 1.2
-```
-
-It also rejects bounces that are too strong:
-
-```text
-return20mPct <= 1.2
-return60mPct <= 2.0
-```
-
-### Stop Loss
-
-The stop is structure-aware and ATR-aware.
-
-```text
-rejectionBuffer = max(0.1 * ATR14, entryStop * 0.0005)
-atrStop = entryStop + ATR14 * stopAtrMult
-structureStop = rejectionHigh + rejectionBuffer
-stopLoss = max(atrStop, structureStop)
-```
-
-Defaults:
-
-```text
-stopAtrMult = 1.6
-structureStopAtrMult = 2.6
-```
-
-The stop is rejected if it is invalid or too wide:
-
-```text
-stopLoss <= entryStop -> reject
-stopLoss > entryStop + ATR14 * structureStopAtrMult -> reject
-```
-
-### Targets
-
-The strategy uses R-multiple target construction.
-
-```text
-riskPerShare = stopLoss - entryStop
-tp1 = entryStop - riskPerShare * 1R
-takeProfit = entryStop - riskPerShare * takeProfitR
-```
-
-Default:
-
-```text
-tp1R = 1.0
-takeProfitR = 2.5
-```
-
-Current execution/backtest still supports one protective take-profit order. The strategy writes TP1 and breakeven intent into metadata, but actual partial close and stop-to-breakeven require a separate position-management layer.
-
-Minimum planned reward:
-
-```text
-plannedRewardMinPct = 0.45
-```
-
-The strategy rejects setups where target distance is too small to justify execution costs and slippage.
-
-### Scoring
-
-The strategy has mandatory filters first, then scoring.
-
-Default entry threshold:
-
-```text
-minScore = 7.0
-```
-
-Current scoring components:
-
-```text
-dailyBearTrend:        +2.00
-dailyEmaAlignment:    +1.25
-dailyEma50Falling:    +1.00
-dailyAdxTrend:        +0.60 to +1.00
-intradayEmaAlignment: +1.00
-resistanceRetest:     +0.35 to +1.40
-confirmedBreak:       +1.00
-closeBackBelowEma20:  +0.75
-bearishRejection:     +0.60 to +1.00
-rsiRollingOver:       +0.75
-macdWeakening:        +1.00
-moneyFlowBearish:     +0.80
-mfiWeakening:         +0.50
-obvWeakening:         +0.30
-```
-
-Signal confidence is derived from score:
-
-```text
-confidenceScore = clamp(0.5 + score / 20, 0, 0.88)
-```
-
-### Decision Pipeline
-
-Execution order:
-
-1. Check supported `secType`.
-2. Check `bear_trend` regime.
-3. Check session window.
-4. Validate required indicators.
-5. Validate higher timeframe availability.
-6. Reject bullish H1/H4/D1 alignment.
-7. Validate D1 bearish trend, falling EMA50, and ADX.
-8. Validate current EMA/SMA alignment.
-9. Detect setup candle bounce into EMA/Bollinger/prior-support resistance.
-10. Require trigger candle close below setup low.
-11. Validate RSI/MACD/CMF/MFI.
-12. Reject overextended selloffs.
-13. Validate volatility.
-14. Validate volume and minimum notional liquidity.
-15. Validate setup and trigger candle quality.
-16. Build stop-entry below trigger candle low.
-17. Build ATR/structure stop.
-18. Build TP1 metadata and final R-multiple take profit.
-19. Calculate score.
-20. Emit `StrategySignal` only if score and risk constraints pass.
-
-### Rejection Examples
-
-Common rejection reasons:
-
-```text
-regime_not_bear_trend
-daily_close_above_sma200
-daily_close_above_ema50
-daily_ema20_not_below_ema50
-daily_ema50_not_falling
-daily_adx_too_low
-close_not_back_below_ema20
-no_resistance_retest
-trigger_close_not_below_setup_low
-rejection_candle_not_bearish
-money_flow_too_positive
-mfi_too_strong
-macd_hist_not_falling_two_bars
-too_far_below_ema20
-stop_too_wide
-score_too_low
-```
-
-### Timeframe Model
-
-Primary timeframe:
-
-- D1 trend filter.
-
-Current strategy context:
-
-- latest/current candle snapshot for execution timing.
-
-Higher timeframe confirmations:
-
-- H1
-- H4
-- D1
-
-For indexes and ETFs:
-
-- prefer D1 as the dominant filter,
-- avoid noisy low-timeframe overfitting.
-
-For commodities:
-
-- W1 trend filter can be added later,
-- recommended condition: W1 close below EMA20 or W1 EMA20 below EMA50.
-
-### Production Considerations
-
-The strategy itself only emits a candidate signal.
-
-The risk/execution layer must still check:
-
-- borrow availability,
-- borrow fee,
-- short sale restrictions,
-- instrument margin,
-- spread and liquidity,
-- earnings blackout,
-- macro-event blackout,
-- gap risk,
-- max exposure,
-- max open positions,
-- order TTL,
-- whether to route as direct short or inverse ETF.
-
-Current code limitation: broad-market confirmation for USA stocks/ETFs, earnings blackout, and macro-event blackout require external data in `StrategyContext`. They are not enforced inside the strategy until SPY/QQQ market snapshots and event calendars are available.
-
-### Optimization Guidance
-
-Avoid optimizing too many parameters at once.
-
-Reasonable tuning order:
-
-1. `minScore`
-2. `takeProfitR`
-3. `stopAtrMult`
-4. `resistanceTolerancePct`
-5. `maxDistanceBelowEma20Pct`
-6. RSI / MFI / CMF thresholds
-
-Primary evaluation metrics:
-
-- net PnL,
-- profit factor,
-- max drawdown,
-- trade count,
-- win rate,
-- average R,
-- symbol concentration,
-- sensitivity across years.
-
-The strategy should not be judged only by win rate.
-
----
-
-## momentum_breakout_long_v1
-
-### Purpose
-
-`momentum_breakout_long_v1` is the primary long-side momentum continuation strategy.
-
-It looks for strong instruments in a bullish regime that consolidate and then break higher.
-
-High-level logic:
-
-```text
-bull trend -> consolidation -> confirmed breakout -> long
-```
-
-The strategy is intentionally simple and production-oriented. It does not try to predict bottoms or buy weak instruments. It waits for an already strong instrument to prove continuation after a controlled consolidation.
-
-Supported instruments:
-
-- stocks
-- indexes
-
-### Required Regime
-
-The strategy only runs in:
-
-```text
-bull_trend
-```
-
-If the market regime detector does not classify the symbol as `bull_trend`, the strategy rejects the setup immediately.
-
-### Trend Requirements
-
-The current candle snapshot must confirm bullish alignment:
+Trend alignment:
 
 ```text
 close > EMA200
@@ -524,120 +209,63 @@ close > EMA50
 EMA20 > EMA50
 ```
 
-Higher timeframe filters must not be bearish:
+Higher timeframe filters:
 
 ```text
-H1 trend != bearish
-H4 trend != bearish
-D1 trend != bearish
-```
-
-The strategy also requires momentum confirmation from higher timeframes:
-
-```text
+1h trend must not be bearish
+4h trend must not be bearish
+1d trend must not be bearish
 D1 return20Pct >= 8
 H1 return4Pct >= 1
 ```
 
-Interpretation:
-
-- D1 confirms that the instrument is in a strong recent trend.
-- H1 confirms that the breakout is not happening against dead short-term momentum.
-- EMA alignment prevents buying into a broader downtrend.
-
-### Consolidation Detection
-
-The strategy expects price to consolidate before the breakout. It measures pre-breakout drift over the previous 20 one-minute candles, excluding the current breakout candle.
+Momentum/overextension filters:
 
 ```text
-preBreakoutDriftPct <= 0.8
+RSI14 < 72
+return20mPct <= 1.2
+return60mPct <= 3
+return60mPct >= 0.2
 ```
 
-This avoids buying after a move that has already run too far before the signal candle.
-
-The strategy also uses Bollinger Band width as a compression filter:
+Volatility filter:
 
 ```text
 bbWidthPct <= 0.08
 ```
 
-Reasoning:
+This means the strategy wants a breakout after controlled compression, not after a very wide/chaotic move.
 
-- A breakout after compression is more attractive than chasing a move after volatility has already expanded.
-- Very wide bands often mean the market is already repricing aggressively, which increases late-entry risk.
+## Entry Logic
 
-### Breakout Confirmation
-
-The breakout is confirmed against the previous 20-candle high:
+The strategy requires a confirmed breakout above the previous 20-candle high.
 
 ```text
-priorHigh20 = max(high of previous 20 candles)
-breakoutBuffer = max(0.015 * ATR14, close * 0.00025)
-close >= priorHigh20 + breakoutBuffer
+priorHigh20 = max(high over previous 20 candles excluding current)
+breakoutBuffer = max(ATR14 * 0.015, close * 0.00025)
+
+valid breakout:
+  close >= priorHigh20 + breakoutBuffer
 ```
 
-This means the strategy does not buy a simple touch of resistance. It requires a close above the previous local high plus a small ATR/price buffer.
-
-The implementation also requires Donchian upper 20 to be available:
+It also rejects cases where the consolidation drift was already too strong:
 
 ```text
-dcUpper20 is defined
+preBreakoutDriftPct <= 0.8
 ```
 
-The current entry mode is:
+This avoids buying after the move has already happened before the breakout candle.
+
+## Volume Filter
 
 ```text
-entryMode = breakout_20
+averageVolume = average volume over previous 20 1m candles
+latestVolume >= averageVolume * 0.95
 ```
 
-### Momentum Filters
+## Breakout Candle Quality
 
-RSI:
-
-```text
-RSI14 < 72
-```
-
-Reject reason:
-
-```text
-rsi_overheated
-```
-
-The strategy wants momentum, but not an obviously overheated candle.
-
-Short-term returns:
-
-```text
-return20mPct <= 1.2
-return60mPct >= 0.2
-return60mPct <= 3.0
-```
-
-Interpretation:
-
-- `return60mPct >= 0.2` confirms enough intraday strength.
-- `return20mPct <= 1.2` and `return60mPct <= 3.0` avoid buying too late after a strong intraday run.
-
-### Volume Confirmation
-
-The breakout candle must have acceptable volume relative to the previous 20 candles:
-
-```text
-latestVolume >= averageVolume20 * 0.95
-```
-
-Reject reason:
-
-```text
-volume_not_confirmed
-```
-
-This is intentionally not a very aggressive volume multiplier. The goal is to filter out weak, illiquid breakouts without requiring a large volume spike on every valid signal.
-
-### Breakout Candle Quality
-
-The breakout candle must look like real buyer control:
+The current candle must be a bullish breakout candle:
 
 ```text
 close > open
@@ -648,68 +276,27 @@ upperWickPct <= 0.45
 
 Meaning:
 
-- candle must be bullish,
-- close should be in the upper part of the range,
-- body cannot be tiny,
-- upper wick cannot dominate the candle.
+- close should be near the high,
+- candle body should not be tiny,
+- upper wick should not show strong rejection.
 
-Reject reasons:
+## Stop Loss
 
-```text
-breakout_candle_not_bullish
-breakout_close_not_near_high
-breakout_body_too_small
-breakout_upper_wick_too_large
-```
-
-### Stop Loss
-
-The stop is built from ATR and local consolidation structure.
-
-ATR stop:
+The stop combines ATR and recent consolidation structure:
 
 ```text
 atrStop = close - ATR14 * 2
+structureStop = max(consolidationLow20, close - ATR14 * 3)
+stopLoss = min(atrStop, structureStop)
 ```
 
-Structure stop:
+The stop must be below entry.
 
-```text
-consolidationLow = min(low of last 20 candles)
-structureStop = max(consolidationLow, close - ATR14 * 3)
-```
-
-Final stop:
-
-```text
-stopLoss = min(atrStop, structureStop ?? atrStop)
-```
-
-Interpretation:
-
-- ATR provides a volatility-adjusted minimum stop distance.
-- Consolidation low keeps the stop connected to local structure.
-- `structureStopAtrMult = 3` prevents structure stop from becoming absurdly wide.
-
-Invalid setup:
-
-```text
-stopLoss >= close -> reject
-```
-
-### Take Profit
-
-The strategy uses a fixed R-multiple target:
+## Take Profit
 
 ```text
 riskPerShare = close - stopLoss
 takeProfit = close + riskPerShare * 4
-```
-
-Default:
-
-```text
-takeProfitR = 4
 ```
 
 Minimum planned reward:
@@ -718,156 +305,947 @@ Minimum planned reward:
 plannedRewardPct >= 0.6
 ```
 
-Reject reason:
+## Scoring
 
-```text
-planned_reward_too_small
-```
-
-The high target multiple is intentional: current backtests show many stop-outs, so the strategy depends on larger winners to offset frequent small losses.
-
-### Confidence Scoring
-
-The strategy uses mandatory filters first, then builds a confidence score.
-
-Base:
+Base confidence:
 
 ```text
 0.58
 ```
 
-Components:
+Additive components:
+
+- trend score from EMA20 - EMA50 distance
+- breakout score from close - priorHigh20 distance
+- RSI score if RSI is strong but not overheated
+- compression score from BB width
+
+Final confidence is clamped:
 
 ```text
-trendScore       = clamp(((EMA20 - EMA50) / close) * 150, 0, 0.18)
-breakoutScore    = clamp(((close - priorHigh20) / close) * 3500, 0, 0.12)
-rsiScore         = +0.10 when 55 <= RSI14 < 72
-                 = +0.06 when 50 < RSI14 < 55
-compressionScore = up to +0.08 when BB width is below max
+0.58 <= confidenceScore <= 0.88
 ```
 
-Final:
+## Typical Rejection Reasons
 
-```text
-confidenceScore = clamp(0.58 + trendScore + breakoutScore + rsiScore + compressionScore, 0, 0.88)
-```
-
-Scoring meaning:
-
-- EMA spread rewards clean trend alignment.
-- Breakout distance rewards a stronger close through resistance.
-- RSI rewards constructive momentum, but caps overheated setups.
-- Compression rewards breakouts after quieter conditions.
-
-### Decision Pipeline
-
-Execution order:
-
-1. Check supported `secType`.
-2. Check `bull_trend` regime.
-3. Check UTC session window.
-4. Validate required indicators.
-5. Validate H1/H4/D1 availability.
-6. Reject bearish higher timeframe alignment.
-7. Require D1 and H1 momentum.
-8. Validate EMA trend alignment.
-9. Reject overheated RSI.
-10. Reject short-term overextension or weak intraday momentum.
-11. Validate Bollinger compression.
-12. Confirm breakout above previous 20-candle high with buffer.
-13. Confirm consolidation drift was not too high before breakout.
-14. Validate volume.
-15. Validate breakout candle quality.
-16. Build ATR/structure stop.
-17. Build R-multiple take profit.
-18. Calculate confidence.
-19. Emit `StrategySignal`.
-
-### Common Rejection Reasons
-
-```text
-regime_not_bull_trend
-outside_strategy_session
-missing_required_indicators
-higher_timeframe_unavailable
-higher_timeframe_1h_bearish
-higher_timeframe_4h_bearish
-higher_timeframe_1d_bearish
-daily_momentum_too_weak
-hourly_momentum_too_weak
-close_below_ema200
-close_below_ema50
-ema20_not_above_ema50
-rsi_overheated
-overextended_20m
-overextended_60m
-intraday_momentum_too_weak
-volatility_not_compressed
-prior_high_unavailable
-no_confirmed_breakout
-consolidation_drift_unavailable
-pre_breakout_drift_too_high
-volume_baseline_unavailable
-volume_not_confirmed
-breakout_candle_not_bullish
-breakout_close_not_near_high
-breakout_body_too_small
-breakout_upper_wick_too_large
-invalid_stop_loss
-planned_reward_too_small
-```
-
-### Parameters
-
-Current defaults:
-
-```text
-dailyReturn20MinPct = 8
-h1Return4MinPct = 1
-return20MaxPct = 1.2
-return60MinPct = 0.2
-return60MaxPct = 3
-consolidationDriftMaxPct = 0.8
-rsiMax = 72
-bbWidthMaxPct = 0.08
-volumeMultiplier = 0.95
-closeLocationMin = 0.60
-bodyMin = 0.12
-upperWickMax = 0.45
-plannedRewardMinPct = 0.60
-stopAtrMult = 2
-structureStopAtrMult = 3
-takeProfitR = 4
-sessionUtcStartHour = 8
-sessionUtcEndHour = 20
-```
-
-### Production Notes
-
-The strategy only emits a candidate. It does not execute orders.
-
-Risk/execution still decides:
-
-- position size,
-- max exposure,
-- max open positions,
-- limit entry price,
-- bracket order validity,
-- tick rounding,
-- broker acceptance.
-
-This strategy is currently the main positive contributor in bot backtests and should be treated as the long-side baseline.
+- `directional_regime_not_bull_trend`
+- `volatility_regime_low_volatility`
+- `higher_timeframe_1h_bearish`
+- `higher_timeframe_4h_bearish`
+- `higher_timeframe_1d_bearish`
+- `daily_momentum_too_weak`
+- `hourly_momentum_too_weak`
+- `close_below_ema200`
+- `close_below_ema50`
+- `ema20_not_above_ema50`
+- `rsi_overheated`
+- `overextended_20m`
+- `overextended_60m`
+- `intraday_momentum_too_weak`
+- `volatility_not_compressed`
+- `no_confirmed_breakout`
+- `pre_breakout_drift_too_high`
+- `volume_not_confirmed`
+- `breakout_candle_not_bullish`
+- `breakout_close_not_near_high`
+- `breakout_body_too_small`
+- `breakout_upper_wick_too_large`
 
 ---
 
-## momentum_breakdown_short_v1
+# momentum_breakdown_short_v1
 
-`momentum_breakdown_short_v1` is the currently active short-side strategy in the default bot portfolio.
+## Status
 
-It is a direct bearish breakdown strategy:
+Active in bot/backtest by default.
 
 ```text
-bear trend -> consolidation -> break below recent low -> short
+enabledInBot = true
 ```
 
-It is materially weaker than `momentum_breakout_long_v1`, but run `#72` showed that it still added positive net PnL when combined with the long strategy. It is therefore active as the current short baseline while `failed_bounce_short_v1` remains experimental in strategy lab.
+## Purpose
+
+Short-only breakdown strategy for bearish trend continuation.
+
+The hypothesis:
+
+```text
+Weak instruments in a confirmed bear trend often continue lower after a short consolidation and a confirmed breakdown through the recent 20-candle low.
+```
+
+It is the directional inverse of `momentum_breakout_long_v1`, but with additional guardrails to avoid shorting too late into an already extended selloff.
+
+## Supported Instruments
+
+```text
+secTypes:
+  STK
+  IND
+```
+
+## Supported Direction
+
+```text
+SHORT only
+side = SELL
+```
+
+## Required Market Context
+
+```text
+directionalRegime:
+  bear_trend
+
+volatilityRegime:
+  normal_volatility
+  high_volatility
+```
+
+Rejects:
+
+```text
+directionalRegime != bear_trend
+volatilityRegime == low_volatility
+```
+
+## Required Timeframes
+
+```text
+1m
+1h
+4h
+1d
+```
+
+## Core Conditions
+
+Required current snapshot indicators:
+
+- EMA20
+- EMA50
+- EMA200
+- RSI14
+- ATR14
+- Donchian lower 20
+
+Trend alignment:
+
+```text
+close < EMA200
+close < EMA50
+EMA20 < EMA50
+```
+
+Higher timeframe filters:
+
+```text
+1h trend must not be bullish
+4h trend must not be bullish
+1d trend must not be bullish
+H4 RSI14 <= 38
+D1 return20Pct <= -8
+H1 return4Pct <= -1
+```
+
+Distance filters:
+
+```text
+distance below EMA20 <= 1.5%
+distance below EMA50 <= 5%
+```
+
+These filters prevent late shorts after a large move away from the moving averages.
+
+Momentum/overextension filters:
+
+```text
+RSI14 > 28
+return20mPct >= -1.2
+return60mPct >= -3
+return60mPct <= -0.2
+```
+
+Volatility filter:
+
+```text
+bbWidthPct <= 0.08
+```
+
+## Entry Logic
+
+The strategy requires a confirmed breakdown below the previous 20-candle low.
+
+```text
+priorLow20 = min(low over previous 20 candles excluding current)
+breakdownBuffer = max(ATR14 * 0.015, close * 0.00025)
+
+valid breakdown:
+  close <= priorLow20 - breakdownBuffer
+```
+
+It also rejects cases where the pre-breakdown drift was already too negative:
+
+```text
+preBreakdownDriftPct >= -0.8
+```
+
+This avoids shorting a move that has already broken down before the confirmation candle.
+
+## Volume Filter
+
+```text
+averageVolume = average volume over previous 20 1m candles
+latestVolume >= averageVolume * 0.95
+```
+
+## Breakdown Candle Quality
+
+The current candle must be a bearish breakdown candle:
+
+```text
+close < open
+closeLocationPct >= 0.60
+bodyPct >= 0.12
+lowerWickPct <= 0.45
+```
+
+For shorts, `closeLocationPct` is calculated as distance from high to close divided by candle range, so higher value means close near the low.
+
+## Stop Loss
+
+The stop combines ATR and recent consolidation structure:
+
+```text
+atrStop = close + ATR14 * 1.5
+structureStop = min(consolidationHigh20, close + ATR14 * 2.5)
+stopLoss = max(atrStop, structureStop)
+```
+
+The stop must be above entry.
+
+## Take Profit
+
+```text
+riskPerShare = stopLoss - close
+takeProfit = close - riskPerShare * 3
+```
+
+Minimum planned reward:
+
+```text
+plannedRewardPct >= 0.6
+```
+
+## Scoring
+
+Base confidence:
+
+```text
+0.58
+```
+
+Additive components:
+
+- trend score from EMA50 - EMA20 distance
+- breakdown score from priorLow20 - close distance
+- RSI score if RSI is weak but not oversold
+- compression score from BB width
+
+Final confidence is clamped:
+
+```text
+0.58 <= confidenceScore <= 0.88
+```
+
+## Typical Rejection Reasons
+
+- `directional_regime_not_bear_trend`
+- `volatility_regime_low_volatility`
+- `higher_timeframe_1h_bullish`
+- `higher_timeframe_4h_bullish`
+- `higher_timeframe_1d_bullish`
+- `h4_rsi_too_high`
+- `daily_momentum_too_weak`
+- `hourly_momentum_too_weak`
+- `close_above_ema200`
+- `close_above_ema50`
+- `ema20_not_below_ema50`
+- `too_far_below_ema20`
+- `too_far_below_ema50`
+- `rsi_oversold`
+- `overextended_20m`
+- `overextended_60m`
+- `intraday_momentum_too_weak`
+- `volatility_not_compressed`
+- `no_confirmed_breakdown`
+- `pre_breakdown_drift_too_low`
+- `volume_not_confirmed`
+- `breakdown_candle_not_bearish`
+- `breakdown_close_not_near_low`
+- `breakdown_body_too_small`
+- `breakdown_lower_wick_too_large`
+
+---
+
+# range_reversal_v1
+
+## Status
+
+Active in bot/backtest by default.
+
+```text
+enabledInBot = true
+```
+
+## Purpose
+
+Two-sided mean-reversion strategy for range markets with normal or elevated volatility.
+
+The hypothesis:
+
+```text
+In a non-trending market, price often rejects the upper/lower edge of a defined range and rotates back toward the middle.
+```
+
+This strategy is not designed for low volatility compression. It should trade only when the range is wide enough to provide practical reward/risk.
+
+## Supported Instruments
+
+```text
+secTypes:
+  STK
+  IND
+  ETF
+  CMDTY
+  FUT
+```
+
+## Supported Direction
+
+```text
+LONG and SHORT
+BUY near lower range edge
+SELL near upper range edge
+```
+
+## Required Market Context
+
+```text
+directionalRegime:
+  range
+
+volatilityRegime:
+  normal_volatility
+  high_volatility
+```
+
+Rejects:
+
+```text
+directionalRegime != range
+volatilityRegime == low_volatility
+```
+
+## Required Timeframes
+
+```text
+1m
+1h
+4h
+```
+
+The implementation primarily uses the 1m execution context plus the regime detector's multi-timeframe classification.
+
+## Core Indicators
+
+Required:
+
+- ATR14
+- RSI14
+- Bollinger upper/middle/lower
+- Donchian upper/lower 20
+
+Optional but used as filters when available:
+
+- CMF20
+- MFI14
+
+## Range Definition
+
+The current range is approximated with Donchian 20:
+
+```text
+rangeLow = dcLower20
+rangeHigh = dcUpper20
+rangeWidthPct = (rangeHigh - rangeLow) / close * 100
+```
+
+Valid range width:
+
+```text
+rangeWidthPct >= 0.45
+rangeWidthPct <= 8
+```
+
+This avoids:
+
+- ranges too narrow to pay spread/commission/slippage,
+- ranges so wide they may represent unstable repricing instead of controlled rotation.
+
+## Volume Filter
+
+```text
+averageVolume = average volume over previous 20 1m candles
+latestVolume >= averageVolume * 0.8
+```
+
+## Long Setup
+
+The long setup looks for rejection near the lower edge.
+
+Edge proximity:
+
+```text
+edgeDistance = min(abs(close - bbLower), abs(close - dcLower20))
+edgeThreshold = max(ATR14 * 0.45, close * 0.25%)
+
+valid:
+  edgeDistance <= edgeThreshold
+```
+
+Momentum:
+
+```text
+RSI14 <= 42
+```
+
+Candle rejection:
+
+```text
+close > open
+closeLocationPct >= 0.58
+bodyPct >= 0.08
+lowerWickPct >= 0.18
+```
+
+Money flow guards:
+
+```text
+reject if CMF20 < -0.2
+reject if MFI14 < 18
+```
+
+These avoid buying a lower-edge touch when selling pressure remains extreme.
+
+## Short Setup
+
+The short setup looks for rejection near the upper edge.
+
+Edge proximity:
+
+```text
+edgeDistance = min(abs(close - bbUpper), abs(close - dcUpper20))
+edgeThreshold = max(ATR14 * 0.45, close * 0.25%)
+
+valid:
+  edgeDistance <= edgeThreshold
+```
+
+Momentum:
+
+```text
+RSI14 >= 58
+```
+
+Candle rejection:
+
+```text
+close < open
+close near lower part of candle range
+bodyPct >= 0.08
+upperWickPct >= 0.18
+```
+
+Money flow guards:
+
+```text
+reject if CMF20 > 0.2
+reject if MFI14 > 82
+```
+
+These avoid shorting an upper-edge touch when buying pressure remains extreme.
+
+## Long Stop Loss
+
+```text
+atrStop = close - ATR14 * 1.25
+structureStop = max(swingLow20, close - ATR14 * 2.2)
+stopLoss = min(atrStop, structureStop)
+```
+
+## Short Stop Loss
+
+```text
+atrStop = close + ATR14 * 1.25
+structureStop = min(swingHigh20, close + ATR14 * 2.2)
+stopLoss = max(atrStop, structureStop)
+```
+
+## Take Profit
+
+For long:
+
+```text
+takeProfit = min(Bollinger middle, close + 0.5 * Donchian range width)
+```
+
+For short:
+
+```text
+takeProfit = max(Bollinger middle, close - 0.5 * Donchian range width)
+```
+
+The strategy targets the middle of the range, not a full range rotation. This is deliberate: mean reversion edge usually degrades when waiting for the opposite edge.
+
+## Minimum Reward/Risk
+
+Normal volatility:
+
+```text
+rewardRisk >= 0.9
+```
+
+High volatility:
+
+```text
+rewardRisk >= 1.1
+```
+
+High volatility requires a better reward/risk because stop-outs and slippage are more likely.
+
+## Scoring
+
+Base confidence:
+
+```text
+0.58
+```
+
+Additive components:
+
+- edge proximity score
+- RSI stretch score
+- rejection candle score
+- wick quality score
+
+Final confidence is clamped:
+
+```text
+0.58 <= confidenceScore <= 0.84
+```
+
+## Typical Rejection Reasons
+
+- `directional_regime_not_range`
+- `volatility_regime_low_volatility`
+- `missing_required_indicators`
+- `invalid_price_or_atr`
+- `range_too_narrow`
+- `range_too_wide`
+- `volume_baseline_unavailable`
+- `volume_not_confirmed`
+- `no_range_reversal_setup`
+
+---
+
+# failed_bounce_short_v1
+
+## Status
+
+Implemented but disabled in the default bot/backtest portfolio.
+
+```text
+enabledInBot = false
+```
+
+Available for strategy lab / isolated testing.
+
+## Purpose
+
+Short-only failed-bounce strategy.
+
+The hypothesis:
+
+```text
+In a confirmed bear trend, short-term relief bounces into resistance often fail and continue lower.
+```
+
+Unlike `momentum_breakdown_short_v1`, this strategy does not short a fresh breakdown immediately. It waits for:
+
+```text
+bear trend -> bounce into resistance -> rejection candle -> trigger below setup low
+```
+
+It uses a stop-entry style signal:
+
+```text
+entryOrderType = STP
+```
+
+## Supported Instruments
+
+```text
+secTypes:
+  STK
+  IND
+  ETF
+  CMDTY
+  FUT
+```
+
+## Supported Direction
+
+```text
+SHORT only
+side = SELL
+```
+
+## Required Market Context
+
+```text
+directionalRegime:
+  bear_trend
+
+volatilityRegime:
+  normal_volatility
+  high_volatility
+```
+
+Rejects:
+
+```text
+directionalRegime != bear_trend
+volatilityRegime == low_volatility
+```
+
+## Required Timeframes
+
+```text
+1m
+1h
+4h
+1d
+```
+
+## Core Indicators
+
+Required current snapshot indicators:
+
+- EMA20
+- EMA50
+- EMA200
+- SMA200
+- RSI14 and previous RSI14
+- ATR14
+- MACD histogram and previous two histogram values
+- CMF20
+- MFI14
+
+Required daily indicators:
+
+- D1 close
+- D1 EMA20
+- D1 EMA50
+- D1 SMA200
+- D1 ADX14
+- D1 EMA50 slope over 10 candles
+
+## Bear Trend Filter
+
+Daily trend must be bearish:
+
+```text
+D1 close < D1 SMA200
+D1 close < D1 EMA50
+D1 EMA20 < D1 EMA50
+D1 EMA50 slope10Pct < 0
+D1 ADX14 >= 22
+```
+
+Higher timeframe filters:
+
+```text
+1h trend must not be bullish
+4h trend must not be bullish
+1d trend must not be bullish
+H4 RSI14 <= 48
+D1 return20Pct <= -5
+H1 return4Pct <= 1
+```
+
+Current snapshot alignment:
+
+```text
+close < EMA200
+close < EMA50
+EMA20 < EMA50
+close < EMA20 after rejection
+distance below EMA20 <= 1.2%
+```
+
+## Momentum Filters
+
+RSI:
+
+```text
+30 < RSI14 < 50
+RSI14 < 50
+```
+
+MACD histogram:
+
+```text
+macdHist < macdHistPrev < macdHistPrev2
+```
+
+This requires weakening momentum over two bars.
+
+Intraday return filters:
+
+```text
+return20mPct >= -1.4
+return20mPct <= 1.2
+return60mPct >= -2.5
+return60mPct <= 2
+```
+
+These avoid both:
+
+- shorting too late after an extended selloff,
+- shorting a bounce that remains too strong.
+
+## Money Flow Filters
+
+Hard rejects:
+
+```text
+CMF20 > 0.08
+MFI14 > 65
+```
+
+Scoring improves when:
+
+```text
+CMF20 < 0
+MFI14 < previous MFI14
+OBV slope < 0
+```
+
+## Volatility Filter
+
+```text
+bbWidthPct <= 0.10
+```
+
+This avoids chaotic repricing where failed-bounce structure is less reliable.
+
+## Resistance Retest
+
+The setup candle must touch at least one resistance zone:
+
+```text
+EMA20/EMA50 resistance
+prior support retested from below
+Bollinger middle/upper band
+```
+
+Tolerance:
+
+```text
+resistanceTolerancePct = 0.35
+```
+
+## Setup Candle
+
+The setup candle is the candle before the trigger candle.
+
+Required:
+
+```text
+setup close rejects highs
+setup upper wick >= 0.12
+```
+
+## Trigger Candle
+
+The current candle must confirm failure:
+
+```text
+trigger close < setup candle low
+trigger candle bearish
+close near low
+bodyPct >= 0.10
+upperWickPct >= 0.12
+```
+
+## Entry
+
+The strategy emits a stop entry below the trigger candle:
+
+```text
+triggerBuffer = max(ATR14 * 0.05, close * 3 bps)
+entryStop = triggerCandle.low - triggerBuffer
+```
+
+## Liquidity Filters
+
+```text
+averageVolume20 >= 1,000
+averageVolume20 * close >= 50,000
+latestVolume >= averageVolume20 * 0.8
+```
+
+## Stop Loss
+
+```text
+rejectionBuffer = max(ATR14 * 0.1, entryStop * 0.0005)
+atrStop = entryStop + ATR14 * 1.6
+structureStop = rejectionHigh + rejectionBuffer
+stopLoss = max(atrStop, structureStop)
+maxStop = entryStop + ATR14 * 2.6
+```
+
+Reject if:
+
+```text
+stopLoss <= entryStop
+stopLoss > maxStop
+```
+
+## Take Profit
+
+```text
+riskPerShare = stopLoss - entryStop
+tp1 = entryStop - riskPerShare * 1
+takeProfit = entryStop - riskPerShare * 2.5
+```
+
+Metadata includes:
+
+```text
+breakevenAfterTp1 = true
+trailingPlan = future: after TP1, trail remaining size by EMA20 or ATR
+```
+
+The current execution/backtest layer still uses the single `takeProfit` field; partial TP and trailing are documented in metadata for future execution support.
+
+## Scoring
+
+Minimum score:
+
+```text
+minScore = 7
+```
+
+Score components:
+
+- daily bear trend
+- daily EMA alignment
+- falling D1 EMA50
+- D1 ADX trend strength
+- intraday EMA alignment
+- resistance retest quality
+- confirmed break below setup low
+- close back below EMA20
+- bearish rejection quality
+- RSI rolling over
+- MACD weakening
+- bearish money flow
+- MFI weakening
+- OBV weakening
+
+Confidence:
+
+```text
+confidenceScore = clamp(0.5 + signalScore / 20, 0, 0.88)
+```
+
+## Typical Rejection Reasons
+
+- `directional_regime_not_bear_trend`
+- `volatility_regime_low_volatility`
+- `daily_trend_indicators_unavailable`
+- `higher_timeframe_1h_bullish`
+- `higher_timeframe_4h_bullish`
+- `higher_timeframe_1d_bullish`
+- `h4_rsi_too_high`
+- `daily_momentum_too_weak`
+- `hourly_bounce_too_strong`
+- `daily_close_above_sma200`
+- `daily_close_above_ema50`
+- `daily_ema20_not_below_ema50`
+- `daily_ema50_not_falling`
+- `daily_adx_too_low`
+- `close_above_ema200`
+- `close_above_ema50`
+- `ema20_not_below_ema50`
+- `close_not_back_below_ema20`
+- `too_far_below_ema20`
+- `rsi_oversold`
+- `rsi_too_strong`
+- `money_flow_too_positive`
+- `mfi_too_strong`
+- `macd_hist_not_falling_two_bars`
+- `overextended_20m`
+- `bounce_too_strong_20m`
+- `overextended_60m`
+- `bounce_too_strong_60m`
+- `volatility_too_wide`
+- `not_enough_1m_candles`
+- `no_resistance_retest`
+- `trigger_close_not_below_setup_low`
+- `average_volume_too_low`
+- `average_notional_too_low`
+- `volume_not_confirmed`
+- `rejection_candle_not_bearish`
+- `rejection_close_not_near_low`
+- `rejection_body_too_small`
+- `rejection_upper_wick_too_small`
+- `stop_too_wide`
+- `score_too_low`
+
+---
+
+# Portfolio Notes
+
+The portfolio manager runs all active strategy implementations and selects the highest-confidence valid signal.
+
+Current default active portfolio:
+
+```text
+momentum_breakout_long_v1:
+  bull_trend + normal/high volatility
+
+momentum_breakdown_short_v1:
+  bear_trend + normal/high volatility
+
+range_reversal_v1:
+  range + normal/high volatility
+```
+
+Disabled but implemented:
+
+```text
+failed_bounce_short_v1:
+  bear_trend + normal/high volatility
+```
+
+No implemented strategy currently targets:
+
+```text
+range + low_volatility
+bull_trend + low_volatility
+bear_trend + low_volatility
+```
+
+Those should be separate strategies, not relaxed versions of the existing momentum/reversal logic.

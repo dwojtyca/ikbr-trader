@@ -2,11 +2,13 @@ import { listStrategyProfiles } from "@ikbr/shared";
 import { FailedBounceShortStrategy } from "./failed-bounce-short.strategy.js";
 import { MomentumBreakdownShortStrategy } from "./momentum-breakdown-short.strategy.js";
 import { MomentumBreakoutLongStrategy } from "./momentum-breakout-long.strategy.js";
+import { RangeReversalStrategy } from "./range-reversal.strategy.js";
 import type { Strategy } from "./strategy.types.js";
 
 const STRATEGY_FACTORIES = {
   momentum_breakout_long_v1: () => new MomentumBreakoutLongStrategy(),
   momentum_breakdown_short_v1: () => new MomentumBreakdownShortStrategy(),
+  range_reversal_v1: () => new RangeReversalStrategy(),
   failed_bounce_short_v1: () => new FailedBounceShortStrategy(),
 } satisfies Record<string, () => Strategy>;
 

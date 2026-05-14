@@ -3,7 +3,12 @@ import test from 'node:test';
 import type { IndicatorSnapshot, TimeframeIndicatorSnapshot } from '@ikbr/shared';
 import { MarketRegimeDetector } from './market-regime-detector.js';
 
-function tf(trend: TimeframeIndicatorSnapshot['trend'], close: number, return20Pct: number): TimeframeIndicatorSnapshot {
+function tf(
+  trend: TimeframeIndicatorSnapshot['trend'],
+  close: number,
+  return20Pct: number,
+  overrides: Partial<TimeframeIndicatorSnapshot> = {}
+): TimeframeIndicatorSnapshot {
   const ema20 = trend === 'bearish' ? close + 1 : trend === 'bullish' ? close - 1 : close;
   const ema50 = trend === 'bearish' ? close + 2 : trend === 'bullish' ? close - 2 : close;
   const ema200 = trend === 'bearish' ? close + 4 : trend === 'bullish' ? close - 4 : close;
@@ -13,9 +18,11 @@ function tf(trend: TimeframeIndicatorSnapshot['trend'], close: number, return20P
     ema50,
     ema200,
     macdHist: trend === 'bearish' ? -0.4 : trend === 'bullish' ? 0.4 : 0,
+    atr14: close * 0.007,
     bbWidthPct: 0.02,
     trend,
-    return20Pct
+    return20Pct,
+    ...overrides
   };
 }
 
@@ -80,9 +87,9 @@ test('MarketRegimeDetector returns high_volatility when volatility is elevated w
     macdHist: 0.02,
     return60mPct: 0.1,
     timeframes: {
-      '1h': tf('neutral', 100, 0.2),
-      '4h': tf('bearish', 99, -0.5),
-      '1d': tf('bullish', 101, 0.5)
+      '1h': tf('neutral', 100, 0.2, { atr14: 1.5, bbWidthPct: 0.058 }),
+      '4h': tf('bearish', 99, -0.5, { atr14: 1.3, bbWidthPct: 0.056 }),
+      '1d': tf('bullish', 101, 0.5, { atr14: 1.1, bbWidthPct: 0.052 })
     }
   }));
 
@@ -102,14 +109,36 @@ test('MarketRegimeDetector returns low_volatility when price is compressed witho
     macdHist: 0.01,
     return60mPct: 0.05,
     timeframes: {
-      '1h': tf('neutral', 100, 0.1),
-      '4h': tf('neutral', 100.1, 0.1),
-      '1d': tf('neutral', 99.9, -0.1)
+      '1h': tf('neutral', 100, 0.1, { atr14: 0.18, bbWidthPct: 0.008 }),
+      '4h': tf('neutral', 100.1, 0.1, { atr14: 0.2, bbWidthPct: 0.009 }),
+      '1d': tf('neutral', 99.9, -0.1, { atr14: 0.2, bbWidthPct: 0.009 })
     }
   }));
 
   assert.equal(analysis.directionalRegime, 'range');
   assert.equal(analysis.volatilityRegime, 'low_volatility');
+});
+
+test('MarketRegimeDetector does not mark high_volatility from a single 1m spike when higher timeframes are normal', () => {
+  const detector = new MarketRegimeDetector();
+
+  const analysis = detector.detectDetailed('STK', 100, baseIndicators({
+    ema20: 100.2,
+    ema50: 100,
+    ema200: 99.8,
+    atr14: 1.6,
+    bbWidthPct: 0.03,
+    macdHist: 0.02,
+    return60mPct: 0.1,
+    timeframes: {
+      '1h': tf('neutral', 100, 0.2),
+      '4h': tf('bearish', 99, -0.5),
+      '1d': tf('bullish', 101, 0.5)
+    }
+  }));
+
+  assert.equal(analysis.directionalRegime, 'range');
+  assert.equal(analysis.volatilityRegime, 'normal_volatility');
 });
 
 test('MarketRegimeDetector returns range when neither trend nor volatility conditions dominate', () => {

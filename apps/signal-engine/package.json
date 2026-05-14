@@ -25,6 +25,11 @@
       "import": "./dist/strategies/momentum-breakdown-short.strategy.js",
       "default": "./dist/strategies/momentum-breakdown-short.strategy.js"
     },
+    "./strategies/range-reversal.strategy": {
+      "types": "./dist/strategies/range-reversal.strategy.d.ts",
+      "import": "./dist/strategies/range-reversal.strategy.js",
+      "default": "./dist/strategies/range-reversal.strategy.js"
+    },
     "./strategies/failed-bounce-short.strategy": {
       "types": "./dist/strategies/failed-bounce-short.strategy.d.ts",
       "import": "./dist/strategies/failed-bounce-short.strategy.js",
