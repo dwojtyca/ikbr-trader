@@ -7,14 +7,14 @@ import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
 import { SignalEngine } from "./signal-engine.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
-import { MomentumBreakoutLongStrategy } from "./strategies/momentum-breakout-long.strategy.js";
+import { createStrategies } from "./strategies/strategy-registry.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
 const strategyToggleSchema = z.object({ enabled: z.boolean() });
-const strategies = [new MomentumBreakoutLongStrategy()];
+const strategies = createStrategies();
 const engine = new SignalEngine(repo, {
   strategies,
   minCandles: config.SIGNAL_MIN_CANDLES,

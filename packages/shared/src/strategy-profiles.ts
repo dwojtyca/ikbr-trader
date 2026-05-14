@@ -7,6 +7,7 @@ export interface StrategyProfile {
   secType: SecType[];
   regime: MarketRegime;
   style: ProfileStyle;
+  enabledInBot: boolean;
   entryScore: number;
   decisionEdge: number;
   minConfidenceMultiplier: number;
@@ -21,6 +22,7 @@ const PROFILES: StrategyProfile[] = [
     secType: ["STK", "IND"],
     regime: "bull_trend",
     style: "breakout",
+    enabledInBot: true,
     entryScore: 0.58,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
@@ -28,9 +30,39 @@ const PROFILES: StrategyProfile[] = [
     spreadFactor: 1,
     requireVolume: true,
   },
+  {
+    id: "momentum_breakdown_short_v1",
+    secType: ["STK", "IND"],
+    regime: "bear_trend",
+    style: "breakout",
+    enabledInBot: true,
+    entryScore: 0.58,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    quantityFactor: 1,
+    spreadFactor: 1,
+    requireVolume: true,
+  },
+  {
+    id: "failed_bounce_short_v1",
+    secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
+    regime: "bear_trend",
+    style: "reversion",
+    enabledInBot: false,
+    entryScore: 0.58,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    quantityFactor: 1,
+    spreadFactor: 1,
+    requireVolume: true,
+  },
 ];
 
 export function listStrategyProfiles(): StrategyProfile[] {
+  return PROFILES.filter((profile) => profile.enabledInBot);
+}
+
+export function listAllStrategyProfiles(): StrategyProfile[] {
   return [...PROFILES];
 }
 

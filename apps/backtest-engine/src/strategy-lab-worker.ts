@@ -19,7 +19,8 @@ const repo = new BacktestRepository(input.postgresUrl);
 try {
   const data = await repo.loadBacktestData(input.symbols);
   const simulator = new BacktestSimulator(repo, input.runId, data, {
-    ...input.options
+    ...input.options,
+    strategyIds: [input.strategyId],
   });
   const label = `${input.strategyIndex + 1}/${input.strategyTotal} ${input.strategyId}`;
   const metrics = await simulator.run({

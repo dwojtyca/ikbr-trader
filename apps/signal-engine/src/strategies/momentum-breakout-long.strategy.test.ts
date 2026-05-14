@@ -178,6 +178,30 @@ test('MomentumBreakoutLongStrategy rejects non-bull-trend regime', () => {
   assert.equal(strategy.getLastRejectionReason(), 'regime_not_bull_trend');
 });
 
+test('MomentumBreakoutLongStrategy rejects signals outside UTC strategy session', () => {
+  const strategy = new MomentumBreakoutLongStrategy();
+  const latestCandle = candle(25, 105, 12500);
+
+  const signal = strategy.generateSignal(baseContext({
+    latestCandle: {
+      ...latestCandle,
+      ts: new Date(Date.UTC(2024, 0, 1, 21, 30))
+    },
+    candlesByTimeframe: {
+      '1m': [
+        ...consolidationCandles(),
+        {
+          ...latestCandle,
+          ts: new Date(Date.UTC(2024, 0, 1, 21, 30))
+        }
+      ]
+    }
+  }));
+
+  assert.equal(signal, null);
+  assert.equal(strategy.getLastRejectionReason(), 'outside_strategy_session');
+});
+
 test('MomentumBreakoutLongStrategy accepts neutral 1h inside bull trend regime', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 

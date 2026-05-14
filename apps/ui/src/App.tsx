@@ -60,7 +60,7 @@ type Order = {
   instrument: string;
   conid?: string;
   side: 'BUY' | 'SELL' | 'HOLD';
-  orderType: 'MKT' | 'LMT';
+  orderType: 'MKT' | 'LMT' | 'STP';
   quantity: number;
   entry?: number;
   stop?: number;

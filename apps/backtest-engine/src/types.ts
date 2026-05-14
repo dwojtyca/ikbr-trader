@@ -35,7 +35,7 @@ export interface BacktestOrderRecord {
   conid?: string;
   side: Side;
   positionEffect?: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
-  orderType: 'MKT' | 'LMT';
+  orderType: 'MKT' | 'LMT' | 'STP';
   quantity: number;
   entry?: number;
   stop?: number;

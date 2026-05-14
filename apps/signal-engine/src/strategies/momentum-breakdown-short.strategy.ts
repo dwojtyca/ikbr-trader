@@ -1,42 +1,45 @@
-import type { SecType, Candle } from "@ikbr/shared";
+import type { Candle, SecType } from "@ikbr/shared";
 import type {
   Strategy,
   StrategyContext,
   StrategySignal,
 } from "./strategy.types.js";
 
-interface MomentumBreakoutParams {
-  dailyReturn20MinPct: number;
-  h1Return4MinPct: number;
-  return20MaxPct: number;
+interface MomentumBreakdownParams {
+  dailyReturn20MaxPct: number;
+  h1Return4MaxPct: number;
+  return20MinPct: number;
   return60MinPct: number;
   return60MaxPct: number;
-  consolidationDriftMaxPct: number;
-  rsiMax: number;
+  consolidationDriftMinPct: number;
+  rsiMin: number;
   bbWidthMaxPct: number;
   volumeMultiplier: number;
   closeLocationMin: number;
   bodyMin: number;
-  upperWickMax: number;
+  lowerWickMax: number;
   plannedRewardMinPct: number;
   stopAtrMult: number;
   structureStopAtrMult: number;
   takeProfitR: number;
+  h4RsiMax: number;
   sessionUtcStartHour: number;
   sessionUtcEndHour: number;
+  maxDistanceBelowEma20Pct: number;
+  maxDistanceBelowEma50Pct: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
-function localConsolidationLow(
+function localConsolidationHigh(
   candles: Candle[],
   lookback: number,
 ): number | undefined {
   const slice = candles.slice(-lookback);
   if (slice.length === 0) return undefined;
-  return Math.min(...slice.map((candle) => candle.low));
+  return Math.max(...slice.map((candle) => candle.high));
 }
 
 function averageVolume(
@@ -49,10 +52,10 @@ function averageVolume(
   return total / slice.length;
 }
 
-function previousHigh(candles: Candle[], lookback: number): number | undefined {
+function previousLow(candles: Candle[], lookback: number): number | undefined {
   const slice = candles.slice(-(lookback + 1), -1);
   if (slice.length < lookback) return undefined;
-  return Math.max(...slice.map((candle) => candle.high));
+  return Math.min(...slice.map((candle) => candle.low));
 }
 
 function consolidationDriftPct(
@@ -74,26 +77,29 @@ function consolidationDriftPct(
   return ((lastClose - firstClose) / firstClose) * 100;
 }
 
-function paramsForSecType(secType: SecType): MomentumBreakoutParams {
+function paramsForSecType(_secType: SecType): MomentumBreakdownParams {
   return {
-    dailyReturn20MinPct: 8,
-    h1Return4MinPct: 1,
-    return20MaxPct: 1.2,
-    return60MinPct: 0.2,
-    return60MaxPct: 3,
-    consolidationDriftMaxPct: 0.8,
-    rsiMax: 72,
+    dailyReturn20MaxPct: -8,
+    h1Return4MaxPct: -1,
+    return20MinPct: -1.2,
+    return60MinPct: -3,
+    return60MaxPct: -0.2,
+    consolidationDriftMinPct: -0.8,
+    rsiMin: 28,
     bbWidthMaxPct: 0.08,
     volumeMultiplier: 0.95,
     closeLocationMin: 0.6,
     bodyMin: 0.12,
-    upperWickMax: 0.45,
+    lowerWickMax: 0.45,
     plannedRewardMinPct: 0.6,
-    stopAtrMult: 2,
-    structureStopAtrMult: 3,
-    takeProfitR: 4,
+    stopAtrMult: 1.5,
+    structureStopAtrMult: 2.5,
+    takeProfitR: 3,
+    h4RsiMax: 38,
     sessionUtcStartHour: 8,
-    sessionUtcEndHour: 20,
+    sessionUtcEndHour: 19,
+    maxDistanceBelowEma20Pct: 1.5,
+    maxDistanceBelowEma50Pct: 5,
   };
 }
 
@@ -113,33 +119,33 @@ function isWithinUtcSession(
 function candleQuality(candle: Candle): {
   closeLocationPct: number;
   bodyPct: number;
-  upperWickPct: number;
-  bullishBody: boolean;
+  lowerWickPct: number;
+  bearishBody: boolean;
 } {
   const range = candle.high - candle.low;
   if (!Number.isFinite(range) || range <= 0) {
     return {
       closeLocationPct: 0,
       bodyPct: 0,
-      upperWickPct: 1,
-      bullishBody: false,
+      lowerWickPct: 1,
+      bearishBody: false,
     };
   }
 
-  const bodyHigh = Math.max(candle.open, candle.close);
+  const bodyLow = Math.min(candle.open, candle.close);
   return {
-    closeLocationPct: (candle.close - candle.low) / range,
+    closeLocationPct: (candle.high - candle.close) / range,
     bodyPct: Math.abs(candle.close - candle.open) / range,
-    upperWickPct: (candle.high - bodyHigh) / range,
-    bullishBody: candle.close > candle.open,
+    lowerWickPct: (bodyLow - candle.low) / range,
+    bearishBody: candle.close < candle.open,
   };
 }
 
-export class MomentumBreakoutLongStrategy implements Strategy {
-  readonly id = "momentum_breakout_long_v1";
+export class MomentumBreakdownShortStrategy implements Strategy {
+  readonly id = "momentum_breakdown_short_v1";
   readonly secTypes = ["STK", "IND"] as const;
-  readonly supportedDirections = ["LONG"] as const;
-  readonly allowedRegimes = ["bull_trend"] as const;
+  readonly supportedDirections = ["SHORT"] as const;
+  readonly allowedRegimes = ["bear_trend"] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
   private lastRejectionReason: string | undefined;
 
@@ -152,8 +158,8 @@ export class MomentumBreakoutLongStrategy implements Strategy {
 
     if (context.secType !== "STK" && context.secType !== "IND")
       return this.reject("sec_type_not_supported");
-    if (context.regime !== "bull_trend")
-      return this.reject("regime_not_bull_trend");
+    if (context.regime !== "bear_trend")
+      return this.reject("regime_not_bear_trend");
 
     const params = paramsForSecType(context.secType);
     if (
@@ -173,7 +179,7 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     const ema200 = indicators.ema200;
     const rsi14 = indicators.rsi14;
     const atr14 = indicators.atr14;
-    const donchianUpper = indicators.dcUpper20;
+    const donchianLower = indicators.dcLower20;
 
     if (
       ema20 === undefined ||
@@ -181,7 +187,7 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       ema200 === undefined ||
       rsi14 === undefined ||
       atr14 === undefined ||
-      donchianUpper === undefined
+      donchianLower === undefined
     ) {
       return this.reject("missing_required_indicators");
     }
@@ -190,26 +196,34 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     const h4 = indicators.timeframes?.["4h"];
     const d1 = indicators.timeframes?.["1d"];
     if (!h1 || !h4 || !d1) return this.reject("higher_timeframe_unavailable");
-    if (h1.trend === "bearish")
-      return this.reject("higher_timeframe_1h_bearish");
-    if (h4.trend === "bearish")
-      return this.reject("higher_timeframe_4h_bearish");
-    if (d1.trend === "bearish")
-      return this.reject("higher_timeframe_1d_bearish");
-    if ((d1.return20Pct ?? 0) < params.dailyReturn20MinPct)
+    if (h1.trend === "bullish")
+      return this.reject("higher_timeframe_1h_bullish");
+    if (h4.trend === "bullish")
+      return this.reject("higher_timeframe_4h_bullish");
+    if (d1.trend === "bullish")
+      return this.reject("higher_timeframe_1d_bullish");
+    if (h4.rsi14 === undefined) return this.reject("h4_rsi_unavailable");
+    if (h4.rsi14 > params.h4RsiMax) return this.reject("h4_rsi_too_high");
+    if ((d1.return20Pct ?? 0) > params.dailyReturn20MaxPct)
       return this.reject("daily_momentum_too_weak");
-    if ((h1.return4Pct ?? 0) < params.h1Return4MinPct)
+    if ((h1.return4Pct ?? 0) > params.h1Return4MaxPct)
       return this.reject("hourly_momentum_too_weak");
 
-    if (close <= ema200) return this.reject("close_below_ema200");
-    if (close <= ema50) return this.reject("close_below_ema50");
-    if (ema20 <= ema50) return this.reject("ema20_not_above_ema50");
-    if (rsi14 >= params.rsiMax) return this.reject("rsi_overheated");
-    if ((indicators.return20mPct ?? 0) > params.return20MaxPct)
+    if (close >= ema200) return this.reject("close_above_ema200");
+    if (close >= ema50) return this.reject("close_above_ema50");
+    if (ema20 >= ema50) return this.reject("ema20_not_below_ema50");
+    const distanceBelowEma20Pct = ((ema20 - close) / close) * 100;
+    const distanceBelowEma50Pct = ((ema50 - close) / close) * 100;
+    if (distanceBelowEma20Pct > params.maxDistanceBelowEma20Pct)
+      return this.reject("too_far_below_ema20");
+    if (distanceBelowEma50Pct > params.maxDistanceBelowEma50Pct)
+      return this.reject("too_far_below_ema50");
+    if (rsi14 <= params.rsiMin) return this.reject("rsi_oversold");
+    if ((indicators.return20mPct ?? 0) < params.return20MinPct)
       return this.reject("overextended_20m");
-    if ((indicators.return60mPct ?? 0) > params.return60MaxPct)
-      return this.reject("overextended_60m");
     if ((indicators.return60mPct ?? 0) < params.return60MinPct)
+      return this.reject("overextended_60m");
+    if ((indicators.return60mPct ?? 0) > params.return60MaxPct)
       return this.reject("intraday_momentum_too_weak");
     if (
       indicators.bbWidthPct !== undefined &&
@@ -218,16 +232,16 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       return this.reject("volatility_not_compressed");
 
     const candles1m = context.candlesByTimeframe["1m"] ?? [];
-    const priorHigh20 = previousHigh(candles1m, 20);
-    if (priorHigh20 === undefined) return this.reject("prior_high_unavailable");
-    const breakoutBuffer = Math.max(atr14 * 0.015, close * 0.00025);
-    const confirmedBreakout20 = close >= priorHigh20 + breakoutBuffer;
-    if (!confirmedBreakout20) return this.reject("no_confirmed_breakout");
-    const preBreakoutDriftPct = consolidationDriftPct(candles1m, 20);
-    if (preBreakoutDriftPct === undefined)
+    const priorLow20 = previousLow(candles1m, 20);
+    if (priorLow20 === undefined) return this.reject("prior_low_unavailable");
+    const breakdownBuffer = Math.max(atr14 * 0.015, close * 0.00025);
+    const confirmedBreakdown20 = close <= priorLow20 - breakdownBuffer;
+    if (!confirmedBreakdown20) return this.reject("no_confirmed_breakdown");
+    const preBreakdownDriftPct = consolidationDriftPct(candles1m, 20);
+    if (preBreakdownDriftPct === undefined)
       return this.reject("consolidation_drift_unavailable");
-    if (preBreakoutDriftPct > params.consolidationDriftMaxPct)
-      return this.reject("pre_breakout_drift_too_high");
+    if (preBreakdownDriftPct < params.consolidationDriftMinPct)
+      return this.reject("pre_breakdown_drift_too_low");
 
     const previousAverageVolume = averageVolume(candles1m.slice(0, -1), 20);
     if (previousAverageVolume === undefined || previousAverageVolume <= 0)
@@ -236,41 +250,43 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       return this.reject("volume_not_confirmed");
 
     const quality = candleQuality(latestCandle);
-    if (!quality.bullishBody) return this.reject("breakout_candle_not_bullish");
+    if (!quality.bearishBody)
+      return this.reject("breakdown_candle_not_bearish");
     if (quality.closeLocationPct < params.closeLocationMin)
-      return this.reject("breakout_close_not_near_high");
+      return this.reject("breakdown_close_not_near_low");
     if (quality.bodyPct < params.bodyMin)
-      return this.reject("breakout_body_too_small");
-    if (quality.upperWickPct > params.upperWickMax)
-      return this.reject("breakout_upper_wick_too_large");
+      return this.reject("breakdown_body_too_small");
+    if (quality.lowerWickPct > params.lowerWickMax)
+      return this.reject("breakdown_lower_wick_too_large");
 
-    const consolidationLow = localConsolidationLow(candles1m, 20);
-    const atrStop = close - atr14 * params.stopAtrMult;
+    const consolidationHigh = localConsolidationHigh(candles1m, 20);
+    const atrStop = close + atr14 * params.stopAtrMult;
     const structureStop =
-      consolidationLow !== undefined && consolidationLow < close
-        ? Math.max(
-            consolidationLow,
-            close - atr14 * params.structureStopAtrMult,
+      consolidationHigh !== undefined && consolidationHigh > close
+        ? Math.min(
+            consolidationHigh,
+            close + atr14 * params.structureStopAtrMult,
           )
         : undefined;
-    const stopLoss = Math.min(atrStop, structureStop ?? atrStop);
-    if (!Number.isFinite(stopLoss) || stopLoss >= close)
+    const stopLoss = Math.max(atrStop, structureStop ?? atrStop);
+    if (!Number.isFinite(stopLoss) || stopLoss <= close)
       return this.reject("invalid_stop_loss");
 
-    const riskPerShare = close - stopLoss;
-    const takeProfit = close + riskPerShare * params.takeProfitR;
-    const plannedRewardPct = ((takeProfit - close) / close) * 100;
+    const riskPerShare = stopLoss - close;
+    const takeProfit = close - riskPerShare * params.takeProfitR;
+    const plannedRewardPct = ((close - takeProfit) / close) * 100;
+    if (takeProfit <= 0) return this.reject("invalid_take_profit");
     if (plannedRewardPct < params.plannedRewardMinPct)
       return this.reject("planned_reward_too_small");
 
-    const trendScore = clamp(((ema20 - ema50) / close) * 150, 0, 0.18);
-    const breakoutScore = clamp(
-      ((close - priorHigh20) / close) * 3500,
+    const trendScore = clamp(((ema50 - ema20) / close) * 150, 0, 0.18);
+    const breakdownScore = clamp(
+      ((priorLow20 - close) / close) * 3500,
       0,
       0.12,
     );
     const rsiScore =
-      rsi14 >= 55 && rsi14 < params.rsiMax ? 0.1 : rsi14 > 50 ? 0.06 : 0;
+      rsi14 <= 45 && rsi14 > params.rsiMin ? 0.1 : rsi14 < 50 ? 0.06 : 0;
     const compressionScore =
       indicators.bbWidthPct !== undefined
         ? clamp(
@@ -281,19 +297,19 @@ export class MomentumBreakoutLongStrategy implements Strategy {
           ) * 0.08
         : 0.03;
     const confidenceScore = clamp(
-      0.58 + trendScore + breakoutScore + rsiScore + compressionScore,
+      0.58 + trendScore + breakdownScore + rsiScore + compressionScore,
       0,
       0.88,
     );
-    const entryMode = "breakout_20";
+    const entryMode = "breakdown_20";
 
     return {
       strategyId: this.id,
       symbol: context.symbol,
-      side: "BUY",
-      direction: "LONG",
+      side: "SELL",
+      direction: "SHORT",
       confidenceScore,
-      entryReason: `Momentum breakout long: mode=${entryMode}, close=${close.toFixed(2)}, priorHigh20=${priorHigh20.toFixed(2)}, EMA50/EMA200 aligned, RSI14=${rsi14.toFixed(1)}, h1=${h1.trend}, h4=${h4.trend}, d1=${d1.trend}`,
+      entryReason: `Momentum breakdown short: mode=${entryMode}, close=${close.toFixed(2)}, priorLow20=${priorLow20.toFixed(2)}, EMA50/EMA200 aligned, RSI14=${rsi14.toFixed(1)}, h1=${h1.trend}, h4=${h4.trend}, d1=${d1.trend}`,
       invalidationLevel: stopLoss,
       suggestedEntry: close,
       stopLoss,
@@ -304,24 +320,29 @@ export class MomentumBreakoutLongStrategy implements Strategy {
         ema200,
         atr14,
         rsi14,
-        donchianUpper,
-        priorHigh20,
-        breakoutBuffer,
-        preBreakoutDriftPct,
-        consolidationDriftMaxPct: params.consolidationDriftMaxPct,
+        donchianLower,
+        priorLow20,
+        breakdownBuffer,
+        preBreakdownDriftPct,
+        consolidationDriftMinPct: params.consolidationDriftMinPct,
         entryMode,
-        confirmedBreakout20,
+        confirmedBreakdown20,
         bbWidthPct: indicators.bbWidthPct,
         previousAverageVolume,
         requiredVolumeMultiplier: params.volumeMultiplier,
         latestVolume: latestCandle.volume,
-        breakoutCloseLocationPct: quality.closeLocationPct,
-        breakoutBodyPct: quality.bodyPct,
-        breakoutUpperWickPct: quality.upperWickPct,
+        breakdownCloseLocationPct: quality.closeLocationPct,
+        breakdownBodyPct: quality.bodyPct,
+        breakdownLowerWickPct: quality.lowerWickPct,
         plannedRewardPct,
         stopAtrMult: params.stopAtrMult,
         structureStopAtrMult: params.structureStopAtrMult,
         takeProfitR: params.takeProfitR,
+        maxDistanceBelowEma20Pct: params.maxDistanceBelowEma20Pct,
+        maxDistanceBelowEma50Pct: params.maxDistanceBelowEma50Pct,
+        distanceBelowEma20Pct,
+        distanceBelowEma50Pct,
+        h4RsiMax: params.h4RsiMax,
         sessionUtcStartHour: params.sessionUtcStartHour,
         sessionUtcEndHour: params.sessionUtcEndHour,
         regime: context.regime,
@@ -333,7 +354,7 @@ export class MomentumBreakoutLongStrategy implements Strategy {
         h4Trend: h4.trend,
         d1Trend: d1.trend,
         d1Return20Pct: d1.return20Pct,
-        consolidationLow,
+        consolidationHigh,
       },
       generatedFromCandleTs: context.latestCandle.ts,
     };

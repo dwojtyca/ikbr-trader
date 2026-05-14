@@ -18,7 +18,7 @@ interface ProposedOrderRow {
   conid: string | null;
   side: Side;
   position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
-  order_type: 'MKT' | 'LMT';
+  order_type: 'MKT' | 'LMT' | 'STP';
   quantity: number;
   entry: number | null;
   stop: number | null;

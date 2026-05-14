@@ -19,7 +19,7 @@ interface ProposedOrderRow {
   conid: string | null;
   side: Side;
   position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
-  order_type: 'MKT' | 'LMT';
+  order_type: 'MKT' | 'LMT' | 'STP';
   quantity: number;
   entry: number | null;
   stop: number | null;
@@ -59,7 +59,7 @@ export interface CumulativeRealizedPnlSummary {
 export interface OrderListFilters {
   instrument?: string;
   side?: Side;
-  orderType?: 'MKT' | 'LMT';
+  orderType?: 'MKT' | 'LMT' | 'STP';
   qty?: number;
   status?: ProposedOrderStatus;
   riskCheckStatus?: 'PASS' | 'REJECT';

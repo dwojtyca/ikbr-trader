@@ -1,8 +1,9 @@
 import { Worker } from "node:worker_threads";
 import { SignalEngine } from "@ikbr/signal-engine/signal-engine";
-import { MomentumBreakoutLongStrategy } from "@ikbr/signal-engine/strategies/momentum-breakout-long.strategy";
+import { createStrategies } from "@ikbr/signal-engine/strategies/strategy-registry";
 import type { Candle, InstrumentContract, ProposedOrder, Side } from "@ikbr/shared";
 import {
+  listAllStrategyProfiles,
   listStrategyProfiles,
   type StrategyProfile,
 } from "@ikbr/shared";
@@ -30,6 +31,7 @@ export interface SimulatorOptions {
   commissionBps: number;
   syntheticSpreadBps: number;
   orderTtlCandles: number;
+  strategyIds?: string[];
   riskLimits: {
     accountEquity: number;
     maxRiskPerTradePct: number;
@@ -145,6 +147,11 @@ function isOrderTouched(order: ProposedOrder, candle: Candle): boolean {
   if (order.orderType === "MKT") return true;
   const entry = order.entry;
   if (!Number.isFinite(entry)) return false;
+  if (order.orderType === "STP") {
+    if (order.side === "BUY") return candle.high >= Number(entry);
+    if (order.side === "SELL") return candle.low <= Number(entry);
+    return false;
+  }
   if (order.side === "BUY") return candle.low <= Number(entry);
   if (order.side === "SELL") return candle.high >= Number(entry);
   return false;
@@ -209,7 +216,11 @@ export class BacktestSimulator {
       "1w": groupCandles(data.candles1w),
     };
     this.currentEquity = options.riskLimits.accountEquity;
+    const activeStrategyIds = new Set(
+      options.strategyIds ?? listStrategyProfiles().map((profile) => profile.id),
+    );
     for (const profile of listStrategyProfiles()) {
+      if (!activeStrategyIds.has(profile.id)) continue;
       this.strategyStates.set(profile.id, {
         strategyId: profile.id,
         enabled: true,
@@ -232,7 +243,7 @@ export class BacktestSimulator {
     const signalEngine = new SignalEngine(
       this as any,
       {
-        strategies: [new MomentumBreakoutLongStrategy()],
+        strategies: createStrategies(this.options.strategyIds),
         minCandles: this.options.minCandles,
         maxSpreadBps: this.options.maxSpreadBps,
         minVolume1m: this.options.minVolume1m,
@@ -1134,7 +1145,7 @@ export async function runIsolatedStrategyBacktest(
   let totalPnl = 0;
   let trades = 0;
   let wins = 0;
-  const profiles = listStrategyProfiles();
+  const profiles = listAllStrategyProfiles();
   const eventsPerStrategy = data.candles1m.length;
   const totalEvents = profiles.length * eventsPerStrategy;
 
@@ -1194,7 +1205,7 @@ export async function runParallelIsolatedStrategyBacktest(
   wins: number;
   winRate: number;
 }> {
-  const profiles = listStrategyProfiles();
+  const profiles = listAllStrategyProfiles();
   const summaries = await repo.listCandleSymbolSummaries();
   const candleCountBySymbol = new Map(
     summaries.map((summary) => [summary.symbol.toUpperCase(), summary.candles]),

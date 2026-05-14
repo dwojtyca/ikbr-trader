@@ -20,6 +20,21 @@
       "import": "./dist/strategies/momentum-breakout-long.strategy.js",
       "default": "./dist/strategies/momentum-breakout-long.strategy.js"
     },
+    "./strategies/momentum-breakdown-short.strategy": {
+      "types": "./dist/strategies/momentum-breakdown-short.strategy.d.ts",
+      "import": "./dist/strategies/momentum-breakdown-short.strategy.js",
+      "default": "./dist/strategies/momentum-breakdown-short.strategy.js"
+    },
+    "./strategies/failed-bounce-short.strategy": {
+      "types": "./dist/strategies/failed-bounce-short.strategy.d.ts",
+      "import": "./dist/strategies/failed-bounce-short.strategy.js",
+      "default": "./dist/strategies/failed-bounce-short.strategy.js"
+    },
+    "./strategies/strategy-registry": {
+      "types": "./dist/strategies/strategy-registry.d.ts",
+      "import": "./dist/strategies/strategy-registry.js",
+      "default": "./dist/strategies/strategy-registry.js"
+    },
     "./repository": {
       "types": "./dist/repository.d.ts",
       "import": "./dist/repository.js",

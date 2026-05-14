@@ -793,8 +793,14 @@ export class TwsExecutionClient {
       }
       base.lmtPrice = ticket.entry;
     }
+    if (orderType === 'STP') {
+      if (ticket.entry === undefined || !Number.isFinite(ticket.entry)) {
+        throw new Error('STP order requires ticket.entry');
+      }
+      base.auxPrice = ticket.entry;
+    }
 
-    if (orderType !== 'MKT' && orderType !== 'LMT') {
+    if (orderType !== 'MKT' && orderType !== 'LMT' && orderType !== 'STP') {
       throw new Error(`Unsupported orderType for current execution engine: ${ticket.orderType}`);
     }
 
@@ -1028,8 +1034,13 @@ export class TwsExecutionClient {
     const normalized: SignalTicket = { ...ticket };
     const isBuy = ticket.side === 'BUY';
 
-    if (ticket.orderType === 'LMT' && ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
-      normalized.entry = this.roundToTick(ticket.entry, minTick, isBuy ? 'down' : 'up');
+    if (ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+      if (ticket.orderType === 'LMT') {
+        normalized.entry = this.roundToTick(ticket.entry, minTick, isBuy ? 'down' : 'up');
+      }
+      if (ticket.orderType === 'STP') {
+        normalized.entry = this.roundToTick(ticket.entry, minTick, isBuy ? 'up' : 'down');
+      }
     }
 
     if (ticket.stop !== undefined && Number.isFinite(ticket.stop)) {

@@ -17,6 +17,7 @@ export interface StrategySignal {
   direction: StrategyDirection;
   confidenceScore: number;
   entryReason: string;
+  entryOrderType?: "MKT" | "LMT" | "STP";
   invalidationLevel?: number;
   suggestedEntry?: number;
   stopLoss?: number;

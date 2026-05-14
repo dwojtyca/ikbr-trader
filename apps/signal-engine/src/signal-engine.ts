@@ -10,13 +10,18 @@ import {
   TimeframeIndicatorSnapshot,
 } from "@ikbr/shared";
 import {
+  emaSlopePct,
+  lastAdx,
   lastAtr,
   lastBollinger,
+  lastCmf,
   lastDonchian,
   lastEma,
   lastMacd,
+  lastMfi,
   lastObvSlope,
   lastRsi,
+  lastSma,
 } from "./indicators.js";
 import { MarketRegimeDetector } from "./regime/market-regime-detector.js";
 import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
@@ -155,6 +160,8 @@ export class SignalEngine {
     const trendFrom1m = lastEma(closes, 200);
     const trendFilterValue = trendFrom1h ?? trendFrom1m;
     const macdSnapshot = lastMacd(closes);
+    const cmfSnapshot = lastCmf(highs, lows, closes, volumes, 20);
+    const mfiSnapshot = lastMfi(highs, lows, closes, volumes, 14);
     const bbSnapshot = lastBollinger(closes, 20);
     const donchianSnapshot = lastDonchian(closes, 20);
 
@@ -162,13 +169,20 @@ export class SignalEngine {
       ema20: lastEma(closes, 20),
       ema50: lastEma(closes, 50),
       ema200: lastEma(closes, 200),
+      sma200: lastSma(closes, 200),
       rsi14: lastRsi(closes, 14),
       rsi14Prev: lastRsi(closes.slice(0, -1), 14),
       atr14: lastAtr(highs, lows, closes, 14),
+      adx14: lastAdx(highs, lows, closes, 14),
       macdLine: macdSnapshot.macdLine,
       macdSignal: macdSnapshot.signalLine,
       macdHist: macdSnapshot.histogram,
       macdHistPrev: macdSnapshot.previousHistogram,
+      macdHistPrev2: macdSnapshot.previous2Histogram,
+      cmf20: cmfSnapshot.value,
+      cmf20Prev: cmfSnapshot.previous,
+      mfi14: mfiSnapshot.value,
+      mfi14Prev: mfiSnapshot.previous,
       bbUpper: bbSnapshot.upper,
       bbMiddle: bbSnapshot.middle,
       bbLower: bbSnapshot.lower,
@@ -422,6 +436,7 @@ export class SignalEngine {
       marketState,
     );
     const entry = signal.suggestedEntry ?? entrySelection.entry;
+    const orderType = signal.entryOrderType ?? "LMT";
     if (signal.stopLoss === undefined || signal.takeProfit === undefined) {
       return this.rejectedOrder(
         symbol,
@@ -649,12 +664,12 @@ export class SignalEngine {
       conid: latest.conid,
       side: signal.side,
       positionEffect,
-      orderType: "LMT",
+      orderType,
       quantity,
       entry,
       stop: positionEffect === "OPEN_OR_ADD" ? stop : undefined,
       takeProfit: positionEffect === "OPEN_OR_ADD" ? takeProfit : undefined,
-      reason: `${signal.entryReason}, strategy=${strategyId}, regime=${indicators.regime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${entrySelection.source}`,
+      reason: `${signal.entryReason}, strategy=${strategyId}, regime=${indicators.regime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
       confidence,
       timestamp: new Date().toISOString(),
       riskCheckStatus: "PASS",
@@ -704,11 +719,15 @@ export class SignalEngine {
     const closes = candles.map((candle) => candle.close);
     const highs = candles.map((candle) => candle.high);
     const lows = candles.map((candle) => candle.low);
+    const volumes = candles.map((candle) => candle.volume);
     const latest = candles[candles.length - 1];
     const ema20 = lastEma(closes, 20);
     const ema50 = lastEma(closes, 50);
     const ema200 = lastEma(closes, 200);
+    const sma200 = lastSma(closes, 200);
     const macd = lastMacd(closes);
+    const cmf = lastCmf(highs, lows, closes, volumes, 20);
+    const mfi = lastMfi(highs, lows, closes, volumes, 14);
     const bb = lastBollinger(closes, 20);
     let trend: TimeframeIndicatorSnapshot["trend"] = "neutral";
     if (
@@ -731,9 +750,15 @@ export class SignalEngine {
       ema20,
       ema50,
       ema200,
+      sma200,
       rsi14: lastRsi(closes, 14),
       atr14: lastAtr(highs, lows, closes, 14),
+      adx14: lastAdx(highs, lows, closes, 14),
       macdHist: macd.histogram,
+      macdHistPrev: macd.previousHistogram,
+      macdHistPrev2: macd.previous2Histogram,
+      cmf20: cmf.value,
+      mfi14: mfi.value,
       bbWidthPct: bb.widthPct,
       volume: latest.volume,
       trend,
@@ -741,6 +766,7 @@ export class SignalEngine {
         ema50 !== undefined
           ? safeDiv(latest.close - ema50, latest.close, 0) * 10000
           : undefined,
+      ema50Slope10Pct: emaSlopePct(closes, 50, 10),
       return3Pct: this.returnPct(closes, 3),
       return4Pct: this.returnPct(closes, 4),
       return12Pct: this.returnPct(closes, 12),
