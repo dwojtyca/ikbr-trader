@@ -85,7 +85,6 @@ type Order = {
   executedAt?: string;
   createdAt?: string;
   indicators?: {
-    regime?: 'bull_trend' | 'bear_trend' | 'range' | 'high_volatility' | 'low_volatility';
     directionalRegime?: 'bull_trend' | 'bear_trend' | 'range';
     volatilityRegime?: 'low_volatility' | 'normal_volatility' | 'high_volatility';
     regimeScore?: number;
@@ -228,7 +227,8 @@ type ReportTrade = {
   instrument: string;
   strategy: string;
   side: 'BUY' | 'SELL';
-  regime: string;
+  directionalRegime: string;
+  volatilityRegime: string;
   confidence: number;
   pnl?: number;
   grossPnl?: number;
@@ -258,7 +258,8 @@ type SignalReportResponse = {
   byStrategy: ReportAggregate[];
   byStrategySymbolSide?: ReportAggregate[];
   bySide: ReportAggregate[];
-  byRegime: ReportAggregate[];
+  byDirectionalRegime: ReportAggregate[];
+  byVolatilityRegime: ReportAggregate[];
   diagnostics?: SignalDiagnostic[];
   worstTrades: ReportTrade[];
 };
@@ -1194,10 +1195,18 @@ export function App() {
 
               <section className="panel">
                 <div className="panel-head">
-                  <h2>By Regime</h2>
-                  <span>How each market regime is behaving</span>
+                  <h2>By Direction</h2>
+                  <span>How each directional regime is behaving</span>
                 </div>
-                <ReportAggregateTable rows={report.byRegime} />
+                <ReportAggregateTable rows={report.byDirectionalRegime} />
+              </section>
+
+              <section className="panel">
+                <div className="panel-head">
+                  <h2>By Volatility</h2>
+                  <span>How each volatility regime is behaving</span>
+                </div>
+                <ReportAggregateTable rows={report.byVolatilityRegime} />
               </section>
 
               <section className="panel">
@@ -1213,7 +1222,8 @@ export function App() {
                         <th>Symbol</th>
                         <th>Strategy</th>
                         <th>Side</th>
-                        <th>Regime</th>
+                        <th>Direction</th>
+                        <th>Volatility</th>
                         <th>Confidence</th>
                         <th>Net PnL</th>
                         <th>Commission</th>
@@ -1225,7 +1235,7 @@ export function App() {
                     <tbody>
                       {report.worstTrades.length === 0 ? (
                         <tr>
-                          <td colSpan={11} className="muted">No broker fills yet</td>
+                          <td colSpan={12} className="muted">No broker fills yet</td>
                         </tr>
                       ) : (
                         report.worstTrades.map((trade) => (
@@ -1234,7 +1244,8 @@ export function App() {
                             <td>{trade.instrument}</td>
                             <td>{trade.strategy}</td>
                             <td>{trade.side}</td>
-                            <td>{trade.regime}</td>
+                          <td>{trade.directionalRegime}</td>
+                          <td>{trade.volatilityRegime}</td>
                             <td>{formatPct(trade.confidence)}</td>
                             <td className={toToneClass(trade.pnl)}>{formatNum(trade.pnl)}</td>
                             <td>{formatNum(trade.commissions)}</td>
@@ -1517,7 +1528,7 @@ export function App() {
               <tr>
                 <th>ID</th>
                 <th>Symbol</th>
-                <th>Regime</th>
+                <th>Market</th>
                 <th>Side</th>
                 <th>Qty</th>
                 <th>Status</th>
@@ -1586,7 +1597,7 @@ export function App() {
                       <tr>
                         <td>{order.id ?? '-'}</td>
                         <td>{order.instrument}</td>
-                        <td>{order.indicators?.regime ?? '-'}</td>
+                        <td>{order.indicators ? `${order.indicators.directionalRegime ?? '-'} / ${order.indicators.volatilityRegime ?? '-'}` : '-'}</td>
                         <td>{order.side}</td>
                         <td>{formatQty(order.quantity)}</td>
                         <td>{order.status}</td>
@@ -1647,7 +1658,8 @@ export function App() {
                                 <div><span>Type</span><strong>{order.orderType}</strong></div>
                                 <div><span>Confidence</span><strong>{formatPct(order.confidence)}</strong></div>
                                 <div><span>Risk</span><strong>{order.riskCheckStatus}</strong></div>
-                                <div><span>Regime</span><strong>{order.indicators?.regime ?? '-'}</strong></div>
+                                <div><span>Direction</span><strong>{order.indicators?.directionalRegime ?? '-'}</strong></div>
+                                <div><span>Volatility</span><strong>{order.indicators?.volatilityRegime ?? '-'}</strong></div>
                                 <div><span>Decision Source</span><strong>{order.decisionSource ?? '-'}</strong></div>
                                 <div><span>AI Decision</span><strong>{order.aiDecision ?? '-'}</strong></div>
                                 <div><span>AI Model</span><strong>{order.aiModel ?? '-'}</strong></div>
@@ -1821,10 +1833,18 @@ function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportRes
 
       <section className="panel">
         <div className="panel-head">
-          <h2>By Regime</h2>
-          <span>How each market regime is behaving</span>
+          <h2>By Direction</h2>
+          <span>How each directional regime is behaving</span>
         </div>
-        <ReportAggregateTable rows={report.byRegime} />
+        <ReportAggregateTable rows={report.byDirectionalRegime} />
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>By Volatility</h2>
+          <span>How each volatility regime is behaving</span>
+        </div>
+        <ReportAggregateTable rows={report.byVolatilityRegime} />
       </section>
 
       <section className="panel">
@@ -1840,7 +1860,8 @@ function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportRes
                 <th>Symbol</th>
                 <th>Strategy</th>
                 <th>Side</th>
-                <th>Regime</th>
+                <th>Direction</th>
+                <th>Volatility</th>
                 <th>Confidence</th>
                 <th>Net PnL</th>
                 <th>Commission</th>
@@ -1852,7 +1873,7 @@ function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportRes
             <tbody>
               {report.worstTrades.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="muted">No fills yet</td>
+                  <td colSpan={12} className="muted">No fills yet</td>
                 </tr>
               ) : (
                 report.worstTrades.map((trade) => (
@@ -1861,7 +1882,8 @@ function ReportDetails({ report, strategyToggleBusy }: { report: SignalReportRes
                     <td>{trade.instrument}</td>
                     <td>{trade.strategy}</td>
                     <td>{trade.side}</td>
-                    <td>{trade.regime}</td>
+                  <td>{trade.directionalRegime}</td>
+                  <td>{trade.volatilityRegime}</td>
                     <td>{formatPct(trade.confidence)}</td>
                     <td className={toToneClass(trade.pnl)}>{formatNum(trade.pnl)}</td>
                     <td>{formatNum(trade.commissions)}</td>

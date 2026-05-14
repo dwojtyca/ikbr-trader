@@ -1,11 +1,12 @@
-import type { MarketRegime, SecType } from "./index.js";
+import type { DirectionalRegime, SecType, VolatilityRegime } from "./index.js";
 
 export type ProfileStyle = "trend" | "range" | "breakout" | "reversion";
 
 export interface StrategyProfile {
   id: string;
   secType: SecType[];
-  regime: MarketRegime;
+  directionalRegimes: DirectionalRegime[];
+  volatilityRegimes: VolatilityRegime[];
   style: ProfileStyle;
   enabledInBot: boolean;
   entryScore: number;
@@ -20,7 +21,8 @@ const PROFILES: StrategyProfile[] = [
   {
     id: "momentum_breakout_long_v1",
     secType: ["STK", "IND"],
-    regime: "bull_trend",
+    directionalRegimes: ["bull_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "breakout",
     enabledInBot: true,
     entryScore: 0.58,
@@ -33,7 +35,8 @@ const PROFILES: StrategyProfile[] = [
   {
     id: "momentum_breakdown_short_v1",
     secType: ["STK", "IND"],
-    regime: "bear_trend",
+    directionalRegimes: ["bear_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "breakout",
     enabledInBot: true,
     entryScore: 0.58,
@@ -46,7 +49,8 @@ const PROFILES: StrategyProfile[] = [
   {
     id: "failed_bounce_short_v1",
     secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
-    regime: "bear_trend",
+    directionalRegimes: ["bear_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "reversion",
     enabledInBot: false,
     entryScore: 0.58,

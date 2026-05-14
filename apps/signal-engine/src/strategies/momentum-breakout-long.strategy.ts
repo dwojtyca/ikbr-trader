@@ -139,7 +139,8 @@ export class MomentumBreakoutLongStrategy implements Strategy {
   readonly id = "momentum_breakout_long_v1";
   readonly secTypes = ["STK", "IND"] as const;
   readonly supportedDirections = ["LONG"] as const;
-  readonly allowedRegimes = ["bull_trend"] as const;
+  readonly allowedDirectionalRegimes = ["bull_trend"] as const;
+  readonly allowedVolatilityRegimes = ["normal_volatility", "high_volatility"] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
   private lastRejectionReason: string | undefined;
 
@@ -152,8 +153,10 @@ export class MomentumBreakoutLongStrategy implements Strategy {
 
     if (context.secType !== "STK" && context.secType !== "IND")
       return this.reject("sec_type_not_supported");
-    if (context.regime !== "bull_trend")
-      return this.reject("regime_not_bull_trend");
+    if (context.directionalRegime !== "bull_trend")
+      return this.reject("directional_regime_not_bull_trend");
+    if (context.volatilityRegime === "low_volatility")
+      return this.reject("volatility_regime_low_volatility");
 
     const params = paramsForSecType(context.secType);
     if (
@@ -324,7 +327,6 @@ export class MomentumBreakoutLongStrategy implements Strategy {
         takeProfitR: params.takeProfitR,
         sessionUtcStartHour: params.sessionUtcStartHour,
         sessionUtcEndHour: params.sessionUtcEndHour,
-        regime: context.regime,
         directionalRegime: indicators.directionalRegime,
         volatilityRegime: indicators.volatilityRegime,
         regimeScore: indicators.regimeScore,

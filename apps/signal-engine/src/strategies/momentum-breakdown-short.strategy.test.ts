@@ -31,7 +31,8 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
     symbol: "AAPL",
     conid: "123",
     secType: "STK",
-    regime: "bear_trend",
+    directionalRegime: "bear_trend",
+    volatilityRegime: "normal_volatility",
     latestCandle,
     indicators: {
       ema20: 102,
@@ -100,13 +101,13 @@ test("MomentumBreakdownShortStrategy emits SELL signal for IND bear breakdown", 
   assert.equal(signal.direction, "SHORT");
 });
 
-test("MomentumBreakdownShortStrategy rejects non-bear-trend regime", () => {
+test("MomentumBreakdownShortStrategy rejects non-bear-trend directional regime", () => {
   const strategy = new MomentumBreakdownShortStrategy();
 
-  const signal = strategy.generateSignal(baseContext({ regime: "range" }));
+  const signal = strategy.generateSignal(baseContext({ directionalRegime: "range" }));
 
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), "regime_not_bear_trend");
+  assert.equal(strategy.getLastRejectionReason(), "directional_regime_not_bear_trend");
 });
 
 test("MomentumBreakdownShortStrategy rejects signals outside UTC strategy session", () => {

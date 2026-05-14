@@ -126,7 +126,8 @@ export interface SignalReportTrade {
   instrument: string;
   strategy: string;
   side: Side;
-  regime: string;
+  directionalRegime: string;
+  volatilityRegime: string;
   confidence: number;
   pnl?: number;
   grossPnl?: number;
@@ -145,7 +146,8 @@ export interface SignalReport {
   byStrategy: SignalReportAggregate[];
   byStrategySymbolSide: SignalReportAggregate[];
   bySide: SignalReportAggregate[];
-  byRegime: SignalReportAggregate[];
+  byDirectionalRegime: SignalReportAggregate[];
+  byVolatilityRegime: SignalReportAggregate[];
   worstTrades: SignalReportTrade[];
 }
 
@@ -1100,7 +1102,8 @@ export class SignalRepository {
           COALESCE(po.instrument, broker_orders.instrument, 'n/a') AS instrument,
           COALESCE(po.strategy, 'n/a') AS strategy,
           COALESCE(po.side, broker_orders.side, 'n/a') AS side,
-          COALESCE(po.indicator_snapshot ->> 'regime', 'unknown') AS regime,
+          COALESCE(po.indicator_snapshot ->> 'directionalRegime', 'unknown') AS directional_regime,
+          COALESCE(po.indicator_snapshot ->> 'volatilityRegime', 'unknown') AS volatility_regime,
           po.confidence,
           broker_orders.pnl,
           broker_orders.gross_pnl,
@@ -1148,7 +1151,8 @@ export class SignalRepository {
       this.queryReportAggregate(baseCte, boundedLimit, 'strategy', strategyIds),
       this.queryReportAggregate(baseCte, boundedLimit, 'strategy_symbol_side'),
       this.queryReportAggregate(baseCte, boundedLimit, 'side'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'regime')
+      this.queryReportAggregate(baseCte, boundedLimit, 'directional_regime'),
+      this.queryReportAggregate(baseCte, boundedLimit, 'volatility_regime')
     ]);
 
     const worstTradesResult = await this.pool.query(
@@ -1159,7 +1163,8 @@ export class SignalRepository {
         instrument,
         strategy,
         side,
-        regime,
+        directional_regime,
+        volatility_regime,
         confidence,
         pnl,
         gross_pnl,
@@ -1217,13 +1222,15 @@ export class SignalRepository {
       byStrategy: aggregateResults[1],
       byStrategySymbolSide: aggregateResults[2],
       bySide: aggregateResults[3],
-      byRegime: aggregateResults[4],
+      byDirectionalRegime: aggregateResults[4],
+      byVolatilityRegime: aggregateResults[5],
       worstTrades: worstTradesResult.rows.map((row) => ({
         orderId: Number(row.order_id),
         instrument: String(row.instrument),
         strategy: String(row.strategy),
         side: row.side as Side,
-        regime: String(row.regime),
+        directionalRegime: String(row.directional_regime),
+        volatilityRegime: String(row.volatility_regime),
         confidence: Number(row.confidence ?? 0),
         pnl: row.pnl === null || row.pnl === undefined ? undefined : Number(row.pnl),
         grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
@@ -1286,7 +1293,7 @@ export class SignalRepository {
   private async queryReportAggregate(
     baseCte: string,
     limit: number,
-    dimension: 'instrument' | 'strategy' | 'strategy_symbol_side' | 'side' | 'regime',
+    dimension: 'instrument' | 'strategy' | 'strategy_symbol_side' | 'side' | 'directional_regime' | 'volatility_regime',
     strategyIds: string[] = []
   ): Promise<SignalReportAggregate[]> {
     const keySqlByDimension = {
@@ -1294,7 +1301,8 @@ export class SignalRepository {
       strategy: 'strategy',
       strategy_symbol_side: "strategy || ' / ' || instrument || ' / ' || side",
       side: 'side',
-      regime: 'regime'
+      directional_regime: 'directional_regime',
+      volatility_regime: 'volatility_regime'
     } satisfies Record<typeof dimension, string>;
     const strategyStatusJoin = dimension === 'strategy' ? 'srs.strategy_id = aggregate.key' : 'false';
 

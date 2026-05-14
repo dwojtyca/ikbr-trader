@@ -2,9 +2,10 @@ import type {
   SecType,
   Candle,
   CandleTimeframe,
+  DirectionalRegime,
   IndicatorSnapshot,
-  MarketRegime,
   Side,
+  VolatilityRegime,
 } from "@ikbr/shared";
 import type { ExposureSnapshot } from "../repository.js";
 
@@ -30,7 +31,8 @@ export interface StrategyContext {
   symbol: string;
   conid: string;
   secType: SecType;
-  regime: MarketRegime;
+  directionalRegime: DirectionalRegime;
+  volatilityRegime: VolatilityRegime;
   latestCandle: Candle;
   indicators: IndicatorSnapshot;
   candlesByTimeframe: Partial<Record<CandleTimeframe, Candle[]>>;
@@ -68,7 +70,8 @@ export interface Strategy {
   id: string;
   secTypes: readonly SecType[];
   supportedDirections: readonly StrategyDirection[];
-  allowedRegimes: readonly MarketRegime[];
+  allowedDirectionalRegimes: readonly DirectionalRegime[];
+  allowedVolatilityRegimes: readonly VolatilityRegime[];
   requiredTimeframes: readonly CandleTimeframe[];
   generateSignal(context: StrategyContext): StrategySignal | null;
   shouldExit?(context: ExitContext): ExitSignal | null;

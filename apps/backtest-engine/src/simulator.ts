@@ -79,7 +79,8 @@ interface Position {
   strategy: string;
   runtimeKey: string;
   confidence: number;
-  regime: string;
+  directionalRegime: string;
+  volatilityRegime: string;
   side: Side;
   priceMultiplier: number;
   fxToBaseAtEntry: number;
@@ -695,7 +696,8 @@ export class BacktestSimulator {
           order.side,
         ),
         confidence: order.confidence,
-        regime: order.indicators?.regime ?? "n/a",
+        directionalRegime: order.indicators?.directionalRegime ?? "unknown",
+        volatilityRegime: order.indicators?.volatilityRegime ?? "unknown",
         side: qty < 0 ? "SELL" : "BUY",
         priceMultiplier,
         fxToBaseAtEntry,
@@ -799,7 +801,8 @@ export class BacktestSimulator {
       conid: position.conid,
       strategy: position.strategy,
       side: position.side,
-      regime: position.regime,
+      directionalRegime: position.directionalRegime,
+      volatilityRegime: position.volatilityRegime,
       confidence: position.confidence,
       quantity: quantityAbs,
       entryPrice: position.averageCost,
@@ -967,6 +970,8 @@ export class BacktestSimulator {
       normalized.includes("no active profile") ||
       normalized.includes("regime_not_trend") ||
       normalized.includes("regime_not_bull_trend") ||
+      normalized.includes("directional_regime_not_") ||
+      normalized.includes("volatility_regime_") ||
       normalized.includes("asset_class_not_stock") ||
       normalized.includes("asset_class_not_supported")
     )

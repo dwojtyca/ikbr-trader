@@ -222,8 +222,6 @@ export class SignalEngine {
       latest.close,
       indicators,
     );
-    const regime = regimeAnalysis.regime;
-    indicators.regime = regime;
     indicators.directionalRegime = regimeAnalysis.directionalRegime;
     indicators.volatilityRegime = regimeAnalysis.volatilityRegime;
     indicators.regimeScore = regimeAnalysis.score;
@@ -339,7 +337,8 @@ export class SignalEngine {
         symbol,
         conid: latest.conid,
         secType,
-        regime,
+        directionalRegime: regimeAnalysis.directionalRegime,
+        volatilityRegime: regimeAnalysis.volatilityRegime,
         latestCandle: latest,
         indicators,
         candlesByTimeframe: {
@@ -370,7 +369,7 @@ export class SignalEngine {
         latest.conid,
         portfolioResult.rejectionReasons.length > 0
           ? portfolioResult.rejectionReasons.join("; ")
-          : `No strategy signal for secType=${secType}, regime=${regime}`,
+          : `No strategy signal for secType=${secType}, directionalRegime=${regimeAnalysis.directionalRegime}, volatilityRegime=${regimeAnalysis.volatilityRegime}`,
         indicators,
         "HOLD",
         generatedFromCandleTs,
@@ -669,7 +668,7 @@ export class SignalEngine {
       entry,
       stop: positionEffect === "OPEN_OR_ADD" ? stop : undefined,
       takeProfit: positionEffect === "OPEN_OR_ADD" ? takeProfit : undefined,
-      reason: `${signal.entryReason}, strategy=${strategyId}, regime=${indicators.regime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
+      reason: `${signal.entryReason}, strategy=${strategyId}, directionalRegime=${indicators.directionalRegime}, volatilityRegime=${indicators.volatilityRegime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
       confidence,
       timestamp: new Date().toISOString(),
       riskCheckStatus: "PASS",

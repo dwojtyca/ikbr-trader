@@ -3,7 +3,6 @@ import type {
   CandleTimeframe,
   DirectionalRegime,
   IndicatorSnapshot,
-  MarketRegime,
   RegimeAnalysis,
   TimeframeIndicatorSnapshot,
   TimeframeTrendVotes,
@@ -229,19 +228,7 @@ function volatilityRegime(
   return 'normal_volatility';
 }
 
-function compositeRegime(directional: DirectionalRegime, volatility: VolatilityRegime): MarketRegime {
-  if (directional === 'bull_trend') return 'bull_trend';
-  if (directional === 'bear_trend') return 'bear_trend';
-  if (volatility === 'high_volatility') return 'high_volatility';
-  if (volatility === 'low_volatility') return 'low_volatility';
-  return 'range';
-}
-
 export class MarketRegimeDetector {
-  detect(secType: SecType, price: number, indicators: IndicatorSnapshot): MarketRegime {
-    return this.detectDetailed(secType, price, indicators).regime;
-  }
-
   detectDetailed(secType: SecType, price: number, indicators: IndicatorSnapshot): RegimeAnalysis {
     const thresholds = thresholdsForSecType(secType);
     const reasons: string[] = [];
@@ -294,7 +281,6 @@ export class MarketRegimeDetector {
     }
 
     return {
-      regime: compositeRegime(directionalRegime, volRegime),
       directionalRegime,
       volatilityRegime: volRegime,
       score: round(score),

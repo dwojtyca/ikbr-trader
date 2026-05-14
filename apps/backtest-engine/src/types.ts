@@ -57,7 +57,8 @@ export interface BacktestFillRecord {
   conid?: string;
   strategy: string;
   side: Side;
-  regime: string;
+  directionalRegime: string;
+  volatilityRegime: string;
   confidence: number;
   quantity: number;
   entryPrice: number;

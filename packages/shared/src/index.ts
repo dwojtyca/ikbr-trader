@@ -9,17 +9,6 @@ export type ProposedOrderStatus =
   | 'SUPERSEDED'
   | 'EXPIRED';
 export type SecType = string;
-export type MarketRegime =
-  // Directional upside regime: higher timeframes mostly agree that price is trending up.
-  | 'bull_trend'
-  // Directional downside regime: higher timeframes mostly agree that price is trending down.
-  | 'bear_trend'
-  // Non-directional regime: no reliable multi-timeframe trend consensus and volatility is not extreme.
-  | 'range'
-  // Volatility expansion regime: ATR/Bollinger width is elevated, but direction is not clean enough for bull_trend/bear_trend.
-  | 'high_volatility'
-  // Compression regime: volatility is muted and price is likely consolidating before a larger move.
-  | 'low_volatility';
 export type DirectionalRegime =
   // Upside directional bias confirmed by the weighted timeframe trend model.
   | 'bull_trend'
@@ -40,7 +29,6 @@ export interface TimeframeTrendVotes {
   neutral: number;
 }
 export interface RegimeAnalysis {
-  regime: MarketRegime;
   directionalRegime: DirectionalRegime;
   volatilityRegime: VolatilityRegime;
   score: number;
@@ -141,7 +129,6 @@ export interface IndicatorSnapshot {
   trendFilterValue?: number;
   trendFilterSource?: 'EMA50_1h' | 'EMA200_1m';
   secType?: SecType;
-  regime?: MarketRegime;
   directionalRegime?: DirectionalRegime;
   volatilityRegime?: VolatilityRegime;
   regimeScore?: number;

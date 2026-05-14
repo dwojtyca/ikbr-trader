@@ -161,7 +161,8 @@ export class FailedBounceShortStrategy implements Strategy {
   readonly id = "failed_bounce_short_v1";
   readonly secTypes = ["STK", "IND", "ETF", "CMDTY", "FUT"] as const;
   readonly supportedDirections = ["SHORT"] as const;
-  readonly allowedRegimes = ["bear_trend"] as const;
+  readonly allowedDirectionalRegimes = ["bear_trend"] as const;
+  readonly allowedVolatilityRegimes = ["normal_volatility", "high_volatility"] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
   private lastRejectionReason: string | undefined;
 
@@ -178,8 +179,10 @@ export class FailedBounceShortStrategy implements Strategy {
       )
     )
       return this.reject("sec_type_not_supported");
-    if (context.regime !== "bear_trend")
-      return this.reject("regime_not_bear_trend");
+    if (context.directionalRegime !== "bear_trend")
+      return this.reject("directional_regime_not_bear_trend");
+    if (context.volatilityRegime === "low_volatility")
+      return this.reject("volatility_regime_low_volatility");
 
     const params = paramsForSecType(context.secType);
     if (
@@ -469,7 +472,6 @@ export class FailedBounceShortStrategy implements Strategy {
         score: signalScore,
         minScore: params.minScore,
         scoreParts,
-        regime: context.regime,
         directionalRegime: indicators.directionalRegime,
         volatilityRegime: indicators.volatilityRegime,
         regimeScore: indicators.regimeScore,

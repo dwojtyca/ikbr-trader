@@ -232,7 +232,8 @@ export class BacktestRepository {
         conid TEXT,
         strategy TEXT NOT NULL,
         side TEXT NOT NULL,
-        regime TEXT NOT NULL,
+        directional_regime TEXT NOT NULL DEFAULT 'unknown',
+        volatility_regime TEXT NOT NULL DEFAULT 'unknown',
         confidence DOUBLE PRECISION NOT NULL,
         quantity DOUBLE PRECISION NOT NULL,
         entry_price DOUBLE PRECISION NOT NULL,
@@ -246,6 +247,9 @@ export class BacktestRepository {
         exit_reason TEXT NOT NULL
       );
     `);
+    await this.pool.query(`ALTER TABLE backtest_fills DROP COLUMN IF EXISTS regime;`);
+    await this.pool.query(`ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS directional_regime TEXT NOT NULL DEFAULT 'unknown';`);
+    await this.pool.query(`ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS volatility_regime TEXT NOT NULL DEFAULT 'unknown';`);
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_strategy_state (
         run_id BIGINT NOT NULL REFERENCES backtest_runs(id) ON DELETE CASCADE,
@@ -620,9 +624,9 @@ export class BacktestRepository {
   async insertFill(fill: BacktestFillRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO backtest_fills (
-        run_id, order_id, instrument, conid, strategy, side, regime, confidence, quantity,
+        run_id, order_id, instrument, conid, strategy, side, directional_regime, volatility_regime, confidence, quantity,
         entry_price, exit_price, entry_at, exit_at, gross_pnl, commission, net_pnl, pnl_pct, exit_reason
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
       [
         fill.runId,
         fill.orderId,
@@ -630,7 +634,8 @@ export class BacktestRepository {
         fill.conid ?? null,
         fill.strategy,
         fill.side,
-        fill.regime,
+        fill.directionalRegime,
+        fill.volatilityRegime,
         fill.confidence,
         fill.quantity,
         fill.entryPrice,
@@ -730,9 +735,8 @@ export class BacktestRepository {
         instrument: String(row.instrument),
         strategy: String(row.strategy),
         side: String(row.side),
-        regime: String(row.regime),
-        directionalRegime: String(indicators?.directionalRegime ?? row.regime ?? 'unknown'),
-        volatilityRegime: String(indicators?.volatilityRegime ?? 'unknown'),
+        directionalRegime: String(indicators?.directionalRegime ?? row.directional_regime ?? 'unknown'),
+        volatilityRegime: String(indicators?.volatilityRegime ?? row.volatility_regime ?? 'unknown'),
         regimeScore: indicators?.regimeScore === undefined ? undefined : Number(indicators.regimeScore),
         regimeConfidence: indicators?.regimeConfidence === undefined ? undefined : Number(indicators.regimeConfidence),
         confidence: Number(row.confidence),
@@ -843,7 +847,6 @@ export class BacktestRepository {
       byStrategy: aggregate((fill) => fill.strategy, listStrategyProfiles().map((profile) => profile.id)),
       byStrategySymbolSide: aggregate((fill) => `${fill.strategy} / ${fill.instrument} / ${fill.side}`),
       bySide: aggregate((fill) => fill.side),
-      byRegime: aggregate((fill) => fill.regime),
       byDirectionalRegime: aggregate((fill) => fill.directionalRegime),
       byVolatilityRegime: aggregate((fill) => fill.volatilityRegime),
       diagnostics,

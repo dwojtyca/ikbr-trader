@@ -29,7 +29,8 @@ function baseContext(overrides: Partial<StrategyContext> = {}): StrategyContext 
     symbol: 'AAPL',
     conid: '123',
     secType: 'STK',
-    regime: 'bull_trend',
+    directionalRegime: 'bull_trend',
+    volatilityRegime: 'normal_volatility',
     latestCandle,
     indicators: {
       ema20: 103,
@@ -169,13 +170,13 @@ test('MomentumBreakoutLongStrategy rejects overbought RSI', () => {
   assert.equal(strategy.getLastRejectionReason(), 'rsi_overheated');
 });
 
-test('MomentumBreakoutLongStrategy rejects non-bull-trend regime', () => {
+test('MomentumBreakoutLongStrategy rejects non-bull-trend directional regime', () => {
   const strategy = new MomentumBreakoutLongStrategy();
 
-  const signal = strategy.generateSignal(baseContext({ regime: 'range' }));
+  const signal = strategy.generateSignal(baseContext({ directionalRegime: 'range' }));
 
   assert.equal(signal, null);
-  assert.equal(strategy.getLastRejectionReason(), 'regime_not_bull_trend');
+  assert.equal(strategy.getLastRejectionReason(), 'directional_regime_not_bull_trend');
 });
 
 test('MomentumBreakoutLongStrategy rejects signals outside UTC strategy session', () => {

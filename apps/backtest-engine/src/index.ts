@@ -96,17 +96,40 @@ async function ensureHistoricalFxRates(
   const baseCurrency = config.IB_CURRENCY.trim().toUpperCase();
   const client = new FrankfurterFxClient();
   for (const quoteCurrency of quoteCurrencies) {
-    const rates = await client.fetchDailyRatesToBase({
-      quoteCurrency,
-      baseCurrency,
-      dateFrom,
-      dateTo,
-    });
-    await repo.insertFxRates(rates);
-    app.log.info(
-      { scope: "fx", quoteCurrency, baseCurrency, rates: rates.length },
-      "historical FX rates fetched",
-    );
+    try {
+      const rates = await client.fetchDailyRatesToBase({
+        quoteCurrency,
+        baseCurrency,
+        dateFrom,
+        dateTo,
+      });
+      await repo.insertFxRates(rates);
+      app.log.info(
+        { scope: "fx", quoteCurrency, baseCurrency, rates: rates.length },
+        "historical FX rates fetched",
+      );
+    } catch (error) {
+      const cachedRates = await repo.countFxRates(
+        baseCurrency,
+        [quoteCurrency],
+        dateFrom,
+        dateTo,
+      );
+      if (cachedRates > 0) {
+        app.log.warn(
+          {
+            scope: "fx",
+            quoteCurrency,
+            baseCurrency,
+            cachedRates,
+            err: error,
+          },
+          "historical FX fetch failed; using cached FX rates",
+        );
+        continue;
+      }
+      throw error;
+    }
   }
 }
 

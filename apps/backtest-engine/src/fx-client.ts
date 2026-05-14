@@ -12,6 +12,10 @@ function dateOnly(value: Date): string {
   return value.toISOString().slice(0, 10);
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class FrankfurterFxClient {
   constructor(private readonly source = 'frankfurter_ecb') {}
 
@@ -33,27 +37,37 @@ export class FrankfurterFxClient {
     url.searchParams.set('base', quoteCurrency);
     url.searchParams.set('quotes', baseCurrency);
 
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`FX fetch failed for ${quoteCurrency}->${baseCurrency}: HTTP ${response.status}`);
+    let lastError: Error | undefined;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = (await response.json()) as FrankfurterSeriesResponse | FrankfurterSeriesResponse[];
+        const rows = Array.isArray(payload) ? payload : payload.rates
+          ? Object.entries(payload.rates).map(([date, byCurrency]) => ({
+              date,
+              rate: Number(byCurrency[baseCurrency])
+            }))
+          : [{ date: payload.date, rate: payload.rate }];
+
+        return rows
+          .map((row) => ({
+            date: String(row.date ?? ''),
+            baseCurrency,
+            quoteCurrency,
+            rateToBase: Number(row.rate),
+            source: this.source
+          }))
+          .filter((rate) => Number.isFinite(rate.rateToBase) && rate.rateToBase > 0);
+      } catch (error) {
+        lastError = error as Error;
+        if (attempt < 3) await delay(500 * attempt);
+      }
     }
 
-    const payload = (await response.json()) as FrankfurterSeriesResponse | FrankfurterSeriesResponse[];
-    const rows = Array.isArray(payload) ? payload : payload.rates
-      ? Object.entries(payload.rates).map(([date, byCurrency]) => ({
-          date,
-          rate: Number(byCurrency[baseCurrency])
-        }))
-      : [{ date: payload.date, rate: payload.rate }];
-
-    return rows
-      .map((row) => ({
-        date: String(row.date ?? ''),
-        baseCurrency,
-        quoteCurrency,
-        rateToBase: Number(row.rate),
-        source: this.source
-      }))
-      .filter((rate) => Number.isFinite(rate.rateToBase) && rate.rateToBase > 0);
+    throw new Error(`FX fetch failed for ${quoteCurrency}->${baseCurrency}: ${lastError?.message ?? 'unknown error'}`);
   }
 }
