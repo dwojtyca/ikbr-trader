@@ -79,6 +79,8 @@ interface Position {
   quantity: number;
   averageCost: number;
   stop?: number;
+  /** Initial stop captured at entry; used to compute 1R for breakeven move. */
+  initialStop?: number;
   takeProfit?: number;
   entryAt: Date;
   orderId: number;
@@ -688,6 +690,7 @@ export class BacktestSimulator {
         quantity: (existing?.quantity ?? 0) + qty,
         averageCost,
         stop: order.stop,
+        initialStop: existing?.initialStop ?? order.stop,
         takeProfit: order.takeProfit,
         entryAt: existing?.entryAt ?? candle.ts,
         orderId: pending.id,
@@ -721,6 +724,65 @@ export class BacktestSimulator {
     if (!position || position.entryAt.getTime() >= candle.ts.getTime()) return;
 
     const isLong = position.quantity > 0;
+
+    // Move stop to breakeven (entry) once price has travelled 1R in our favor.
+    // Per-strategy opt-in: globally enabling BE hurt 3/4 strategies (run #9).
+    // Only momentum_breakdown_short_v1 benefits (its TP target is far, BE protects).
+    const breakevenStrategies = new Set(["momentum_breakdown_short_v1"]);
+    if (
+      breakevenStrategies.has(position.strategy) &&
+      position.initialStop !== undefined &&
+      position.stop === position.initialStop
+    ) {
+      const riskPerShare = isLong
+        ? position.averageCost - position.initialStop
+        : position.initialStop - position.averageCost;
+      if (riskPerShare > 0) {
+        const oneR = isLong
+          ? position.averageCost + riskPerShare
+          : position.averageCost - riskPerShare;
+        const reachedOneR = isLong ? candle.high >= oneR : candle.low <= oneR;
+        const touchedOriginalStop = isLong
+          ? candle.low <= position.initialStop
+          : candle.high >= position.initialStop;
+        if (reachedOneR && !touchedOriginalStop) {
+          position.stop = position.averageCost;
+        }
+      }
+    }
+
+    // Soft trailing: lock +1R profit once price reaches 3R in our favor.
+    // Only momentum_breakout_long_v1 (TP=4R). Less aggressive than the failed
+    // "lock 0.5R after 2R" experiment (run #12) — only kicks in for genuine winners
+    // already deep in profit, leaving normal swings to TP=4R or full ATR stop.
+    const lockPlus1RAfter3RStrategies = new Set(["momentum_breakout_long_v1"]);
+    if (
+      lockPlus1RAfter3RStrategies.has(position.strategy) &&
+      position.initialStop !== undefined &&
+      position.stop === position.initialStop
+    ) {
+      const riskPerShare = isLong
+        ? position.averageCost - position.initialStop
+        : position.initialStop - position.averageCost;
+      if (riskPerShare > 0) {
+        const threeR = isLong
+          ? position.averageCost + riskPerShare * 3
+          : position.averageCost - riskPerShare * 3;
+        const oneR = isLong
+          ? position.averageCost + riskPerShare
+          : position.averageCost - riskPerShare;
+        const reachedThreeR = isLong
+          ? candle.high >= threeR
+          : candle.low <= threeR;
+        const touchedOriginalStop = isLong
+          ? candle.low <= position.initialStop
+          : candle.high >= position.initialStop;
+        if (reachedThreeR && !touchedOriginalStop) {
+          position.stop = oneR;
+        }
+      }
+    }
+
     const stopTouched =
       position.stop !== undefined
         ? isLong

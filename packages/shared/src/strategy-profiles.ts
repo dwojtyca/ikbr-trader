@@ -42,7 +42,7 @@ const PROFILES: StrategyProfile[] = [
     id: "momentum_breakdown_short_v1",
     secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
     directionalRegimes: ["bear_trend"],
-    volatilityRegimes: ["high_volatility"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "breakout",
     enabledInBot: true,
     entryScore: 0.58,
@@ -72,11 +72,13 @@ const PROFILES: StrategyProfile[] = [
   {
     id: "gap_fade_short_v1",
     secType: ["STK", "IND", "ETF"],
-    // Gap fades work in any directional regime, but most signal in bull/range
-    // (gap-ups are common; bear-trend gap-ups are rare exhaustion plays).
-    directionalRegimes: ["bull_trend", "range", "bear_trend"],
+    // Run #7: bull_trend regime is toxic for gap fades (gaps continue, don't fade)
+    // -139$ on 13 trades. Range and bear_trend break-even or better. Excluded bull.
+    directionalRegimes: ["range", "bear_trend"],
     volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "reversion",
+    // Re-enabled after fixing tight-stop bug (run #5: stops were 0.12% wide
+    // -> WR 3%). Now stopMinPct floor of 0.6% prevents micro-noise stopouts.
     enabledInBot: true,
     entryScore: 0.6,
     decisionEdge: 0.08,

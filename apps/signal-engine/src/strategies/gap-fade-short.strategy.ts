@@ -24,8 +24,10 @@ interface GapFadeShortParams {
   closeLocationMaxPct: number;
   /** Trigger candle minimum body fraction (avoid tiny dojis). */
   bodyMin: number;
-  /** Stop = max(sessionOpen, close + atr * stopAtrMult). */
+  /** Stop = max(sessionOpen, close + atr * stopAtrMult, close * (1 + stopMinPct/100)). */
   stopAtrMult: number;
+  /** Minimum stop distance from entry as percent of price (floor for tight ATR). */
+  stopMinPct: number;
   /** Distance-from-VWAP minimum in bps (must be meaningfully above VWAP). */
   distanceFromVwapMinBps: number;
   /** Minimum planned reward percent (must clear commission drag). */
@@ -49,9 +51,10 @@ function paramsForSecType(_secType: SecType): GapFadeShortParams {
     closeLocationMaxPct: 0.4,
     bodyMin: 0.15,
     stopAtrMult: 1.2,
+    stopMinPct: 0.6,
     distanceFromVwapMinBps: 20,
     plannedRewardMinPct: 0.4,
-    takeProfitGapFraction: 0.7,
+    takeProfitGapFraction: 0.5,
     sessionUtcStartHour: 8,
     sessionUtcEndHour: 19,
   };
@@ -125,11 +128,7 @@ export class GapFadeShortStrategy implements Strategy {
   readonly id = "gap_fade_short_v1";
   readonly secTypes = ["STK", "IND", "ETF"] as const;
   readonly supportedDirections = ["SHORT"] as const;
-  readonly allowedDirectionalRegimes = [
-    "bull_trend",
-    "range",
-    "bear_trend",
-  ] as const;
+  readonly allowedDirectionalRegimes = ["range", "bear_trend"] as const;
   readonly allowedVolatilityRegimes = [
     "normal_volatility",
     "high_volatility",
@@ -222,9 +221,11 @@ export class GapFadeShortStrategy implements Strategy {
     if (quality.bodyPct < params.bodyMin)
       return this.reject("trigger_body_too_small");
 
-    // Stop above session open + ATR cushion.
+    // Stop above session open + ATR cushion, with a hard floor (avoid stops tighter
+    // than typical 1m noise on low-ATR instruments — caused WR ~3% in run #5).
     const atrStop = close + atr14 * params.stopAtrMult;
-    const stopLoss = Math.max(sessionOpen, atrStop);
+    const minStop = close * (1 + params.stopMinPct / 100);
+    const stopLoss = Math.max(sessionOpen, atrStop, minStop);
     if (!Number.isFinite(stopLoss) || stopLoss <= close)
       return this.reject("invalid_stop_loss");
 
