@@ -53,6 +53,7 @@ export interface BacktestOrderRecord {
   strategy?: string;
   indicatorSnapshot?: IndicatorSnapshot;
   partialTakeProfits?: PartialTakeProfit[];
+  trailingStopPct?: number;
   generatedFromCandleTs?: Date;
   createdAt: Date;
 }

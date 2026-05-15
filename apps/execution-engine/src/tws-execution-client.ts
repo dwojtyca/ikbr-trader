@@ -376,8 +376,9 @@ export class TwsExecutionClient {
             .map((leg) => `${leg.isPartial ? 'p' : 'r'}@${leg.takeProfitPrice}/x${leg.quantity}`)
             .join(',')
         : '';
+      const trailDetail = ticket.trailingStopPct ? ` trail=${ticket.trailingStopPct}%` : '';
       this.onLog(
-        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${legDetail}`
+        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${trailDetail}${legDetail}`
       );
     }
 
@@ -737,20 +738,42 @@ export class TwsExecutionClient {
         ocaType: 2,
         transmit: false
       };
-      const stopLossOrder: Record<string, unknown> = {
-        action: oppositeAction,
-        totalQuantity: leg.quantity,
-        orderType: 'STP',
-        auxPrice: leg.stopPrice,
-        tif,
-        account: accountId,
-        parentId: parentOrderId,
-        ocaGroup: leg.ocaGroup,
-        ocaType: 2,
-        // Only the very last child of the very last leg transmits the entire
-        // staged batch atomically.
-        transmit: isLastLeg
-      };
+      const useTrail =
+        ticket.trailingStopPct !== undefined &&
+        Number.isFinite(ticket.trailingStopPct) &&
+        ticket.trailingStopPct > 0;
+      const stopLossOrder: Record<string, unknown> = useTrail
+        ? {
+            action: oppositeAction,
+            totalQuantity: leg.quantity,
+            orderType: 'TRAIL',
+            // IBKR ratchets the stop by `trailingPercent` (e.g. 1.5 for 1.5%)
+            // away from the best price seen since order creation.
+            trailingPercent: ticket.trailingStopPct,
+            // Initial stop level — also acts as the worst-case floor before
+            // the trail starts following the price.
+            trailStopPrice: leg.stopPrice,
+            tif,
+            account: accountId,
+            parentId: parentOrderId,
+            ocaGroup: leg.ocaGroup,
+            ocaType: 2,
+            transmit: isLastLeg
+          }
+        : {
+            action: oppositeAction,
+            totalQuantity: leg.quantity,
+            orderType: 'STP',
+            auxPrice: leg.stopPrice,
+            tif,
+            account: accountId,
+            parentId: parentOrderId,
+            ocaGroup: leg.ocaGroup,
+            ocaType: 2,
+            // Only the very last child of the very last leg transmits the entire
+            // staged batch atomically.
+            transmit: isLastLeg
+          };
       ordersList.push({ orderId: leg.takeProfitOrderId, order: takeProfitOrder });
       ordersList.push({ orderId: leg.stopLossOrderId, order: stopLossOrder });
       relatedOrderIds.add(leg.takeProfitOrderId);

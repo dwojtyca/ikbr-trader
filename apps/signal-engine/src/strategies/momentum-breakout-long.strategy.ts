@@ -313,7 +313,10 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       // strategy every tested ladder (50%/+2R, 33%/+2R, 50%/+3R) regressed
       // on the dataset because winners overwhelmingly run to the +4R target.
       // Left disabled until a different strategy/regime warrants it.
-      // partialTakeProfits: [...],
+      // partialTakeProfits: [
+      //   { fraction: 0.33, price: close + riskPerShare * 1 }, // +1R
+      //   { fraction: 0.33, price: close + riskPerShare * 2 }, // +2R
+      // ],
       metadata: {
         ema20,
         ema50,

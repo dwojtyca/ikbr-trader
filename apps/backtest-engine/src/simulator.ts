@@ -96,6 +96,18 @@ interface Position {
    * order the price would be reached for the position's direction.
    */
   pendingPartials?: PendingPartial[];
+  /**
+   * Trailing-stop offset in percent of price (mirrors live IBKR TRAIL order).
+   * When set, the simulator ratchets `stop` upward (long) or downward (short)
+   * each candle so that `stop = peak * (1 - pct/100)` (long) or
+   * `stop = trough * (1 + pct/100)` (short). Initial `stop` acts as the
+   * floor (long) / ceiling (short) — the trail never relaxes it.
+   */
+  trailingStopPct?: number;
+  /** Highest high seen since entry (long) — for trail computation. */
+  peakPrice?: number;
+  /** Lowest low seen since entry (short) — for trail computation. */
+  troughPrice?: number;
   entryAt: Date;
   orderId: number;
   strategy: string;
@@ -371,6 +383,7 @@ export class BacktestSimulator {
         strategy: order.strategy,
         indicatorSnapshot: order.indicators,
         partialTakeProfits: order.partialTakeProfits,
+        trailingStopPct: order.trailingStopPct,
         generatedFromCandleTs: event.candle.ts,
         createdAt: event.candle.ts,
       });
@@ -712,6 +725,19 @@ export class BacktestSimulator {
         takeProfit: order.takeProfit,
         pendingPartials:
           existing?.pendingPartials ?? this.buildPendingPartials(order),
+        trailingStopPct: existing?.trailingStopPct ?? order.trailingStopPct,
+        peakPrice:
+          existing?.peakPrice !== undefined
+            ? Math.max(existing.peakPrice, fillPrice)
+            : qty > 0
+              ? fillPrice
+              : undefined,
+        troughPrice:
+          existing?.troughPrice !== undefined
+            ? Math.min(existing.troughPrice, fillPrice)
+            : qty < 0
+              ? fillPrice
+              : undefined,
         entryAt: existing?.entryAt ?? candle.ts,
         orderId: pending.id,
         strategy: order.strategy ?? "n/a",
@@ -853,6 +879,33 @@ export class BacktestSimulator {
         "take_profit",
         position.orderId,
       );
+      return;
+    }
+
+    // Trailing-stop ratchet: position survived this candle, so update the
+    // peak/trough and tighten the stop. Applied AFTER stop/TP checks so the
+    // stop level used for the current candle is the one set at the end of
+    // the previous candle (matches conservative tick-based simulation).
+    if (
+      position.trailingStopPct !== undefined &&
+      position.trailingStopPct > 0
+    ) {
+      const pct = position.trailingStopPct / 100;
+      if (isLong) {
+        position.peakPrice = Math.max(
+          position.peakPrice ?? candle.high,
+          candle.high,
+        );
+        const trailedStop = position.peakPrice * (1 - pct);
+        position.stop = Math.max(position.stop ?? -Infinity, trailedStop);
+      } else {
+        position.troughPrice = Math.min(
+          position.troughPrice ?? candle.low,
+          candle.low,
+        );
+        const trailedStop = position.troughPrice * (1 + pct);
+        position.stop = Math.min(position.stop ?? Infinity, trailedStop);
+      }
     }
   }
 

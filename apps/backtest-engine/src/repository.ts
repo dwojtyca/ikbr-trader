@@ -250,12 +250,16 @@ export class BacktestRepository {
         strategy TEXT,
         indicator_snapshot JSONB,
         partial_take_profits JSONB,
+        trailing_stop_pct DOUBLE PRECISION,
         generated_from_candle_ts TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL
       );
     `);
     await this.pool.query(
       `ALTER TABLE backtest_orders ADD COLUMN IF NOT EXISTS partial_take_profits JSONB;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE backtest_orders ADD COLUMN IF NOT EXISTS trailing_stop_pct DOUBLE PRECISION;`,
     );
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_fills (
@@ -763,9 +767,9 @@ export class BacktestRepository {
       `INSERT INTO backtest_orders (
         run_id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
         reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
-        partial_take_profits, generated_from_candle_ts, created_at
+        partial_take_profits, trailing_stop_pct, generated_from_candle_ts, created_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20
       ) RETURNING id`,
       [
         order.runId,
@@ -789,6 +793,7 @@ export class BacktestRepository {
         order.partialTakeProfits
           ? JSON.stringify(order.partialTakeProfits)
           : null,
+        order.trailingStopPct ?? null,
         order.generatedFromCandleTs ?? null,
         order.createdAt,
       ],

@@ -30,6 +30,11 @@ export interface StrategySignal {
    * field on the resulting `ProposedOrder`.
    */
   partialTakeProfits?: PartialTakeProfit[];
+  /**
+   * Optional trailing-stop offset in percent (e.g. 1.5). Forwarded to the
+   * `SignalTicket.trailingStopPct` field on the resulting `ProposedOrder`.
+   */
+  trailingStopPct?: number;
   metadata?: Record<string, unknown>;
   generatedFromCandleTs?: Date;
 }

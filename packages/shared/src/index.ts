@@ -109,6 +109,15 @@ export interface SignalTicket {
    * the legacy single-target behaviour in live).
    */
   partialTakeProfits?: PartialTakeProfit[];
+  /**
+   * Optional trailing-stop offset, expressed in percent of the last price
+   * (e.g. 1.5 for 1.5%). When set, the bracket's protective stop child is
+   * placed as an IBKR `TRAIL` order with `trailingPercent = trailingStopPct`
+   * and `trailStopPrice = stop` (the initial stop). The backtest simulator
+   * mirrors this by ratcheting the in-memory stop up to
+   * `peakPrice * (1 - trailingStopPct/100)` (long) on each candle.
+   */
+  trailingStopPct?: number;
   reason: string;
   confidence: number;
   timestamp: string;
