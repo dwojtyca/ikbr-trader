@@ -22,6 +22,13 @@ interface MomentumBreakoutParams {
   stopAtrMult: number;
   structureStopAtrMult: number;
   takeProfitR: number;
+  /**
+   * Minimum regimeScore (from MarketRegimeDetector) required to emit a
+   * signal. Tuned on backtest run #25: scores 0..8 form a stagnant
+   * "no man's land" with negative expectancy, while scores >= 9 carry
+   * the bulk of profits. Set to 0 to disable.
+   */
+  minRegimeScore: number;
   sessionUtcStartHour: number;
   sessionUtcEndHour: number;
 }
@@ -93,6 +100,7 @@ function paramsForSecType(secType: SecType): MomentumBreakoutParams {
     stopAtrMult: 2,
     structureStopAtrMult: 3,
     takeProfitR: 5,
+    minRegimeScore: 8,
     sessionUtcStartHour: 8,
     sessionUtcEndHour: 20,
   };
@@ -191,6 +199,14 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       donchianUpper === undefined
     ) {
       return this.reject("missing_required_indicators");
+    }
+
+    if (
+      params.minRegimeScore > 0 &&
+      indicators.regimeScore !== undefined &&
+      indicators.regimeScore < params.minRegimeScore
+    ) {
+      return this.reject("regime_score_below_minimum");
     }
 
     const h1 = indicators.timeframes?.["1h"];
