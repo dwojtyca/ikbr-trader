@@ -444,6 +444,20 @@ export class TwsExecutionClient {
       this.onLog(
         `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${trailDetail}${legDetail}`,
       );
+      if (
+        ticket.trailingStopActivationR !== undefined &&
+        ticket.trailingStopActivationR > 0
+      ) {
+        // Live BE+trail (delayed activation) requires a market-data watcher
+        // + cancel-and-replace on trigger. Not implemented in execution-engine
+        // yet (ib@0.2.x has no native Adjustable Order support). The ticket
+        // value is preserved for backtest fidelity and persisted in
+        // proposed_orders for audit; the live bracket falls back to the
+        // configured trailingStopPct (or static stop) from order creation.
+        this.onLog(
+          `execution bracket WARN parent=${parentOrderId} trailingStopActivationR=${ticket.trailingStopActivationR} requested but live activation gate is not implemented; trailing stop (if any) is armed from entry`,
+        );
+      }
     }
 
     return new Promise<PlaceOrderResult>((resolve, reject) => {

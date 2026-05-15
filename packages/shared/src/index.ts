@@ -118,6 +118,17 @@ export interface SignalTicket {
    * `peakPrice * (1 - trailingStopPct/100)` (long) on each candle.
    */
   trailingStopPct?: number;
+  /**
+   * Optional R-multiple offset that delays trailing-stop activation until
+   * unrealized profit reaches `entry + activationR * (entry - initialStop)`
+   * (long). Until then the protective stop stays at `initialStop`. Once
+   * activated, the trail follows `trailingStopPct` rules from the highest
+   * price seen since activation. Live execution-engine currently logs a
+   * warning and falls back to plain trailing/static stop because IBKR's
+   * `ib@0.2.x` lacks native Adjustable Order support; backtest fully
+   * implements the activation gate.
+   */
+  trailingStopActivationR?: number;
   reason: string;
   confidence: number;
   timestamp: string;

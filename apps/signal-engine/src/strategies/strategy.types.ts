@@ -35,6 +35,11 @@ export interface StrategySignal {
    * `SignalTicket.trailingStopPct` field on the resulting `ProposedOrder`.
    */
   trailingStopPct?: number;
+  /**
+   * Optional R-multiple offset for delayed trailing-stop activation.
+   * Forwarded to `SignalTicket.trailingStopActivationR`.
+   */
+  trailingStopActivationR?: number;
   metadata?: Record<string, unknown>;
   generatedFromCandleTs?: Date;
 }

@@ -729,6 +729,14 @@ export class SignalEngine {
         signal.trailingStopPct < 50
           ? signal.trailingStopPct
           : undefined,
+      trailingStopActivationR:
+        positionEffect === "OPEN_OR_ADD" &&
+        signal.trailingStopActivationR !== undefined &&
+        Number.isFinite(signal.trailingStopActivationR) &&
+        signal.trailingStopActivationR > 0 &&
+        signal.trailingStopActivationR < 20
+          ? signal.trailingStopActivationR
+          : undefined,
       reason: `${signal.entryReason}, strategy=${strategyId}, directionalRegime=${indicators.directionalRegime}, volatilityRegime=${indicators.volatilityRegime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
       confidence,
       timestamp: new Date().toISOString(),

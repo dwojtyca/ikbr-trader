@@ -104,6 +104,18 @@ interface Position {
    * floor (long) / ceiling (short) — the trail never relaxes it.
    */
   trailingStopPct?: number;
+  /**
+   * R-multiple offset that delays trailing-stop activation. Trail starts
+   * tracking only once unrealized profit reaches `entry + activationR * R`
+   * (long) or `entry - activationR * R` (short), where R = `entry - initialStop`
+   * for long. While inactive, `stop` stays pinned at `initialStop`. After
+   * activation we additionally ratchet `stop` to break-even (entry) before
+   * the trail takes over, so a fully-armed trail can never give back to the
+   * initial-loss zone.
+   */
+  trailingStopActivationR?: number;
+  /** True once price reached the activation threshold. */
+  trailActivated?: boolean;
   /** Highest high seen since entry (long) — for trail computation. */
   peakPrice?: number;
   /** Lowest low seen since entry (short) — for trail computation. */
@@ -384,6 +396,7 @@ export class BacktestSimulator {
         indicatorSnapshot: order.indicators,
         partialTakeProfits: order.partialTakeProfits,
         trailingStopPct: order.trailingStopPct,
+        trailingStopActivationR: order.trailingStopActivationR,
         generatedFromCandleTs: event.candle.ts,
         createdAt: event.candle.ts,
       });
@@ -726,6 +739,13 @@ export class BacktestSimulator {
         pendingPartials:
           existing?.pendingPartials ?? this.buildPendingPartials(order),
         trailingStopPct: existing?.trailingStopPct ?? order.trailingStopPct,
+        trailingStopActivationR:
+          existing?.trailingStopActivationR ?? order.trailingStopActivationR,
+        trailActivated:
+          existing?.trailActivated ??
+          // No activation gate -> trail is armed from entry.
+          (order.trailingStopActivationR === undefined ||
+            !(order.trailingStopActivationR > 0)),
         peakPrice:
           existing?.peakPrice !== undefined
             ? Math.max(existing.peakPrice, fillPrice)
@@ -896,15 +916,68 @@ export class BacktestSimulator {
           position.peakPrice ?? candle.high,
           candle.high,
         );
-        const trailedStop = position.peakPrice * (1 - pct);
-        position.stop = Math.max(position.stop ?? -Infinity, trailedStop);
+
+        // Activation gate: trail stays disarmed until peak reaches
+        // entry + activationR * (entry - initialStop). On activation, the
+        // stop also jumps to break-even (entry) so we never give back to
+        // the initial-loss zone.
+        if (
+          !position.trailActivated &&
+          position.trailingStopActivationR !== undefined &&
+          position.trailingStopActivationR > 0 &&
+          position.initialStop !== undefined
+        ) {
+          const rPerShare = position.averageCost - position.initialStop;
+          if (rPerShare > 0) {
+            const activationLevel =
+              position.averageCost +
+              rPerShare * position.trailingStopActivationR;
+            if (position.peakPrice >= activationLevel) {
+              position.trailActivated = true;
+              // Lock break-even at activation.
+              position.stop = Math.max(
+                position.stop ?? -Infinity,
+                position.averageCost,
+              );
+            }
+          }
+        }
+
+        if (position.trailActivated !== false) {
+          const trailedStop = position.peakPrice * (1 - pct);
+          position.stop = Math.max(position.stop ?? -Infinity, trailedStop);
+        }
       } else {
         position.troughPrice = Math.min(
           position.troughPrice ?? candle.low,
           candle.low,
         );
-        const trailedStop = position.troughPrice * (1 + pct);
-        position.stop = Math.min(position.stop ?? Infinity, trailedStop);
+
+        if (
+          !position.trailActivated &&
+          position.trailingStopActivationR !== undefined &&
+          position.trailingStopActivationR > 0 &&
+          position.initialStop !== undefined
+        ) {
+          const rPerShare = position.initialStop - position.averageCost;
+          if (rPerShare > 0) {
+            const activationLevel =
+              position.averageCost -
+              rPerShare * position.trailingStopActivationR;
+            if (position.troughPrice <= activationLevel) {
+              position.trailActivated = true;
+              position.stop = Math.min(
+                position.stop ?? Infinity,
+                position.averageCost,
+              );
+            }
+          }
+        }
+
+        if (position.trailActivated !== false) {
+          const trailedStop = position.troughPrice * (1 + pct);
+          position.stop = Math.min(position.stop ?? Infinity, trailedStop);
+        }
       }
     }
   }

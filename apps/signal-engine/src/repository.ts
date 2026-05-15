@@ -363,6 +363,9 @@ export class SignalRepository {
       `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS trailing_stop_pct DOUBLE PRECISION;`,
     );
     await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS trailing_stop_activation_r DOUBLE PRECISION;`,
+    );
+    await this.pool.query(
       `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT;`,
     );
     await this.pool.query(
@@ -955,6 +958,7 @@ export class SignalRepository {
         superseded_by_order_id,
         partial_take_profits,
         trailing_stop_pct,
+        trailing_stop_activation_r,
         created_at
       )
       VALUES (
@@ -963,7 +967,7 @@ export class SignalRepository {
         $11, $12, $13, $14, $15,
         'signal', NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL,
-        $16, $17, $18, $19, $20, NOW()
+        $16, $17, $18, $19, $20, $21, NOW()
       )
       RETURNING id
       `,
@@ -990,6 +994,7 @@ export class SignalRepository {
           ? JSON.stringify(order.partialTakeProfits)
           : null,
         order.trailingStopPct ?? null,
+        order.trailingStopActivationR ?? null,
       ],
     );
 
