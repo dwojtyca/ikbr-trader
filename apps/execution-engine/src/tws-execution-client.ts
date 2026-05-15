@@ -1,5 +1,5 @@
-import IB from 'ib';
-import { SignalTicket } from '@ikbr/shared';
+import IB from "ib";
+import { SignalTicket } from "@ikbr/shared";
 
 interface TwsExecutionConfig {
   host: string;
@@ -41,13 +41,13 @@ interface ContractDetailsShape {
 
 interface PlaceOrderResult {
   orderId: number;
-  status: 'SUBMITTED' | 'FILLED';
+  status: "SUBMITTED" | "FILLED";
   brokerOrderId: string;
 }
 
 interface CancelOrderResult {
   brokerOrderId: string;
-  status: 'CANCELLED' | 'PENDING_CANCEL';
+  status: "CANCELLED" | "PENDING_CANCEL";
 }
 
 interface ResolvedContract {
@@ -57,7 +57,7 @@ interface ResolvedContract {
 
 interface EffectiveTick {
   tick?: number;
-  source: 'none' | 'minTick' | 'wse_ladder';
+  source: "none" | "minTick" | "wse_ladder";
 }
 
 interface PlannedOrder {
@@ -96,9 +96,9 @@ interface PlaceOrderPlan {
 
 interface OpenOrderContext {
   symbol: string;
-  side: SignalTicket['side'];
-  positionEffect?: SignalTicket['positionEffect'];
-  role: 'parent' | 'take_profit' | 'stop_loss';
+  side: SignalTicket["side"];
+  positionEffect?: SignalTicket["positionEffect"];
+  role: "parent" | "take_profit" | "stop_loss";
   parentOrderId?: number;
 }
 
@@ -110,7 +110,7 @@ export interface BrokerExecutionFill {
   symbol: string;
   currency?: string;
   exchange?: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   shares: number;
   price: number;
   avgPrice?: number;
@@ -183,8 +183,8 @@ export interface AccountSnapshot {
 const IBKR_UNSET_DOUBLE_THRESHOLD = 1e307;
 
 function toNum(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string') {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) return parsed;
   }
@@ -205,28 +205,43 @@ export class TwsExecutionClient {
   private connectPromise?: Promise<void>;
   private readonly openOrderContext = new Map<number, OpenOrderContext>();
   private readonly orderStatusById = new Map<number, string>();
-  private readonly bracketPlansByParent = new Map<number, {
-    symbol: string;
-    takeProfitOrderId: number;
-    stopLossOrderId: number;
-  }>();
-  private readonly bracketVerificationTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly bracketPlansByParent = new Map<
+    number,
+    {
+      symbol: string;
+      takeProfitOrderId: number;
+      stopLossOrderId: number;
+    }
+  >();
+  private readonly bracketVerificationTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
   private readonly locateAutoCancelAttempted = new Set<number>();
-  private readonly submittedAutoCancelTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly submittedAutoCancelTimers = new Map<
+    number,
+    ReturnType<typeof setTimeout>
+  >();
   private readonly brokerOrderWarnings = new Map<number, string[]>();
   private nextRequestId = 1_000_000;
 
   constructor(
     private readonly config: TwsExecutionConfig,
     private readonly onLog: (line: string) => void,
-    private readonly onBrokerOrderStatus?: (update: BrokerOrderStatusUpdate) => void,
-    private readonly onBrokerExecutionFill?: (fill: BrokerExecutionFill) => void,
-    private readonly onBrokerCommissionReport?: (report: BrokerCommissionReport) => void
+    private readonly onBrokerOrderStatus?: (
+      update: BrokerOrderStatusUpdate,
+    ) => void,
+    private readonly onBrokerExecutionFill?: (
+      fill: BrokerExecutionFill,
+    ) => void,
+    private readonly onBrokerCommissionReport?: (
+      report: BrokerCommissionReport,
+    ) => void,
   ) {
     this.ib = new IB({
       host: config.host,
       port: config.port,
-      clientId: config.clientId
+      clientId: config.clientId,
     });
 
     this.bindCoreListeners();
@@ -246,13 +261,15 @@ export class TwsExecutionClient {
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error('TWS execution connect timeout waiting for nextValidId'));
+        reject(
+          new Error("TWS execution connect timeout waiting for nextValidId"),
+        );
       }, 12_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('nextValidId', onNextValidId);
-        this.ib.off('error', onError);
+        this.ib.off("nextValidId", onNextValidId);
+        this.ib.off("error", onError);
       };
 
       const onNextValidId = (orderId: number) => {
@@ -264,20 +281,30 @@ export class TwsExecutionClient {
 
       const onError = (arg1: unknown, arg2?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2);
-        if (String(parsed.code) === '502' || String(parsed.code) === '503' || String(parsed.code) === '504') {
+        if (
+          String(parsed.code) === "502" ||
+          String(parsed.code) === "503" ||
+          String(parsed.code) === "504"
+        ) {
           cleanup();
-          reject(new Error(`TWS socket connection failed (${parsed.code ?? 'n/a'}): ${parsed.message}`));
+          reject(
+            new Error(
+              `TWS socket connection failed (${parsed.code ?? "n/a"}): ${parsed.message}`,
+            ),
+          );
         }
       };
 
-      this.ib.once('nextValidId', onNextValidId);
-      this.ib.on('error', onError);
+      this.ib.once("nextValidId", onNextValidId);
+      this.ib.on("error", onError);
       this.ib.connect();
     });
 
     try {
       await this.connectPromise;
-      this.onLog(`execution socket connected ${this.config.host}:${this.config.port}, clientId=${this.config.clientId}`);
+      this.onLog(
+        `execution socket connected ${this.config.host}:${this.config.port}, clientId=${this.config.clientId}`,
+      );
     } finally {
       this.connectPromise = undefined;
     }
@@ -295,12 +322,16 @@ export class TwsExecutionClient {
     const accounts = await new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error('Timed out waiting for managedAccounts from TWS execution socket'));
+        reject(
+          new Error(
+            "Timed out waiting for managedAccounts from TWS execution socket",
+          ),
+        );
       }, 8_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('managedAccounts', onManagedAccounts);
+        this.ib.off("managedAccounts", onManagedAccounts);
       };
 
       const onManagedAccounts = (accountsList: string) => {
@@ -308,37 +339,57 @@ export class TwsExecutionClient {
         resolve(accountsList);
       };
 
-      this.ib.once('managedAccounts', onManagedAccounts);
+      this.ib.once("managedAccounts", onManagedAccounts);
       this.ib.reqManagedAccts();
     });
 
     return accounts
-      .split(',')
+      .split(",")
       .map((v) => v.trim())
       .filter(Boolean);
   }
 
-  async placeSignalOrder(ticket: SignalTicket, accountId: string, tif: string): Promise<PlaceOrderResult> {
+  async placeSignalOrder(
+    ticket: SignalTicket,
+    accountId: string,
+    tif: string,
+  ): Promise<PlaceOrderResult> {
     await this.connect();
 
     const resolvedContract = await this.resolveContract(ticket);
     const contract = resolvedContract.contract;
-    const effectiveTick = this.determineEffectiveTick(contract, ticket, resolvedContract.minTick);
-    const normalizedTicket = this.normalizeTicketPrices(ticket, effectiveTick.tick);
+    const effectiveTick = this.determineEffectiveTick(
+      contract,
+      ticket,
+      resolvedContract.minTick,
+    );
+    const normalizedTicket = this.normalizeTicketPrices(
+      ticket,
+      effectiveTick.tick,
+    );
 
-    if (effectiveTick.tick && this.wasTicketNormalized(ticket, normalizedTicket)) {
+    if (
+      effectiveTick.tick &&
+      this.wasTicketNormalized(ticket, normalizedTicket)
+    ) {
       this.onLog(
-        `execution price normalization conid=${ticket.conid ?? 'n/a'} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? 'n/a'} effectiveTick=${effectiveTick.tick} entry=${ticket.entry ?? 'n/a'}->${normalizedTicket.entry ?? 'n/a'} stop=${ticket.stop ?? 'n/a'}->${normalizedTicket.stop ?? 'n/a'} tp=${ticket.takeProfit ?? 'n/a'}->${normalizedTicket.takeProfit ?? 'n/a'}`
+        `execution price normalization conid=${ticket.conid ?? "n/a"} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? "n/a"} effectiveTick=${effectiveTick.tick} entry=${ticket.entry ?? "n/a"}->${normalizedTicket.entry ?? "n/a"} stop=${ticket.stop ?? "n/a"}->${normalizedTicket.stop ?? "n/a"} tp=${ticket.takeProfit ?? "n/a"}->${normalizedTicket.takeProfit ?? "n/a"}`,
       );
     }
 
     try {
-      return await this.placeSignalOrderAttempt(contract, normalizedTicket, accountId, tif);
+      return await this.placeSignalOrderAttempt(
+        contract,
+        normalizedTicket,
+        accountId,
+        tif,
+      );
     } catch (error) {
       const message = (error as Error).message;
-      const shouldRetryAsMkt = this.config.retryAsMktOnCode110 === true
-        && String(ticket.orderType || '').toUpperCase() === 'LMT'
-        && message.includes('code=110');
+      const shouldRetryAsMkt =
+        this.config.retryAsMktOnCode110 === true &&
+        String(ticket.orderType || "").toUpperCase() === "LMT" &&
+        message.includes("code=110");
 
       if (!shouldRetryAsMkt) {
         throw error;
@@ -346,15 +397,20 @@ export class TwsExecutionClient {
 
       const retryTicket: SignalTicket = {
         ...normalizedTicket,
-        orderType: 'MKT',
-        entry: undefined
+        orderType: "MKT",
+        entry: undefined,
       };
 
       this.onLog(
-        `execution retry-as-mkt triggered symbol=${ticket.instrument} conid=${ticket.conid ?? 'n/a'} reason=code110`
+        `execution retry-as-mkt triggered symbol=${ticket.instrument} conid=${ticket.conid ?? "n/a"} reason=code110`,
       );
 
-      return this.placeSignalOrderAttempt(contract, retryTicket, accountId, tif);
+      return this.placeSignalOrderAttempt(
+        contract,
+        retryTicket,
+        accountId,
+        tif,
+      );
     }
   }
 
@@ -362,7 +418,7 @@ export class TwsExecutionClient {
     contract: ContractShape,
     ticket: SignalTicket,
     accountId: string,
-    tif: string
+    tif: string,
   ): Promise<PlaceOrderResult> {
     const plan = this.buildOrderPlan(ticket, accountId, tif);
     const { parentOrderId } = plan;
@@ -370,28 +426,40 @@ export class TwsExecutionClient {
 
     if (plan.bracket) {
       const legCount = plan.bracketLegs?.length ?? 1;
-      const partialCount = plan.bracketLegs?.filter((leg) => leg.isPartial).length ?? 0;
-      const legDetail = plan.bracketLegs && plan.bracketLegs.length > 1
-        ? ' legs=' + plan.bracketLegs
-            .map((leg) => `${leg.isPartial ? 'p' : 'r'}@${leg.takeProfitPrice}/x${leg.quantity}`)
-            .join(',')
-        : '';
-      const trailDetail = ticket.trailingStopPct ? ` trail=${ticket.trailingStopPct}%` : '';
+      const partialCount =
+        plan.bracketLegs?.filter((leg) => leg.isPartial).length ?? 0;
+      const legDetail =
+        plan.bracketLegs && plan.bracketLegs.length > 1
+          ? " legs=" +
+            plan.bracketLegs
+              .map(
+                (leg) =>
+                  `${leg.isPartial ? "p" : "r"}@${leg.takeProfitPrice}/x${leg.quantity}`,
+              )
+              .join(",")
+          : "";
+      const trailDetail = ticket.trailingStopPct
+        ? ` trail=${ticket.trailingStopPct}%`
+        : "";
       this.onLog(
-        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${trailDetail}${legDetail}`
+        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${trailDetail}${legDetail}`,
       );
     }
 
     return new Promise<PlaceOrderResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting orderStatus for orderId=${parentOrderId}`));
+        reject(
+          new Error(
+            `Timed out waiting orderStatus for orderId=${parentOrderId}`,
+          ),
+        );
       }, this.config.orderTimeoutMs);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('orderStatus', onOrderStatus);
-        this.ib.off('error', onError);
+        this.ib.off("orderStatus", onOrderStatus);
+        this.ib.off("error", onError);
       };
 
       const onOrderStatus = (
@@ -405,37 +473,63 @@ export class TwsExecutionClient {
         _lastFillPrice: number,
         _clientId: number,
         _whyHeld: string,
-        _mktCapPrice: number
+        _mktCapPrice: number,
       ) => {
         if (incomingOrderId !== parentOrderId) return;
 
-        const normalized = String(status || '').toUpperCase();
-        if (normalized === 'FILLED') {
+        const normalized = String(status || "").toUpperCase();
+        if (normalized === "FILLED") {
           cleanup();
           this.clearParentOrderContext(parentOrderId);
-          resolve({ orderId: parentOrderId, status: 'FILLED', brokerOrderId: String(parentOrderId) });
+          resolve({
+            orderId: parentOrderId,
+            status: "FILLED",
+            brokerOrderId: String(parentOrderId),
+          });
           return;
         }
 
-        if (normalized === 'PRESUBMITTED' || normalized === 'SUBMITTED' || normalized === 'PENDINGSUBMIT') {
+        if (
+          normalized === "PRESUBMITTED" ||
+          normalized === "SUBMITTED" ||
+          normalized === "PENDINGSUBMIT"
+        ) {
           cleanup();
-          resolve({ orderId: parentOrderId, status: 'SUBMITTED', brokerOrderId: String(parentOrderId) });
+          resolve({
+            orderId: parentOrderId,
+            status: "SUBMITTED",
+            brokerOrderId: String(parentOrderId),
+          });
           return;
         }
 
-        if (normalized === 'INACTIVE' || normalized === 'CANCELLED' || normalized === 'APICANCELLED') {
+        if (
+          normalized === "INACTIVE" ||
+          normalized === "CANCELLED" ||
+          normalized === "APICANCELLED"
+        ) {
           cleanup();
           this.clearParentOrderContext(parentOrderId);
-          reject(new Error(`Order ${parentOrderId} was not accepted by broker, status=${normalized}`));
+          reject(
+            new Error(
+              `Order ${parentOrderId} was not accepted by broker, status=${normalized}`,
+            ),
+          );
         }
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && !plan.relatedOrderIds.has(Number(parsed.reqId))) return;
+        if (
+          parsed.reqId !== undefined &&
+          !plan.relatedOrderIds.has(Number(parsed.reqId))
+        )
+          return;
 
         const code = Number(parsed.code);
-        const fatalCodes = new Set([103, 104, 109, 110, 200, 201, 202, 203, 320, 321, 322, 323, 354]);
+        const fatalCodes = new Set([
+          103, 104, 109, 110, 200, 201, 202, 203, 320, 321, 322, 323, 354,
+        ]);
         if (Number.isFinite(code) && !fatalCodes.has(code)) {
           return;
         }
@@ -444,16 +538,20 @@ export class TwsExecutionClient {
         this.clearParentOrderContext(parentOrderId);
         reject(
           new Error(
-            `Broker rejected order ${parentOrderId}: ${parsed.message} (code=${parsed.code ?? 'n/a'}, reqId=${parsed.reqId ?? 'n/a'})`
-          )
+            `Broker rejected order ${parentOrderId}: ${parsed.message} (code=${parsed.code ?? "n/a"}, reqId=${parsed.reqId ?? "n/a"})`,
+          ),
         );
       };
 
-      this.ib.on('orderStatus', onOrderStatus);
-      this.ib.on('error', onError);
+      this.ib.on("orderStatus", onOrderStatus);
+      this.ib.on("error", onError);
       try {
         for (const plannedOrder of plan.orders) {
-          this.ib.placeOrder(plannedOrder.orderId, contract, plannedOrder.order);
+          this.ib.placeOrder(
+            plannedOrder.orderId,
+            contract,
+            plannedOrder.order,
+          );
         }
       } catch (error) {
         cleanup();
@@ -473,56 +571,70 @@ export class TwsExecutionClient {
     return new Promise<CancelOrderResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting cancel confirmation for brokerOrderId=${orderId}`));
+        reject(
+          new Error(
+            `Timed out waiting cancel confirmation for brokerOrderId=${orderId}`,
+          ),
+        );
       }, this.config.orderTimeoutMs);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('orderStatus', onOrderStatus);
-        this.ib.off('error', onError);
+        this.ib.off("orderStatus", onOrderStatus);
+        this.ib.off("error", onError);
       };
 
-      const onOrderStatus = (
-        incomingOrderId: number,
-        status: string
-      ) => {
+      const onOrderStatus = (incomingOrderId: number, status: string) => {
         if (incomingOrderId !== orderId) return;
 
-        const normalized = String(status || '').toUpperCase();
-        if (normalized === 'CANCELLED' || normalized === 'APICANCELLED' || normalized === 'INACTIVE') {
+        const normalized = String(status || "").toUpperCase();
+        if (
+          normalized === "CANCELLED" ||
+          normalized === "APICANCELLED" ||
+          normalized === "INACTIVE"
+        ) {
           cleanup();
-          resolve({ brokerOrderId: String(orderId), status: 'CANCELLED' });
+          resolve({ brokerOrderId: String(orderId), status: "CANCELLED" });
           return;
         }
 
-        if (normalized === 'PENDINGCANCEL') {
+        if (normalized === "PENDINGCANCEL") {
           cleanup();
-          resolve({ brokerOrderId: String(orderId), status: 'PENDING_CANCEL' });
+          resolve({ brokerOrderId: String(orderId), status: "PENDING_CANCEL" });
           return;
         }
 
-        if (normalized === 'FILLED') {
+        if (normalized === "FILLED") {
           cleanup();
-          reject(new Error(`Order ${orderId} already FILLED; cancel not possible`));
+          reject(
+            new Error(`Order ${orderId} already FILLED; cancel not possible`),
+          );
         }
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && Number(parsed.reqId) !== orderId) return;
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== orderId)
+          return;
 
         const code = Number(parsed.code);
-        const fatalCodes = new Set([135, 161, 201, 202, 321, 322, 323, 354, 10147, 10148]);
+        const fatalCodes = new Set([
+          135, 161, 201, 202, 321, 322, 323, 354, 10147, 10148,
+        ]);
         if (Number.isFinite(code) && !fatalCodes.has(code)) {
           return;
         }
 
         cleanup();
-        reject(new Error(`Broker cancel failed for order ${orderId}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(
+          new Error(
+            `Broker cancel failed for order ${orderId}: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
+          ),
+        );
       };
 
-      this.ib.on('orderStatus', onOrderStatus);
-      this.ib.on('error', onError);
+      this.ib.on("orderStatus", onOrderStatus);
+      this.ib.on("error", onError);
 
       try {
         this.onLog(`execution cancel requested orderId=${orderId}`);
@@ -549,11 +661,11 @@ export class TwsExecutionClient {
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('updateAccountValue', onUpdateAccountValue);
-        this.ib.off('updatePortfolio', onUpdatePortfolio);
-        this.ib.off('updateAccountTime', onUpdateAccountTime);
-        this.ib.off('accountDownloadEnd', onAccountDownloadEnd);
-        this.ib.off('error', onError);
+        this.ib.off("updateAccountValue", onUpdateAccountValue);
+        this.ib.off("updatePortfolio", onUpdatePortfolio);
+        this.ib.off("updateAccountTime", onUpdateAccountTime);
+        this.ib.off("accountDownloadEnd", onAccountDownloadEnd);
+        this.ib.off("error", onError);
         try {
           this.ib.reqAccountUpdates(false, accountId);
         } catch {
@@ -561,10 +673,15 @@ export class TwsExecutionClient {
         }
       };
 
-      const onUpdateAccountValue = (key: string, value: string, currency: string, accountName: string) => {
+      const onUpdateAccountValue = (
+        key: string,
+        value: string,
+        currency: string,
+        accountName: string,
+      ) => {
         if (accountName !== accountId) return;
         if (!valuesByKey.has(key)) valuesByKey.set(key, new Map());
-        valuesByKey.get(key)?.set(currency || 'BASE', String(value));
+        valuesByKey.get(key)?.set(currency || "BASE", String(value));
       };
 
       const onUpdatePortfolio = (
@@ -575,12 +692,14 @@ export class TwsExecutionClient {
         averageCost: number,
         unrealizedPNL: number,
         realizedPNL: number,
-        accountName: string
+        accountName: string,
       ) => {
         if (accountName !== accountId) return;
 
         const conid = toNum(contract.conId);
-        const symbol = String(contract.symbol ?? (conid ? `CONID:${conid}` : 'UNKNOWN'));
+        const symbol = String(
+          contract.symbol ?? (conid ? `CONID:${conid}` : "UNKNOWN"),
+        );
         const key = conid ? `conid:${conid}` : `symbol:${symbol}`;
 
         if (!Number.isFinite(position) || Math.abs(position) < 1e-12) {
@@ -591,15 +710,22 @@ export class TwsExecutionClient {
         positionsByKey.set(key, {
           conid: conid ? String(conid) : undefined,
           symbol,
-          secType: typeof contract.secType === 'string' ? contract.secType : undefined,
-          exchange: typeof contract.exchange === 'string' ? contract.exchange : undefined,
-          currency: typeof contract.currency === 'string' ? contract.currency : undefined,
+          secType:
+            typeof contract.secType === "string" ? contract.secType : undefined,
+          exchange:
+            typeof contract.exchange === "string"
+              ? contract.exchange
+              : undefined,
+          currency:
+            typeof contract.currency === "string"
+              ? contract.currency
+              : undefined,
           position: Number(position),
           marketPrice: toNum(marketPrice),
           marketValue: toNum(marketValue),
           averageCost: toNum(averageCost),
           unrealizedPnL: toNum(unrealizedPNL),
-          realizedPnL: toNum(realizedPNL)
+          realizedPnL: toNum(realizedPNL),
         });
       };
 
@@ -610,7 +736,14 @@ export class TwsExecutionClient {
       const onAccountDownloadEnd = (accountName: string) => {
         if (accountName !== accountId) return;
         cleanup();
-        resolve(this.buildAccountSnapshot(accountId, valuesByKey, positionsByKey, accountTime));
+        resolve(
+          this.buildAccountSnapshot(
+            accountId,
+            valuesByKey,
+            positionsByKey,
+            accountTime,
+          ),
+        );
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
@@ -622,14 +755,18 @@ export class TwsExecutionClient {
         if (!fatal.has(code)) return;
 
         cleanup();
-        reject(new Error(`Failed to fetch account snapshot: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(
+          new Error(
+            `Failed to fetch account snapshot: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
+          ),
+        );
       };
 
-      this.ib.on('updateAccountValue', onUpdateAccountValue);
-      this.ib.on('updatePortfolio', onUpdatePortfolio);
-      this.ib.on('updateAccountTime', onUpdateAccountTime);
-      this.ib.on('accountDownloadEnd', onAccountDownloadEnd);
-      this.ib.on('error', onError);
+      this.ib.on("updateAccountValue", onUpdateAccountValue);
+      this.ib.on("updatePortfolio", onUpdatePortfolio);
+      this.ib.on("updateAccountTime", onUpdateAccountTime);
+      this.ib.on("accountDownloadEnd", onAccountDownloadEnd);
+      this.ib.on("error", onError);
       this.ib.reqAccountUpdates(true, accountId);
     });
   }
@@ -641,11 +778,11 @@ export class TwsExecutionClient {
     const filter = {
       clientId: 0,
       acctCode: accountId,
-      time: since ? this.formatExecutionFilterTime(since) : '',
-      symbol: '',
-      secType: '',
-      exchange: '',
-      side: ''
+      time: since ? this.formatExecutionFilterTime(since) : "",
+      symbol: "",
+      secType: "",
+      exchange: "",
+      side: "",
     };
 
     return new Promise<number>((resolve, reject) => {
@@ -653,14 +790,16 @@ export class TwsExecutionClient {
       let done = false;
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting execDetailsEnd for reqId=${reqId}`));
+        reject(
+          new Error(`Timed out waiting execDetailsEnd for reqId=${reqId}`),
+        );
       }, 15_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('execDetails', onExecDetails);
-        this.ib.off('execDetailsEnd', onExecDetailsEnd);
-        this.ib.off('error', onError);
+        this.ib.off("execDetails", onExecDetails);
+        this.ib.off("execDetailsEnd", onExecDetailsEnd);
+        this.ib.off("error", onError);
       };
 
       const finish = () => {
@@ -682,17 +821,26 @@ export class TwsExecutionClient {
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId) return;
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId)
+          return;
 
         const code = Number(parsed.code);
-        if (Number.isFinite(code) && !new Set([162, 200, 321, 322, 323]).has(code)) return;
+        if (
+          Number.isFinite(code) &&
+          !new Set([162, 200, 321, 322, 323]).has(code)
+        )
+          return;
         cleanup();
-        reject(new Error(`reqExecutions failed for reqId=${reqId}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(
+          new Error(
+            `reqExecutions failed for reqId=${reqId}: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
+          ),
+        );
       };
 
-      this.ib.on('execDetails', onExecDetails);
-      this.ib.on('execDetailsEnd', onExecDetailsEnd);
-      this.ib.on('error', onError);
+      this.ib.on("execDetails", onExecDetails);
+      this.ib.on("execDetailsEnd", onExecDetailsEnd);
+      this.ib.on("error", onError);
 
       try {
         this.ib.reqExecutions(reqId, filter);
@@ -703,25 +851,36 @@ export class TwsExecutionClient {
     });
   }
 
-  private buildOrderPlan(ticket: SignalTicket, accountId: string, tif: string): PlaceOrderPlan {
+  private buildOrderPlan(
+    ticket: SignalTicket,
+    accountId: string,
+    tif: string,
+  ): PlaceOrderPlan {
     const parentOrderId = this.allocOrderId();
     const attachBracket = this.shouldAttachBracket(ticket);
-    const parentOrder = this.buildParentOrder(ticket, accountId, tif, !attachBracket);
+    const parentOrder = this.buildParentOrder(
+      ticket,
+      accountId,
+      tif,
+      !attachBracket,
+    );
 
     if (!attachBracket) {
       return {
         parentOrderId,
         orders: [{ orderId: parentOrderId, order: parentOrder }],
-        relatedOrderIds: new Set([parentOrderId])
+        relatedOrderIds: new Set([parentOrderId]),
       };
     }
 
     this.validateBracket(ticket);
 
-    const oppositeAction = ticket.side === 'BUY' ? 'SELL' : 'BUY';
+    const oppositeAction = ticket.side === "BUY" ? "SELL" : "BUY";
     const legs = this.planBracketLegs(ticket);
 
-    const ordersList: PlannedOrder[] = [{ orderId: parentOrderId, order: parentOrder }];
+    const ordersList: PlannedOrder[] = [
+      { orderId: parentOrderId, order: parentOrder },
+    ];
     const relatedOrderIds = new Set<number>([parentOrderId]);
 
     legs.forEach((leg, idx) => {
@@ -729,14 +888,14 @@ export class TwsExecutionClient {
       const takeProfitOrder: Record<string, unknown> = {
         action: oppositeAction,
         totalQuantity: leg.quantity,
-        orderType: 'LMT',
+        orderType: "LMT",
         lmtPrice: leg.takeProfitPrice,
         tif,
         account: accountId,
         parentId: parentOrderId,
         ocaGroup: leg.ocaGroup,
         ocaType: 2,
-        transmit: false
+        transmit: false,
       };
       const useTrail =
         ticket.trailingStopPct !== undefined &&
@@ -746,7 +905,7 @@ export class TwsExecutionClient {
         ? {
             action: oppositeAction,
             totalQuantity: leg.quantity,
-            orderType: 'TRAIL',
+            orderType: "TRAIL",
             // IBKR ratchets the stop by `trailingPercent` (e.g. 1.5 for 1.5%)
             // away from the best price seen since order creation.
             trailingPercent: ticket.trailingStopPct,
@@ -758,12 +917,12 @@ export class TwsExecutionClient {
             parentId: parentOrderId,
             ocaGroup: leg.ocaGroup,
             ocaType: 2,
-            transmit: isLastLeg
+            transmit: isLastLeg,
           }
         : {
             action: oppositeAction,
             totalQuantity: leg.quantity,
-            orderType: 'STP',
+            orderType: "STP",
             auxPrice: leg.stopPrice,
             tif,
             account: accountId,
@@ -772,9 +931,12 @@ export class TwsExecutionClient {
             ocaType: 2,
             // Only the very last child of the very last leg transmits the entire
             // staged batch atomically.
-            transmit: isLastLeg
+            transmit: isLastLeg,
           };
-      ordersList.push({ orderId: leg.takeProfitOrderId, order: takeProfitOrder });
+      ordersList.push({
+        orderId: leg.takeProfitOrderId,
+        order: takeProfitOrder,
+      });
       ordersList.push({ orderId: leg.stopLossOrderId, order: stopLossOrder });
       relatedOrderIds.add(leg.takeProfitOrderId);
       relatedOrderIds.add(leg.stopLossOrderId);
@@ -791,9 +953,9 @@ export class TwsExecutionClient {
       relatedOrderIds,
       bracket: {
         takeProfitOrderId: runner.takeProfitOrderId,
-        stopLossOrderId: runner.stopLossOrderId
+        stopLossOrderId: runner.stopLossOrderId,
       },
-      bracketLegs: legs
+      bracketLegs: legs,
     };
   }
 
@@ -806,15 +968,17 @@ export class TwsExecutionClient {
    */
   private planBracketLegs(ticket: SignalTicket): PlannedBracketLeg[] {
     if (ticket.stop === undefined || ticket.takeProfit === undefined) {
-      throw new Error('Bracket leg planning requires stop and takeProfit');
+      throw new Error("Bracket leg planning requires stop and takeProfit");
     }
 
     const totalQty = ticket.quantity;
     const step = Number.isInteger(totalQty) ? 1 : 0.0001;
-    const roundDown = (qty: number): number => Math.max(0, Math.floor(qty / step) * step);
+    const roundDown = (qty: number): number =>
+      Math.max(0, Math.floor(qty / step) * step);
 
     const partials = (ticket.partialTakeProfits ?? []).filter(
-      (level) => Number.isFinite(level.fraction) && Number.isFinite(level.price)
+      (level) =>
+        Number.isFinite(level.fraction) && Number.isFinite(level.price),
     );
 
     const ocaPrefix = `BR_${this.allocOcaToken()}`;
@@ -839,7 +1003,7 @@ export class TwsExecutionClient {
         takeProfitPrice: partial.price,
         stopPrice: ticket.stop,
         ocaGroup: `${ocaPrefix}_p${i + 1}`,
-        isPartial: true
+        isPartial: true,
       });
       allocatedQty += legQty;
     }
@@ -848,7 +1012,7 @@ export class TwsExecutionClient {
     if (runnerQty < step) {
       throw new Error(
         `Bracket leg planning produced runner qty < step (totalQty=${totalQty}, allocated=${allocatedQty}, step=${step}). ` +
-        `Reduce partialTakeProfits fractions or quantity.`
+          `Reduce partialTakeProfits fractions or quantity.`,
       );
     }
 
@@ -859,7 +1023,7 @@ export class TwsExecutionClient {
       takeProfitPrice: ticket.takeProfit,
       stopPrice: ticket.stop,
       ocaGroup: `${ocaPrefix}_r`,
-      isPartial: false
+      isPartial: false,
     });
 
     return legs;
@@ -873,38 +1037,56 @@ export class TwsExecutionClient {
   }
 
   private shouldAttachBracket(ticket: SignalTicket): boolean {
-    if (ticket.positionEffect === 'CLOSE_OR_REDUCE') return false;
-    if (ticket.stop === undefined || ticket.takeProfit === undefined) return false;
-    if (!Number.isFinite(ticket.stop) || !Number.isFinite(ticket.takeProfit)) return false;
+    if (ticket.positionEffect === "CLOSE_OR_REDUCE") return false;
+    if (ticket.stop === undefined || ticket.takeProfit === undefined)
+      return false;
+    if (!Number.isFinite(ticket.stop) || !Number.isFinite(ticket.takeProfit))
+      return false;
     return true;
   }
 
   private validateBracket(ticket: SignalTicket): void {
     if (ticket.stop === undefined || ticket.takeProfit === undefined) {
-      throw new Error('Bracket order requires stop and takeProfit');
+      throw new Error("Bracket order requires stop and takeProfit");
     }
     if (!Number.isFinite(ticket.stop) || !Number.isFinite(ticket.takeProfit)) {
-      throw new Error('Bracket order requires finite stop and takeProfit');
+      throw new Error("Bracket order requires finite stop and takeProfit");
     }
     if (ticket.stop <= 0 || ticket.takeProfit <= 0) {
-      throw new Error('Bracket order requires positive stop and takeProfit');
+      throw new Error("Bracket order requires positive stop and takeProfit");
     }
 
-    if (ticket.side === 'BUY' && ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+    if (
+      ticket.side === "BUY" &&
+      ticket.entry !== undefined &&
+      Number.isFinite(ticket.entry)
+    ) {
       if (!(ticket.stop < ticket.entry)) {
-        throw new Error(`Invalid BUY bracket: stop (${ticket.stop}) must be below entry (${ticket.entry})`);
+        throw new Error(
+          `Invalid BUY bracket: stop (${ticket.stop}) must be below entry (${ticket.entry})`,
+        );
       }
       if (!(ticket.takeProfit > ticket.entry)) {
-        throw new Error(`Invalid BUY bracket: takeProfit (${ticket.takeProfit}) must be above entry (${ticket.entry})`);
+        throw new Error(
+          `Invalid BUY bracket: takeProfit (${ticket.takeProfit}) must be above entry (${ticket.entry})`,
+        );
       }
     }
 
-    if (ticket.side === 'SELL' && ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+    if (
+      ticket.side === "SELL" &&
+      ticket.entry !== undefined &&
+      Number.isFinite(ticket.entry)
+    ) {
       if (!(ticket.stop > ticket.entry)) {
-        throw new Error(`Invalid SELL bracket: stop (${ticket.stop}) must be above entry (${ticket.entry})`);
+        throw new Error(
+          `Invalid SELL bracket: stop (${ticket.stop}) must be above entry (${ticket.entry})`,
+        );
       }
       if (!(ticket.takeProfit < ticket.entry)) {
-        throw new Error(`Invalid SELL bracket: takeProfit (${ticket.takeProfit}) must be below entry (${ticket.entry})`);
+        throw new Error(
+          `Invalid SELL bracket: takeProfit (${ticket.takeProfit}) must be below entry (${ticket.entry})`,
+        );
       }
     }
 
@@ -912,37 +1094,60 @@ export class TwsExecutionClient {
     // runner takeProfit, on the correct side of the entry. Cumulative fraction
     // must stay below 1 so the runner always has at least one share.
     if (ticket.partialTakeProfits && ticket.partialTakeProfits.length > 0) {
-      const isLong = ticket.side === 'BUY';
+      const isLong = ticket.side === "BUY";
       let cumulative = 0;
       for (const level of ticket.partialTakeProfits) {
-        if (!Number.isFinite(level.fraction) || !(level.fraction > 0) || level.fraction >= 1) {
-          throw new Error(`Invalid partialTakeProfits fraction: ${level.fraction}`);
+        if (
+          !Number.isFinite(level.fraction) ||
+          !(level.fraction > 0) ||
+          level.fraction >= 1
+        ) {
+          throw new Error(
+            `Invalid partialTakeProfits fraction: ${level.fraction}`,
+          );
         }
         if (!Number.isFinite(level.price) || level.price <= 0) {
           throw new Error(`Invalid partialTakeProfits price: ${level.price}`);
         }
         if (ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
-          if (isLong && !(level.price > ticket.entry && level.price < ticket.takeProfit)) {
-            throw new Error(`Invalid BUY partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`);
+          if (
+            isLong &&
+            !(level.price > ticket.entry && level.price < ticket.takeProfit)
+          ) {
+            throw new Error(
+              `Invalid BUY partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`,
+            );
           }
-          if (!isLong && !(level.price < ticket.entry && level.price > ticket.takeProfit)) {
-            throw new Error(`Invalid SELL partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`);
+          if (
+            !isLong &&
+            !(level.price < ticket.entry && level.price > ticket.takeProfit)
+          ) {
+            throw new Error(
+              `Invalid SELL partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`,
+            );
           }
         }
         cumulative += level.fraction;
       }
       if (!(cumulative < 1)) {
-        throw new Error(`partialTakeProfits cumulative fraction must be < 1, got ${cumulative}`);
+        throw new Error(
+          `partialTakeProfits cumulative fraction must be < 1, got ${cumulative}`,
+        );
       }
     }
   }
 
-  private buildParentOrder(ticket: SignalTicket, accountId: string, tif: string, transmit: boolean): Record<string, unknown> {
-    if (ticket.side !== 'BUY' && ticket.side !== 'SELL') {
+  private buildParentOrder(
+    ticket: SignalTicket,
+    accountId: string,
+    tif: string,
+    transmit: boolean,
+  ): Record<string, unknown> {
+    if (ticket.side !== "BUY" && ticket.side !== "SELL") {
       throw new Error(`Execution supports BUY/SELL only, got ${ticket.side}`);
     }
     if (ticket.quantity <= 0) {
-      throw new Error('Quantity must be > 0');
+      throw new Error("Quantity must be > 0");
     }
 
     const orderType = ticket.orderType.toUpperCase();
@@ -952,36 +1157,42 @@ export class TwsExecutionClient {
       orderType,
       tif,
       account: accountId,
-      transmit
+      transmit,
     };
 
-    if (orderType === 'LMT') {
+    if (orderType === "LMT") {
       if (ticket.entry === undefined || !Number.isFinite(ticket.entry)) {
-        throw new Error('LMT order requires ticket.entry');
+        throw new Error("LMT order requires ticket.entry");
       }
       base.lmtPrice = ticket.entry;
     }
-    if (orderType === 'STP') {
+    if (orderType === "STP") {
       if (ticket.entry === undefined || !Number.isFinite(ticket.entry)) {
-        throw new Error('STP order requires ticket.entry');
+        throw new Error("STP order requires ticket.entry");
       }
       base.auxPrice = ticket.entry;
     }
 
-    if (orderType !== 'MKT' && orderType !== 'LMT' && orderType !== 'STP') {
-      throw new Error(`Unsupported orderType for current execution engine: ${ticket.orderType}`);
+    if (orderType !== "MKT" && orderType !== "LMT" && orderType !== "STP") {
+      throw new Error(
+        `Unsupported orderType for current execution engine: ${ticket.orderType}`,
+      );
     }
 
     return base;
   }
 
-  private async resolveContract(ticket: SignalTicket): Promise<ResolvedContract> {
+  private async resolveContract(
+    ticket: SignalTicket,
+  ): Promise<ResolvedContract> {
     if (ticket.conid && Number.isFinite(Number(ticket.conid))) {
       const conId = Number(ticket.conid);
       try {
         return await this.resolveContractByConid(conId, ticket.instrument);
       } catch (error) {
-        this.onLog(`execution contractDetails fallback for conid=${conId}: ${(error as Error).message}`);
+        this.onLog(
+          `execution contractDetails fallback for conid=${conId}: ${(error as Error).message}`,
+        );
         const fromEnv = this.config.contractFallbackByConid?.[String(conId)];
         const fallbackExchange = fromEnv?.exchange ?? this.config.exchange;
         const fallbackCurrency = fromEnv?.currency ?? this.config.currency;
@@ -993,9 +1204,11 @@ export class TwsExecutionClient {
             symbol: fromEnv?.symbol ?? ticket.instrument,
             secType: fromEnv?.secType ?? this.config.securityType,
             ...(fallbackExchange ? { exchange: fallbackExchange } : {}),
-            ...(fromEnv?.primaryExch ? { primaryExch: fromEnv.primaryExch } : {}),
-            ...(fallbackCurrency ? { currency: fallbackCurrency } : {})
-          }
+            ...(fromEnv?.primaryExch
+              ? { primaryExch: fromEnv.primaryExch }
+              : {}),
+            ...(fallbackCurrency ? { currency: fallbackCurrency } : {}),
+          },
         };
       }
     }
@@ -1008,17 +1221,24 @@ export class TwsExecutionClient {
 
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting contractDetails for ${ticket.instrument}`));
+        reject(
+          new Error(
+            `Timed out waiting contractDetails for ${ticket.instrument}`,
+          ),
+        );
       }, 8_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('contractDetails', onContractDetails);
-        this.ib.off('contractDetailsEnd', onContractDetailsEnd);
-        this.ib.off('error', onError);
+        this.ib.off("contractDetails", onContractDetails);
+        this.ib.off("contractDetailsEnd", onContractDetailsEnd);
+        this.ib.off("error", onError);
       };
 
-      const onContractDetails = (incomingReqId: number, details: ContractDetailsShape) => {
+      const onContractDetails = (
+        incomingReqId: number,
+        details: ContractDetailsShape,
+      ) => {
         if (incomingReqId !== reqId) return;
         if (!firstDetails) firstDetails = details;
       };
@@ -1035,7 +1255,9 @@ export class TwsExecutionClient {
 
         const conId = toNum(summary.conId);
         if (!conId) {
-          reject(new Error(`No conId in contract details for ${ticket.instrument}`));
+          reject(
+            new Error(`No conId in contract details for ${ticket.instrument}`),
+          );
           return;
         }
 
@@ -1043,30 +1265,48 @@ export class TwsExecutionClient {
           contract: this.withDefaults({
             conId,
             symbol: String(summary.symbol ?? ticket.instrument),
-            secType: typeof summary.secType === 'string' ? summary.secType : undefined,
-            exchange: typeof summary.exchange === 'string' ? summary.exchange : undefined,
-            currency: typeof summary.currency === 'string' ? summary.currency : undefined,
-            primaryExch: typeof summary.primaryExch === 'string' ? summary.primaryExch : undefined
+            secType:
+              typeof summary.secType === "string" ? summary.secType : undefined,
+            exchange:
+              typeof summary.exchange === "string"
+                ? summary.exchange
+                : undefined,
+            currency:
+              typeof summary.currency === "string"
+                ? summary.currency
+                : undefined,
+            primaryExch:
+              typeof summary.primaryExch === "string"
+                ? summary.primaryExch
+                : undefined,
           }),
-          minTick: this.normalizeMinTick(firstDetails?.minTick)
+          minTick: this.normalizeMinTick(firstDetails?.minTick),
         });
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId) return;
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId)
+          return;
         cleanup();
-        reject(new Error(`contractDetails error for ${ticket.instrument}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(
+          new Error(
+            `contractDetails error for ${ticket.instrument}: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
+          ),
+        );
       };
 
-      this.ib.on('contractDetails', onContractDetails);
-      this.ib.on('contractDetailsEnd', onContractDetailsEnd);
-      this.ib.on('error', onError);
+      this.ib.on("contractDetails", onContractDetails);
+      this.ib.on("contractDetailsEnd", onContractDetailsEnd);
+      this.ib.on("error", onError);
       this.ib.reqContractDetails(reqId, contract);
     });
   }
 
-  private async resolveContractByConid(conId: number, symbolHint?: string): Promise<ResolvedContract> {
+  private async resolveContractByConid(
+    conId: number,
+    symbolHint?: string,
+  ): Promise<ResolvedContract> {
     const reqId = this.allocOrderId() + 100_000;
 
     return new Promise<ResolvedContract>((resolve, reject) => {
@@ -1074,17 +1314,22 @@ export class TwsExecutionClient {
 
       const timeout = setTimeout(() => {
         cleanup();
-        reject(new Error(`Timed out waiting contractDetails for conid=${conId}`));
+        reject(
+          new Error(`Timed out waiting contractDetails for conid=${conId}`),
+        );
       }, 8_000);
 
       const cleanup = () => {
         clearTimeout(timeout);
-        this.ib.off('contractDetails', onContractDetails);
-        this.ib.off('contractDetailsEnd', onContractDetailsEnd);
-        this.ib.off('error', onError);
+        this.ib.off("contractDetails", onContractDetails);
+        this.ib.off("contractDetailsEnd", onContractDetailsEnd);
+        this.ib.off("error", onError);
       };
 
-      const onContractDetails = (incomingReqId: number, details: ContractDetailsShape) => {
+      const onContractDetails = (
+        incomingReqId: number,
+        details: ContractDetailsShape,
+      ) => {
         if (incomingReqId !== reqId) return;
         if (!firstDetails) firstDetails = details;
       };
@@ -1102,26 +1347,43 @@ export class TwsExecutionClient {
         resolve({
           contract: {
             conId,
-            symbol: String(summary.symbol ?? symbolHint ?? ''),
-            secType: typeof summary.secType === 'string' ? summary.secType : this.config.securityType,
-            exchange: typeof summary.exchange === 'string' ? summary.exchange : undefined,
-            primaryExch: typeof summary.primaryExch === 'string' ? summary.primaryExch : undefined,
-            currency: typeof summary.currency === 'string' ? summary.currency : undefined
+            symbol: String(summary.symbol ?? symbolHint ?? ""),
+            secType:
+              typeof summary.secType === "string"
+                ? summary.secType
+                : this.config.securityType,
+            exchange:
+              typeof summary.exchange === "string"
+                ? summary.exchange
+                : undefined,
+            primaryExch:
+              typeof summary.primaryExch === "string"
+                ? summary.primaryExch
+                : undefined,
+            currency:
+              typeof summary.currency === "string"
+                ? summary.currency
+                : undefined,
           },
-          minTick: this.normalizeMinTick(firstDetails?.minTick)
+          minTick: this.normalizeMinTick(firstDetails?.minTick),
         });
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
         const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId) return;
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId)
+          return;
         cleanup();
-        reject(new Error(`contractDetails error for conid=${conId}: ${parsed.message} (code=${parsed.code ?? 'n/a'})`));
+        reject(
+          new Error(
+            `contractDetails error for conid=${conId}: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
+          ),
+        );
       };
 
-      this.ib.on('contractDetails', onContractDetails);
-      this.ib.on('contractDetailsEnd', onContractDetailsEnd);
-      this.ib.on('error', onError);
+      this.ib.on("contractDetails", onContractDetails);
+      this.ib.on("contractDetailsEnd", onContractDetailsEnd);
+      this.ib.on("error", onError);
       this.ib.reqContractDetails(reqId, { conId });
     });
   }
@@ -1131,42 +1393,62 @@ export class TwsExecutionClient {
       secType: this.config.securityType,
       exchange: this.config.exchange,
       currency: this.config.currency,
-      ...(this.config.primaryExchange ? { primaryExch: this.config.primaryExchange } : {}),
-      ...contract
+      ...(this.config.primaryExchange
+        ? { primaryExch: this.config.primaryExchange }
+        : {}),
+      ...contract,
     };
   }
 
   private normalizeMinTick(value: unknown): number | undefined {
     const parsed = toNum(value);
-    if (parsed === undefined || !Number.isFinite(parsed) || parsed <= 0) return undefined;
+    if (parsed === undefined || !Number.isFinite(parsed) || parsed <= 0)
+      return undefined;
     return parsed;
   }
 
-  private determineEffectiveTick(contract: ContractShape, ticket: SignalTicket, rawMinTick?: number): EffectiveTick {
-    const validMinTick = rawMinTick && Number.isFinite(rawMinTick) && rawMinTick > 0 ? rawMinTick : undefined;
+  private determineEffectiveTick(
+    contract: ContractShape,
+    ticket: SignalTicket,
+    rawMinTick?: number,
+  ): EffectiveTick {
+    const validMinTick =
+      rawMinTick && Number.isFinite(rawMinTick) && rawMinTick > 0
+        ? rawMinTick
+        : undefined;
     const fallbackRefPrice = ticket.entry ?? ticket.stop ?? ticket.takeProfit;
-    const refPrice = typeof fallbackRefPrice === 'number' && Number.isFinite(fallbackRefPrice) ? fallbackRefPrice : undefined;
+    const refPrice =
+      typeof fallbackRefPrice === "number" && Number.isFinite(fallbackRefPrice)
+        ? fallbackRefPrice
+        : undefined;
 
-    if (this.isWseContract(contract) && refPrice !== undefined && refPrice > 0) {
+    if (
+      this.isWseContract(contract) &&
+      refPrice !== undefined &&
+      refPrice > 0
+    ) {
       const ladderTick = this.wseTickForPrice(refPrice);
       if (validMinTick === undefined || validMinTick < ladderTick) {
-        return { tick: ladderTick, source: 'wse_ladder' };
+        return { tick: ladderTick, source: "wse_ladder" };
       }
-      return { tick: validMinTick, source: 'minTick' };
+      return { tick: validMinTick, source: "minTick" };
     }
 
     if (validMinTick !== undefined) {
-      return { tick: validMinTick, source: 'minTick' };
+      return { tick: validMinTick, source: "minTick" };
     }
-    return { source: 'none' };
+    return { source: "none" };
   }
 
   private isWseContract(contract: ContractShape): boolean {
     const values = [contract.exchange, contract.primaryExch]
-      .filter((value): value is string => typeof value === 'string')
+      .filter((value): value is string => typeof value === "string")
       .map((value) => value.toUpperCase());
 
-    return values.some((value) => value === 'WSE' || value.includes('WARSAW') || value.includes('GPW'));
+    return values.some(
+      (value) =>
+        value === "WSE" || value.includes("WARSAW") || value.includes("GPW"),
+    );
   }
 
   private wseTickForPrice(price: number): number {
@@ -1180,7 +1462,10 @@ export class TwsExecutionClient {
     return 1;
   }
 
-  private wasTicketNormalized(original: SignalTicket, normalized: SignalTicket): boolean {
+  private wasTicketNormalized(
+    original: SignalTicket,
+    normalized: SignalTicket,
+  ): boolean {
     const different = (a?: number, b?: number): boolean => {
       if (a === undefined && b === undefined) return false;
       if (a === undefined || b === undefined) return true;
@@ -1194,29 +1479,48 @@ export class TwsExecutionClient {
     );
   }
 
-  private normalizeTicketPrices(ticket: SignalTicket, minTick?: number): SignalTicket {
+  private normalizeTicketPrices(
+    ticket: SignalTicket,
+    minTick?: number,
+  ): SignalTicket {
     if (!minTick || !Number.isFinite(minTick) || minTick <= 0) {
       return ticket;
     }
 
     const normalized: SignalTicket = { ...ticket };
-    const isBuy = ticket.side === 'BUY';
+    const isBuy = ticket.side === "BUY";
 
     if (ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
-      if (ticket.orderType === 'LMT') {
-        normalized.entry = this.roundToTick(ticket.entry, minTick, isBuy ? 'down' : 'up');
+      if (ticket.orderType === "LMT") {
+        normalized.entry = this.roundToTick(
+          ticket.entry,
+          minTick,
+          isBuy ? "down" : "up",
+        );
       }
-      if (ticket.orderType === 'STP') {
-        normalized.entry = this.roundToTick(ticket.entry, minTick, isBuy ? 'up' : 'down');
+      if (ticket.orderType === "STP") {
+        normalized.entry = this.roundToTick(
+          ticket.entry,
+          minTick,
+          isBuy ? "up" : "down",
+        );
       }
     }
 
     if (ticket.stop !== undefined && Number.isFinite(ticket.stop)) {
-      normalized.stop = this.roundToTick(ticket.stop, minTick, isBuy ? 'down' : 'up');
+      normalized.stop = this.roundToTick(
+        ticket.stop,
+        minTick,
+        isBuy ? "down" : "up",
+      );
     }
 
     if (ticket.takeProfit !== undefined && Number.isFinite(ticket.takeProfit)) {
-      normalized.takeProfit = this.roundToTick(ticket.takeProfit, minTick, isBuy ? 'up' : 'down');
+      normalized.takeProfit = this.roundToTick(
+        ticket.takeProfit,
+        minTick,
+        isBuy ? "up" : "down",
+      );
     }
 
     if (normalized.stop !== undefined && normalized.stop <= 0) {
@@ -1226,36 +1530,67 @@ export class TwsExecutionClient {
       normalized.takeProfit = minTick;
     }
 
-    if (ticket.side === 'BUY' && normalized.entry !== undefined) {
-      if (normalized.stop !== undefined && normalized.stop >= normalized.entry) {
-        normalized.stop = Math.max(minTick, this.roundToTick(normalized.entry - minTick, minTick, 'down'));
+    if (ticket.side === "BUY" && normalized.entry !== undefined) {
+      if (
+        normalized.stop !== undefined &&
+        normalized.stop >= normalized.entry
+      ) {
+        normalized.stop = Math.max(
+          minTick,
+          this.roundToTick(normalized.entry - minTick, minTick, "down"),
+        );
       }
-      if (normalized.takeProfit !== undefined && normalized.takeProfit <= normalized.entry) {
-        normalized.takeProfit = this.roundToTick(normalized.entry + minTick, minTick, 'up');
+      if (
+        normalized.takeProfit !== undefined &&
+        normalized.takeProfit <= normalized.entry
+      ) {
+        normalized.takeProfit = this.roundToTick(
+          normalized.entry + minTick,
+          minTick,
+          "up",
+        );
       }
     }
 
-    if (ticket.side === 'SELL' && normalized.entry !== undefined) {
-      if (normalized.stop !== undefined && normalized.stop <= normalized.entry) {
-        normalized.stop = this.roundToTick(normalized.entry + minTick, minTick, 'up');
+    if (ticket.side === "SELL" && normalized.entry !== undefined) {
+      if (
+        normalized.stop !== undefined &&
+        normalized.stop <= normalized.entry
+      ) {
+        normalized.stop = this.roundToTick(
+          normalized.entry + minTick,
+          minTick,
+          "up",
+        );
       }
-      if (normalized.takeProfit !== undefined && normalized.takeProfit >= normalized.entry) {
-        normalized.takeProfit = Math.max(minTick, this.roundToTick(normalized.entry - minTick, minTick, 'down'));
+      if (
+        normalized.takeProfit !== undefined &&
+        normalized.takeProfit >= normalized.entry
+      ) {
+        normalized.takeProfit = Math.max(
+          minTick,
+          this.roundToTick(normalized.entry - minTick, minTick, "down"),
+        );
       }
     }
 
     return normalized;
   }
 
-  private roundToTick(price: number, minTick: number, direction: 'down' | 'up'): number {
+  private roundToTick(
+    price: number,
+    minTick: number,
+    direction: "down" | "up",
+  ): number {
     if (!Number.isFinite(price)) return price;
 
     const decimals = this.decimalPlaces(minTick);
     const epsilon = minTick * 1e-9;
     const stepsRaw = price / minTick;
-    const steps = direction === 'down'
-      ? Math.floor(stepsRaw + epsilon)
-      : Math.ceil(stepsRaw - epsilon);
+    const steps =
+      direction === "down"
+        ? Math.floor(stepsRaw + epsilon)
+        : Math.ceil(stepsRaw - epsilon);
     const rounded = steps * minTick;
 
     return Number(rounded.toFixed(Math.min(Math.max(decimals, 2), 8)));
@@ -1263,13 +1598,13 @@ export class TwsExecutionClient {
 
   private decimalPlaces(value: number): number {
     const normalized = String(value).toLowerCase();
-    if (normalized.includes('e-')) {
-      const [, exponent] = normalized.split('e-');
+    if (normalized.includes("e-")) {
+      const [, exponent] = normalized.split("e-");
       const parsed = Number(exponent);
       if (Number.isFinite(parsed) && parsed >= 0) return parsed;
       return 8;
     }
-    const dot = normalized.indexOf('.');
+    const dot = normalized.indexOf(".");
     if (dot === -1) return 0;
     return normalized.length - dot - 1;
   }
@@ -1278,9 +1613,11 @@ export class TwsExecutionClient {
     accountId: string,
     valuesByKey: Map<string, Map<string, string>>,
     positionsByKey: Map<string, AccountPositionSnapshot>,
-    accountTime?: string
+    accountTime?: string,
   ): AccountSnapshot {
-    const positions = Array.from(positionsByKey.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+    const positions = Array.from(positionsByKey.values()).sort((a, b) =>
+      a.symbol.localeCompare(b.symbol),
+    );
 
     let longExposure = 0;
     let shortExposure = 0;
@@ -1292,37 +1629,58 @@ export class TwsExecutionClient {
     }
 
     const metrics: AccountMetricSet = {
-      netLiquidation: this.pickAccountMetric(valuesByKey, 'NetLiquidation'),
-      totalCashValue: this.pickAccountMetric(valuesByKey, 'TotalCashValue'),
-      settledCash: this.pickAccountMetric(valuesByKey, 'SettledCash'),
-      buyingPower: this.pickAccountMetric(valuesByKey, 'BuyingPower'),
-      availableFunds: this.pickAccountMetric(valuesByKey, 'AvailableFunds'),
-      excessLiquidity: this.pickAccountMetric(valuesByKey, 'ExcessLiquidity'),
-      equityWithLoanValue: this.pickAccountMetric(valuesByKey, 'EquityWithLoanValue'),
-      grossPositionValue: this.pickAccountMetric(valuesByKey, 'GrossPositionValue'),
-      initMarginReq: this.pickAccountMetric(valuesByKey, 'InitMarginReq'),
-      maintMarginReq: this.pickAccountMetric(valuesByKey, 'MaintMarginReq'),
-      unrealizedPnL: this.pickAccountMetric(valuesByKey, 'UnrealizedPnL'),
-      realizedPnL: this.pickAccountMetric(valuesByKey, 'RealizedPnL'),
-      cushion: this.pickAccountMetric(valuesByKey, 'Cushion')
+      netLiquidation: this.pickAccountMetric(valuesByKey, "NetLiquidation"),
+      totalCashValue: this.pickAccountMetric(valuesByKey, "TotalCashValue"),
+      settledCash: this.pickAccountMetric(valuesByKey, "SettledCash"),
+      buyingPower: this.pickAccountMetric(valuesByKey, "BuyingPower"),
+      availableFunds: this.pickAccountMetric(valuesByKey, "AvailableFunds"),
+      excessLiquidity: this.pickAccountMetric(valuesByKey, "ExcessLiquidity"),
+      equityWithLoanValue: this.pickAccountMetric(
+        valuesByKey,
+        "EquityWithLoanValue",
+      ),
+      grossPositionValue: this.pickAccountMetric(
+        valuesByKey,
+        "GrossPositionValue",
+      ),
+      initMarginReq: this.pickAccountMetric(valuesByKey, "InitMarginReq"),
+      maintMarginReq: this.pickAccountMetric(valuesByKey, "MaintMarginReq"),
+      unrealizedPnL: this.pickAccountMetric(valuesByKey, "UnrealizedPnL"),
+      realizedPnL: this.pickAccountMetric(valuesByKey, "RealizedPnL"),
+      cushion: this.pickAccountMetric(valuesByKey, "Cushion"),
     };
 
     const baseCurrency = this.config.currency.trim().toUpperCase();
-    const pnlFxToBaseByCurrency = this.buildPnLFxToBaseByCurrency(valuesByKey, positions, baseCurrency, metrics.unrealizedPnL);
+    const pnlFxToBaseByCurrency = this.buildPnLFxToBaseByCurrency(
+      valuesByKey,
+      positions,
+      baseCurrency,
+      metrics.unrealizedPnL,
+    );
     let unrealizedPnLFromPositionsBase = 0;
     let realizedPnLFromPositionsBase = 0;
 
     for (const position of positions) {
       const currency = position.currency?.trim().toUpperCase();
-      const fxToBase = currency ? pnlFxToBaseByCurrency.get(currency) : undefined;
+      const fxToBase = currency
+        ? pnlFxToBaseByCurrency.get(currency)
+        : undefined;
 
-      if (fxToBase !== undefined && position.unrealizedPnL !== undefined && Number.isFinite(position.unrealizedPnL)) {
+      if (
+        fxToBase !== undefined &&
+        position.unrealizedPnL !== undefined &&
+        Number.isFinite(position.unrealizedPnL)
+      ) {
         const value = position.unrealizedPnL * fxToBase;
         position.unrealizedPnLBase = value;
         unrealizedPnLFromPositionsBase += value;
       }
 
-      if (fxToBase !== undefined && position.realizedPnL !== undefined && Number.isFinite(position.realizedPnL)) {
+      if (
+        fxToBase !== undefined &&
+        position.realizedPnL !== undefined &&
+        Number.isFinite(position.realizedPnL)
+      ) {
         const value = position.realizedPnL * fxToBase;
         position.realizedPnLBase = value;
         realizedPnLFromPositionsBase += value;
@@ -1342,9 +1700,9 @@ export class TwsExecutionClient {
         grossExposure: longExposure + shortExposure,
         netExposure: longExposure - shortExposure,
         unrealizedPnL: metrics.unrealizedPnL ?? unrealizedPnLFromPositionsBase,
-        realizedPnL: metrics.realizedPnL ?? realizedPnLFromPositionsBase
+        realizedPnL: metrics.realizedPnL ?? realizedPnLFromPositionsBase,
       },
-      positions
+      positions,
     };
   }
 
@@ -1352,7 +1710,7 @@ export class TwsExecutionClient {
     valuesByKey: Map<string, Map<string, string>>,
     positions: AccountPositionSnapshot[],
     baseCurrency: string,
-    targetUnrealizedBase?: number
+    targetUnrealizedBase?: number,
   ): Map<string, number> {
     const normalizedBaseCurrency = baseCurrency.trim().toUpperCase();
     const byCurrencyLocalUnrealized = new Map<string, number>();
@@ -1360,12 +1718,15 @@ export class TwsExecutionClient {
       const currency = position.currency?.trim().toUpperCase();
       if (!currency) continue;
       const current = byCurrencyLocalUnrealized.get(currency) ?? 0;
-      byCurrencyLocalUnrealized.set(currency, current + (position.unrealizedPnL ?? 0));
+      byCurrencyLocalUnrealized.set(
+        currency,
+        current + (position.unrealizedPnL ?? 0),
+      );
     }
 
     const out = new Map<string, number>([[normalizedBaseCurrency, 1]]);
 
-    const exchangeRates = valuesByKey.get('ExchangeRate');
+    const exchangeRates = valuesByKey.get("ExchangeRate");
     if (!exchangeRates || byCurrencyLocalUnrealized.size === 0) {
       return out;
     }
@@ -1375,19 +1736,25 @@ export class TwsExecutionClient {
       .map(([currency, localUnrealized]) => ({
         currency,
         localUnrealized,
-        rawRate: toNum(exchangeRates.get(currency))
+        rawRate: toNum(exchangeRates.get(currency)),
       }))
-      .filter((entry) => entry.rawRate !== undefined && Number.isFinite(entry.rawRate) && (entry.rawRate as number) > 0);
+      .filter(
+        (entry) =>
+          entry.rawRate !== undefined &&
+          Number.isFinite(entry.rawRate) &&
+          (entry.rawRate as number) > 0,
+      );
 
     if (candidates.length === 0) {
       return out;
     }
 
-    const baseLocalUnrealized = byCurrencyLocalUnrealized.get(normalizedBaseCurrency) ?? 0;
+    const baseLocalUnrealized =
+      byCurrencyLocalUnrealized.get(normalizedBaseCurrency) ?? 0;
     const target = Number.isFinite(targetUnrealizedBase ?? NaN)
       ? Number(targetUnrealizedBase) - baseLocalUnrealized
       : undefined;
-    const combos = candidates.length <= 10 ? (1 << candidates.length) : 0;
+    const combos = candidates.length <= 10 ? 1 << candidates.length : 0;
 
     if (target === undefined || combos === 0) {
       for (const entry of candidates) {
@@ -1430,30 +1797,39 @@ export class TwsExecutionClient {
     return out;
   }
 
-  private pickAccountMetric(valuesByKey: Map<string, Map<string, string>>, key: string): number | undefined {
+  private pickAccountMetric(
+    valuesByKey: Map<string, Map<string, string>>,
+    key: string,
+  ): number | undefined {
     const byCurrency = valuesByKey.get(key);
     if (!byCurrency) return undefined;
 
-    const candidate = byCurrency.get('BASE') ?? byCurrency.get('USD') ?? Array.from(byCurrency.values())[0];
+    const candidate =
+      byCurrency.get("BASE") ??
+      byCurrency.get("USD") ??
+      Array.from(byCurrency.values())[0];
     return toNum(candidate);
   }
 
   private bindCoreListeners(): void {
-    this.ib.on('connected', () => {
-      this.onLog('execution socket connected event received');
+    this.ib.on("connected", () => {
+      this.onLog("execution socket connected event received");
     });
 
-    this.ib.on('disconnected', () => {
-      this.onLog('execution socket disconnected');
+    this.ib.on("disconnected", () => {
+      this.onLog("execution socket disconnected");
       this.connected = false;
       this.clearAllSubmittedAutoCancelTimers();
       this.clearAllBracketVerificationTimers();
     });
 
-    this.ib.on('error', (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+    this.ib.on("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
       const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-      const prefix = parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : 'reqId=n/a';
-      this.onLog(`execution TWS error code=${parsed.code ?? 'n/a'} ${prefix}: ${parsed.message}`);
+      const prefix =
+        parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : "reqId=n/a";
+      this.onLog(
+        `execution TWS error code=${parsed.code ?? "n/a"} ${prefix}: ${parsed.message}`,
+      );
 
       const reqId = Number(parsed.reqId);
       const code = Number(parsed.code);
@@ -1476,111 +1852,154 @@ export class TwsExecutionClient {
 
       this.locateAutoCancelAttempted.add(reqId);
       this.onLog(
-        `execution auto-cancel locate-held orderId=${reqId} symbol=${context.symbol} side=${context.side} positionEffect=${context.positionEffect ?? 'n/a'}`
+        `execution auto-cancel locate-held orderId=${reqId} symbol=${context.symbol} side=${context.side} positionEffect=${context.positionEffect ?? "n/a"}`,
       );
 
       void this.cancelBrokerOrder(String(reqId))
         .then((result) => {
-          this.onLog(`execution auto-cancel locate-held result orderId=${reqId} status=${result.status}`);
-          if (result.status === 'CANCELLED') {
+          this.onLog(
+            `execution auto-cancel locate-held result orderId=${reqId} status=${result.status}`,
+          );
+          if (result.status === "CANCELLED") {
             this.onBrokerOrderStatus?.({
               brokerOrderId: String(reqId),
-              status: 'CANCELLED',
-              message: this.buildCancelMessage(reqId, `Auto-cancelled locate-held short (code=404): ${parsed.message}`)
+              status: "CANCELLED",
+              message: this.buildCancelMessage(
+                reqId,
+                `Auto-cancelled locate-held short (code=404): ${parsed.message}`,
+              ),
             });
           }
         })
         .catch((error) => {
           const message = (error as Error).message;
-          this.onLog(`execution auto-cancel locate-held failed orderId=${reqId}: ${message}`);
+          this.onLog(
+            `execution auto-cancel locate-held failed orderId=${reqId}: ${message}`,
+          );
 
           // If broker reports "not found", treat as terminal and close local record.
-          if (message.includes('code=10147')) {
+          if (message.includes("code=10147")) {
             this.onBrokerOrderStatus?.({
               brokerOrderId: String(reqId),
-              status: 'CANCELLED',
+              status: "CANCELLED",
               message: this.buildCancelMessage(
                 reqId,
-                `Auto-cancel locate-held: broker reports order not found (code=10147). Original error: ${message}`
-              )
+                `Auto-cancel locate-held: broker reports order not found (code=10147). Original error: ${message}`,
+              ),
             });
           }
         });
     });
 
     this.ib.on(
-      'orderStatus',
-      (
-        orderId: number,
-        status: string,
-        filled: number,
-        remaining: number
-      ) => {
-        const normalized = String(status || '').toUpperCase();
+      "orderStatus",
+      (orderId: number, status: string, filled: number, remaining: number) => {
+        const normalized = String(status || "").toUpperCase();
         this.orderStatusById.set(orderId, normalized);
-        this.onLog(`execution orderStatus orderId=${orderId} status=${normalized} filled=${filled} remaining=${remaining}`);
+        this.onLog(
+          `execution orderStatus orderId=${orderId} status=${normalized} filled=${filled} remaining=${remaining}`,
+        );
         this.onBrokerOrderStatus?.({
           brokerOrderId: String(orderId),
           status: normalized,
-          message: `Broker order status update: ${normalized} (filled=${filled}, remaining=${remaining})`
+          message: `Broker order status update: ${normalized} (filled=${filled}, remaining=${remaining})`,
         });
 
         const context = this.openOrderContext.get(orderId);
 
         if (
-          context?.role === 'parent' &&
-          (normalized === 'SUBMITTED' || normalized === 'PRESUBMITTED' || normalized === 'PENDINGSUBMIT')
+          context?.role === "parent" &&
+          (normalized === "SUBMITTED" ||
+            normalized === "PRESUBMITTED" ||
+            normalized === "PENDINGSUBMIT")
         ) {
           this.scheduleSubmittedAutoCancel(orderId);
         }
 
-        if (normalized === 'PENDINGCANCEL') {
+        if (normalized === "PENDINGCANCEL") {
           this.clearSubmittedAutoCancelTimer(orderId);
         }
 
-        if (context?.role === 'parent' && normalized === 'FILLED') {
+        if (context?.role === "parent" && normalized === "FILLED") {
           this.scheduleBracketVerification(orderId);
         }
 
-        if (normalized === 'FILLED' || normalized === 'CANCELLED' || normalized === 'APICANCELLED' || normalized === 'INACTIVE') {
+        if (
+          normalized === "FILLED" ||
+          normalized === "CANCELLED" ||
+          normalized === "APICANCELLED" ||
+          normalized === "INACTIVE"
+        ) {
           this.clearParentOrderContext(orderId);
         }
-      }
+      },
     );
 
-    this.ib.on('execDetails', (reqId: number, contract: ContractShape, exec: Record<string, unknown>) => {
-      const sideRaw = String(exec.side ?? '').trim().toUpperCase();
-      const side = sideRaw === 'BOT' || sideRaw === 'BUY' ? 'BUY' : sideRaw === 'SLD' || sideRaw === 'SELL' ? 'SELL' : null;
-      const execId = String(exec.execId ?? '').trim();
-      const shares = toNum(exec.shares);
-      const price = toNum(exec.price);
-      if (!execId || !side || !Number.isFinite(shares) || !Number.isFinite(price)) return;
+    this.ib.on(
+      "execDetails",
+      (
+        reqId: number,
+        contract: ContractShape,
+        exec: Record<string, unknown>,
+      ) => {
+        const sideRaw = String(exec.side ?? "")
+          .trim()
+          .toUpperCase();
+        const side =
+          sideRaw === "BOT" || sideRaw === "BUY"
+            ? "BUY"
+            : sideRaw === "SLD" || sideRaw === "SELL"
+              ? "SELL"
+              : null;
+        const execId = String(exec.execId ?? "").trim();
+        const shares = toNum(exec.shares);
+        const price = toNum(exec.price);
+        if (
+          !execId ||
+          !side ||
+          !Number.isFinite(shares) ||
+          !Number.isFinite(price)
+        )
+          return;
 
-      this.onBrokerExecutionFill?.({
-        execId,
-        orderId: toNum(exec.orderId),
-        accountId: typeof exec.acctNumber === 'string' ? exec.acctNumber : undefined,
-        conid: Number.isFinite(toNum(contract.conId)) ? String(toNum(contract.conId)) : undefined,
-        symbol: String(contract.symbol ?? 'UNKNOWN'),
-        currency: typeof contract.currency === 'string' ? contract.currency : undefined,
-        exchange: typeof exec.exchange === 'string' ? exec.exchange : typeof contract.exchange === 'string' ? contract.exchange : undefined,
-        side,
-        shares: Number(shares),
-        price: Number(price),
-        avgPrice: toNum(exec.avgPrice),
-        executedAt: typeof exec.time === 'string' ? exec.time : undefined
-      });
-    });
+        this.onBrokerExecutionFill?.({
+          execId,
+          orderId: toNum(exec.orderId),
+          accountId:
+            typeof exec.acctNumber === "string" ? exec.acctNumber : undefined,
+          conid: Number.isFinite(toNum(contract.conId))
+            ? String(toNum(contract.conId))
+            : undefined,
+          symbol: String(contract.symbol ?? "UNKNOWN"),
+          currency:
+            typeof contract.currency === "string"
+              ? contract.currency
+              : undefined,
+          exchange:
+            typeof exec.exchange === "string"
+              ? exec.exchange
+              : typeof contract.exchange === "string"
+                ? contract.exchange
+                : undefined,
+          side,
+          shares: Number(shares),
+          price: Number(price),
+          avgPrice: toNum(exec.avgPrice),
+          executedAt: typeof exec.time === "string" ? exec.time : undefined,
+        });
+      },
+    );
 
-    this.ib.on('commissionReport', (report: Record<string, unknown>) => {
-      const execId = String(report.execId ?? '').trim();
+    this.ib.on("commissionReport", (report: Record<string, unknown>) => {
+      const execId = String(report.execId ?? "").trim();
       if (!execId) return;
 
       this.onBrokerCommissionReport?.({
         execId,
         commission: toNum(report.commission),
-        currency: typeof report.currency === 'string' ? report.currency : undefined,
-        realizedPnL: toBrokerRealizedPnl(report.realizedPNL)
+        currency:
+          typeof report.currency === "string" ? report.currency : undefined,
+        realizedPnL: toBrokerRealizedPnl(report.realizedPNL),
       });
     });
   }
@@ -1592,20 +2011,23 @@ export class TwsExecutionClient {
 
   private formatExecutionFilterTime(value: Date): string {
     const year = value.getUTCFullYear();
-    const month = String(value.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(value.getUTCDate()).padStart(2, '0');
-    const hour = String(value.getUTCHours()).padStart(2, '0');
-    const minute = String(value.getUTCMinutes()).padStart(2, '0');
-    const second = String(value.getUTCSeconds()).padStart(2, '0');
+    const month = String(value.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(value.getUTCDate()).padStart(2, "0");
+    const hour = String(value.getUTCHours()).padStart(2, "0");
+    const minute = String(value.getUTCMinutes()).padStart(2, "0");
+    const second = String(value.getUTCSeconds()).padStart(2, "0");
     return `${year}${month}${day}-${hour}:${minute}:${second}`;
   }
 
-  private trackOrderPlanContext(plan: PlaceOrderPlan, ticket: SignalTicket): void {
+  private trackOrderPlanContext(
+    plan: PlaceOrderPlan,
+    ticket: SignalTicket,
+  ): void {
     this.openOrderContext.set(plan.parentOrderId, {
       symbol: ticket.instrument,
       side: ticket.side,
       positionEffect: ticket.positionEffect,
-      role: 'parent'
+      role: "parent",
     });
 
     if (!plan.bracket) return;
@@ -1614,16 +2036,16 @@ export class TwsExecutionClient {
       symbol: ticket.instrument,
       side: ticket.side,
       positionEffect: ticket.positionEffect,
-      role: 'take_profit',
-      parentOrderId: plan.parentOrderId
+      role: "take_profit",
+      parentOrderId: plan.parentOrderId,
     });
 
     this.openOrderContext.set(plan.bracket.stopLossOrderId, {
       symbol: ticket.instrument,
       side: ticket.side,
       positionEffect: ticket.positionEffect,
-      role: 'stop_loss',
-      parentOrderId: plan.parentOrderId
+      role: "stop_loss",
+      parentOrderId: plan.parentOrderId,
     });
 
     // Register every partial leg's TP/STOP children so status callbacks can
@@ -1636,15 +2058,15 @@ export class TwsExecutionClient {
           symbol: ticket.instrument,
           side: ticket.side,
           positionEffect: ticket.positionEffect,
-          role: 'take_profit',
-          parentOrderId: plan.parentOrderId
+          role: "take_profit",
+          parentOrderId: plan.parentOrderId,
         });
         this.openOrderContext.set(leg.stopLossOrderId, {
           symbol: ticket.instrument,
           side: ticket.side,
           positionEffect: ticket.positionEffect,
-          role: 'stop_loss',
-          parentOrderId: plan.parentOrderId
+          role: "stop_loss",
+          parentOrderId: plan.parentOrderId,
         });
       }
     }
@@ -1652,7 +2074,7 @@ export class TwsExecutionClient {
     this.bracketPlansByParent.set(plan.parentOrderId, {
       symbol: ticket.instrument,
       takeProfitOrderId: plan.bracket.takeProfitOrderId,
-      stopLossOrderId: plan.bracket.stopLossOrderId
+      stopLossOrderId: plan.bracket.stopLossOrderId,
     });
   }
 
@@ -1665,7 +2087,7 @@ export class TwsExecutionClient {
 
   private scheduleSubmittedAutoCancel(orderId: number): void {
     const context = this.openOrderContext.get(orderId);
-    if (context?.role !== 'parent') return;
+    if (context?.role !== "parent") return;
 
     const timeoutMs = Number(this.config.submittedAutoCancelMs ?? 0);
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
@@ -1673,33 +2095,42 @@ export class TwsExecutionClient {
 
     const timer = setTimeout(() => {
       this.submittedAutoCancelTimers.delete(orderId);
-      this.onLog(`execution submitted-timeout auto-cancel orderId=${orderId} after=${timeoutMs}ms`);
-      const cancelMessage = this.buildCancelMessage(orderId, `Auto-cancel submitted-timeout after ${timeoutMs}ms without fill`);
+      this.onLog(
+        `execution submitted-timeout auto-cancel orderId=${orderId} after=${timeoutMs}ms`,
+      );
+      const cancelMessage = this.buildCancelMessage(
+        orderId,
+        `Auto-cancel submitted-timeout after ${timeoutMs}ms without fill`,
+      );
 
       void this.cancelBrokerOrder(String(orderId))
         .then((result) => {
-          this.onLog(`execution submitted-timeout auto-cancel result orderId=${orderId} status=${result.status}`);
-          if (result.status === 'CANCELLED') {
+          this.onLog(
+            `execution submitted-timeout auto-cancel result orderId=${orderId} status=${result.status}`,
+          );
+          if (result.status === "CANCELLED") {
             this.onBrokerOrderStatus?.({
               brokerOrderId: String(orderId),
-              status: 'CANCELLED',
-              message: cancelMessage
+              status: "CANCELLED",
+              message: cancelMessage,
             });
           }
         })
         .catch((error) => {
           const message = (error as Error).message;
-          this.onLog(`execution submitted-timeout auto-cancel failed orderId=${orderId}: ${message}`);
+          this.onLog(
+            `execution submitted-timeout auto-cancel failed orderId=${orderId}: ${message}`,
+          );
 
           // If broker reports "not found", close local record as cancelled.
-          if (message.includes('code=10147')) {
+          if (message.includes("code=10147")) {
             this.onBrokerOrderStatus?.({
               brokerOrderId: String(orderId),
-              status: 'CANCELLED',
+              status: "CANCELLED",
               message: this.buildCancelMessage(
                 orderId,
-                `Auto-cancel submitted-timeout: broker reports order not found (code=10147). Original error: ${message}`
-              )
+                `Auto-cancel submitted-timeout: broker reports order not found (code=10147). Original error: ${message}`,
+              ),
             });
           }
         });
@@ -1730,24 +2161,26 @@ export class TwsExecutionClient {
     const timer = setTimeout(() => {
       this.bracketVerificationTimers.delete(parentOrderId);
 
-      const takeProfitStatus = this.orderStatusById.get(bracket.takeProfitOrderId);
+      const takeProfitStatus = this.orderStatusById.get(
+        bracket.takeProfitOrderId,
+      );
       const stopLossStatus = this.orderStatusById.get(bracket.stopLossOrderId);
       const takeProfitOk = this.isProtectiveOrderActiveOrDone(takeProfitStatus);
       const stopLossOk = this.isProtectiveOrderActiveOrDone(stopLossStatus);
 
       if (takeProfitOk && stopLossOk) {
         this.onLog(
-          `execution bracket verified parent=${parentOrderId} symbol=${bracket.symbol} tp=${bracket.takeProfitOrderId}:${takeProfitStatus} sl=${bracket.stopLossOrderId}:${stopLossStatus}`
+          `execution bracket verified parent=${parentOrderId} symbol=${bracket.symbol} tp=${bracket.takeProfitOrderId}:${takeProfitStatus} sl=${bracket.stopLossOrderId}:${stopLossStatus}`,
         );
         return;
       }
 
-      const message = `Bracket verification warning: protective child order not active for parent=${parentOrderId}, symbol=${bracket.symbol}, tp=${bracket.takeProfitOrderId}:${takeProfitStatus ?? 'missing'}, sl=${bracket.stopLossOrderId}:${stopLossStatus ?? 'missing'}`;
+      const message = `Bracket verification warning: protective child order not active for parent=${parentOrderId}, symbol=${bracket.symbol}, tp=${bracket.takeProfitOrderId}:${takeProfitStatus ?? "missing"}, sl=${bracket.stopLossOrderId}:${stopLossStatus ?? "missing"}`;
       this.onLog(`execution ${message}`);
       this.onBrokerOrderStatus?.({
         brokerOrderId: String(parentOrderId),
-        status: 'FILLED',
-        message
+        status: "FILLED",
+        message,
       });
     }, 5_000);
 
@@ -1755,10 +2188,12 @@ export class TwsExecutionClient {
   }
 
   private isProtectiveOrderActiveOrDone(status: string | undefined): boolean {
-    return status === 'SUBMITTED' ||
-      status === 'PRESUBMITTED' ||
-      status === 'PENDINGSUBMIT' ||
-      status === 'FILLED';
+    return (
+      status === "SUBMITTED" ||
+      status === "PRESUBMITTED" ||
+      status === "PENDINGSUBMIT" ||
+      status === "FILLED"
+    );
   }
 
   private clearAllBracketVerificationTimers(): void {
@@ -1774,42 +2209,55 @@ export class TwsExecutionClient {
     return `${baseMessage} | broker_warning: ${warning}`;
   }
 
-  private shouldAutoCancelLocateHeld(context: OpenOrderContext, message: string): boolean {
-    if (context.side !== 'SELL') return false;
-    if (context.positionEffect === 'CLOSE_OR_REDUCE') return false;
+  private shouldAutoCancelLocateHeld(
+    context: OpenOrderContext,
+    message: string,
+  ): boolean {
+    if (context.side !== "SELL") return false;
+    if (context.positionEffect === "CLOSE_OR_REDUCE") return false;
     const normalized = message.toLowerCase();
-    return normalized.includes('held while securities are located') || normalized.includes('securities are located');
+    return (
+      normalized.includes("held while securities are located") ||
+      normalized.includes("securities are located")
+    );
   }
 
-  private parseIbErrorArgs(arg1: unknown, arg2?: unknown, arg3?: unknown): { code?: number | string; reqId?: number | string; message: string } {
+  private parseIbErrorArgs(
+    arg1: unknown,
+    arg2?: unknown,
+    arg3?: unknown,
+  ): { code?: number | string; reqId?: number | string; message: string } {
     let code: number | string | undefined;
     let reqId: number | string | undefined;
-    let message = 'unknown IB error';
+    let message = "unknown IB error";
 
-    if (typeof arg1 === 'string') {
+    if (typeof arg1 === "string") {
       message = arg1;
     } else if (arg1 instanceof Error) {
       message = arg1.message;
-    } else if (arg1 && typeof arg1 === 'object') {
+    } else if (arg1 && typeof arg1 === "object") {
       const obj = arg1 as Record<string, unknown>;
       if (obj.message !== undefined) message = String(obj.message);
       if (obj.code !== undefined) code = String(obj.code);
       if (obj.reqId !== undefined) reqId = String(obj.reqId);
       if (obj.id !== undefined && reqId === undefined) reqId = String(obj.id);
-      if (obj.errorCode !== undefined && code === undefined) code = String(obj.errorCode);
+      if (obj.errorCode !== undefined && code === undefined)
+        code = String(obj.errorCode);
     }
 
-    if (typeof arg2 === 'number' || typeof arg2 === 'string') {
+    if (typeof arg2 === "number" || typeof arg2 === "string") {
       code = arg2;
-    } else if (arg2 && typeof arg2 === 'object') {
+    } else if (arg2 && typeof arg2 === "object") {
       const obj = arg2 as Record<string, unknown>;
       if (obj.code !== undefined) code = String(obj.code);
-      if (obj.errorCode !== undefined && code === undefined) code = String(obj.errorCode);
-      if (obj.reqId !== undefined && reqId === undefined) reqId = String(obj.reqId);
+      if (obj.errorCode !== undefined && code === undefined)
+        code = String(obj.errorCode);
+      if (obj.reqId !== undefined && reqId === undefined)
+        reqId = String(obj.reqId);
       if (obj.id !== undefined && reqId === undefined) reqId = String(obj.id);
     }
 
-    if (typeof arg3 === 'number' || typeof arg3 === 'string') {
+    if (typeof arg3 === "number" || typeof arg3 === "string") {
       reqId = arg3;
     }
 
