@@ -1,4 +1,4 @@
-import type { Candle, IndicatorSnapshot, ProposedOrder, Side } from '@ikbr/shared';
+import type { Candle, IndicatorSnapshot, PartialTakeProfit, ProposedOrder, Side } from '@ikbr/shared';
 
 export interface BacktestDataset {
   id: number;
@@ -46,6 +46,7 @@ export interface BacktestOrderRecord {
   status: ProposedOrder['status'];
   strategy?: string;
   indicatorSnapshot?: IndicatorSnapshot;
+  partialTakeProfits?: PartialTakeProfit[];
   generatedFromCandleTs?: Date;
   createdAt: Date;
 }

@@ -73,15 +73,29 @@ interface PendingOrder {
   generatedAt: Date;
 }
 
+interface PendingPartial {
+  fraction: number;
+  price: number;
+  executed: boolean;
+}
+
 interface Position {
   symbol: string;
   conid?: string;
   quantity: number;
+  /** Absolute size at the very first entry; used to size partial closes. */
+  originalQuantityAbs: number;
   averageCost: number;
   stop?: number;
   /** Initial stop captured at entry; used to compute 1R for breakeven move. */
   initialStop?: number;
   takeProfit?: number;
+  /**
+   * Intermediate take-profit ladder. Each level is closed for
+   * `originalQuantityAbs * fraction` shares (rounded down). Sorted in the
+   * order the price would be reached for the position's direction.
+   */
+  pendingPartials?: PendingPartial[];
   entryAt: Date;
   orderId: number;
   strategy: string;
@@ -356,6 +370,7 @@ export class BacktestSimulator {
         status: "PROPOSED",
         strategy: order.strategy,
         indicatorSnapshot: order.indicators,
+        partialTakeProfits: order.partialTakeProfits,
         generatedFromCandleTs: event.candle.ts,
         createdAt: event.candle.ts,
       });
@@ -688,10 +703,14 @@ export class BacktestSimulator {
         symbol: order.instrument,
         conid: order.conid,
         quantity: (existing?.quantity ?? 0) + qty,
+        originalQuantityAbs: existing
+          ? existing.originalQuantityAbs + Math.abs(qty)
+          : Math.abs(qty),
         averageCost,
         stop: order.stop,
         initialStop: existing?.initialStop ?? order.stop,
         takeProfit: order.takeProfit,
+        pendingPartials: existing?.pendingPartials ?? this.buildPendingPartials(order),
         entryAt: existing?.entryAt ?? candle.ts,
         orderId: pending.id,
         strategy: order.strategy ?? "n/a",
@@ -783,6 +802,24 @@ export class BacktestSimulator {
       }
     }
 
+    // Partial take-profits: scale out a fraction of the original size at each
+    // intermediate level reached this candle. Executed BEFORE final stop/TP so
+    // the runner can still hit the main target on the same bar. We assume each
+    // touched level fills fully at its limit price (optimistic, in line with
+    // the simulator's stop/TP semantics).
+    if (position.pendingPartials && position.pendingPartials.length > 0) {
+      for (const partial of position.pendingPartials) {
+        if (partial.executed) continue;
+        const reached = isLong
+          ? candle.high >= partial.price
+          : candle.low <= partial.price;
+        if (!reached) continue;
+        await this.closePartialPosition(position, partial, candle.ts);
+        // If the partial close drained the position, stop processing.
+        if (Math.abs(position.quantity) < 1) return;
+      }
+    }
+
     const stopTouched =
       position.stop !== undefined
         ? isLong
@@ -816,6 +853,105 @@ export class BacktestSimulator {
         position.orderId,
       );
     }
+  }
+
+  private buildPendingPartials(order: ProposedOrder): PendingPartial[] | undefined {
+    const levels = order.partialTakeProfits;
+    if (!levels || levels.length === 0) return undefined;
+    const isLong = order.side === "BUY";
+    const sorted = [...levels].sort((a, b) => (isLong ? a.price - b.price : b.price - a.price));
+    return sorted.map((level) => ({
+      fraction: level.fraction,
+      price: level.price,
+      executed: false,
+    }));
+  }
+
+  private async closePartialPosition(
+    position: Position,
+    partial: PendingPartial,
+    exitAt: Date,
+  ): Promise<void> {
+    partial.executed = true;
+    const partialQtyAbs = Math.floor(position.originalQuantityAbs * partial.fraction);
+    if (!(partialQtyAbs > 0)) return;
+    const remainingAbs = Math.abs(position.quantity);
+    const closeQtyAbs = Math.min(partialQtyAbs, remainingAbs);
+    if (!(closeQtyAbs > 0)) return;
+
+    const exitPrice = partial.price;
+    const exitFxToBase = this.fxToBaseForSymbol(position.symbol, exitAt);
+    if (exitFxToBase === undefined)
+      throw new Error(
+        `Missing FX rate for ${position.symbol} at ${exitAt.toISOString()}`,
+      );
+    const priceMultiplier = position.priceMultiplier;
+    const entryNotional = Math.abs(
+      position.averageCost *
+        closeQtyAbs *
+        priceMultiplier *
+        position.fxToBaseAtEntry,
+    );
+    const exitNotional = Math.abs(
+      exitPrice * closeQtyAbs * priceMultiplier * exitFxToBase,
+    );
+    const grossPnl =
+      position.quantity > 0
+        ? (exitPrice - position.averageCost) *
+          closeQtyAbs *
+          priceMultiplier *
+          exitFxToBase
+        : (position.averageCost - exitPrice) *
+          closeQtyAbs *
+          priceMultiplier *
+          exitFxToBase;
+    const commission =
+      ((entryNotional + exitNotional) * this.options.commissionBps) / 10000;
+    const netPnl = grossPnl - commission;
+    const pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
+
+    await this.repo.insertFill({
+      runId: this.runId,
+      orderId: position.orderId,
+      instrument: position.symbol,
+      conid: position.conid,
+      strategy: position.strategy,
+      side: position.side,
+      directionalRegime: position.directionalRegime,
+      volatilityRegime: position.volatilityRegime,
+      confidence: position.confidence,
+      quantity: closeQtyAbs,
+      entryPrice: position.averageCost,
+      exitPrice,
+      entryAt: position.entryAt,
+      exitAt,
+      grossPnl,
+      commission,
+      netPnl,
+      pnlPct,
+      exitReason: "partial_take_profit",
+    });
+
+    // Decrement position size (preserving direction sign).
+    const direction = position.quantity > 0 ? 1 : -1;
+    position.quantity = direction * (remainingAbs - closeQtyAbs);
+
+    this.closedTrades.push({
+      instrument: position.symbol,
+      strategy: position.strategy,
+      side: position.side,
+      pnl: netPnl,
+      pnlPct,
+      exitedAt: exitAt,
+    });
+    this.currentEquity += netPnl;
+    this.updateStrategyRuntime(
+      position.runtimeKey,
+      netPnl,
+      exitAt,
+      "partial_take_profit",
+      pnlPct,
+    );
   }
 
   private async closePosition(

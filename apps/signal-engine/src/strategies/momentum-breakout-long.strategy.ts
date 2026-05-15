@@ -308,6 +308,12 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       suggestedEntry: close,
       stopLoss,
       takeProfit,
+      // NOTE: partial take-profit infrastructure (PartialTakeProfit) is wired
+      // through the simulator + live ProposedOrder pipeline, but for this
+      // strategy every tested ladder (50%/+2R, 33%/+2R, 50%/+3R) regressed
+      // on the dataset because winners overwhelmingly run to the +4R target.
+      // Left disabled until a different strategy/regime warrants it.
+      // partialTakeProfits: [...],
       metadata: {
         ema20,
         ema50,

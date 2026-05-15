@@ -288,6 +288,7 @@ export class SignalRepository {
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS generated_from_candle_ts TIMESTAMPTZ;`);
+    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS partial_take_profits JSONB;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT;`);
     await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS superseded_by_order_id BIGINT;`);
 
@@ -813,6 +814,7 @@ export class SignalRepository {
         generated_from_candle_ts,
         lifecycle_reason,
         superseded_by_order_id,
+        partial_take_profits,
         created_at
       )
       VALUES (
@@ -821,7 +823,7 @@ export class SignalRepository {
         $11, $12, $13, $14, $15,
         'signal', NULL, NULL, NULL, NULL,
         NULL, NULL, NULL, NULL, NULL,
-        $16, $17, $18, NOW()
+        $16, $17, $18, $19, NOW()
       )
       RETURNING id
       `,
@@ -843,7 +845,8 @@ export class SignalRepository {
         JSON.stringify(order.indicators ?? null),
         order.generatedFromCandleTs ?? null,
         order.lifecycleReason ?? null,
-        order.supersededByOrderId ?? null
+        order.supersededByOrderId ?? null,
+        order.partialTakeProfits ? JSON.stringify(order.partialTakeProfits) : null
       ]
     );
 

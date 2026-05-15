@@ -3,6 +3,7 @@ import {
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
+  PartialTakeProfit,
   ProposedOrder,
   RegimeAnalysis,
   RiskLimits,
@@ -711,6 +712,10 @@ export class SignalEngine {
       entry,
       stop: positionEffect === "OPEN_OR_ADD" ? stop : undefined,
       takeProfit: positionEffect === "OPEN_OR_ADD" ? takeProfit : undefined,
+      partialTakeProfits:
+        positionEffect === "OPEN_OR_ADD" && signal.partialTakeProfits
+          ? this.sanitizePartialTakeProfits(signal.partialTakeProfits, signal.side, entry, takeProfit)
+          : undefined,
       reason: `${signal.entryReason}, strategy=${strategyId}, directionalRegime=${indicators.directionalRegime}, volatilityRegime=${indicators.volatilityRegime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
       confidence,
       timestamp: new Date().toISOString(),
@@ -720,6 +725,42 @@ export class SignalEngine {
       indicators,
       generatedFromCandleTs,
     };
+  }
+
+  /**
+   * Filters and orders partial take-profit levels so they sit strictly between
+   * the entry and the final take-profit on the correct side of the entry, and
+   * the cumulative fraction never exceeds 1. Anything malformed is dropped.
+   */
+  private sanitizePartialTakeProfits(
+    levels: PartialTakeProfit[],
+    side: Exclude<Side, "HOLD">,
+    entry: number,
+    finalTakeProfit: number,
+  ): PartialTakeProfit[] | undefined {
+    if (!Array.isArray(levels) || levels.length === 0) return undefined;
+    const isLong = side === "BUY";
+    const valid = levels.filter((level) => {
+      if (!Number.isFinite(level.price) || !Number.isFinite(level.fraction)) return false;
+      if (!(level.fraction > 0 && level.fraction < 1)) return false;
+      if (isLong) {
+        return level.price > entry && level.price < finalTakeProfit;
+      }
+      return level.price < entry && level.price > finalTakeProfit;
+    });
+    if (valid.length === 0) return undefined;
+    const sorted = [...valid].sort((a, b) => (isLong ? a.price - b.price : b.price - a.price));
+    let cumulative = 0;
+    const out: PartialTakeProfit[] = [];
+    for (const level of sorted) {
+      const remaining = 1 - cumulative;
+      if (remaining <= 1e-6) break;
+      const fraction = Math.min(level.fraction, remaining - 1e-6);
+      if (fraction <= 0) break;
+      out.push({ fraction, price: level.price });
+      cumulative += fraction;
+    }
+    return out.length > 0 ? out : undefined;
   }
 
   private hasRequiredIndicators(indicators: IndicatorSnapshot): boolean {

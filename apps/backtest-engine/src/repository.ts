@@ -219,10 +219,12 @@ export class BacktestRepository {
         status TEXT NOT NULL,
         strategy TEXT,
         indicator_snapshot JSONB,
+        partial_take_profits JSONB,
         generated_from_candle_ts TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL
       );
     `);
+    await this.pool.query(`ALTER TABLE backtest_orders ADD COLUMN IF NOT EXISTS partial_take_profits JSONB;`);
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_fills (
         id BIGSERIAL PRIMARY KEY,
@@ -584,9 +586,9 @@ export class BacktestRepository {
       `INSERT INTO backtest_orders (
         run_id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
         reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
-        generated_from_candle_ts, created_at
+        partial_take_profits, generated_from_candle_ts, created_at
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
       ) RETURNING id`,
       [
         order.runId,
@@ -605,6 +607,7 @@ export class BacktestRepository {
         order.status,
         order.strategy ?? null,
         order.indicatorSnapshot ? JSON.stringify(order.indicatorSnapshot) : null,
+        order.partialTakeProfits ? JSON.stringify(order.partialTakeProfits) : null,
         order.generatedFromCandleTs ?? null,
         order.createdAt
       ]

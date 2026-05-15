@@ -81,6 +81,17 @@ export interface InstrumentContract {
   resolvedAt?: Date;
 }
 
+/**
+ * Optional intermediate take-profit level for scaling out of a position.
+ * `fraction` of the ORIGINAL filled quantity is closed at `price`. Remaining
+ * quantity continues toward the main `takeProfit` (or stop). Multiple levels
+ * are supported (e.g. 1/3 at 1R, 1/3 at 2R, 1/3 runner).
+ */
+export interface PartialTakeProfit {
+  fraction: number;
+  price: number;
+}
+
 export interface SignalTicket {
   instrument: string;
   conid?: string;
@@ -91,6 +102,13 @@ export interface SignalTicket {
   entry?: number;
   stop?: number;
   takeProfit?: number;
+  /**
+   * Optional partial take-profit ladder. Currently honoured by the backtest
+   * simulator only; the live execution-engine treats this as advisory metadata
+   * until the cascade-resize support is implemented (parent `takeProfit` keeps
+   * the legacy single-target behaviour in live).
+   */
+  partialTakeProfits?: PartialTakeProfit[];
   reason: string;
   confidence: number;
   timestamp: string;

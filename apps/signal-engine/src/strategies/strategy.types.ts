@@ -4,6 +4,7 @@ import type {
   CandleTimeframe,
   DirectionalRegime,
   IndicatorSnapshot,
+  PartialTakeProfit,
   Side,
   VolatilityRegime,
 } from "@ikbr/shared";
@@ -23,6 +24,12 @@ export interface StrategySignal {
   suggestedEntry?: number;
   stopLoss?: number;
   takeProfit?: number;
+  /**
+   * Optional partial take-profit ladder (price levels). The simulator and
+   * execution layers consume this through the corresponding `SignalTicket`
+   * field on the resulting `ProposedOrder`.
+   */
+  partialTakeProfits?: PartialTakeProfit[];
   metadata?: Record<string, unknown>;
   generatedFromCandleTs?: Date;
 }
