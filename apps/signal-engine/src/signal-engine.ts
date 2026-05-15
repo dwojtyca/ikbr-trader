@@ -714,7 +714,12 @@ export class SignalEngine {
       takeProfit: positionEffect === "OPEN_OR_ADD" ? takeProfit : undefined,
       partialTakeProfits:
         positionEffect === "OPEN_OR_ADD" && signal.partialTakeProfits
-          ? this.sanitizePartialTakeProfits(signal.partialTakeProfits, signal.side, entry, takeProfit)
+          ? this.sanitizePartialTakeProfits(
+              signal.partialTakeProfits,
+              signal.side,
+              entry,
+              takeProfit,
+            )
           : undefined,
       reason: `${signal.entryReason}, strategy=${strategyId}, directionalRegime=${indicators.directionalRegime}, volatilityRegime=${indicators.volatilityRegime}, mode=${positionEffect}, position=${existingPositionQty.toFixed(4)}, entrySource=${signal.suggestedEntry !== undefined ? "strategy" : entrySelection.source}`,
       confidence,
@@ -741,7 +746,8 @@ export class SignalEngine {
     if (!Array.isArray(levels) || levels.length === 0) return undefined;
     const isLong = side === "BUY";
     const valid = levels.filter((level) => {
-      if (!Number.isFinite(level.price) || !Number.isFinite(level.fraction)) return false;
+      if (!Number.isFinite(level.price) || !Number.isFinite(level.fraction))
+        return false;
       if (!(level.fraction > 0 && level.fraction < 1)) return false;
       if (isLong) {
         return level.price > entry && level.price < finalTakeProfit;
@@ -749,7 +755,9 @@ export class SignalEngine {
       return level.price < entry && level.price > finalTakeProfit;
     });
     if (valid.length === 0) return undefined;
-    const sorted = [...valid].sort((a, b) => (isLong ? a.price - b.price : b.price - a.price));
+    const sorted = [...valid].sort((a, b) =>
+      isLong ? a.price - b.price : b.price - a.price,
+    );
     let cumulative = 0;
     const out: PartialTakeProfit[] = [];
     for (const level of sorted) {

@@ -710,7 +710,8 @@ export class BacktestSimulator {
         stop: order.stop,
         initialStop: existing?.initialStop ?? order.stop,
         takeProfit: order.takeProfit,
-        pendingPartials: existing?.pendingPartials ?? this.buildPendingPartials(order),
+        pendingPartials:
+          existing?.pendingPartials ?? this.buildPendingPartials(order),
         entryAt: existing?.entryAt ?? candle.ts,
         orderId: pending.id,
         strategy: order.strategy ?? "n/a",
@@ -855,11 +856,15 @@ export class BacktestSimulator {
     }
   }
 
-  private buildPendingPartials(order: ProposedOrder): PendingPartial[] | undefined {
+  private buildPendingPartials(
+    order: ProposedOrder,
+  ): PendingPartial[] | undefined {
     const levels = order.partialTakeProfits;
     if (!levels || levels.length === 0) return undefined;
     const isLong = order.side === "BUY";
-    const sorted = [...levels].sort((a, b) => (isLong ? a.price - b.price : b.price - a.price));
+    const sorted = [...levels].sort((a, b) =>
+      isLong ? a.price - b.price : b.price - a.price,
+    );
     return sorted.map((level) => ({
       fraction: level.fraction,
       price: level.price,
@@ -873,7 +878,9 @@ export class BacktestSimulator {
     exitAt: Date,
   ): Promise<void> {
     partial.executed = true;
-    const partialQtyAbs = Math.floor(position.originalQuantityAbs * partial.fraction);
+    const partialQtyAbs = Math.floor(
+      position.originalQuantityAbs * partial.fraction,
+    );
     if (!(partialQtyAbs > 0)) return;
     const remainingAbs = Math.abs(position.quantity);
     const closeQtyAbs = Math.min(partialQtyAbs, remainingAbs);

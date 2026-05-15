@@ -65,6 +65,16 @@ interface PlannedOrder {
   order: Record<string, unknown>;
 }
 
+interface PlannedBracketLeg {
+  takeProfitOrderId: number;
+  stopLossOrderId: number;
+  quantity: number;
+  takeProfitPrice: number;
+  stopPrice: number;
+  ocaGroup: string;
+  isPartial: boolean;
+}
+
 interface PlaceOrderPlan {
   parentOrderId: number;
   orders: PlannedOrder[];
@@ -73,6 +83,15 @@ interface PlaceOrderPlan {
     takeProfitOrderId: number;
     stopLossOrderId: number;
   };
+  /**
+   * When the ticket includes a partial-take-profit ladder, the bracket is
+   * split into one independent (TP, STP) pair per ladder rung plus a runner
+   * pair. Each pair lives in its own OCA group (ocaType=2) so that filling
+   * one TP cancels only its sibling stop, leaving the rest of the ladder
+   * intact. The `bracket` summary above points at the runner pair for
+   * back-compat with verification/logging that knows about a single bracket.
+   */
+  bracketLegs?: PlannedBracketLeg[];
 }
 
 interface OpenOrderContext {
@@ -350,8 +369,15 @@ export class TwsExecutionClient {
     this.trackOrderPlanContext(plan, ticket);
 
     if (plan.bracket) {
+      const legCount = plan.bracketLegs?.length ?? 1;
+      const partialCount = plan.bracketLegs?.filter((leg) => leg.isPartial).length ?? 0;
+      const legDetail = plan.bracketLegs && plan.bracketLegs.length > 1
+        ? ' legs=' + plan.bracketLegs
+            .map((leg) => `${leg.isPartial ? 'p' : 'r'}@${leg.takeProfitPrice}/x${leg.quantity}`)
+            .join(',')
+        : '';
       this.onLog(
-        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId}`
+        `execution bracket staged parent=${parentOrderId} tp=${plan.bracket.takeProfitOrderId} sl=${plan.bracket.stopLossOrderId} legs=${legCount} partials=${partialCount}${legDetail}`
       );
     }
 
@@ -692,44 +718,135 @@ export class TwsExecutionClient {
     this.validateBracket(ticket);
 
     const oppositeAction = ticket.side === 'BUY' ? 'SELL' : 'BUY';
-    const takeProfitOrderId = this.allocOrderId();
-    const stopLossOrderId = this.allocOrderId();
+    const legs = this.planBracketLegs(ticket);
 
-    const takeProfitOrder: Record<string, unknown> = {
-      action: oppositeAction,
-      totalQuantity: ticket.quantity,
-      orderType: 'LMT',
-      lmtPrice: ticket.takeProfit,
-      tif,
-      account: accountId,
-      parentId: parentOrderId,
-      transmit: false
-    };
+    const ordersList: PlannedOrder[] = [{ orderId: parentOrderId, order: parentOrder }];
+    const relatedOrderIds = new Set<number>([parentOrderId]);
 
-    const stopLossOrder: Record<string, unknown> = {
-      action: oppositeAction,
-      totalQuantity: ticket.quantity,
-      orderType: 'STP',
-      auxPrice: ticket.stop,
-      tif,
-      account: accountId,
-      parentId: parentOrderId,
-      transmit: true
-    };
+    legs.forEach((leg, idx) => {
+      const isLastLeg = idx === legs.length - 1;
+      const takeProfitOrder: Record<string, unknown> = {
+        action: oppositeAction,
+        totalQuantity: leg.quantity,
+        orderType: 'LMT',
+        lmtPrice: leg.takeProfitPrice,
+        tif,
+        account: accountId,
+        parentId: parentOrderId,
+        ocaGroup: leg.ocaGroup,
+        ocaType: 2,
+        transmit: false
+      };
+      const stopLossOrder: Record<string, unknown> = {
+        action: oppositeAction,
+        totalQuantity: leg.quantity,
+        orderType: 'STP',
+        auxPrice: leg.stopPrice,
+        tif,
+        account: accountId,
+        parentId: parentOrderId,
+        ocaGroup: leg.ocaGroup,
+        ocaType: 2,
+        // Only the very last child of the very last leg transmits the entire
+        // staged batch atomically.
+        transmit: isLastLeg
+      };
+      ordersList.push({ orderId: leg.takeProfitOrderId, order: takeProfitOrder });
+      ordersList.push({ orderId: leg.stopLossOrderId, order: stopLossOrder });
+      relatedOrderIds.add(leg.takeProfitOrderId);
+      relatedOrderIds.add(leg.stopLossOrderId);
+    });
+
+    // The runner pair is always the last entry in `legs`; surface it as the
+    // primary bracket for verification/logging consumers that expect a single
+    // (tp, sl) pair.
+    const runner = legs[legs.length - 1];
 
     return {
       parentOrderId,
-      orders: [
-        { orderId: parentOrderId, order: parentOrder },
-        { orderId: takeProfitOrderId, order: takeProfitOrder },
-        { orderId: stopLossOrderId, order: stopLossOrder }
-      ],
-      relatedOrderIds: new Set([parentOrderId, takeProfitOrderId, stopLossOrderId]),
+      orders: ordersList,
+      relatedOrderIds,
       bracket: {
-        takeProfitOrderId,
-        stopLossOrderId
-      }
+        takeProfitOrderId: runner.takeProfitOrderId,
+        stopLossOrderId: runner.stopLossOrderId
+      },
+      bracketLegs: legs
     };
+  }
+
+  /**
+   * Builds the per-leg plan for a bracket order. When the ticket has no
+   * `partialTakeProfits`, returns a single runner leg covering the full
+   * quantity. Otherwise returns one leg per partial rung plus a runner leg
+   * for the residual quantity. Each leg gets its own OCA group so that
+   * legs are mutually independent.
+   */
+  private planBracketLegs(ticket: SignalTicket): PlannedBracketLeg[] {
+    if (ticket.stop === undefined || ticket.takeProfit === undefined) {
+      throw new Error('Bracket leg planning requires stop and takeProfit');
+    }
+
+    const totalQty = ticket.quantity;
+    const step = Number.isInteger(totalQty) ? 1 : 0.0001;
+    const roundDown = (qty: number): number => Math.max(0, Math.floor(qty / step) * step);
+
+    const partials = (ticket.partialTakeProfits ?? []).filter(
+      (level) => Number.isFinite(level.fraction) && Number.isFinite(level.price)
+    );
+
+    const ocaPrefix = `BR_${this.allocOcaToken()}`;
+    const legs: PlannedBracketLeg[] = [];
+    let allocatedQty = 0;
+
+    for (let i = 0; i < partials.length; i += 1) {
+      const partial = partials[i];
+      const remainingQty = totalQty - allocatedQty;
+      // Reserve at least one step for the runner so the ladder always has a
+      // tail; if rounding leaves no room, drop the partial silently.
+      const maxLegQty = remainingQty - step;
+      if (maxLegQty < step) break;
+      const desired = roundDown(totalQty * partial.fraction);
+      const legQty = Math.min(desired, maxLegQty);
+      if (legQty < step) continue;
+
+      legs.push({
+        takeProfitOrderId: this.allocOrderId(),
+        stopLossOrderId: this.allocOrderId(),
+        quantity: legQty,
+        takeProfitPrice: partial.price,
+        stopPrice: ticket.stop,
+        ocaGroup: `${ocaPrefix}_p${i + 1}`,
+        isPartial: true
+      });
+      allocatedQty += legQty;
+    }
+
+    const runnerQty = roundDown(totalQty - allocatedQty);
+    if (runnerQty < step) {
+      throw new Error(
+        `Bracket leg planning produced runner qty < step (totalQty=${totalQty}, allocated=${allocatedQty}, step=${step}). ` +
+        `Reduce partialTakeProfits fractions or quantity.`
+      );
+    }
+
+    legs.push({
+      takeProfitOrderId: this.allocOrderId(),
+      stopLossOrderId: this.allocOrderId(),
+      quantity: runnerQty,
+      takeProfitPrice: ticket.takeProfit,
+      stopPrice: ticket.stop,
+      ocaGroup: `${ocaPrefix}_r`,
+      isPartial: false
+    });
+
+    return legs;
+  }
+
+  private ocaTokenCounter = 0;
+  private allocOcaToken(): string {
+    this.ocaTokenCounter += 1;
+    // Compact unique token, scoped to this client instance.
+    return `${Date.now().toString(36)}_${this.ocaTokenCounter}`;
   }
 
   private shouldAttachBracket(ticket: SignalTicket): boolean {
@@ -765,6 +882,34 @@ export class TwsExecutionClient {
       }
       if (!(ticket.takeProfit < ticket.entry)) {
         throw new Error(`Invalid SELL bracket: takeProfit (${ticket.takeProfit}) must be below entry (${ticket.entry})`);
+      }
+    }
+
+    // Partial-take-profit ladder must sit strictly between the entry and the
+    // runner takeProfit, on the correct side of the entry. Cumulative fraction
+    // must stay below 1 so the runner always has at least one share.
+    if (ticket.partialTakeProfits && ticket.partialTakeProfits.length > 0) {
+      const isLong = ticket.side === 'BUY';
+      let cumulative = 0;
+      for (const level of ticket.partialTakeProfits) {
+        if (!Number.isFinite(level.fraction) || !(level.fraction > 0) || level.fraction >= 1) {
+          throw new Error(`Invalid partialTakeProfits fraction: ${level.fraction}`);
+        }
+        if (!Number.isFinite(level.price) || level.price <= 0) {
+          throw new Error(`Invalid partialTakeProfits price: ${level.price}`);
+        }
+        if (ticket.entry !== undefined && Number.isFinite(ticket.entry)) {
+          if (isLong && !(level.price > ticket.entry && level.price < ticket.takeProfit)) {
+            throw new Error(`Invalid BUY partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`);
+          }
+          if (!isLong && !(level.price < ticket.entry && level.price > ticket.takeProfit)) {
+            throw new Error(`Invalid SELL partial TP: ${level.price} must be between entry (${ticket.entry}) and takeProfit (${ticket.takeProfit})`);
+          }
+        }
+        cumulative += level.fraction;
+      }
+      if (!(cumulative < 1)) {
+        throw new Error(`partialTakeProfits cumulative fraction must be < 1, got ${cumulative}`);
       }
     }
   }
@@ -1457,6 +1602,29 @@ export class TwsExecutionClient {
       role: 'stop_loss',
       parentOrderId: plan.parentOrderId
     });
+
+    // Register every partial leg's TP/STOP children so status callbacks can
+    // resolve them back to this parent. The runner pair above is already
+    // registered; partial legs (if any) live alongside it.
+    if (plan.bracketLegs) {
+      for (const leg of plan.bracketLegs) {
+        if (leg.takeProfitOrderId === plan.bracket.takeProfitOrderId) continue;
+        this.openOrderContext.set(leg.takeProfitOrderId, {
+          symbol: ticket.instrument,
+          side: ticket.side,
+          positionEffect: ticket.positionEffect,
+          role: 'take_profit',
+          parentOrderId: plan.parentOrderId
+        });
+        this.openOrderContext.set(leg.stopLossOrderId, {
+          symbol: ticket.instrument,
+          side: ticket.side,
+          positionEffect: ticket.positionEffect,
+          role: 'stop_loss',
+          parentOrderId: plan.parentOrderId
+        });
+      }
+    }
 
     this.bracketPlansByParent.set(plan.parentOrderId, {
       symbol: ticket.instrument,

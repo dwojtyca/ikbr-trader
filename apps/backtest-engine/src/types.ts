@@ -1,4 +1,10 @@
-import type { Candle, IndicatorSnapshot, PartialTakeProfit, ProposedOrder, Side } from '@ikbr/shared';
+import type {
+  Candle,
+  IndicatorSnapshot,
+  PartialTakeProfit,
+  ProposedOrder,
+  Side,
+} from "@ikbr/shared";
 
 export interface BacktestDataset {
   id: number;
@@ -15,7 +21,7 @@ export interface BacktestDataset {
 export interface BacktestRun {
   id: number;
   datasetId: number;
-  mode: 'bot' | 'isolated';
+  mode: "bot" | "isolated";
   status: string;
   startedAt: string;
   finishedAt?: string;
@@ -34,16 +40,16 @@ export interface BacktestOrderRecord {
   instrument: string;
   conid?: string;
   side: Side;
-  positionEffect?: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE';
-  orderType: 'MKT' | 'LMT' | 'STP';
+  positionEffect?: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE";
+  orderType: "MKT" | "LMT" | "STP";
   quantity: number;
   entry?: number;
   stop?: number;
   takeProfit?: number;
   reason: string;
   confidence: number;
-  riskCheckStatus: 'PASS' | 'REJECT';
-  status: ProposedOrder['status'];
+  riskCheckStatus: "PASS" | "REJECT";
+  status: ProposedOrder["status"];
   strategy?: string;
   indicatorSnapshot?: IndicatorSnapshot;
   partialTakeProfits?: PartialTakeProfit[];

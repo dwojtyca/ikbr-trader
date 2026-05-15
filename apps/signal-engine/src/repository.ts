@@ -1,6 +1,15 @@
-import { Pool } from 'pg';
-import { Redis } from 'ioredis';
-import { Candle, CandleTimeframe, IndicatorSnapshot, InstrumentContract, ProposedOrder, ProposedOrderStatus, RiskCheckStatus, Side } from '@ikbr/shared';
+import { Pool } from "pg";
+import { Redis } from "ioredis";
+import {
+  Candle,
+  CandleTimeframe,
+  IndicatorSnapshot,
+  InstrumentContract,
+  ProposedOrder,
+  ProposedOrderStatus,
+  RiskCheckStatus,
+  Side,
+} from "@ikbr/shared";
 
 interface StoredMarketState {
   conid: string;
@@ -17,8 +26,8 @@ interface ProposedOrderRow {
   instrument: string;
   conid: string | null;
   side: Side;
-  position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
-  order_type: 'MKT' | 'LMT' | 'STP';
+  position_effect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" | null;
+  order_type: "MKT" | "LMT" | "STP";
   quantity: number;
   entry: number | null;
   stop: number | null;
@@ -26,7 +35,15 @@ interface ProposedOrderRow {
   reason: string;
   confidence: number;
   risk_check_status: RiskCheckStatus;
-  status: 'PROPOSED' | 'REJECTED' | 'SUBMITTED' | 'FILLED' | 'CANCELLED' | 'SUPERSEDED' | 'EXPIRED' | 'EXECUTED';
+  status:
+    | "PROPOSED"
+    | "REJECTED"
+    | "SUBMITTED"
+    | "FILLED"
+    | "CANCELLED"
+    | "SUPERSEDED"
+    | "EXPIRED"
+    | "EXECUTED";
   strategy: string | null;
   indicator_snapshot: IndicatorSnapshot | string | null;
   execution_attempted_at: Date | string | null;
@@ -51,7 +68,7 @@ interface SignalOutcomeRow {
 }
 
 export interface SignalOutcomeSummary {
-  scope: 'symbol' | 'strategy';
+  scope: "symbol" | "strategy";
   key: string;
   trades: number;
   wins: number;
@@ -140,7 +157,7 @@ export interface SignalReportTrade {
 export interface SignalReport {
   generatedAt: string;
   limit: number;
-  source: 'broker_fills';
+  source: "broker_fills";
   overview: SignalReportOverview;
   bySymbol: SignalReportAggregate[];
   byStrategy: SignalReportAggregate[];
@@ -154,19 +171,22 @@ export interface SignalReport {
 export interface ExposureSnapshot {
   exposure: number;
   openPositions: number;
-  source: 'execution' | 'db';
+  source: "execution" | "db";
   positionsBySymbol: Record<string, number>;
   accountEquity?: number;
   fxToBaseByCurrency?: Record<string, number>;
   longExposure?: number;
   shortExposure?: number;
-  positionContextsBySymbol?: Record<string, {
-    quantity: number;
-    averageCost?: number;
-    marketPrice?: number;
-    marketValue?: number;
-    unrealizedPnL?: number;
-  }>;
+  positionContextsBySymbol?: Record<
+    string,
+    {
+      quantity: number;
+      averageCost?: number;
+      marketPrice?: number;
+      marketValue?: number;
+      unrealizedPnL?: number;
+    }
+  >;
 }
 
 export interface LatestFilledOrderContext {
@@ -184,11 +204,19 @@ export interface LatestFilledOrderContext {
 export class SignalRepository {
   constructor(
     private readonly pool: Pool,
-    private readonly redis: Redis
+    private readonly redis: Redis,
   ) {}
 
   async init(): Promise<void> {
-    for (const table of ['candles_1m', 'candles_5m', 'candles_1h', 'candles_4h', 'candles_12h', 'candles_1d', 'candles_1w'] as const) {
+    for (const table of [
+      "candles_1m",
+      "candles_5m",
+      "candles_1h",
+      "candles_4h",
+      "candles_12h",
+      "candles_1d",
+      "candles_1w",
+    ] as const) {
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
           conid TEXT NOT NULL,
@@ -268,29 +296,75 @@ export class SignalRepository {
       );
     `);
 
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS conid TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS entry DOUBLE PRECISION;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PROPOSED';`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS strategy TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS indicator_snapshot JSONB;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS generated_from_candle_ts TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS partial_take_profits JSONB;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS superseded_by_order_id BIGINT;`);
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS conid TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS entry DOUBLE PRECISION;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'PROPOSED';`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS strategy TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS indicator_snapshot JSONB;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS generated_from_candle_ts TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS partial_take_profits JSONB;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS lifecycle_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS superseded_by_order_id BIGINT;`,
+    );
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_created_idx
@@ -349,7 +423,11 @@ export class SignalRepository {
     `);
   }
 
-  async getRecentCandles(symbol: string, timeframe: CandleTimeframe, limit: number): Promise<Candle[]> {
+  async getRecentCandles(
+    symbol: string,
+    timeframe: CandleTimeframe,
+    limit: number,
+  ): Promise<Candle[]> {
     const table = this.tableForTimeframe(timeframe);
     const result = await this.pool.query(
       `
@@ -359,7 +437,7 @@ export class SignalRepository {
       ORDER BY ts DESC
       LIMIT $2;
       `,
-      [symbol, limit]
+      [symbol, limit],
     );
 
     return result.rows
@@ -372,7 +450,7 @@ export class SignalRepository {
         high: Number(row.high),
         low: Number(row.low),
         close: Number(row.close),
-        volume: Number(row.volume)
+        volume: Number(row.volume),
       }))
       .reverse();
   }
@@ -388,7 +466,10 @@ export class SignalRepository {
     }
   }
 
-  async getInstrumentContract(symbol: string, conid?: string): Promise<InstrumentContract | null> {
+  async getInstrumentContract(
+    symbol: string,
+    conid?: string,
+  ): Promise<InstrumentContract | null> {
     const result = await this.pool.query(
       `
       SELECT symbol, conid, sec_type, exchange, primary_exchange, currency,
@@ -400,7 +481,7 @@ export class SignalRepository {
       ORDER BY CASE WHEN UPPER(symbol) = UPPER($1) THEN 0 ELSE 1 END
       LIMIT 1
       `,
-      [symbol, conid ?? null]
+      [symbol, conid ?? null],
     );
     const row = result.rows[0];
     if (!row) return null;
@@ -414,18 +495,24 @@ export class SignalRepository {
       currency: row.currency ?? undefined,
       localSymbol: row.local_symbol ?? undefined,
       tradingClass: row.trading_class ?? undefined,
-      minTick: row.min_tick === null || row.min_tick === undefined ? undefined : Number(row.min_tick),
+      minTick:
+        row.min_tick === null || row.min_tick === undefined
+          ? undefined
+          : Number(row.min_tick),
       displayName: row.display_name ?? undefined,
       contractJson: row.contract_json ?? undefined,
       detailsJson: row.details_json ?? undefined,
-      source: row.source === 'override_fallback' ? 'override_fallback' : 'ibkr',
-      resolvedAt: row.resolved_at ? new Date(row.resolved_at) : undefined
+      source: row.source === "override_fallback" ? "override_fallback" : "ibkr",
+      resolvedAt: row.resolved_at ? new Date(row.resolved_at) : undefined,
     };
   }
 
   async getOpenExposureNotional(): Promise<number> {
     const positions = await this.getDbNetPositions();
-    return positions.reduce((sum, row) => sum + Math.abs(row.netQty) * row.referencePrice, 0);
+    return positions.reduce(
+      (sum, row) => sum + Math.abs(row.netQty) * row.referencePrice,
+      0,
+    );
   }
 
   async getOpenPositionsCount(): Promise<number> {
@@ -433,9 +520,12 @@ export class SignalRepository {
     return positions.length;
   }
 
-  async getExposureSnapshot(executionBaseUrl?: string): Promise<ExposureSnapshot> {
+  async getExposureSnapshot(
+    executionBaseUrl?: string,
+  ): Promise<ExposureSnapshot> {
     if (executionBaseUrl) {
-      const fromExecution = await this.tryLoadExposureFromExecution(executionBaseUrl);
+      const fromExecution =
+        await this.tryLoadExposureFromExecution(executionBaseUrl);
       if (fromExecution) return fromExecution;
     }
 
@@ -450,12 +540,14 @@ export class SignalRepository {
     return {
       exposure,
       openPositions: positions.length,
-      source: 'db',
-      positionsBySymbol
+      source: "db",
+      positionsBySymbol,
     };
   }
 
-  async getLatestFilledOrderContext(instrument: string): Promise<LatestFilledOrderContext | null> {
+  async getLatestFilledOrderContext(
+    instrument: string,
+  ): Promise<LatestFilledOrderContext | null> {
     const result = await this.pool.query(
       `
       SELECT instrument, side, quantity, entry, stop, take_profit, executed_at, created_at, strategy
@@ -465,27 +557,34 @@ export class SignalRepository {
       ORDER BY COALESCE(executed_at, created_at) DESC
       LIMIT 1
       `,
-      [instrument]
+      [instrument],
     );
 
-    const row = result.rows[0] as {
-      instrument: string;
-      side: Side;
-      quantity: number;
-      entry: number | null;
-      stop: number | null;
-      take_profit: number | null;
-      executed_at: Date | string | null;
-      created_at: Date | string;
-      strategy: string | null;
-    } | undefined;
+    const row = result.rows[0] as
+      | {
+          instrument: string;
+          side: Side;
+          quantity: number;
+          entry: number | null;
+          stop: number | null;
+          take_profit: number | null;
+          executed_at: Date | string | null;
+          created_at: Date | string;
+          strategy: string | null;
+        }
+      | undefined;
 
     if (!row) return null;
 
     const executedAtRaw = row.executed_at ?? row.created_at;
-    const executedAt = executedAtRaw instanceof Date ? executedAtRaw : new Date(executedAtRaw);
-    const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
-    if (Number.isNaN(executedAt.getTime()) || Number.isNaN(createdAt.getTime())) return null;
+    const executedAt =
+      executedAtRaw instanceof Date ? executedAtRaw : new Date(executedAtRaw);
+    const createdAt =
+      row.created_at instanceof Date
+        ? row.created_at
+        : new Date(row.created_at);
+    if (Number.isNaN(executedAt.getTime()) || Number.isNaN(createdAt.getTime()))
+      return null;
 
     return {
       instrument: row.instrument,
@@ -493,14 +592,18 @@ export class SignalRepository {
       quantity: Number(row.quantity),
       entry: row.entry === null ? undefined : Number(row.entry),
       stop: row.stop === null ? undefined : Number(row.stop),
-      takeProfit: row.take_profit === null ? undefined : Number(row.take_profit),
+      takeProfit:
+        row.take_profit === null ? undefined : Number(row.take_profit),
       executedAt,
       createdAt,
-      strategy: row.strategy ?? undefined
+      strategy: row.strategy ?? undefined,
     };
   }
 
-  async syncStrategyRuntimeStates(strategyIds: string[], cooldownMs: number): Promise<void> {
+  async syncStrategyRuntimeStates(
+    strategyIds: string[],
+    cooldownMs: number,
+  ): Promise<void> {
     if (strategyIds.length === 0) return;
 
     const existingResult = await this.pool.query(
@@ -510,20 +613,23 @@ export class SignalRepository {
       FROM strategy_runtime_state
       WHERE strategy_id = ANY($1)
       `,
-      [strategyIds]
+      [strategyIds],
     );
 
-    const states = new Map<string, {
-      strategyId: string;
-      enabled: boolean;
-      permanentlyDisabled: boolean;
-      cooldownUntil: Date | null;
-      consecutiveLossCount: number;
-      cooldownCount: number;
-      lastEvaluatedFillAt: Date | null;
-      reason: string | null;
-      changed: boolean;
-    }>();
+    const states = new Map<
+      string,
+      {
+        strategyId: string;
+        enabled: boolean;
+        permanentlyDisabled: boolean;
+        cooldownUntil: Date | null;
+        consecutiveLossCount: number;
+        cooldownCount: number;
+        lastEvaluatedFillAt: Date | null;
+        reason: string | null;
+        changed: boolean;
+      }
+    >();
 
     for (const strategyId of strategyIds) {
       states.set(strategyId, {
@@ -535,7 +641,7 @@ export class SignalRepository {
         cooldownCount: 0,
         lastEvaluatedFillAt: null,
         reason: null,
-        changed: false
+        changed: false,
       });
     }
 
@@ -544,10 +650,14 @@ export class SignalRepository {
       if (!state) continue;
       state.enabled = row.enabled !== false;
       state.permanentlyDisabled = row.permanently_disabled === true;
-      state.cooldownUntil = row.cooldown_until ? new Date(row.cooldown_until) : null;
+      state.cooldownUntil = row.cooldown_until
+        ? new Date(row.cooldown_until)
+        : null;
       state.consecutiveLossCount = Number(row.consecutive_loss_count ?? 0);
       state.cooldownCount = Number(row.cooldown_count ?? 0);
-      state.lastEvaluatedFillAt = row.last_evaluated_fill_at ? new Date(row.last_evaluated_fill_at) : null;
+      state.lastEvaluatedFillAt = row.last_evaluated_fill_at
+        ? new Date(row.last_evaluated_fill_at)
+        : null;
       state.reason = row.reason ?? null;
     }
 
@@ -570,7 +680,7 @@ export class SignalRepository {
         AND broker_orders.executed_at IS NOT NULL
       ORDER BY broker_orders.executed_at ASC, broker_orders.proposed_order_id ASC
       `,
-      [strategyIds]
+      [strategyIds],
     );
 
     const cooldownDuration = Math.max(0, cooldownMs);
@@ -579,9 +689,13 @@ export class SignalRepository {
       const state = states.get(strategyId);
       if (!state) continue;
 
-      const executedAt = row.executed_at instanceof Date ? row.executed_at : new Date(row.executed_at);
+      const executedAt =
+        row.executed_at instanceof Date
+          ? row.executed_at
+          : new Date(row.executed_at);
       if (Number.isNaN(executedAt.getTime())) continue;
-      if (state.lastEvaluatedFillAt && executedAt <= state.lastEvaluatedFillAt) continue;
+      if (state.lastEvaluatedFillAt && executedAt <= state.lastEvaluatedFillAt)
+        continue;
       if (state.permanentlyDisabled) {
         state.lastEvaluatedFillAt = executedAt;
         state.changed = true;
@@ -614,7 +728,13 @@ export class SignalRepository {
     }
 
     for (const state of states.values()) {
-      if (!state.changed && existingResult.rows.some((row) => String(row.strategy_id) === state.strategyId)) continue;
+      if (
+        !state.changed &&
+        existingResult.rows.some(
+          (row) => String(row.strategy_id) === state.strategyId,
+        )
+      )
+        continue;
 
       await this.pool.query(
         `
@@ -648,13 +768,15 @@ export class SignalRepository {
           state.consecutiveLossCount,
           state.cooldownCount,
           state.lastEvaluatedFillAt,
-          state.reason
-        ]
+          state.reason,
+        ],
       );
     }
   }
 
-  async getStrategyRuntimeState(strategyId: string): Promise<StrategyRuntimeState> {
+  async getStrategyRuntimeState(
+    strategyId: string,
+  ): Promise<StrategyRuntimeState> {
     const result = await this.pool.query(
       `
       SELECT strategy_id, enabled, permanently_disabled, cooldown_until, consecutive_loss_count,
@@ -662,7 +784,7 @@ export class SignalRepository {
       FROM strategy_runtime_state
       WHERE strategy_id = $1
       `,
-      [strategyId]
+      [strategyId],
     );
 
     const row = result.rows[0];
@@ -672,7 +794,7 @@ export class SignalRepository {
         enabled: true,
         permanentlyDisabled: false,
         consecutiveLossCount: 0,
-        cooldownCount: 0
+        cooldownCount: 0,
       };
     }
 
@@ -680,16 +802,21 @@ export class SignalRepository {
       strategyId: String(row.strategy_id),
       enabled: row.enabled !== false,
       permanentlyDisabled: row.permanently_disabled === true,
-      cooldownUntil: row.cooldown_until ? new Date(row.cooldown_until) : undefined,
+      cooldownUntil: row.cooldown_until
+        ? new Date(row.cooldown_until)
+        : undefined,
       consecutiveLossCount: Number(row.consecutive_loss_count ?? 0),
       cooldownCount: Number(row.cooldown_count ?? 0),
-      reason: row.reason ?? undefined
+      reason: row.reason ?? undefined,
     };
   }
 
-  async setStrategyManualEnabled(strategyId: string, enabled: boolean): Promise<StrategyRuntimeState> {
+  async setStrategyManualEnabled(
+    strategyId: string,
+    enabled: boolean,
+  ): Promise<StrategyRuntimeState> {
     const permanentlyDisabled = !enabled;
-    const reason = enabled ? 'Manual ON from report' : 'Manual OFF from report';
+    const reason = enabled ? "Manual ON from report" : "Manual OFF from report";
 
     await this.pool.query(
       `
@@ -709,7 +836,7 @@ export class SignalRepository {
         reason = EXCLUDED.reason,
         updated_at = NOW()
       `,
-      [strategyId, enabled, permanentlyDisabled, reason]
+      [strategyId, enabled, permanentlyDisabled, reason],
     );
 
     return this.getStrategyRuntimeState(strategyId);
@@ -718,14 +845,14 @@ export class SignalRepository {
   async getSignalPerformance(input: {
     instrument?: string;
     strategy: string;
-    side: Exclude<Side, 'HOLD'>;
+    side: Exclude<Side, "HOLD">;
     limit?: number;
   }): Promise<SignalPerformanceStats> {
     const limit = Math.max(5, Math.min(100, input.limit ?? 40));
     const params: Array<string | number> = [input.strategy, input.side, limit];
     const instrumentFilter = input.instrument
       ? `AND UPPER(po.instrument) = UPPER($${params.push(input.instrument)})`
-      : '';
+      : "";
 
     const result = await this.pool.query(
       `
@@ -743,7 +870,7 @@ export class SignalRepository {
       ) recent
       ORDER BY evaluated_at ASC
       `,
-      params
+      params,
     );
 
     const values = result.rows
@@ -756,18 +883,27 @@ export class SignalRepository {
 
     const sorted = [...values].sort((a, b) => a - b);
     const midpoint = Math.floor(sorted.length / 2);
-    const median = sorted.length % 2 === 0
-      ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
-      : sorted[midpoint];
+    const median =
+      sorted.length % 2 === 0
+        ? (sorted[midpoint - 1] + sorted[midpoint]) / 2
+        : sorted[midpoint];
     const wins = values.filter((value) => value > 0).length;
     const losses = trades - wins;
     const avg = values.reduce((sum, value) => sum + value, 0) / trades;
-    const avgWin = wins > 0
-      ? values.filter((value) => value > 0).reduce((sum, value) => sum + value, 0) / wins
-      : 0;
-    const avgLoss = losses > 0
-      ? Math.abs(values.filter((value) => value <= 0).reduce((sum, value) => sum + value, 0) / losses)
-      : 0;
+    const avgWin =
+      wins > 0
+        ? values
+            .filter((value) => value > 0)
+            .reduce((sum, value) => sum + value, 0) / wins
+        : 0;
+    const avgLoss =
+      losses > 0
+        ? Math.abs(
+            values
+              .filter((value) => value <= 0)
+              .reduce((sum, value) => sum + value, 0) / losses,
+          )
+        : 0;
     const winRate = wins / trades;
     const expectancy = avgWin * winRate - avgLoss * (1 - winRate);
 
@@ -778,7 +914,7 @@ export class SignalRepository {
       winRate,
       avgPnlPct: avg,
       medianPnlPct: median,
-      expectancyPct: expectancy
+      expectancyPct: expectancy,
     };
   }
 
@@ -846,14 +982,19 @@ export class SignalRepository {
         order.generatedFromCandleTs ?? null,
         order.lifecycleReason ?? null,
         order.supersededByOrderId ?? null,
-        order.partialTakeProfits ? JSON.stringify(order.partialTakeProfits) : null
-      ]
+        order.partialTakeProfits
+          ? JSON.stringify(order.partialTakeProfits)
+          : null,
+      ],
     );
 
     return Number(result.rows[0].id);
   }
 
-  async supersedePendingSignalsForInstrument(instrument: string, supersededByOrderId: number): Promise<void> {
+  async supersedePendingSignalsForInstrument(
+    instrument: string,
+    supersededByOrderId: number,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -865,7 +1006,7 @@ export class SignalRepository {
         AND id <> $2
         AND processing_owner IS NULL
       `,
-      [instrument, supersededByOrderId]
+      [instrument, supersededByOrderId],
     );
   }
 
@@ -881,7 +1022,7 @@ export class SignalRepository {
         AND processing_owner IS NULL
         AND created_at < NOW() - (($1::BIGINT || ' milliseconds')::interval)
       `,
-      [ttlMs]
+      [ttlMs],
     );
 
     return Number(result.rowCount ?? 0);
@@ -898,7 +1039,7 @@ export class SignalRepository {
       ORDER BY created_at DESC
       LIMIT $1
       `,
-      [limit]
+      [limit],
     );
 
     return result.rows.map((row) => this.mapRow(row as ProposedOrderRow));
@@ -924,12 +1065,17 @@ export class SignalRepository {
       ORDER BY COALESCE(po.executed_at, po.execution_attempted_at, po.created_at) ASC
       LIMIT $1
       `,
-      [limit]
+      [limit],
     );
 
     let inserted = 0;
     for (const row of candidates.rows as SignalOutcomeRow[]) {
-      const executedAtRaw = row.executed_at instanceof Date ? row.executed_at : row.executed_at ? new Date(row.executed_at) : null;
+      const executedAtRaw =
+        row.executed_at instanceof Date
+          ? row.executed_at
+          : row.executed_at
+            ? new Date(row.executed_at)
+            : null;
       if (!executedAtRaw || Number.isNaN(executedAtRaw.getTime())) continue;
 
       const candles = await this.pool.query(
@@ -941,59 +1087,68 @@ export class SignalRepository {
         ORDER BY ts ASC
         LIMIT 500
         `,
-        [row.instrument, executedAtRaw]
+        [row.instrument, executedAtRaw],
       );
 
       const entry = Number(row.entry ?? NaN);
       if (!Number.isFinite(entry) || entry <= 0) continue;
 
       const stop = row.stop !== null ? Number(row.stop) : undefined;
-      const takeProfit = row.take_profit !== null ? Number(row.take_profit) : undefined;
+      const takeProfit =
+        row.take_profit !== null ? Number(row.take_profit) : undefined;
       let pnlPct: number | null = null;
       let hitStop = false;
       let hitTakeProfit = false;
-      let notes = 'mark_to_market';
+      let notes = "mark_to_market";
 
-      for (const candle of candles.rows as Array<{ ts: Date | string; high: number; low: number; close: number }>) {
+      for (const candle of candles.rows as Array<{
+        ts: Date | string;
+        high: number;
+        low: number;
+        close: number;
+      }>) {
         const high = Number(candle.high);
         const low = Number(candle.low);
 
-        if (row.side === 'BUY') {
+        if (row.side === "BUY") {
           if (takeProfit !== undefined && high >= takeProfit) {
             pnlPct = ((takeProfit - entry) / entry) * 100;
             hitTakeProfit = true;
-            notes = 'take_profit_hit';
+            notes = "take_profit_hit";
             break;
           }
           if (stop !== undefined && low <= stop) {
             pnlPct = ((stop - entry) / entry) * 100;
             hitStop = true;
-            notes = 'stop_hit';
+            notes = "stop_hit";
             break;
           }
-        } else if (row.side === 'SELL') {
+        } else if (row.side === "SELL") {
           if (takeProfit !== undefined && low <= takeProfit) {
             pnlPct = ((entry - takeProfit) / entry) * 100;
             hitTakeProfit = true;
-            notes = 'take_profit_hit';
+            notes = "take_profit_hit";
             break;
           }
           if (stop !== undefined && high >= stop) {
             pnlPct = ((entry - stop) / entry) * 100;
             hitStop = true;
-            notes = 'stop_hit';
+            notes = "stop_hit";
             break;
           }
         }
       }
 
       if (pnlPct === null && candles.rows.length > 0) {
-        const lastCandle = candles.rows[candles.rows.length - 1] as { close: number };
+        const lastCandle = candles.rows[candles.rows.length - 1] as {
+          close: number;
+        };
         const close = Number(lastCandle.close);
         if (Number.isFinite(close) && close > 0) {
-          pnlPct = row.side === 'BUY'
-            ? ((close - entry) / entry) * 100
-            : ((entry - close) / entry) * 100;
+          pnlPct =
+            row.side === "BUY"
+              ? ((close - entry) / entry) * 100
+              : ((entry - close) / entry) * 100;
         }
       }
 
@@ -1002,7 +1157,7 @@ export class SignalRepository {
         INSERT INTO signal_outcomes (proposed_order_id, evaluated_at, pnl_pct, hit_stop, hit_take_profit, notes)
         VALUES ($1, NOW(), $2, $3, $4, $5)
         `,
-        [row.proposed_order_id, pnlPct, hitStop, hitTakeProfit, notes]
+        [row.proposed_order_id, pnlPct, hitStop, hitTakeProfit, notes],
       );
       inserted += 1;
     }
@@ -1065,7 +1220,7 @@ export class SignalRepository {
       ORDER BY trades DESC, key ASC
       LIMIT $1
       `,
-      [limit]
+      [limit],
     );
 
     return result.rows.map((row) => ({
@@ -1075,13 +1230,18 @@ export class SignalRepository {
       wins: Number(row.wins),
       losses: Number(row.losses),
       open: Number(row.open),
-      winRate: Number(row.trades) > 0 ? Number(row.wins) / Number(row.trades) : 0,
+      winRate:
+        Number(row.trades) > 0 ? Number(row.wins) / Number(row.trades) : 0,
       avgPnlPct: row.avg_pnl_pct === null ? undefined : Number(row.avg_pnl_pct),
-      medianPnlPct: row.median_pnl_pct === null ? undefined : Number(row.median_pnl_pct)
+      medianPnlPct:
+        row.median_pnl_pct === null ? undefined : Number(row.median_pnl_pct),
     }));
   }
 
-  async getSignalReport(limit = 300, strategyIds: string[] = []): Promise<SignalReport> {
+  async getSignalReport(
+    limit = 300,
+    strategyIds: string[] = [],
+  ): Promise<SignalReport> {
     const boundedLimit = Math.min(Math.max(limit, 20), 2000);
     const baseCte = `
       WITH broker_orders AS (
@@ -1146,16 +1306,16 @@ export class SignalRepository {
         COUNT(*) FILTER (WHERE hit_stop)::int AS stop_hits
       FROM base
       `,
-      [boundedLimit]
+      [boundedLimit],
     );
 
     const aggregateResults = await Promise.all([
-      this.queryReportAggregate(baseCte, boundedLimit, 'instrument'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'strategy', strategyIds),
-      this.queryReportAggregate(baseCte, boundedLimit, 'strategy_symbol_side'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'side'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'directional_regime'),
-      this.queryReportAggregate(baseCte, boundedLimit, 'volatility_regime')
+      this.queryReportAggregate(baseCte, boundedLimit, "instrument"),
+      this.queryReportAggregate(baseCte, boundedLimit, "strategy", strategyIds),
+      this.queryReportAggregate(baseCte, boundedLimit, "strategy_symbol_side"),
+      this.queryReportAggregate(baseCte, boundedLimit, "side"),
+      this.queryReportAggregate(baseCte, boundedLimit, "directional_regime"),
+      this.queryReportAggregate(baseCte, boundedLimit, "volatility_regime"),
     ]);
 
     const worstTradesResult = await this.pool.query(
@@ -1180,7 +1340,7 @@ export class SignalRepository {
       ORDER BY pnl ASC, executed_at DESC
       LIMIT 12
       `,
-      [boundedLimit]
+      [boundedLimit],
     );
 
     const overviewRow = overviewResult.rows[0] ?? {};
@@ -1190,36 +1350,47 @@ export class SignalRepository {
     return {
       generatedAt: new Date().toISOString(),
       limit: boundedLimit,
-      source: 'broker_fills',
+      source: "broker_fills",
       overview: {
         trades,
         wins,
         losses: Number(overviewRow.losses ?? 0),
         open: Number(overviewRow.open ?? 0),
         winRate: trades > 0 ? wins / trades : 0,
-        totalPnl: overviewRow.total_pnl === null || overviewRow.total_pnl === undefined
-          ? undefined
-          : Number(overviewRow.total_pnl),
-        grossPnl: overviewRow.gross_pnl === null || overviewRow.gross_pnl === undefined
-          ? undefined
-          : Number(overviewRow.gross_pnl),
-        commissions: overviewRow.commissions === null || overviewRow.commissions === undefined
-          ? undefined
-          : Number(overviewRow.commissions),
-        avgPnl: overviewRow.avg_pnl === null || overviewRow.avg_pnl === undefined
-          ? undefined
-          : Number(overviewRow.avg_pnl),
-        avgPnlPct: overviewRow.avg_pnl_pct === null || overviewRow.avg_pnl_pct === undefined
-          ? undefined
-          : Number(overviewRow.avg_pnl_pct),
-        medianPnlPct: overviewRow.median_pnl_pct === null || overviewRow.median_pnl_pct === undefined
-          ? undefined
-          : Number(overviewRow.median_pnl_pct),
-        avgConfidence: overviewRow.avg_confidence === null || overviewRow.avg_confidence === undefined
-          ? undefined
-          : Number(overviewRow.avg_confidence),
+        totalPnl:
+          overviewRow.total_pnl === null || overviewRow.total_pnl === undefined
+            ? undefined
+            : Number(overviewRow.total_pnl),
+        grossPnl:
+          overviewRow.gross_pnl === null || overviewRow.gross_pnl === undefined
+            ? undefined
+            : Number(overviewRow.gross_pnl),
+        commissions:
+          overviewRow.commissions === null ||
+          overviewRow.commissions === undefined
+            ? undefined
+            : Number(overviewRow.commissions),
+        avgPnl:
+          overviewRow.avg_pnl === null || overviewRow.avg_pnl === undefined
+            ? undefined
+            : Number(overviewRow.avg_pnl),
+        avgPnlPct:
+          overviewRow.avg_pnl_pct === null ||
+          overviewRow.avg_pnl_pct === undefined
+            ? undefined
+            : Number(overviewRow.avg_pnl_pct),
+        medianPnlPct:
+          overviewRow.median_pnl_pct === null ||
+          overviewRow.median_pnl_pct === undefined
+            ? undefined
+            : Number(overviewRow.median_pnl_pct),
+        avgConfidence:
+          overviewRow.avg_confidence === null ||
+          overviewRow.avg_confidence === undefined
+            ? undefined
+            : Number(overviewRow.avg_confidence),
         takeProfitHits: Number(overviewRow.take_profit_hits ?? 0),
-        stopHits: Number(overviewRow.stop_hits ?? 0)
+        stopHits: Number(overviewRow.stop_hits ?? 0),
       },
       bySymbol: aggregateResults[0],
       byStrategy: aggregateResults[1],
@@ -1235,18 +1406,33 @@ export class SignalRepository {
         directionalRegime: String(row.directional_regime),
         volatilityRegime: String(row.volatility_regime),
         confidence: Number(row.confidence ?? 0),
-        pnl: row.pnl === null || row.pnl === undefined ? undefined : Number(row.pnl),
-        grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
-        commissions: row.commissions === null || row.commissions === undefined ? undefined : Number(row.commissions),
-        pnlPct: row.pnl_pct === null || row.pnl_pct === undefined ? undefined : Number(row.pnl_pct),
-        notes: String(row.notes ?? 'n/a'),
-        executedAt: new Date(row.executed_at).toISOString()
-      }))
+        pnl:
+          row.pnl === null || row.pnl === undefined
+            ? undefined
+            : Number(row.pnl),
+        grossPnl:
+          row.gross_pnl === null || row.gross_pnl === undefined
+            ? undefined
+            : Number(row.gross_pnl),
+        commissions:
+          row.commissions === null || row.commissions === undefined
+            ? undefined
+            : Number(row.commissions),
+        pnlPct:
+          row.pnl_pct === null || row.pnl_pct === undefined
+            ? undefined
+            : Number(row.pnl_pct),
+        notes: String(row.notes ?? "n/a"),
+        executedAt: new Date(row.executed_at).toISOString(),
+      })),
     };
   }
 
   private mapRow(row: ProposedOrderRow): ProposedOrder {
-    const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    const createdAt =
+      row.created_at instanceof Date
+        ? row.created_at
+        : new Date(row.created_at);
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
 
     return {
@@ -1267,18 +1453,24 @@ export class SignalRepository {
       status: this.normalizeStatus(row.status),
       strategy: row.strategy ?? undefined,
       indicators,
-      executionAttemptedAt: row.execution_attempted_at ? new Date(row.execution_attempted_at) : undefined,
+      executionAttemptedAt: row.execution_attempted_at
+        ? new Date(row.execution_attempted_at)
+        : undefined,
       executedAt: row.executed_at ? new Date(row.executed_at) : undefined,
-      generatedFromCandleTs: row.generated_from_candle_ts ? new Date(row.generated_from_candle_ts) : undefined,
+      generatedFromCandleTs: row.generated_from_candle_ts
+        ? new Date(row.generated_from_candle_ts)
+        : undefined,
       lifecycleReason: row.lifecycle_reason ?? undefined,
       supersededByOrderId: row.superseded_by_order_id ?? undefined,
-      createdAt
+      createdAt,
     };
   }
 
-  private normalizeIndicators(value: IndicatorSnapshot | string | null): IndicatorSnapshot | undefined {
+  private normalizeIndicators(
+    value: IndicatorSnapshot | string | null,
+  ): IndicatorSnapshot | undefined {
     if (!value) return undefined;
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       try {
         return JSON.parse(value) as IndicatorSnapshot;
       } catch {
@@ -1288,28 +1480,37 @@ export class SignalRepository {
     return value;
   }
 
-  private normalizeStatus(status: ProposedOrderRow['status']): ProposedOrderStatus {
-    if (status === 'EXECUTED') return 'SUBMITTED';
+  private normalizeStatus(
+    status: ProposedOrderRow["status"],
+  ): ProposedOrderStatus {
+    if (status === "EXECUTED") return "SUBMITTED";
     return status;
   }
 
   private async queryReportAggregate(
     baseCte: string,
     limit: number,
-    dimension: 'instrument' | 'strategy' | 'strategy_symbol_side' | 'side' | 'directional_regime' | 'volatility_regime',
-    strategyIds: string[] = []
+    dimension:
+      | "instrument"
+      | "strategy"
+      | "strategy_symbol_side"
+      | "side"
+      | "directional_regime"
+      | "volatility_regime",
+    strategyIds: string[] = [],
   ): Promise<SignalReportAggregate[]> {
     const keySqlByDimension = {
-      instrument: 'instrument',
-      strategy: 'strategy',
+      instrument: "instrument",
+      strategy: "strategy",
       strategy_symbol_side: "strategy || ' / ' || instrument || ' / ' || side",
-      side: 'side',
-      directional_regime: 'directional_regime',
-      volatility_regime: 'volatility_regime'
+      side: "side",
+      directional_regime: "directional_regime",
+      volatility_regime: "volatility_regime",
     } satisfies Record<typeof dimension, string>;
-    const strategyStatusJoin = dimension === 'strategy' ? 'srs.strategy_id = aggregate.key' : 'false';
+    const strategyStatusJoin =
+      dimension === "strategy" ? "srs.strategy_id = aggregate.key" : "false";
 
-    if (dimension === 'strategy' && strategyIds.length > 0) {
+    if (dimension === "strategy" && strategyIds.length > 0) {
       const aggregateLimit = Math.max(100, strategyIds.length + 12);
       const result = await this.pool.query(
         `
@@ -1363,13 +1564,13 @@ export class SignalRepository {
         ORDER BY trades DESC, aggregate_keys.key ASC
         LIMIT ${aggregateLimit}
         `,
-        [limit, strategyIds]
+        [limit, strategyIds],
       );
 
       return this.mapReportAggregateRows(result.rows);
     }
 
-    const aggregateLimit = dimension === 'strategy_symbol_side' ? 50 : 12;
+    const aggregateLimit = dimension === "strategy_symbol_side" ? 50 : 12;
     const result = await this.pool.query(
       `
       ${baseCte},
@@ -1403,7 +1604,7 @@ export class SignalRepository {
       ORDER BY trades DESC, key ASC
       LIMIT ${aggregateLimit}
       `,
-      [limit]
+      [limit],
     );
 
     return this.mapReportAggregateRows(result.rows);
@@ -1421,36 +1622,71 @@ export class SignalRepository {
         losses: Number(row.losses ?? 0),
         open: Number(row.open ?? 0),
         winRate: trades > 0 ? wins / trades : 0,
-        strategyEnabled: row.strategy_enabled === null || row.strategy_enabled === undefined ? undefined : row.strategy_enabled !== false,
-        strategyPermanentlyDisabled: row.strategy_permanently_disabled === null || row.strategy_permanently_disabled === undefined
-          ? undefined
-          : row.strategy_permanently_disabled === true,
-        strategyCooldownUntil: row.strategy_cooldown_until === null || row.strategy_cooldown_until === undefined
-          ? undefined
-          : new Date(row.strategy_cooldown_until).toISOString(),
+        strategyEnabled:
+          row.strategy_enabled === null || row.strategy_enabled === undefined
+            ? undefined
+            : row.strategy_enabled !== false,
+        strategyPermanentlyDisabled:
+          row.strategy_permanently_disabled === null ||
+          row.strategy_permanently_disabled === undefined
+            ? undefined
+            : row.strategy_permanently_disabled === true,
+        strategyCooldownUntil:
+          row.strategy_cooldown_until === null ||
+          row.strategy_cooldown_until === undefined
+            ? undefined
+            : new Date(row.strategy_cooldown_until).toISOString(),
         strategyReason: row.strategy_reason ?? undefined,
-        totalPnl: row.total_pnl === null || row.total_pnl === undefined ? undefined : Number(row.total_pnl),
-        grossPnl: row.gross_pnl === null || row.gross_pnl === undefined ? undefined : Number(row.gross_pnl),
-        commissions: row.commissions === null || row.commissions === undefined ? undefined : Number(row.commissions),
-        avgPnl: row.avg_pnl === null || row.avg_pnl === undefined ? undefined : Number(row.avg_pnl),
-        avgPnlPct: row.avg_pnl_pct === null || row.avg_pnl_pct === undefined ? undefined : Number(row.avg_pnl_pct),
-        medianPnlPct: row.median_pnl_pct === null || row.median_pnl_pct === undefined ? undefined : Number(row.median_pnl_pct),
-        avgConfidence: row.avg_confidence === null || row.avg_confidence === undefined ? undefined : Number(row.avg_confidence),
+        totalPnl:
+          row.total_pnl === null || row.total_pnl === undefined
+            ? undefined
+            : Number(row.total_pnl),
+        grossPnl:
+          row.gross_pnl === null || row.gross_pnl === undefined
+            ? undefined
+            : Number(row.gross_pnl),
+        commissions:
+          row.commissions === null || row.commissions === undefined
+            ? undefined
+            : Number(row.commissions),
+        avgPnl:
+          row.avg_pnl === null || row.avg_pnl === undefined
+            ? undefined
+            : Number(row.avg_pnl),
+        avgPnlPct:
+          row.avg_pnl_pct === null || row.avg_pnl_pct === undefined
+            ? undefined
+            : Number(row.avg_pnl_pct),
+        medianPnlPct:
+          row.median_pnl_pct === null || row.median_pnl_pct === undefined
+            ? undefined
+            : Number(row.median_pnl_pct),
+        avgConfidence:
+          row.avg_confidence === null || row.avg_confidence === undefined
+            ? undefined
+            : Number(row.avg_confidence),
         takeProfitHits: Number(row.take_profit_hits ?? 0),
-        stopHits: Number(row.stop_hits ?? 0)
+        stopHits: Number(row.stop_hits ?? 0),
       };
     });
   }
 
-  private async tryLoadExposureFromExecution(executionBaseUrl: string): Promise<ExposureSnapshot | null> {
+  private async tryLoadExposureFromExecution(
+    executionBaseUrl: string,
+  ): Promise<ExposureSnapshot | null> {
     try {
-      const base = executionBaseUrl.endsWith('/') ? executionBaseUrl.slice(0, -1) : executionBaseUrl;
+      const base = executionBaseUrl.endsWith("/")
+        ? executionBaseUrl.slice(0, -1)
+        : executionBaseUrl;
       const url = `${base}/execution/account/summary`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3500);
 
       try {
-        const response = await fetch(url, { method: 'GET', signal: controller.signal });
+        const response = await fetch(url, {
+          method: "GET",
+          signal: controller.signal,
+        });
         if (!response.ok) return null;
 
         const payload = (await response.json()) as {
@@ -1479,18 +1715,24 @@ export class SignalRepository {
         const longExposure = Number(payload?.totals?.longExposure);
         const shortExposure = Number(payload?.totals?.shortExposure);
         const openPositions = Number(payload?.totals?.positionsCount);
-        const accountEquityRaw = payload?.metrics?.netLiquidation ?? payload?.metrics?.equityWithLoanValue;
+        const accountEquityRaw =
+          payload?.metrics?.netLiquidation ??
+          payload?.metrics?.equityWithLoanValue;
         const accountEquity = Number(accountEquityRaw);
 
-        if (!Number.isFinite(exposure) || !Number.isFinite(openPositions)) return null;
+        if (!Number.isFinite(exposure) || !Number.isFinite(openPositions))
+          return null;
         const positionsBySymbol: Record<string, number> = {};
-        const positionContextsBySymbol: Record<string, {
-          quantity: number;
-          averageCost?: number;
-          marketPrice?: number;
-          marketValue?: number;
-          unrealizedPnL?: number;
-        }> = {};
+        const positionContextsBySymbol: Record<
+          string,
+          {
+            quantity: number;
+            averageCost?: number;
+            marketPrice?: number;
+            marketValue?: number;
+            unrealizedPnL?: number;
+          }
+        > = {};
         for (const position of payload.positions ?? []) {
           if (!position?.symbol) continue;
           const qty = Number(position.position);
@@ -1499,27 +1741,42 @@ export class SignalRepository {
           positionsBySymbol[key] = qty;
           positionContextsBySymbol[key] = {
             quantity: qty,
-            averageCost: Number.isFinite(Number(position.averageCost)) ? Number(position.averageCost) : undefined,
-            marketPrice: Number.isFinite(Number(position.marketPrice)) ? Number(position.marketPrice) : undefined,
-            marketValue: Number.isFinite(Number(position.marketValue)) ? Number(position.marketValue) : undefined,
-            unrealizedPnL: Number.isFinite(Number(position.unrealizedPnL)) ? Number(position.unrealizedPnL) : undefined
+            averageCost: Number.isFinite(Number(position.averageCost))
+              ? Number(position.averageCost)
+              : undefined,
+            marketPrice: Number.isFinite(Number(position.marketPrice))
+              ? Number(position.marketPrice)
+              : undefined,
+            marketValue: Number.isFinite(Number(position.marketValue))
+              ? Number(position.marketValue)
+              : undefined,
+            unrealizedPnL: Number.isFinite(Number(position.unrealizedPnL))
+              ? Number(position.unrealizedPnL)
+              : undefined,
           };
         }
 
         return {
           exposure,
           openPositions,
-          source: 'execution',
+          source: "execution",
           positionsBySymbol,
-          accountEquity: Number.isFinite(accountEquity) && accountEquity > 0 ? accountEquity : undefined,
+          accountEquity:
+            Number.isFinite(accountEquity) && accountEquity > 0
+              ? accountEquity
+              : undefined,
           fxToBaseByCurrency: Object.fromEntries(
             Object.entries(payload.fxToBaseByCurrency ?? {})
               .map(([currency, rate]) => [currency.toUpperCase(), Number(rate)])
-              .filter(([, rate]) => Number.isFinite(rate) && Number(rate) > 0)
+              .filter(([, rate]) => Number.isFinite(rate) && Number(rate) > 0),
           ),
-          longExposure: Number.isFinite(longExposure) ? longExposure : undefined,
-          shortExposure: Number.isFinite(shortExposure) ? shortExposure : undefined,
-          positionContextsBySymbol
+          longExposure: Number.isFinite(longExposure)
+            ? longExposure
+            : undefined,
+          shortExposure: Number.isFinite(shortExposure)
+            ? shortExposure
+            : undefined,
+          positionContextsBySymbol,
         };
       } finally {
         clearTimeout(timeout);
@@ -1529,7 +1786,9 @@ export class SignalRepository {
     }
   }
 
-  private async getDbNetPositions(): Promise<Array<{ instrument: string; netQty: number; referencePrice: number }>> {
+  private async getDbNetPositions(): Promise<
+    Array<{ instrument: string; netQty: number; referencePrice: number }>
+  > {
     const result = await this.pool.query(
       `
       WITH fills AS (
@@ -1554,23 +1813,23 @@ export class SignalRepository {
         COALESCE(NULLIF(last_entry, 0), avg_entry, 0) AS reference_price
       FROM fills
       WHERE ABS(net_qty) > 1e-12
-      `
+      `,
     );
 
     return result.rows.map((row) => ({
       instrument: String(row.instrument),
       netQty: Number(row.net_qty),
-      referencePrice: Number(row.reference_price)
+      referencePrice: Number(row.reference_price),
     }));
   }
 
-  private tableForTimeframe(timeframe: Candle['timeframe']): string {
-    if (timeframe === '1m') return 'candles_1m';
-    if (timeframe === '5m') return 'candles_5m';
-    if (timeframe === '1h') return 'candles_1h';
-    if (timeframe === '4h') return 'candles_4h';
-    if (timeframe === '12h') return 'candles_12h';
-    if (timeframe === '1d') return 'candles_1d';
-    return 'candles_1w';
+  private tableForTimeframe(timeframe: Candle["timeframe"]): string {
+    if (timeframe === "1m") return "candles_1m";
+    if (timeframe === "5m") return "candles_5m";
+    if (timeframe === "1h") return "candles_1h";
+    if (timeframe === "4h") return "candles_4h";
+    if (timeframe === "12h") return "candles_12h";
+    if (timeframe === "1d") return "candles_1d";
+    return "candles_1w";
   }
 }
