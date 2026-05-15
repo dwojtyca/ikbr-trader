@@ -324,14 +324,16 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       suggestedEntry: close,
       stopLoss,
       takeProfit,
-      // Trailing-stop infrastructure (trailingStopPct -> live IBKR TRAIL +
-      // simulator peak/trough ratchet) is wired end-to-end. Tested at 1.5%
-      // on this strategy: run #22 = $1840.70 vs baseline #21 = $2406.40
-      // (-23.5%). Winners on momentum_breakout_long_v1 run all the way to
-      // the +4R take-profit and a 1.5% trail clips them on intraday wicks
-      // (stop hits 153 vs baseline; TP hits dropped). Left disabled here
-      // until a different strategy/regime warrants it.
-      // trailingStopPct: 1.5,
+      // BE+trail (trailingStopActivationR + trailingStopPct) infrastructure
+      // is wired end-to-end (commit 2eb2772). Tested 3 variants vs baseline
+      // #29 (\$2576.17): 2R/3% = \$1834 (-29%), 3R/5% = \$1834 (-29%),
+      // 2R/8% = \$1781 (-31%). All lose because the dataset is bimodal —
+      // out of 174 long trades, 39 reach >=+4R (TP) and only 2 land in
+      // the +2R..+4R band. There is essentially no "give-back" pool to
+      // protect; activating BE just clips the runners that briefly tag
+      // +2R, dip, then run to +4R. Left disabled here.
+      // trailingStopPct: 3,
+      // trailingStopActivationR: 2,
       // NOTE: partial take-profit infrastructure (PartialTakeProfit) is wired
       // through the simulator + live ProposedOrder pipeline, but for this
       // strategy every tested ladder (50%/+2R, 33%/+2R, 50%/+3R) regressed
