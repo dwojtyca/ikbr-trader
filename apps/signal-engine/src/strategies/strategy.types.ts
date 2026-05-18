@@ -90,6 +90,13 @@ export interface Strategy {
   allowedDirectionalRegimes: readonly DirectionalRegime[];
   allowedVolatilityRegimes: readonly VolatilityRegime[];
   requiredTimeframes: readonly CandleTimeframe[];
+  /**
+   * Lane priority for portfolio-level conflict resolution. Higher wins when
+   * multiple strategies emit a signal for the same symbol on the same tick.
+   * Use this to enforce hard lane separation (e.g. an intraday breakout lane
+   * should beat a daily swing lane regardless of confidence). Defaults to 0.
+   */
+  lanePriority?: number;
   generateSignal(context: StrategyContext): StrategySignal | null;
   shouldExit?(context: ExitContext): ExitSignal | null;
   getLastRejectionReason?(): string | undefined;

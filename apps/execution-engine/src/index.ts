@@ -167,6 +167,127 @@ function buildSubmittedConflictMessage(symbol: string, existing: { id: number; b
   return `Execution blocked for ${symbol}: active SUBMITTED order already exists (id=${existing.id}, brokerOrderId=${existing.brokerOrderId ?? 'n/a'}, createdAt=${existing.createdAt.toISOString()})`;
 }
 
+function startOfTodayUtc(): Date {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+}
+
+interface KillSwitchStatus {
+  enabled: boolean;
+  triggered: boolean;
+  reason?: string;
+  dailyRealizedPnL: number;
+  baseCurrency: string;
+  since: string;
+  thresholds: {
+    maxDailyLossUsd: number;
+    maxDailyLossPct: number;
+  };
+  netLiquidation?: number;
+  diagnostics: {
+    missingFxRates: number;
+    missingCommissionReports: number;
+    complete: boolean;
+    snapshotCacheAgeMs?: number;
+  };
+}
+
+/**
+ * Evaluates the daily-loss kill-switch using already-cached account
+ * snapshot data (no extra TWS round-trip) and broker_execution_fills
+ * persisted by the execution-engine. Returns a structured status so the
+ * same code path can answer GET /execution/kill-switch and gate
+ * /execution/execute-* endpoints.
+ *
+ * Conservative behaviour:
+ *   - if both USD and PCT thresholds are 0 -> disabled
+ *   - if PCT threshold is set but no netLiquidation is known yet -> skip
+ *     the PCT bound (USD bound still applies)
+ *   - FX rates come from the last cached account snapshot; rows in a
+ *     currency we cannot convert are skipped and flagged in diagnostics
+ */
+async function evaluateKillSwitch(): Promise<KillSwitchStatus> {
+  const since = startOfTodayUtc();
+  const fxToBaseByCurrency = accountSnapshotCache?.snapshot.fxToBaseByCurrency;
+  const netLiquidation = accountSnapshotCache?.snapshot.metrics.netLiquidation;
+  const snapshotCacheAgeMs = accountSnapshotCache
+    ? Date.now() - accountSnapshotCache.fetchedAtMs
+    : undefined;
+
+  const summary = await repo.getRealizedPnLSince({
+    baseCurrency: config.IB_CURRENCY,
+    since,
+    fxToBaseByCurrency
+  });
+
+  const enabled = config.EXECUTION_MAX_DAILY_LOSS_USD > 0 || config.EXECUTION_MAX_DAILY_LOSS_PCT > 0;
+
+  const status: KillSwitchStatus = {
+    enabled,
+    triggered: false,
+    dailyRealizedPnL: summary.pnl,
+    baseCurrency: config.IB_CURRENCY,
+    since: since.toISOString(),
+    thresholds: {
+      maxDailyLossUsd: config.EXECUTION_MAX_DAILY_LOSS_USD,
+      maxDailyLossPct: config.EXECUTION_MAX_DAILY_LOSS_PCT
+    },
+    netLiquidation,
+    diagnostics: {
+      missingFxRates: summary.missingFxRates,
+      missingCommissionReports: summary.missingCommissionReports,
+      complete: summary.complete,
+      snapshotCacheAgeMs
+    }
+  };
+
+  if (!enabled) {
+    return status;
+  }
+
+  if (config.EXECUTION_MAX_DAILY_LOSS_USD > 0 && summary.pnl <= -config.EXECUTION_MAX_DAILY_LOSS_USD) {
+    status.triggered = true;
+    status.reason = `daily realized PnL ${summary.pnl.toFixed(2)} ${config.IB_CURRENCY} <= -${config.EXECUTION_MAX_DAILY_LOSS_USD} ${config.IB_CURRENCY}`;
+    return status;
+  }
+
+  if (
+    config.EXECUTION_MAX_DAILY_LOSS_PCT > 0 &&
+    netLiquidation !== undefined &&
+    netLiquidation > 0
+  ) {
+    const lossPct = (-summary.pnl / netLiquidation) * 100;
+    if (lossPct >= config.EXECUTION_MAX_DAILY_LOSS_PCT) {
+      status.triggered = true;
+      status.reason = `daily realized PnL ${summary.pnl.toFixed(2)} ${config.IB_CURRENCY} = -${lossPct.toFixed(2)}% of netLiquidation (${netLiquidation.toFixed(2)}) >= ${config.EXECUTION_MAX_DAILY_LOSS_PCT}%`;
+      return status;
+    }
+  }
+
+  return status;
+}
+
+/**
+ * Throws when the kill-switch is triggered and the order would open or
+ * add to a position. CLOSE_OR_REDUCE orders always pass so the bot can
+ * exit existing positions even after the daily loss limit was hit.
+ */
+async function assertKillSwitchOk(order: { positionEffect?: ProposedOrder['positionEffect']; instrument: string }): Promise<void> {
+  const positionEffect = order.positionEffect ?? 'OPEN_OR_ADD';
+  if (positionEffect === 'CLOSE_OR_REDUCE') return;
+
+  const status = await evaluateKillSwitch();
+  if (status.triggered) {
+    app.log.warn(
+      { instrument: order.instrument, status },
+      'kill-switch blocked OPEN_OR_ADD order'
+    );
+    throw new Error(
+      `Execution blocked for ${order.instrument}: daily loss kill-switch triggered (${status.reason}). Existing positions can still be closed.`
+    );
+  }
+}
+
 async function ensureBrokerSession(): Promise<{ accountId: string; accounts: string[] }> {
   await tws.connect();
   const accounts = await tws.getManagedAccounts();
@@ -209,6 +330,8 @@ async function executePersistedOrder(order: ProposedOrder, metadata?: OrderDecis
     throw new Error(buildSubmittedConflictMessage(order.instrument, activeSubmitted));
   }
 
+  await assertKillSwitchOk(order);
+
   const { accountId } = await ensureBrokerSession();
   await repo.markExecutionAttempt(order.id, accountId, metadata);
 
@@ -239,6 +362,10 @@ async function executePersistedOrder(order: ProposedOrder, metadata?: OrderDecis
 }
 
 app.get('/health', async () => ({ ok: true, twsConnected: tws.isConnected() }));
+
+app.get('/execution/kill-switch', async () => {
+  return evaluateKillSwitch();
+});
 
 app.post('/execution/bootstrap', async () => {
   const { accountId, accounts } = await ensureBrokerSession();
@@ -379,6 +506,12 @@ app.post('/execution/execute-proposed/:id', async (request, reply) => {
   }
 
   try {
+    await assertKillSwitchOk(order);
+  } catch (error) {
+    return reply.code(423).send({ error: (error as Error).message });
+  }
+
+  try {
     const result = await executePersistedOrder(order, metadata);
     const fresh = await repo.getProposedOrderById(params.id);
     return {
@@ -461,6 +594,12 @@ app.post('/execution/execute-ticket', async (request, reply) => {
   const activeSubmitted = await repo.findActiveSubmittedByInstrument(ticket.instrument);
   if (activeSubmitted) {
     return reply.code(409).send({ error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted) });
+  }
+
+  try {
+    await assertKillSwitchOk({ instrument: ticket.instrument, positionEffect: ticket.positionEffect });
+  } catch (error) {
+    return reply.code(423).send({ error: (error as Error).message });
   }
 
   if (!body.persist) {

@@ -154,6 +154,10 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     "high_volatility",
   ] as const;
   readonly requiredTimeframes = ["1m", "1h", "4h", "1d"] as const;
+  // Hard lane separation: intraday breakout lane is the proven primary lane
+  // and must beat any swing-style strategy (e.g. trend_following_long_v1) when
+  // both fire on the same symbol/tick, regardless of confidence score.
+  readonly lanePriority = 10;
   private lastRejectionReason: string | undefined;
 
   getLastRejectionReason(): string | undefined {

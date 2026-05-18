@@ -71,6 +71,7 @@ export class StrategyPortfolioManager {
 
     candidates.sort(
       (a, b) =>
+        (b.strategy.lanePriority ?? 0) - (a.strategy.lanePriority ?? 0) ||
         b.signal.confidenceScore - a.signal.confidenceScore ||
         a.strategy.id.localeCompare(b.strategy.id),
     );

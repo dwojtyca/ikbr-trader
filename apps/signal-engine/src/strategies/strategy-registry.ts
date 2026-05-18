@@ -3,6 +3,7 @@ import { GapFadeShortStrategy } from "./gap-fade-short.strategy.js";
 import { MomentumBreakdownShortStrategy } from "./momentum-breakdown-short.strategy.js";
 import { MomentumBreakoutLongStrategy } from "./momentum-breakout-long.strategy.js";
 import { RangeReversalStrategy } from "./range-reversal.strategy.js";
+import { TrendFollowingLongStrategy } from "./trend-following-long.strategy.js";
 import type { Strategy } from "./strategy.types.js";
 
 const STRATEGY_FACTORIES = {
@@ -10,6 +11,7 @@ const STRATEGY_FACTORIES = {
   momentum_breakdown_short_v1: () => new MomentumBreakdownShortStrategy(),
   range_reversal_v1: () => new RangeReversalStrategy(),
   gap_fade_short_v1: () => new GapFadeShortStrategy(),
+  trend_following_long_v1: () => new TrendFollowingLongStrategy(),
 } satisfies Record<string, () => Strategy>;
 
 export type ImplementedStrategyId = keyof typeof STRATEGY_FACTORIES;

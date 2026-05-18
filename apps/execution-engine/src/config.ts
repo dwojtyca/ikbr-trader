@@ -25,7 +25,14 @@ const schema = z.object({
   EXECUTION_DEFAULT_TIF: z.string().default('DAY'),
   EXECUTION_ORDER_TIMEOUT_MS: z.coerce.number().default(15000),
   EXECUTION_SUBMITTED_AUTO_CANCEL_MS: z.coerce.number().int().min(0).default(0),
-  EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default('false')
+  EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default('false'),
+  // Daily loss kill-switch. When daily realized PnL (in base currency)
+  // drops below the configured threshold, the execution-engine refuses
+  // any new OPEN_OR_ADD orders. CLOSE_OR_REDUCE always passes so the bot
+  // can still exit existing positions. Set USD or PCT (or both); 0 disables
+  // that bound. PCT is evaluated against last-known account netLiquidation.
+  EXECUTION_MAX_DAILY_LOSS_USD: z.coerce.number().min(0).default(0),
+  EXECUTION_MAX_DAILY_LOSS_PCT: z.coerce.number().min(0).max(100).default(0)
 });
 
 const env = schema.parse(process.env);

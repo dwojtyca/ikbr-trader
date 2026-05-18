@@ -136,21 +136,53 @@ export class ExecutionRepository {
       `
     );
 
-    const baseCurrency = options.baseCurrency.trim().toUpperCase();
-    let realizedPnL = 0;
-    let missingCommissionReports = 0;
-    let missingFxRates = 0;
+    return this.aggregateRealizedPnL(result.rows, options.baseCurrency, options.fxToBaseByCurrency);
+  }
 
-    for (const row of result.rows as Array<{
+  /**
+   * Realized PnL for fills with executed_at (or created_at fallback)
+   * greater or equal to `since`. Used by the daily-loss kill-switch in
+   * the execution-engine. Returns a summary with the same shape as
+   * `getCumulativeRealizedPnL` so callers can inspect FX gaps.
+   */
+  async getRealizedPnLSince(options: {
+    baseCurrency: string;
+    since: Date;
+    fxToBaseByCurrency?: Record<string, number | undefined>;
+  }): Promise<CumulativeRealizedPnlSummary> {
+    const result = await this.pool.query(
+      `
+      SELECT exec_id, commission, commission_currency, realized_pnl, currency
+      FROM broker_execution_fills
+      WHERE COALESCE(executed_at, created_at) >= $1
+      ORDER BY COALESCE(executed_at, created_at) ASC, exec_id ASC
+      `,
+      [options.since]
+    );
+
+    return this.aggregateRealizedPnL(result.rows, options.baseCurrency, options.fxToBaseByCurrency);
+  }
+
+  private aggregateRealizedPnL(
+    rows: ReadonlyArray<{
       exec_id: string;
       commission: number | null;
       commission_currency: string | null;
       realized_pnl: number | null;
       currency: string | null;
-    }>) {
+    }>,
+    baseCurrencyRaw: string,
+    fxToBaseByCurrency?: Record<string, number | undefined>
+  ): CumulativeRealizedPnlSummary {
+    const baseCurrency = baseCurrencyRaw.trim().toUpperCase();
+    let realizedPnL = 0;
+    let missingCommissionReports = 0;
+    let missingFxRates = 0;
+
+    for (const row of rows) {
       const pnlCurrency = String(row.commission_currency ?? row.currency ?? baseCurrency).trim().toUpperCase();
       const fxToBase = this.toFiniteNumber(
-        options.fxToBaseByCurrency?.[pnlCurrency] ?? (pnlCurrency === baseCurrency ? 1 : NaN),
+        fxToBaseByCurrency?.[pnlCurrency] ?? (pnlCurrency === baseCurrency ? 1 : NaN),
         NaN
       );
       if (!Number.isFinite(fxToBase) || fxToBase <= 0) {
@@ -171,7 +203,7 @@ export class ExecutionRepository {
       pnl: realizedPnL,
       missingCommissionReports,
       missingFxRates,
-      complete: result.rowCount !== 0 && missingCommissionReports === 0 && missingFxRates === 0
+      complete: rows.length !== 0 && missingCommissionReports === 0 && missingFxRates === 0
     };
   }
 

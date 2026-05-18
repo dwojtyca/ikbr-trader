@@ -87,6 +87,28 @@ const PROFILES: StrategyProfile[] = [
     spreadFactor: 1,
     requireVolume: true,
   },
+  {
+    // Daily-timeframe Donchian-50 breakout. Lane-separated from
+    // momentum_breakout_long_v1 by timeframe (D1 close vs 1m intraday breakout)
+    // and by a confidence anchor of 0.88 so the daily setup wins ties.
+    id: "trend_following_long_v1",
+    secType: ["STK", "IND"],
+    directionalRegimes: ["bull_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
+    style: "trend",
+    // Disabled: only 5 fills in 6-month backtest (run #40), 3 didn't close
+    // before dataset end and 2 hit stop for -$514 combined. Strategy also
+    // blocks intraday slots that momentum_breakout_long_v1 would use,
+    // costing ~$200 vs the $2576 baseline. Re-evaluate after extending the
+    // historical dataset to 2+ years (Etap 6).
+    enabledInBot: false,
+    entryScore: 0.6,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    quantityFactor: 1,
+    spreadFactor: 1,
+    requireVolume: true,
+  },
 ];
 
 export function listStrategyProfiles(): StrategyProfile[] {
