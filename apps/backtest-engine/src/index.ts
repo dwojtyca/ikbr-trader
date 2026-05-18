@@ -21,6 +21,12 @@ const dateRangeSchema = z.object({
   dateTo: z.string().min(1),
 });
 
+const partialHistorySchema = z.object({
+  symbols: z.array(z.string().min(1)).min(1),
+  dateFrom: z.string().min(1).optional(),
+  dateTo: z.string().min(1).optional(),
+});
+
 const runSchema = z.object({
   mode: z.enum(["bot", "isolated"]).default("bot"),
 });
@@ -299,6 +305,65 @@ async function startHistoryResumeJob(
   }
 }
 
+/**
+ * Per-symbol top-up that re-uses the existing dataset. Does NOT
+ * TRUNCATE anything; insertCandles1m has ON CONFLICT (symbol, ts) so
+ * re-fetching overlapping ranges is safe. After ingestion we rebuild
+ * the higher-timeframe aggregates and merge the symbols into the
+ * dataset's symbols TEXT[] so subsequent backtest runs see them.
+ *
+ * Used when adding 1-2 new tickers to the watchlist without wanting to
+ * re-pull data for everything else (which IBKR rate-limits would make
+ * very slow). Does NOT change the dataset's status: it stays 'ready'.
+ */
+async function startHistoryPartialJob(
+  datasetId: number,
+  instruments: WatchlistInstrument[],
+  dateFrom: Date,
+  dateTo: Date,
+): Promise<void> {
+  const client = createHistoricalClient();
+
+  try {
+    await client.connect();
+    const subscriptions = await client.resolveContracts(instruments);
+    for (const subscription of subscriptions) {
+      if (subscription.instrumentContract) {
+        await repo.upsertInstrumentContract(subscription.instrumentContract);
+      }
+    }
+    for (const sub of subscriptions) {
+      app.log.info(
+        {
+          scope: "historical",
+          symbol: sub.symbol,
+          dateFrom: dateFrom.toISOString(),
+          dateTo: dateTo.toISOString(),
+        },
+        "partial-fetch symbol started",
+      );
+      await fetchSubscriptionRange(client, sub, dateFrom, dateTo);
+    }
+    await ensureHistoricalFxRates(dateFrom, dateTo);
+    await repo.rebuildAggregates();
+    await repo.appendDatasetSymbols(
+      datasetId,
+      instruments.map((i) => i.symbol),
+    );
+    await repo.refreshDatasetCandlesCount(datasetId);
+    app.log.info(
+      { datasetId, symbols: instruments.map((i) => i.symbol) },
+      "partial history fetch completed",
+    );
+  } catch (error) {
+    app.log.error({ err: error }, "partial history fetch failed");
+    throw error;
+  } finally {
+    client.disconnect();
+    historyJob = null;
+  }
+}
+
 await ensureBacktestDatabase(
   config.BACKTEST_POSTGRES_ADMIN_URL,
   config.BACKTEST_POSTGRES_URL,
@@ -356,6 +421,60 @@ app.post("/backtest/history", async (request, reply) => {
 
   reply.code(202);
   return { dataset, historyJobRunning: true };
+});
+
+app.post("/backtest/history/symbols", async (request, reply) => {
+  if (historyJob) {
+    reply.code(409);
+    return { error: "history_job_running" };
+  }
+
+  const parsed = partialHistorySchema.safeParse(request.body ?? {});
+  if (!parsed.success) {
+    reply.code(400);
+    return { error: "invalid_body", details: parsed.error.flatten() };
+  }
+
+  const existing = await repo.latestDataset();
+  if (!existing) {
+    reply.code(400);
+    return {
+      error: "no_dataset",
+      message:
+        "No base dataset exists. Call POST /backtest/history first to seed one.",
+    };
+  }
+
+  // Default to the existing dataset's window so a per-symbol top-up
+  // produces candles aligned with the rest of the data.
+  const dateFrom = parsed.data.dateFrom
+    ? parseDateStart(parsed.data.dateFrom)
+    : new Date(existing.dateFrom);
+  const dateTo = parsed.data.dateTo
+    ? parseDateEnd(parsed.data.dateTo)
+    : new Date(existing.dateTo);
+  if (dateTo <= dateFrom) {
+    reply.code(400);
+    return { error: "invalid_range", message: "dateTo must be after dateFrom" };
+  }
+
+  const instruments = instrumentsForDatasetSymbols(parsed.data.symbols);
+
+  historyJob = startHistoryPartialJob(
+    existing.id,
+    instruments,
+    dateFrom,
+    dateTo,
+  );
+
+  reply.code(202);
+  return {
+    dataset: existing,
+    requestedSymbols: instruments.map((i) => i.symbol.toUpperCase()),
+    dateFrom: dateFrom.toISOString(),
+    dateTo: dateTo.toISOString(),
+    historyJobRunning: true,
+  };
 });
 
 app.post("/backtest/history/resume", async (_request, reply) => {

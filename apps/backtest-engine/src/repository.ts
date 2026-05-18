@@ -600,6 +600,57 @@ export class BacktestRepository {
     return result.rows[0] ? mapDataset(result.rows[0]) : null;
   }
 
+  /**
+   * Merges new symbols into the symbols TEXT[] of an existing dataset
+   * (idempotent, case-insensitive via uppercase). Used by the per-symbol
+   * top-up endpoint so that subsequent runs see the freshly added
+   * tickers as part of the dataset.
+   */
+  async appendDatasetSymbols(
+    datasetId: number,
+    symbols: string[],
+  ): Promise<BacktestDataset | null> {
+    const normalized = Array.from(
+      new Set(
+        symbols.map((s) => s.trim().toUpperCase()).filter(Boolean),
+      ),
+    );
+    if (normalized.length === 0) return null;
+    const result = await this.pool.query(
+      `UPDATE backtest_datasets
+       SET symbols = (
+         SELECT ARRAY(
+           SELECT DISTINCT upper(s)
+           FROM unnest(COALESCE(symbols, ARRAY[]::text[]) || $2::text[]) AS s
+           WHERE s IS NOT NULL AND s <> ''
+           ORDER BY 1
+         )
+       )
+       WHERE id = $1
+       RETURNING *`,
+      [datasetId, normalized],
+    );
+    return result.rows[0] ? mapDataset(result.rows[0]) : null;
+  }
+
+  /**
+   * Refresh the cached candles_count on a dataset. Used after a partial
+   * top-up so /backtest/dataset reflects the new total without forcing
+   * a full status transition.
+   */
+  async refreshDatasetCandlesCount(
+    datasetId: number,
+  ): Promise<BacktestDataset | null> {
+    const countResult = await this.pool.query(
+      "SELECT COUNT(*) AS count FROM backtest_candles_1m",
+    );
+    const result = await this.pool.query(
+      `UPDATE backtest_datasets SET candles_count = $2 WHERE id = $1 RETURNING *`,
+      [datasetId, Number(countResult.rows[0]?.count ?? 0)],
+    );
+    return result.rows[0] ? mapDataset(result.rows[0]) : null;
+  }
+
   async listRuns(): Promise<BacktestRun[]> {
     const result = await this.pool.query(
       "SELECT * FROM backtest_runs ORDER BY id DESC LIMIT 50",
