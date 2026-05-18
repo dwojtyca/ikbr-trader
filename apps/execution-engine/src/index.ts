@@ -575,6 +575,22 @@ app.get("/execution/alerts", async (request) => {
   return { alerts: rows };
 });
 
+app.post("/execution/alerts/test", async (request) => {
+  const body = z
+    .object({
+      severity: z.enum(["info", "warn", "error"]).default("warn"),
+      message: z.string().default("Test alert from /execution/alerts/test"),
+    })
+    .parse(request.body ?? {});
+  await alerts.record({
+    severity: body.severity,
+    kind: "system",
+    message: body.message,
+    payload: { triggeredAt: new Date().toISOString() },
+  });
+  return { ok: true };
+});
+
 app.post("/execution/bootstrap", async () => {
   const { accountId, accounts } = await ensureBrokerSession();
   return {

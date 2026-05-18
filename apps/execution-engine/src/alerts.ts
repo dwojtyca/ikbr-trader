@@ -116,9 +116,23 @@ export class AlertService implements AlertNotifier {
         body,
         signal: controller.signal
       });
+      const text = await response.text().catch(() => '');
       if (!response.ok) {
-        const text = await response.text().catch(() => '');
-        throw new Error(`telegram api status=${response.status} body=${text.slice(0, 200)}`);
+        throw new Error(`telegram api status=${response.status} body=${text.slice(0, 300)}`);
+      }
+      // Telegram returns HTTP 200 even for some logical errors; surface
+      // ok:false from the API payload so misconfigured chats are visible
+      // in logs (e.g. "chat not found" if the user never started the bot).
+      try {
+        const parsed = JSON.parse(text) as { ok?: boolean; description?: string };
+        if (parsed.ok === false) {
+          throw new Error(`telegram api ok=false description=${parsed.description ?? 'unknown'}`);
+        }
+      } catch (parseError) {
+        if (parseError instanceof Error && parseError.message.startsWith('telegram api ok=false')) {
+          throw parseError;
+        }
+        // non-JSON body on 200 is unexpected but not necessarily fatal
       }
     } finally {
       clearTimeout(timeout);
