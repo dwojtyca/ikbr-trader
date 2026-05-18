@@ -49,10 +49,7 @@ function utcHour(ts: Date | string): number {
   return new Date(ts).getUTCHours();
 }
 
-function priorMaxHigh(
-  candles: Candle[],
-  lookback: number,
-): number | undefined {
+function priorMaxHigh(candles: Candle[], lookback: number): number | undefined {
   // Exclude the most recent (current) D1 candle so the breakout level reflects
   // the *prior* `lookback` sessions, not including today.
   const slice = candles.slice(-(lookback + 1), -1);
@@ -148,8 +145,7 @@ export class TrendFollowingLongStrategy implements Strategy {
     const priorHigh = priorMaxHigh(candles1d, params.donchianWindow);
     if (priorHigh === undefined) return this.reject("d1_donchian_unavailable");
     const breakoutLevel = priorHigh * (1 + params.breakoutBufferPct / 100);
-    if (closeD <= breakoutLevel)
-      return this.reject("d1_no_donchian_breakout");
+    if (closeD <= breakoutLevel) return this.reject("d1_no_donchian_breakout");
 
     // Optional volume confirmation on D1.
     if (params.volumeMultiplier > 0) {

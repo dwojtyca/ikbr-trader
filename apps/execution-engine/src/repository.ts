@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool } from "pg";
 import {
   AiDecision,
   DecisionSource,
@@ -7,26 +7,30 @@ import {
   ProposedOrderStatus,
   SignalTicket,
   Side,
-  deriveOrderDiagnostics
-} from '@ikbr/shared';
-import { BrokerCommissionReport, BrokerExecutionFill, BrokerOrderStatusUpdate } from './tws-execution-client.js';
+  deriveOrderDiagnostics,
+} from "@ikbr/shared";
+import {
+  BrokerCommissionReport,
+  BrokerExecutionFill,
+  BrokerOrderStatusUpdate,
+} from "./tws-execution-client.js";
 
-export type DecisionActor = 'llm-agent' | 'user' | 'user_override';
+export type DecisionActor = "llm-agent" | "user" | "user_override";
 
 interface ProposedOrderRow {
   id: number;
   instrument: string;
   conid: string | null;
   side: Side;
-  position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
-  order_type: 'MKT' | 'LMT' | 'STP';
+  position_effect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" | null;
+  order_type: "MKT" | "LMT" | "STP";
   quantity: number;
   entry: number | null;
   stop: number | null;
   take_profit: number | null;
   reason: string;
   confidence: number;
-  risk_check_status: 'PASS' | 'REJECT';
+  risk_check_status: "PASS" | "REJECT";
   status: string;
   strategy: string | null;
   indicator_snapshot: string | null;
@@ -56,13 +60,32 @@ export interface CumulativeRealizedPnlSummary {
   complete: boolean;
 }
 
+export interface ExpectedNetPosition {
+  symbol: string;
+  netShares: number;
+  longShares: number;
+  shortShares: number;
+  fillsCount: number;
+  lastFillAt: Date | null;
+}
+
+export interface SystemAlertRow {
+  id: number;
+  severity: 'info' | 'warn' | 'error';
+  kind: string;
+  message: string;
+  payload: Record<string, unknown> | null;
+  deliveredToTelegram: boolean;
+  createdAt: Date;
+}
+
 export interface OrderListFilters {
   instrument?: string;
   side?: Side;
-  orderType?: 'MKT' | 'LMT' | 'STP';
+  orderType?: "MKT" | "LMT" | "STP";
   qty?: number;
   status?: ProposedOrderStatus;
-  riskCheckStatus?: 'PASS' | 'REJECT';
+  riskCheckStatus?: "PASS" | "REJECT";
   decisionSource?: DecisionSource;
   aiDecision?: AiDecision;
 }
@@ -91,8 +114,9 @@ export class ExecutionRepository {
   private static readonly IBKR_UNSET_DOUBLE_THRESHOLD = 1e307;
 
   private toFiniteNumber(value: unknown, fallback = 0): number {
-    if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
-    if (typeof value === 'string') {
+    if (typeof value === "number")
+      return Number.isFinite(value) ? value : fallback;
+    if (typeof value === "string") {
       const trimmed = value.trim();
       if (!trimmed) return fallback;
       const parsed = Number(trimmed);
@@ -104,18 +128,21 @@ export class ExecutionRepository {
   private normalizeBrokerRealizedPnl(value: unknown): number {
     const parsed = this.toFiniteNumber(value, NaN);
     if (!Number.isFinite(parsed)) return 0;
-    if (Math.abs(parsed) >= ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD) return 0;
+    if (Math.abs(parsed) >= ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD)
+      return 0;
     return parsed;
   }
 
   private parseBrokerExecutionTime(value?: string): Date | null {
-    const raw = String(value ?? '').trim();
+    const raw = String(value ?? "").trim();
     if (!raw) return null;
 
     const direct = new Date(raw);
     if (!Number.isNaN(direct.getTime())) return direct;
 
-    const compact = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/);
+    const compact = raw.match(
+      /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})$/,
+    );
     if (compact) {
       const [, year, month, day, hour, minute, second] = compact;
       return new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
@@ -133,10 +160,14 @@ export class ExecutionRepository {
       SELECT exec_id, commission, commission_currency, realized_pnl, currency
       FROM broker_execution_fills
       ORDER BY COALESCE(executed_at, created_at) ASC, exec_id ASC
-      `
+      `,
     );
 
-    return this.aggregateRealizedPnL(result.rows, options.baseCurrency, options.fxToBaseByCurrency);
+    return this.aggregateRealizedPnL(
+      result.rows,
+      options.baseCurrency,
+      options.fxToBaseByCurrency,
+    );
   }
 
   /**
@@ -157,10 +188,14 @@ export class ExecutionRepository {
       WHERE COALESCE(executed_at, created_at) >= $1
       ORDER BY COALESCE(executed_at, created_at) ASC, exec_id ASC
       `,
-      [options.since]
+      [options.since],
     );
 
-    return this.aggregateRealizedPnL(result.rows, options.baseCurrency, options.fxToBaseByCurrency);
+    return this.aggregateRealizedPnL(
+      result.rows,
+      options.baseCurrency,
+      options.fxToBaseByCurrency,
+    );
   }
 
   private aggregateRealizedPnL(
@@ -172,7 +207,7 @@ export class ExecutionRepository {
       currency: string | null;
     }>,
     baseCurrencyRaw: string,
-    fxToBaseByCurrency?: Record<string, number | undefined>
+    fxToBaseByCurrency?: Record<string, number | undefined>,
   ): CumulativeRealizedPnlSummary {
     const baseCurrency = baseCurrencyRaw.trim().toUpperCase();
     let realizedPnL = 0;
@@ -180,10 +215,15 @@ export class ExecutionRepository {
     let missingFxRates = 0;
 
     for (const row of rows) {
-      const pnlCurrency = String(row.commission_currency ?? row.currency ?? baseCurrency).trim().toUpperCase();
+      const pnlCurrency = String(
+        row.commission_currency ?? row.currency ?? baseCurrency,
+      )
+        .trim()
+        .toUpperCase();
       const fxToBase = this.toFiniteNumber(
-        fxToBaseByCurrency?.[pnlCurrency] ?? (pnlCurrency === baseCurrency ? 1 : NaN),
-        NaN
+        fxToBaseByCurrency?.[pnlCurrency] ??
+          (pnlCurrency === baseCurrency ? 1 : NaN),
+        NaN,
       );
       if (!Number.isFinite(fxToBase) || fxToBase <= 0) {
         missingFxRates += 1;
@@ -203,23 +243,33 @@ export class ExecutionRepository {
       pnl: realizedPnL,
       missingCommissionReports,
       missingFxRates,
-      complete: rows.length !== 0 && missingCommissionReports === 0 && missingFxRates === 0
+      complete:
+        rows.length !== 0 &&
+        missingCommissionReports === 0 &&
+        missingFxRates === 0,
     };
   }
 
   async upsertBrokerExecutionFill(fill: BrokerExecutionFill): Promise<void> {
-    const proposedOrderId = fill.orderId !== undefined
-      ? await this.pool.query(
-          `
+    const proposedOrderId =
+      fill.orderId !== undefined
+        ? await this.pool
+            .query(
+              `
           SELECT id
           FROM proposed_orders
           WHERE broker_order_id = $1
           ORDER BY created_at DESC
           LIMIT 1
           `,
-          [String(fill.orderId)]
-        ).then((result) => (result.rows[0] ? Number((result.rows[0] as { id: number }).id) : null))
-      : null;
+              [String(fill.orderId)],
+            )
+            .then((result) =>
+              result.rows[0]
+                ? Number((result.rows[0] as { id: number }).id)
+                : null,
+            )
+        : null;
 
     await this.pool.query(
       `
@@ -275,8 +325,8 @@ export class ExecutionRepository {
         fill.shares,
         fill.price,
         fill.avgPrice ?? null,
-        this.parseBrokerExecutionTime(fill.executedAt)
-      ]
+        this.parseBrokerExecutionTime(fill.executedAt),
+      ],
     );
 
     if (proposedOrderId !== null) {
@@ -284,11 +334,14 @@ export class ExecutionRepository {
     }
   }
 
-  async reconcileFilledOrdersFromBrokerFills(proposedOrderId?: number): Promise<number> {
+  async reconcileFilledOrdersFromBrokerFills(
+    proposedOrderId?: number,
+  ): Promise<number> {
     const params: number[] = [];
-    const idFilter = proposedOrderId !== undefined
-      ? `AND po.id = $${params.push(proposedOrderId)}`
-      : '';
+    const idFilter =
+      proposedOrderId !== undefined
+        ? `AND po.id = $${params.push(proposedOrderId)}`
+        : "";
 
     const result = await this.pool.query(
       `
@@ -316,13 +369,15 @@ export class ExecutionRepository {
         ${idFilter}
       RETURNING po.id
       `,
-      params
+      params,
     );
 
     return result.rowCount ?? 0;
   }
 
-  async applyBrokerCommissionReport(report: BrokerCommissionReport): Promise<void> {
+  async applyBrokerCommissionReport(
+    report: BrokerCommissionReport,
+  ): Promise<void> {
     await this.pool.query(
       `
       INSERT INTO broker_execution_fills (
@@ -344,35 +399,45 @@ export class ExecutionRepository {
         report.commission ?? null,
         report.currency ?? null,
         report.realizedPnL !== undefined &&
-        Math.abs(report.realizedPnL) < ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD
+        Math.abs(report.realizedPnL) <
+          ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD
           ? report.realizedPnL
-          : null
-      ]
+          : null,
+      ],
     );
   }
 
   private executionMessagePriority(message?: string | null): number {
-    const normalized = String(message ?? '').trim();
+    const normalized = String(message ?? "").trim();
     if (!normalized) return 0;
     if (/^Broker accepted order, status=/i.test(normalized)) return 1;
     if (/^Broker order status update: /i.test(normalized)) return 1;
-    if (/submitted-timeout|locate-held|held while securities are located|will not be placed at the exchange until|broker rejected order|not accepted by broker/i.test(normalized)) {
+    if (
+      /submitted-timeout|locate-held|held while securities are located|will not be placed at the exchange until|broker rejected order|not accepted by broker/i.test(
+        normalized,
+      )
+    ) {
       return 3;
     }
     return 2;
   }
 
-  private choosePreferredMessage(existing?: string | null, incoming?: string | null): string | null {
+  private choosePreferredMessage(
+    existing?: string | null,
+    incoming?: string | null,
+  ): string | null {
     const existingPriority = this.executionMessagePriority(existing);
     const incomingPriority = this.executionMessagePriority(incoming);
     if (incomingPriority > existingPriority) return incoming ?? null;
     if (incomingPriority < existingPriority) return existing ?? null;
 
-    const existingText = String(existing ?? '').trim();
-    const incomingText = String(incoming ?? '').trim();
+    const existingText = String(existing ?? "").trim();
+    const incomingText = String(incoming ?? "").trim();
     if (!incomingText) return existingText || null;
     if (!existingText) return incomingText || null;
-    return incomingText.length >= existingText.length ? incomingText : existingText;
+    return incomingText.length >= existingText.length
+      ? incomingText
+      : existingText;
   }
 
   async init(): Promise<void> {
@@ -414,23 +479,57 @@ export class ExecutionRepository {
       );
     `);
 
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_account_id TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_message TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS last_error TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`);
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS broker_order_id TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_account_id TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_message TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS last_error TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS execution_attempted_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS position_effect TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`,
+    );
 
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS broker_execution_fills (
@@ -455,10 +554,26 @@ export class ExecutionRepository {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN symbol DROP NOT NULL;`).catch(() => undefined);
-    await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN side DROP NOT NULL;`).catch(() => undefined);
-    await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN shares DROP NOT NULL;`).catch(() => undefined);
-    await this.pool.query(`ALTER TABLE broker_execution_fills ALTER COLUMN price DROP NOT NULL;`).catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills ALTER COLUMN symbol DROP NOT NULL;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills ALTER COLUMN side DROP NOT NULL;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills ALTER COLUMN shares DROP NOT NULL;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills ALTER COLUMN price DROP NOT NULL;`,
+      )
+      .catch(() => undefined);
     await this.pool.query(
       `
       UPDATE broker_execution_fills
@@ -466,7 +581,7 @@ export class ExecutionRepository {
       WHERE realized_pnl IS NOT NULL
         AND ABS(realized_pnl) >= $1
       `,
-      [ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD]
+      [ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD],
     );
 
     await this.pool.query(`
@@ -513,9 +628,32 @@ export class ExecutionRepository {
         AND executed_at IS NOT NULL
     `);
     await this.reconcileFilledOrdersFromBrokerFills();
+
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS system_alerts (
+        id BIGSERIAL PRIMARY KEY,
+        severity TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        message TEXT NOT NULL,
+        payload JSONB,
+        delivered_to_telegram BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS system_alerts_created_idx
+      ON system_alerts (created_at DESC);
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS system_alerts_kind_idx
+      ON system_alerts (kind, created_at DESC);
+    `);
   }
 
-  async insertProposedFromTicket(ticket: SignalTicket, strategy = 'manual_ticket'): Promise<number> {
+  async insertProposedFromTicket(
+    ticket: SignalTicket,
+    strategy = "manual_ticket",
+  ): Promise<number> {
     const result = await this.pool.query(
       `
       INSERT INTO proposed_orders (
@@ -556,8 +694,8 @@ export class ExecutionRepository {
         ticket.reason,
         ticket.confidence,
         ticket.riskCheckStatus,
-        strategy
-      ]
+        strategy,
+      ],
     );
 
     return Number(result.rows[0].id);
@@ -575,19 +713,22 @@ export class ExecutionRepository {
       FROM proposed_orders
       WHERE id = $1
       `,
-      [id]
+      [id],
     );
 
     if (!result.rows[0]) return null;
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
-  async findActiveSubmittedByInstrument(instrument: string, excludeId?: number): Promise<ActiveSubmittedOrder | null> {
+  async findActiveSubmittedByInstrument(
+    instrument: string,
+    excludeId?: number,
+  ): Promise<ActiveSubmittedOrder | null> {
     const normalized = instrument.trim();
     if (!normalized) return null;
 
     const params: Array<string | number> = [normalized];
-    let excludeSql = '';
+    let excludeSql = "";
     if (excludeId !== undefined) {
       params.push(excludeId);
       excludeSql = `AND id <> $${params.length}`;
@@ -603,21 +744,34 @@ export class ExecutionRepository {
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      params
+      params,
     );
 
-    const row = result.rows[0] as { id: number; instrument: string; broker_order_id: string | null; created_at: Date | string } | undefined;
+    const row = result.rows[0] as
+      | {
+          id: number;
+          instrument: string;
+          broker_order_id: string | null;
+          created_at: Date | string;
+        }
+      | undefined;
     if (!row) return null;
 
     return {
       id: Number(row.id),
       instrument: String(row.instrument),
       brokerOrderId: row.broker_order_id ?? undefined,
-      createdAt: row.created_at instanceof Date ? row.created_at : new Date(row.created_at)
+      createdAt:
+        row.created_at instanceof Date
+          ? row.created_at
+          : new Date(row.created_at),
     };
   }
 
-  async listOrders(limit: number, filters: OrderListFilters = {}): Promise<ProposedOrder[]> {
+  async listOrders(
+    limit: number,
+    filters: OrderListFilters = {},
+  ): Promise<ProposedOrder[]> {
     const safeLimit = Math.max(1, Math.min(500, limit));
 
     const where: string[] = [];
@@ -665,7 +819,7 @@ export class ExecutionRepository {
 
     params.push(safeLimit);
     const limitParam = `$${params.length}`;
-    const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
 
     const result = await this.pool.query(
       `
@@ -680,13 +834,17 @@ export class ExecutionRepository {
       ORDER BY created_at DESC
       LIMIT ${limitParam}
       `,
-      params
+      params,
     );
 
     return result.rows.map((row) => this.mapRow(row as ProposedOrderRow));
   }
 
-  async markExecutionAttempt(id: number, accountId: string, metadata?: OrderDecisionMetadata): Promise<void> {
+  async markExecutionAttempt(
+    id: number,
+    accountId: string,
+    metadata?: OrderDecisionMetadata,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -712,12 +870,18 @@ export class ExecutionRepository {
         metadata?.aiModel ?? null,
         metadata?.aiDecisionConfidence ?? null,
         metadata?.llmDecisionId ?? null,
-        metadata?.sourceError ?? null
-      ]
+        metadata?.sourceError ?? null,
+      ],
     );
   }
 
-  async markSubmitted(id: number, accountId: string, brokerOrderId: string, executionMessage: string, metadata?: OrderDecisionMetadata): Promise<void> {
+  async markSubmitted(
+    id: number,
+    accountId: string,
+    brokerOrderId: string,
+    executionMessage: string,
+    metadata?: OrderDecisionMetadata,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -751,12 +915,18 @@ export class ExecutionRepository {
         metadata?.aiReason ?? null,
         metadata?.aiModel ?? null,
         metadata?.aiDecisionConfidence ?? null,
-        metadata?.llmDecisionId ?? null
-      ]
+        metadata?.llmDecisionId ?? null,
+      ],
     );
   }
 
-  async markFilled(id: number, accountId: string, brokerOrderId: string, executionMessage: string, metadata?: OrderDecisionMetadata): Promise<void> {
+  async markFilled(
+    id: number,
+    accountId: string,
+    brokerOrderId: string,
+    executionMessage: string,
+    metadata?: OrderDecisionMetadata,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -790,12 +960,16 @@ export class ExecutionRepository {
         metadata?.aiReason ?? null,
         metadata?.aiModel ?? null,
         metadata?.aiDecisionConfidence ?? null,
-        metadata?.llmDecisionId ?? null
-      ]
+        metadata?.llmDecisionId ?? null,
+      ],
     );
   }
 
-  async markRejected(id: number, reason: string, metadata?: OrderDecisionMetadata): Promise<void> {
+  async markRejected(
+    id: number,
+    reason: string,
+    metadata?: OrderDecisionMetadata,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -825,8 +999,8 @@ export class ExecutionRepository {
         metadata?.aiModel ?? null,
         metadata?.aiDecisionConfidence ?? null,
         metadata?.llmDecisionId ?? null,
-        metadata?.sourceError ?? null
-      ]
+        metadata?.sourceError ?? null,
+      ],
     );
   }
 
@@ -842,11 +1016,14 @@ export class ExecutionRepository {
           processing_claimed_at = NULL
       WHERE id = $1
       `,
-      [id, reason]
+      [id, reason],
     );
   }
 
-  async setDecisionMetadata(id: number, metadata: OrderDecisionMetadata): Promise<void> {
+  async setDecisionMetadata(
+    id: number,
+    metadata: OrderDecisionMetadata,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE proposed_orders
@@ -869,15 +1046,17 @@ export class ExecutionRepository {
         metadata.aiModel ?? null,
         metadata.aiDecisionConfidence ?? null,
         metadata.llmDecisionId ?? null,
-        metadata.sourceError ?? null
-      ]
+        metadata.sourceError ?? null,
+      ],
     );
   }
 
-  async applyBrokerStatusUpdate(update: BrokerOrderStatusUpdate): Promise<void> {
+  async applyBrokerStatusUpdate(
+    update: BrokerOrderStatusUpdate,
+  ): Promise<void> {
     const status = update.status.toUpperCase();
 
-    if (status === 'FILLED') {
+    if (status === "FILLED") {
       await this.pool.query(
         `
         UPDATE proposed_orders
@@ -890,12 +1069,16 @@ export class ExecutionRepository {
             processing_claimed_at = NULL
         WHERE broker_order_id = $1
         `,
-        [update.brokerOrderId, update.message]
+        [update.brokerOrderId, update.message],
       );
       return;
     }
 
-    if (status === 'SUBMITTED' || status === 'PRESUBMITTED' || status === 'PENDINGSUBMIT') {
+    if (
+      status === "SUBMITTED" ||
+      status === "PRESUBMITTED" ||
+      status === "PENDINGSUBMIT"
+    ) {
       await this.pool.query(
         `
         UPDATE proposed_orders
@@ -906,12 +1089,16 @@ export class ExecutionRepository {
         WHERE broker_order_id = $1
           AND status IN ('PROPOSED', 'SUBMITTED', 'EXECUTED')
         `,
-        [update.brokerOrderId, update.message]
+        [update.brokerOrderId, update.message],
       );
       return;
     }
 
-    if (status === 'INACTIVE' || status === 'CANCELLED' || status === 'APICANCELLED') {
+    if (
+      status === "INACTIVE" ||
+      status === "CANCELLED" ||
+      status === "APICANCELLED"
+    ) {
       const current = await this.pool.query(
         `
         SELECT execution_message, last_error
@@ -920,11 +1107,19 @@ export class ExecutionRepository {
         ORDER BY created_at DESC
         LIMIT 1
         `,
-        [update.brokerOrderId]
+        [update.brokerOrderId],
       );
-      const existing = current.rows[0] as { execution_message?: string | null; last_error?: string | null } | undefined;
-      const preferredMessage = this.choosePreferredMessage(existing?.execution_message, update.message);
-      const preferredError = this.choosePreferredMessage(existing?.last_error, update.message);
+      const existing = current.rows[0] as
+        | { execution_message?: string | null; last_error?: string | null }
+        | undefined;
+      const preferredMessage = this.choosePreferredMessage(
+        existing?.execution_message,
+        update.message,
+      );
+      const preferredError = this.choosePreferredMessage(
+        existing?.last_error,
+        update.message,
+      );
 
       await this.pool.query(
         `
@@ -937,13 +1132,19 @@ export class ExecutionRepository {
         WHERE broker_order_id = $1
           AND status <> 'FILLED'
         `,
-        [update.brokerOrderId, this.choosePreferredMessage(preferredMessage, preferredError)]
+        [
+          update.brokerOrderId,
+          this.choosePreferredMessage(preferredMessage, preferredError),
+        ],
       );
     }
   }
 
   private mapRow(row: ProposedOrderRow): ProposedOrder {
-    const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    const createdAt =
+      row.created_at instanceof Date
+        ? row.created_at
+        : new Date(row.created_at);
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
 
     const out: ProposedOrder = {
@@ -971,19 +1172,26 @@ export class ExecutionRepository {
       aiDecisionConfidence: row.ai_decision_confidence ?? undefined,
       llmDecisionId: row.llm_decision_id ?? undefined,
       sourceError: row.source_error ?? undefined,
-      createdAt
+      createdAt,
     };
 
     if (row.broker_order_id !== null) out.brokerOrderId = row.broker_order_id;
-    if (row.execution_account_id !== null) out.executionAccountId = row.execution_account_id;
-    if (row.execution_message !== null) out.executionMessage = row.execution_message;
+    if (row.execution_account_id !== null)
+      out.executionAccountId = row.execution_account_id;
+    if (row.execution_message !== null)
+      out.executionMessage = row.execution_message;
     if (row.last_error !== null) out.lastError = row.last_error;
     if (row.execution_attempted_at !== null) {
       out.executionAttemptedAt =
-        row.execution_attempted_at instanceof Date ? row.execution_attempted_at : new Date(row.execution_attempted_at);
+        row.execution_attempted_at instanceof Date
+          ? row.execution_attempted_at
+          : new Date(row.execution_attempted_at);
     }
     if (row.executed_at !== null) {
-      out.executedAt = row.executed_at instanceof Date ? row.executed_at : new Date(row.executed_at);
+      out.executedAt =
+        row.executed_at instanceof Date
+          ? row.executed_at
+          : new Date(row.executed_at);
     }
 
     Object.assign(out, deriveOrderDiagnostics(out));
@@ -991,9 +1199,11 @@ export class ExecutionRepository {
     return out;
   }
 
-  private normalizeIndicators(value: IndicatorSnapshot | string | null): IndicatorSnapshot | undefined {
+  private normalizeIndicators(
+    value: IndicatorSnapshot | string | null,
+  ): IndicatorSnapshot | undefined {
     if (!value) return undefined;
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       try {
         return JSON.parse(value) as IndicatorSnapshot;
       } catch {
@@ -1004,16 +1214,134 @@ export class ExecutionRepository {
   }
 
   private normalizeStatus(status: string): ProposedOrderStatus {
-    const normalized = String(status || '').toUpperCase();
-    if (normalized === 'PROPOSED') return 'PROPOSED';
-    if (normalized === 'REJECTED') return 'REJECTED';
-    if (normalized === 'SUBMITTED' || normalized === 'PRESUBMITTED' || normalized === 'PENDINGSUBMIT') return 'SUBMITTED';
-    if (normalized === 'FILLED') return 'FILLED';
-    if (normalized === 'CANCELLED' || normalized === 'APICANCELLED' || normalized === 'INACTIVE') return 'CANCELLED';
-    if (normalized === 'SUPERSEDED') return 'SUPERSEDED';
-    if (normalized === 'EXPIRED') return 'EXPIRED';
+    const normalized = String(status || "").toUpperCase();
+    if (normalized === "PROPOSED") return "PROPOSED";
+    if (normalized === "REJECTED") return "REJECTED";
+    if (
+      normalized === "SUBMITTED" ||
+      normalized === "PRESUBMITTED" ||
+      normalized === "PENDINGSUBMIT"
+    )
+      return "SUBMITTED";
+    if (normalized === "FILLED") return "FILLED";
+    if (
+      normalized === "CANCELLED" ||
+      normalized === "APICANCELLED" ||
+      normalized === "INACTIVE"
+    )
+      return "CANCELLED";
+    if (normalized === "SUPERSEDED") return "SUPERSEDED";
+    if (normalized === "EXPIRED") return "EXPIRED";
     // Legacy compatibility.
-    if (normalized === 'EXECUTED') return 'SUBMITTED';
-    return 'REJECTED';
+    if (normalized === "EXECUTED") return "SUBMITTED";
+    return "REJECTED";
+  }
+
+  async insertSystemAlert(input: {
+    severity: 'info' | 'warn' | 'error';
+    kind: string;
+    message: string;
+    payload?: Record<string, unknown>;
+  }): Promise<number> {
+    const result = await this.pool.query<{ id: string }>(
+      `
+      INSERT INTO system_alerts (severity, kind, message, payload)
+      VALUES ($1, $2, $3, $4::jsonb)
+      RETURNING id
+      `,
+      [
+        input.severity,
+        input.kind,
+        input.message,
+        input.payload ? JSON.stringify(input.payload) : null
+      ]
+    );
+    return Number(result.rows[0].id);
+  }
+
+  async markSystemAlertDelivered(id: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE system_alerts SET delivered_to_telegram = TRUE WHERE id = $1`,
+      [id]
+    );
+  }
+
+  async listSystemAlerts(limit = 100): Promise<SystemAlertRow[]> {
+    const safeLimit = Math.max(1, Math.min(500, limit));
+    const result = await this.pool.query(
+      `
+      SELECT id, severity, kind, message, payload, delivered_to_telegram, created_at
+      FROM system_alerts
+      ORDER BY created_at DESC
+      LIMIT $1
+      `,
+      [safeLimit]
+    );
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      severity: row.severity as 'info' | 'warn' | 'error',
+      kind: String(row.kind),
+      message: String(row.message),
+      payload: (row.payload as Record<string, unknown> | null) ?? null,
+      deliveredToTelegram: Boolean(row.delivered_to_telegram),
+      createdAt:
+        row.created_at instanceof Date ? row.created_at : new Date(row.created_at)
+    }));
+  }
+
+  /**
+   * Aggregates broker_execution_fills into per-symbol net positions
+   * (signed shares: +qty for BUY, -qty for SELL). Symbols that net to
+   * exactly zero are omitted. Used by the startup reconciliation routine
+   * to compare what the execution-engine believes it holds vs what TWS
+   * reports via reqPositions. We rely on broker fills (not proposed
+   * orders) because they are the broker's authoritative view of what
+   * actually filled.
+   */
+  async computeExpectedNetPositions(): Promise<ExpectedNetPosition[]> {
+    const result = await this.pool.query(
+      `
+      SELECT
+        upper(symbol) AS symbol,
+        SUM(
+          CASE
+            WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0)
+            WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN -COALESCE(shares, 0)
+            ELSE 0
+          END
+        ) AS net_shares,
+        SUM(
+          CASE WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0) ELSE 0 END
+        ) AS long_shares,
+        SUM(
+          CASE WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN COALESCE(shares, 0) ELSE 0 END
+        ) AS short_shares,
+        COUNT(*) AS fills_count,
+        MAX(COALESCE(executed_at, created_at)) AS last_fill_at
+      FROM broker_execution_fills
+      WHERE symbol IS NOT NULL AND symbol <> ''
+      GROUP BY upper(symbol)
+      HAVING ABS(SUM(
+        CASE
+          WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0)
+          WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN -COALESCE(shares, 0)
+          ELSE 0
+        END
+      )) > 0.000001
+      ORDER BY upper(symbol) ASC
+      `
+    );
+    return result.rows.map((row) => ({
+      symbol: String(row.symbol),
+      netShares: Number(row.net_shares ?? 0),
+      longShares: Number(row.long_shares ?? 0),
+      shortShares: Number(row.short_shares ?? 0),
+      fillsCount: Number(row.fills_count ?? 0),
+      lastFillAt: row.last_fill_at
+        ? row.last_fill_at instanceof Date
+          ? row.last_fill_at
+          : new Date(row.last_fill_at)
+        : null
+    }));
   }
 }

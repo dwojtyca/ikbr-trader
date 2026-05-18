@@ -45,13 +45,17 @@ export class StrategyPortfolioManager {
         );
         continue;
       }
-      if (!strategy.allowedDirectionalRegimes.includes(context.directionalRegime)) {
+      if (
+        !strategy.allowedDirectionalRegimes.includes(context.directionalRegime)
+      ) {
         rejectionReasons.push(
           `${strategy.id}: unsupported directionalRegime=${context.directionalRegime}`,
         );
         continue;
       }
-      if (!strategy.allowedVolatilityRegimes.includes(context.volatilityRegime)) {
+      if (
+        !strategy.allowedVolatilityRegimes.includes(context.volatilityRegime)
+      ) {
         rejectionReasons.push(
           `${strategy.id}: unsupported volatilityRegime=${context.volatilityRegime}`,
         );
