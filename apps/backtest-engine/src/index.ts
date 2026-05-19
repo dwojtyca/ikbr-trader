@@ -76,7 +76,7 @@ async function simulatorOptions() {
       maxRiskPerTradePct: config.SIGNAL_MAX_RISK_PER_TRADE_PCT,
       targetRiskPerTradePct: config.SIGNAL_TARGET_RISK_PER_TRADE_PCT,
       maxExposurePct: config.SIGNAL_MAX_EXPOSURE_PCT,
-      maxNotionalPerTradePct: config.SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT,
+      maxNotionalPerTradePct: config.MAX_NOTIONAL_PER_TRADE_PCT,
       maxOpenPositions: config.SIGNAL_MAX_OPEN_POSITIONS,
     },
   };

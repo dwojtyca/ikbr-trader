@@ -19,7 +19,8 @@ const decider = new OpenAiDecider({
   baseUrl: config.LLM_AGENT_OPENAI_BASE_URL,
   model: config.LLM_AGENT_MODEL,
   timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS,
-  promptVersion: config.LLM_AGENT_PROMPT_VERSION
+  promptVersion: config.LLM_AGENT_PROMPT_VERSION,
+  maxOpenNotionalPct: config.MAX_NOTIONAL_PER_TRADE_PCT
 });
 
 const workerId = `llm-agent-${process.pid}`;

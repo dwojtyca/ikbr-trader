@@ -71,7 +71,7 @@ export interface ExpectedNetPosition {
 
 export interface SystemAlertRow {
   id: number;
-  severity: 'info' | 'warn' | 'error';
+  severity: "info" | "warn" | "error";
   kind: string;
   message: string;
   payload: Record<string, unknown> | null;
@@ -720,6 +720,29 @@ export class ExecutionRepository {
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
+  async getProposedOrderByBrokerOrderId(
+    brokerOrderId: string,
+  ): Promise<ProposedOrder | null> {
+    const result = await this.pool.query(
+      `
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
+             decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
+             llm_decision_id, source_error, processing_owner, processing_claimed_at,
+             broker_order_id, execution_account_id, execution_message, last_error,
+             execution_attempted_at, executed_at, created_at
+      FROM proposed_orders
+      WHERE broker_order_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+      `,
+      [brokerOrderId],
+    );
+
+    if (!result.rows[0]) return null;
+    return this.mapRow(result.rows[0] as ProposedOrderRow);
+  }
+
   async findActiveSubmittedByInstrument(
     instrument: string,
     excludeId?: number,
@@ -1238,7 +1261,7 @@ export class ExecutionRepository {
   }
 
   async insertSystemAlert(input: {
-    severity: 'info' | 'warn' | 'error';
+    severity: "info" | "warn" | "error";
     kind: string;
     message: string;
     payload?: Record<string, unknown>;
@@ -1253,8 +1276,8 @@ export class ExecutionRepository {
         input.severity,
         input.kind,
         input.message,
-        input.payload ? JSON.stringify(input.payload) : null
-      ]
+        input.payload ? JSON.stringify(input.payload) : null,
+      ],
     );
     return Number(result.rows[0].id);
   }
@@ -1262,7 +1285,7 @@ export class ExecutionRepository {
   async markSystemAlertDelivered(id: number): Promise<void> {
     await this.pool.query(
       `UPDATE system_alerts SET delivered_to_telegram = TRUE WHERE id = $1`,
-      [id]
+      [id],
     );
   }
 
@@ -1275,17 +1298,19 @@ export class ExecutionRepository {
       ORDER BY created_at DESC
       LIMIT $1
       `,
-      [safeLimit]
+      [safeLimit],
     );
     return result.rows.map((row) => ({
       id: Number(row.id),
-      severity: row.severity as 'info' | 'warn' | 'error',
+      severity: row.severity as "info" | "warn" | "error",
       kind: String(row.kind),
       message: String(row.message),
       payload: (row.payload as Record<string, unknown> | null) ?? null,
       deliveredToTelegram: Boolean(row.delivered_to_telegram),
       createdAt:
-        row.created_at instanceof Date ? row.created_at : new Date(row.created_at)
+        row.created_at instanceof Date
+          ? row.created_at
+          : new Date(row.created_at),
     }));
   }
 
@@ -1329,7 +1354,7 @@ export class ExecutionRepository {
         END
       )) > 0.000001
       ORDER BY upper(symbol) ASC
-      `
+      `,
     );
     return result.rows.map((row) => ({
       symbol: String(row.symbol),
@@ -1341,7 +1366,7 @@ export class ExecutionRepository {
         ? row.last_fill_at instanceof Date
           ? row.last_fill_at
           : new Date(row.last_fill_at)
-        : null
+        : null,
     }));
   }
 }

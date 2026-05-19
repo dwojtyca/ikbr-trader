@@ -108,10 +108,17 @@ export class SignalEngine {
     exposureSnapshot?: ExposureSnapshot,
     generatedFromCandleTs?: Date,
   ): Promise<ProposedOrder> {
+    // We need enough 1m candles to (a) compute indicators (minCandles+80)
+    // AND (b) include at least one overnight gap so buildIntradaySnapshot
+    // can locate the current session's open. A US session is ~390 minutes
+    // and a WSE session ~510 minutes, so 1000 bars guarantees ≥2 sessions
+    // worth of data regardless of when we run mid-session. The older bars
+    // are essentially free — strategies only inspect the last ~60 bars.
+    const oneMinuteBufferSize = Math.max(this.options.minCandles + 80, 1000);
     const candles = await this.repo.getRecentCandles(
       symbol,
       "1m",
-      this.options.minCandles + 80,
+      oneMinuteBufferSize,
     );
     const candles1h = await this.repo.getRecentCandles(symbol, "1h", 160);
     const [candles5m, candles4h, candles12h, candles1d, candles1w] =

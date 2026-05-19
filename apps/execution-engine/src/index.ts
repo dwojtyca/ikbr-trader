@@ -38,14 +38,63 @@ const tws = new TwsExecutionClient(
         "failed to apply broker order status update",
       );
     });
-    const status = String(update.status ?? '').toUpperCase();
-    if (status === 'REJECTED' || status === 'INACTIVE' || status === 'CANCELLED' || status === 'APICANCELLED') {
+    const status = String(update.status ?? "").toUpperCase();
+    if (
+      status === "REJECTED" ||
+      status === "INACTIVE" ||
+      status === "CANCELLED" ||
+      status === "APICANCELLED"
+    ) {
       void alerts.record({
-        severity: status === 'REJECTED' || status === 'INACTIVE' ? 'error' : 'warn',
-        kind: 'order_rejected',
+        severity:
+          status === "REJECTED" || status === "INACTIVE" ? "error" : "warn",
+        kind: "order_rejected",
         message: `Broker order ${update.brokerOrderId} reached terminal status ${status}`,
-        payload: { brokerOrderId: update.brokerOrderId, status, message: update.message }
+        payload: {
+          brokerOrderId: update.brokerOrderId,
+          status,
+          message: update.message,
+        },
       });
+    }
+    if (status === "FILLED") {
+      void (async () => {
+        try {
+          const order = await repo.getProposedOrderByBrokerOrderId(
+            String(update.brokerOrderId),
+          );
+          const effect = order?.positionEffect ?? "UNKNOWN";
+          const action = effect === "CLOSE_OR_REDUCE" ? "EXIT" : "ENTRY";
+          const arrow =
+            order?.side === "BUY" ? "🟢" : order?.side === "SELL" ? "🔴" : "⚪";
+          const msg =
+            `${arrow} ${action} FILLED: ${order?.side ?? "?"} ${order?.quantity ?? "?"} ${order?.instrument ?? "?"}` +
+            (order?.entry !== undefined ? ` @ ${order.entry}` : "") +
+            (order?.strategy ? ` [${order.strategy}]` : "");
+          void alerts.record({
+            severity: "info",
+            kind: "order_filled",
+            message: msg,
+            payload: {
+              brokerOrderId: update.brokerOrderId,
+              proposedOrderId: order?.id,
+              instrument: order?.instrument,
+              side: order?.side,
+              positionEffect: effect,
+              quantity: order?.quantity,
+              entry: order?.entry,
+              stop: order?.stop,
+              takeProfit: order?.takeProfit,
+              strategy: order?.strategy,
+            },
+          });
+        } catch (err) {
+          app.log.warn(
+            { err, brokerOrderId: update.brokerOrderId },
+            "failed to emit order_filled alert",
+          );
+        }
+      })();
     }
   },
   (fill) => {
@@ -744,11 +793,9 @@ app.post("/execution/execute-proposed/:id", async (request, reply) => {
     order.status === "PROPOSED" ||
     (order.status === "REJECTED" && body.overrideRejected === true);
   if (!canExecute) {
-    return reply
-      .code(409)
-      .send({
-        error: `order id=${params.id} cannot be executed (current=${order.status})`,
-      });
+    return reply.code(409).send({
+      error: `order id=${params.id} cannot be executed (current=${order.status})`,
+    });
   }
 
   const fallbackActor: DecisionActor = body.overrideRejected
@@ -760,11 +807,9 @@ app.post("/execution/execute-proposed/:id", async (request, reply) => {
     order.id,
   );
   if (activeSubmitted) {
-    return reply
-      .code(409)
-      .send({
-        error: buildSubmittedConflictMessage(order.instrument, activeSubmitted),
-      });
+    return reply.code(409).send({
+      error: buildSubmittedConflictMessage(order.instrument, activeSubmitted),
+    });
   }
 
   try {
@@ -799,11 +844,9 @@ app.post("/execution/reject-proposed/:id", async (request, reply) => {
   }
 
   if (order.status !== "PROPOSED") {
-    return reply
-      .code(409)
-      .send({
-        error: `order id=${params.id} cannot be rejected (current=${order.status})`,
-      });
+    return reply.code(409).send({
+      error: `order id=${params.id} cannot be rejected (current=${order.status})`,
+    });
   }
 
   const metadata = normalizeDecisionMetadata(body, body.actor);
@@ -827,11 +870,9 @@ app.post("/execution/cancel-proposed/:id", async (request, reply) => {
   }
 
   if (order.status !== "SUBMITTED") {
-    return reply
-      .code(409)
-      .send({
-        error: `order id=${params.id} cannot be cancelled (current=${order.status})`,
-      });
+    return reply.code(409).send({
+      error: `order id=${params.id} cannot be cancelled (current=${order.status})`,
+    });
   }
 
   if (!order.brokerOrderId) {
@@ -878,14 +919,9 @@ app.post("/execution/execute-ticket", async (request, reply) => {
     ticket.instrument,
   );
   if (activeSubmitted) {
-    return reply
-      .code(409)
-      .send({
-        error: buildSubmittedConflictMessage(
-          ticket.instrument,
-          activeSubmitted,
-        ),
-      });
+    return reply.code(409).send({
+      error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted),
+    });
   }
 
   try {

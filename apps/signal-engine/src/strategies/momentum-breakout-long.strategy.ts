@@ -100,7 +100,7 @@ function paramsForSecType(secType: SecType): MomentumBreakoutParams {
     stopAtrMult: 2,
     structureStopAtrMult: 3,
     takeProfitR: 5,
-    minRegimeScore: 8,
+    minRegimeScore: 5,
     sessionUtcStartHour: 8,
     sessionUtcEndHour: 20,
   };

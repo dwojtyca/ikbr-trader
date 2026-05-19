@@ -247,7 +247,7 @@ Logika doboru strategii:
 Istotne aktualne parametry:
 
 - `SIGNAL_MAX_RISK_PER_TRADE_PCT=0.35`
-- `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT=5`
+- `MAX_NOTIONAL_PER_TRADE_PCT=5`
 - `SIGNAL_MAX_EXPOSURE_PCT=25`
 - `SIGNAL_MAX_OPEN_POSITIONS=5`
 - `SIGNAL_MIN_CONFIDENCE=0.55`
@@ -259,7 +259,7 @@ Istotne aktualne parametry:
 
 1. Zbyt niska selektywnosc przy obecnym rozmiarze pozycji.
 
-   `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT=5` oznacza, ze pojedynczy sygnal moze dostac istotny kapital. To nie musi byc problemem, jezeli filtr wejsc ma dodatnia expectancy. Obecne wyniki sugeruja jednak, ze kapital jest czasem alokowany do setupow rozciagnietych lub niskiej jakosci. Wniosek: nie zmniejszac limitow, tylko podniesc prog jakosci sygnalu, ktory dopuszcza uzycie pelnego size.
+   `MAX_NOTIONAL_PER_TRADE_PCT=5` oznacza, ze pojedynczy sygnal moze dostac istotny kapital. To nie musi byc problemem, jezeli filtr wejsc ma dodatnia expectancy. Obecne wyniki sugeruja jednak, ze kapital jest czasem alokowany do setupow rozciagnietych lub niskiej jakosci. Wniosek: nie zmniejszac limitow, tylko podniesc prog jakosci sygnalu, ktory dopuszcza uzycie pelnego size.
 
 2. Stop distance jest czesto zbyt waski wobec szumu intraday.
 
@@ -295,7 +295,7 @@ Istotne aktualne parametry:
 
 ### Rekomendowane zmiany pod poprawe expectancy
 
-Zalozenie operacyjne: `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` zostaja bez zmian. Ponizsze zmiany nie maja sluzyc prostemu "ucinaniu strat" przez mniejsza ekspozycje. Celem jest zwiekszenie oczekiwanej wartosci transakcji: mniej wejsc po slabym setupie, wiekszy udzial transakcji z dodatnim R, lepsze prowadzenie zwyciezcow i alokacja kapitalu do profili, ktore faktycznie maja przewage.
+Zalozenie operacyjne: `MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` zostaja bez zmian. Ponizsze zmiany nie maja sluzyc prostemu "ucinaniu strat" przez mniejsza ekspozycje. Celem jest zwiekszenie oczekiwanej wartosci transakcji: mniej wejsc po slabym setupie, wiekszy udzial transakcji z dodatnim R, lepsze prowadzenie zwyciezcow i alokacja kapitalu do profili, ktore faktycznie maja przewage.
 
 Priorytet 1 - poprawic jakosc wejsc, nie zmniejszac size:
 
@@ -360,7 +360,7 @@ Docelowo bot powinien byc bardziej selektywny i lepiej wykorzystywac zwyciezcow,
 
 ## Aktualna strategia po implementacji zmian
 
-Ta sekcja opisuje faktycznie zaimplementowana logike po zmianach z 2026-04-29. Globalne limity `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` pozostaja bez zmian. Optymalizacja polega na lepszym wyborze sygnalow, dynamicznym progu jakosci i innym prowadzeniu pozycji.
+Ta sekcja opisuje faktycznie zaimplementowana logike po zmianach z 2026-04-29. Globalne limity `MAX_NOTIONAL_PER_TRADE_PCT` i `SIGNAL_MAX_RISK_PER_TRADE_PCT` pozostaja bez zmian. Optymalizacja polega na lepszym wyborze sygnalow, dynamicznym progu jakosci i innym prowadzeniu pozycji.
 
 ### Pipeline sygnalu
 
@@ -447,7 +447,7 @@ Sizing pozostaje oparty o:
 - odleglosc entry-stop (`riskPerUnit`)
 - `profile.quantityFactor`
 - `SIGNAL_MAX_EXPOSURE_PCT`
-- `SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT`
+- `MAX_NOTIONAL_PER_TRADE_PCT`
 - limit ekspozycji kierunkowej
 - limit koncentracji symbolu
 - `SIGNAL_MAX_OPEN_POSITIONS`

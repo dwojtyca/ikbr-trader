@@ -28,6 +28,14 @@ interface MomentumBreakdownParams {
   maxDistanceBelowEma20Pct: number;
   maxDistanceBelowEma50Pct: number;
   adxMin: number;
+  /**
+   * Minimum |regimeScore| (from MarketRegimeDetector) required to emit a
+   * short. regimeScore is signed (+ bullish / − bearish), so this strategy
+   * requires regimeScore <= -minRegimeScore. Mirrors the bullish gate on
+   * momentum_breakout_long_v1 so both lanes use a consistent multi-timeframe
+   * trend filter. Set 0 to disable.
+   */
+  minRegimeScore: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -106,6 +114,9 @@ function paramsForSecType(_secType: SecType): MomentumBreakdownParams {
     maxDistanceBelowEma50Pct: 5,
     // Stage 9: short only when there's actual directional movement.
     adxMin: 20,
+    // Mirror of momentum_breakout_long_v1: require a sufficiently bearish
+    // multi-timeframe regime vote before emitting a short.
+    minRegimeScore: 8,
   };
 }
 
@@ -207,6 +218,14 @@ export class MomentumBreakdownShortStrategy implements Strategy {
     // Stage 9: require trending market for shorts — ADX < 20 = chop, commission drag dominates.
     if (indicators.adx14 !== undefined && indicators.adx14 < params.adxMin)
       return this.reject("adx_too_low");
+
+    if (
+      params.minRegimeScore > 0 &&
+      indicators.regimeScore !== undefined &&
+      indicators.regimeScore > -params.minRegimeScore
+    ) {
+      return this.reject("regime_score_above_minimum");
+    }
 
     const h1 = indicators.timeframes?.["1h"];
     const h4 = indicators.timeframes?.["4h"];

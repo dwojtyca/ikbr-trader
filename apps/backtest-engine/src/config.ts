@@ -49,7 +49,7 @@ const schema = z.object({
     )
     .optional(),
   SIGNAL_MAX_EXPOSURE_PCT: z.coerce.number().default(25),
-  SIGNAL_MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
+  MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
   SIGNAL_MAX_OPEN_POSITIONS: z.coerce.number().default(5),
   SIGNAL_MAX_SPREAD_BPS: z.coerce.number().default(12),
   SIGNAL_MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),

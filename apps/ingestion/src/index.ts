@@ -233,6 +233,78 @@ app.post("/bootstrap", async () => {
     }
   }
 
+  // Stage 8: native higher-timeframe backfill direct from TWS. The 1m
+  // backfill above only covers ~220 minutes per symbol, so the aggregator
+  // can at best build a handful of 4h/1d/1w bars — far below the 20 bars
+  // required for EMA50/EMA200 and the regime detector to work. Here we
+  // pull true historical bars per timeframe so indicators are sized
+  // correctly from the first tick. Native bars overwrite any aggregated
+  // approximations for the same timestamp (upsert).
+  const higherBackfillJobs: Array<{
+    timeframe: import("@ikbr/shared").CandleTimeframe;
+    count: number;
+  }> = [
+    { timeframe: "5m", count: config.backfill5mCandles },
+    { timeframe: "1h", count: config.backfill1hCandles },
+    { timeframe: "4h", count: config.backfill4hCandles },
+    { timeframe: "12h", count: config.backfill12hCandles },
+    { timeframe: "1d", count: config.backfill1dCandles },
+    { timeframe: "1w", count: config.backfill1wCandles },
+  ];
+  const nativeBackfillStats: Record<string, number> = {};
+  const enabledJobs = higherBackfillJobs.filter((job) => job.count > 0);
+  const totalJobs = enabledJobs.length;
+  const totalSymbols = subscriptions.length;
+  let jobIndex = 0;
+  for (const job of enabledJobs) {
+    jobIndex += 1;
+    app.log.info(
+      {
+        timeframe: job.timeframe,
+        progress: `${jobIndex}/${totalJobs}`,
+        symbols: totalSymbols,
+        candlesPerSymbol: job.count,
+      },
+      `native historical backfill starting [${jobIndex}/${totalJobs}] ${job.timeframe}`,
+    );
+    try {
+      const results = await twsClient.backfillRecentCandles(
+        subscriptions,
+        job.timeframe,
+        job.count,
+      );
+      let inserted = 0;
+      for (const entry of results) {
+        for (const candle of entry.candles) {
+          await repo.upsertCandle(candle);
+          inserted += 1;
+        }
+      }
+      nativeBackfillStats[job.timeframe] = inserted;
+      const pct = Math.round((jobIndex / totalJobs) * 100);
+      app.log.info(
+        {
+          timeframe: job.timeframe,
+          progress: `${jobIndex}/${totalJobs}`,
+          pct,
+          requestedPerSymbol: job.count,
+          inserted,
+          symbols: results.length,
+        },
+        `native historical backfill completed [${jobIndex}/${totalJobs} ${pct}%] ${job.timeframe}`,
+      );
+    } catch (error) {
+      app.log.warn(
+        {
+          timeframe: job.timeframe,
+          progress: `${jobIndex}/${totalJobs}`,
+          err: error,
+        },
+        "native historical backfill failed",
+      );
+    }
+  }
+
   app.log.info(
     {
       requestedPerSymbol: config.backfill1mCandles,

@@ -41,7 +41,7 @@ const schema = z.object({
   // ALERT_MIN_SEVERITY filters Telegram delivery only (db keeps all).
   ALERT_TELEGRAM_BOT_TOKEN: optionalTrimmedString,
   ALERT_TELEGRAM_CHAT_ID: optionalTrimmedString,
-  ALERT_MIN_SEVERITY: z.enum(['info', 'warn', 'error']).default('warn')
+  ALERT_MIN_SEVERITY: z.enum(["info", "warn", "error"]).default("warn"),
 });
 
 const env = schema.parse(process.env);

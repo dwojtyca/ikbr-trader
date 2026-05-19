@@ -1,23 +1,24 @@
-import { config } from './config.js';
-import type { ExecutionRepository } from './repository.js';
+import { config } from "./config.js";
+import type { ExecutionRepository } from "./repository.js";
 
-export type AlertSeverity = 'info' | 'warn' | 'error';
+export type AlertSeverity = "info" | "warn" | "error";
 
 const SEVERITY_RANK: Record<AlertSeverity, number> = {
   info: 0,
   warn: 1,
-  error: 2
+  error: 2,
 };
 
 export type AlertKind =
-  | 'tws_connection'
-  | 'order_rejected'
-  | 'order_broker_error'
-  | 'kill_switch_triggered'
-  | 'reconciliation_mismatch'
-  | 'reconciliation_run'
-  | 'startup'
-  | 'system';
+  | "tws_connection"
+  | "order_rejected"
+  | "order_broker_error"
+  | "order_filled"
+  | "kill_switch_triggered"
+  | "reconciliation_mismatch"
+  | "reconciliation_run"
+  | "startup"
+  | "system";
 
 export interface AlertInput {
   severity: AlertSeverity;
@@ -48,12 +49,12 @@ export class AlertService implements AlertNotifier {
 
   constructor(
     private readonly repo: ExecutionRepository,
-    private readonly logger: AlertLogger
+    private readonly logger: AlertLogger,
   ) {
-    const min = (config.ALERT_MIN_SEVERITY as AlertSeverity) ?? 'warn';
+    const min = (config.ALERT_MIN_SEVERITY as AlertSeverity) ?? "warn";
     this.minRank = SEVERITY_RANK[min] ?? SEVERITY_RANK.warn;
     this.telegramEnabled = Boolean(
-      config.ALERT_TELEGRAM_BOT_TOKEN && config.ALERT_TELEGRAM_CHAT_ID
+      config.ALERT_TELEGRAM_BOT_TOKEN && config.ALERT_TELEGRAM_CHAT_ID,
     );
   }
 
@@ -62,7 +63,10 @@ export class AlertService implements AlertNotifier {
     try {
       alertId = await this.repo.insertSystemAlert(alert);
     } catch (error) {
-      this.logger.error({ err: error, alert }, 'failed to persist system alert');
+      this.logger.error(
+        { err: error, alert },
+        "failed to persist system alert",
+      );
     }
 
     if (!this.telegramEnabled) return;
@@ -74,12 +78,18 @@ export class AlertService implements AlertNotifier {
           try {
             await this.repo.markSystemAlertDelivered(alertId);
           } catch (error) {
-            this.logger.warn({ err: error, alertId }, 'failed to mark alert delivered');
+            this.logger.warn(
+              { err: error, alertId },
+              "failed to mark alert delivered",
+            );
           }
         }
       })
       .catch((error) => {
-        this.logger.warn({ err: error, alert }, 'failed to deliver telegram alert');
+        this.logger.warn(
+          { err: error, alert },
+          "failed to deliver telegram alert",
+        );
       });
   }
 
@@ -89,8 +99,15 @@ export class AlertService implements AlertNotifier {
     if (!token || !chatId) return;
 
     const icon =
-      alert.severity === 'error' ? '🔴' : alert.severity === 'warn' ? '🟡' : '🔵';
-    const lines = [`${icon} <b>${escapeHtml(alert.kind)}</b>`, escapeHtml(alert.message)];
+      alert.severity === "error"
+        ? "🔴"
+        : alert.severity === "warn"
+          ? "🟡"
+          : "🔵";
+    const lines = [
+      `${icon} <b>${escapeHtml(alert.kind)}</b>`,
+      escapeHtml(alert.message),
+    ];
 
     if (alert.payload && Object.keys(alert.payload).length > 0) {
       const json = JSON.stringify(alert.payload, null, 2);
@@ -100,9 +117,9 @@ export class AlertService implements AlertNotifier {
 
     const body = JSON.stringify({
       chat_id: chatId,
-      parse_mode: 'HTML',
+      parse_mode: "HTML",
       disable_web_page_preview: true,
-      text: lines.join('\n')
+      text: lines.join("\n"),
     });
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -111,25 +128,35 @@ export class AlertService implements AlertNotifier {
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        method: "POST",
+        headers: { "content-type": "application/json" },
         body,
-        signal: controller.signal
+        signal: controller.signal,
       });
-      const text = await response.text().catch(() => '');
+      const text = await response.text().catch(() => "");
       if (!response.ok) {
-        throw new Error(`telegram api status=${response.status} body=${text.slice(0, 300)}`);
+        throw new Error(
+          `telegram api status=${response.status} body=${text.slice(0, 300)}`,
+        );
       }
       // Telegram returns HTTP 200 even for some logical errors; surface
       // ok:false from the API payload so misconfigured chats are visible
       // in logs (e.g. "chat not found" if the user never started the bot).
       try {
-        const parsed = JSON.parse(text) as { ok?: boolean; description?: string };
+        const parsed = JSON.parse(text) as {
+          ok?: boolean;
+          description?: string;
+        };
         if (parsed.ok === false) {
-          throw new Error(`telegram api ok=false description=${parsed.description ?? 'unknown'}`);
+          throw new Error(
+            `telegram api ok=false description=${parsed.description ?? "unknown"}`,
+          );
         }
       } catch (parseError) {
-        if (parseError instanceof Error && parseError.message.startsWith('telegram api ok=false')) {
+        if (
+          parseError instanceof Error &&
+          parseError.message.startsWith("telegram api ok=false")
+        ) {
           throw parseError;
         }
         // non-JSON body on 200 is unexpected but not necessarily fatal
@@ -142,7 +169,7 @@ export class AlertService implements AlertNotifier {
 
 function escapeHtml(value: string): string {
   return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

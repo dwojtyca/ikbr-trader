@@ -31,7 +31,7 @@ interface TrendFollowingLongParams {
 
 function paramsForSecType(_secType: SecType): TrendFollowingLongParams {
   return {
-    minRegimeScore: 8,
+    minRegimeScore: 5,
     donchianWindow: 50,
     rsiMin: 50,
     rsiMax: 72,

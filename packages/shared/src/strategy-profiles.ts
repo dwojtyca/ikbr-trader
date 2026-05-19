@@ -64,7 +64,8 @@ const PROFILES: StrategyProfile[] = [
     // Temporarily disabled in bot: net negative across all tuning iterations (#87..#89).
     // Kept enabled in strategy lab for further offline research.
     enabledInBot: false,
-    entryScore: 0.6,
+    // entryScore: 0.6,
+    entryScore: 0.4,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
     quantityFactor: 0.5,
@@ -82,7 +83,8 @@ const PROFILES: StrategyProfile[] = [
     // Re-enabled after fixing tight-stop bug (run #5: stops were 0.12% wide
     // -> WR 3%). Now stopMinPct floor of 0.6% prevents micro-noise stopouts.
     enabledInBot: true,
-    entryScore: 0.6,
+    // entryScore: 0.6,
+    entryScore: 0.4,
     decisionEdge: 0.08,
     minConfidenceMultiplier: 1,
     quantityFactor: 1,

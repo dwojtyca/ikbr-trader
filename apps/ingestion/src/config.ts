@@ -34,6 +34,12 @@ const schema = z.object({
   INGESTION_SIGNAL_ENGINE_BASE_URL: z.string().default("http://localhost:3102"),
   INGESTION_TRIGGER_SIGNALS_ON_CANDLE: z.string().default("true"),
   INGESTION_BACKFILL_1M_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_5M_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_1H_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_4H_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_12H_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_1D_CANDLES: optionalNumberFromEnv,
+  INGESTION_BACKFILL_1W_CANDLES: optionalNumberFromEnv,
   POSTGRES_URL: z
     .string()
     .default("postgresql://postgres:postgres@localhost:5432/ikbr_trader"),
@@ -138,8 +144,15 @@ export const config = {
   watchlistInstruments,
   ingestionTriggerSignalsOnCandle:
     env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === "true",
-  backfill1mCandles: Math.max(
-    0,
-    env.INGESTION_BACKFILL_1M_CANDLES ?? 220,
-  ),
+  backfill1mCandles: Math.max(0, env.INGESTION_BACKFILL_1M_CANDLES ?? 220),
+  // Native higher-TF backfill counts. These are fetched directly from
+  // IBKR via reqHistoricalData on startup so the bot has enough bars to
+  // compute EMA50/EMA200 / regimeScore from the first tick rather than
+  // waiting weeks for live aggregation to build them up.
+  backfill5mCandles: Math.max(0, env.INGESTION_BACKFILL_5M_CANDLES ?? 500),
+  backfill1hCandles: Math.max(0, env.INGESTION_BACKFILL_1H_CANDLES ?? 400),
+  backfill4hCandles: Math.max(0, env.INGESTION_BACKFILL_4H_CANDLES ?? 200),
+  backfill12hCandles: Math.max(0, env.INGESTION_BACKFILL_12H_CANDLES ?? 120),
+  backfill1dCandles: Math.max(0, env.INGESTION_BACKFILL_1D_CANDLES ?? 260),
+  backfill1wCandles: Math.max(0, env.INGESTION_BACKFILL_1W_CANDLES ?? 104),
 };

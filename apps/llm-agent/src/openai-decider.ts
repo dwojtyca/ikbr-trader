@@ -83,6 +83,7 @@ interface OpenAiDeciderOptions {
   model: string;
   timeoutMs: number;
   promptVersion: string;
+  maxOpenNotionalPct: number;
 }
 
 export class OpenAiDecider {
@@ -108,7 +109,7 @@ export class OpenAiDecider {
       '- For OPEN_OR_ADD trades, be cautious when the proposed side would materially increase same-direction exposure (for example, more long exposure when the account is already heavily long).',
       '- When judging order size or concentration, use account metrics such as netLiquidation, availableFunds, buyingPower, and equityWithLoanValue as the primary scale of the account.',
       '- Do not reject a trade only because its notional is much larger than current grossExposure; a mostly-cash account can still support a first position if the order is reasonable relative to account size and available funds.',
-      '- As a rule of thumb, OPEN_OR_ADD trades above roughly 8% of netLiquidation or that clearly dominate existing portfolio concentration should usually be rejected unless there is exceptional support.',
+      `- The risk engine has already enforced sizing limits; OPEN_OR_ADD trades up to roughly ${this.options.maxOpenNotionalPct}% of netLiquidation are expected and should not be rejected on notional size alone. Only reject for notional reasons if the order materially exceeds this budget or creates extreme single-name dominance beyond it.`,
       '- If the order closes or reduces an existing position, that can be a positive factor.',
       '- Treat indicatorSummary as a compact technical snapshot from the signal engine.',
       '- indicatorSummary.directionalRegime classifies trend direction; indicatorSummary.volatilityRegime classifies volatility separately.',

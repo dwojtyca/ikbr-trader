@@ -611,9 +611,7 @@ export class BacktestRepository {
     symbols: string[],
   ): Promise<BacktestDataset | null> {
     const normalized = Array.from(
-      new Set(
-        symbols.map((s) => s.trim().toUpperCase()).filter(Boolean),
-      ),
+      new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)),
     );
     if (normalized.length === 0) return null;
     const result = await this.pool.query(
