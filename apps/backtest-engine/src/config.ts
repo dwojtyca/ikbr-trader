@@ -76,6 +76,18 @@ const schema = z.object({
     .min(1)
     .max(4)
     .default(2),
+  BACKTEST_HISTORY_CONCURRENCY: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10)
+    .default(3),
+  BACKTEST_HISTORY_PACING_PER_10MIN: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(60)
+    .default(50),
 });
 
 const env = schema.parse(process.env);

@@ -16,6 +16,74 @@ const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 let historyJob: Promise<void> | null = null;
 let runJob: Promise<void> | null = null;
 
+const CHUNK_MS = 5 * 24 * 60 * 60 * 1000;
+
+type HistoryProgressPhase = "fetch" | "resume" | "partial";
+
+interface HistoryProgress {
+  datasetId: number;
+  phase: HistoryProgressPhase;
+  startedAt: string;
+  totalSymbols: number;
+  completedSymbols: number;
+  activeSymbols: string[];
+  totalChunks: number;
+  completedChunks: number;
+}
+
+let historyProgress: HistoryProgress | null = null;
+
+function estimateChunksForRange(dateFrom: Date, dateTo: Date): number {
+  const range = Math.max(0, dateTo.getTime() - dateFrom.getTime());
+  return Math.max(1, Math.ceil(range / CHUNK_MS));
+}
+
+function initHistoryProgress(
+  datasetId: number,
+  phase: HistoryProgressPhase,
+  totalSymbols: number,
+  totalChunks: number,
+): void {
+  historyProgress = {
+    datasetId,
+    phase,
+    startedAt: new Date().toISOString(),
+    totalSymbols,
+    completedSymbols: 0,
+    activeSymbols: [],
+    totalChunks,
+    completedChunks: 0,
+  };
+}
+
+function addActiveSymbol(symbol: string): void {
+  if (!historyProgress) return;
+  if (!historyProgress.activeSymbols.includes(symbol)) {
+    historyProgress.activeSymbols.push(symbol);
+  }
+}
+
+function removeActiveSymbol(symbol: string): void {
+  if (!historyProgress) return;
+  historyProgress.activeSymbols = historyProgress.activeSymbols.filter(
+    (s) => s !== symbol,
+  );
+}
+
+function bumpProgressChunks(): void {
+  if (!historyProgress) return;
+  historyProgress.completedChunks += 1;
+}
+
+function bumpProgressSymbol(): void {
+  if (!historyProgress) return;
+  historyProgress.completedSymbols += 1;
+}
+
+function clearHistoryProgress(): void {
+  historyProgress = null;
+}
+
 const dateRangeSchema = z.object({
   dateFrom: z.string().min(1),
   dateTo: z.string().min(1),
@@ -150,6 +218,8 @@ function createHistoricalClient(): HistoricalClient {
       exchange: config.IB_EXCHANGE,
       primaryExchange: config.IB_PRIMARY_EXCHANGE,
       currency: config.IB_CURRENCY,
+      pacingPer10Min: config.BACKTEST_HISTORY_PACING_PER_10MIN,
+      maxConcurrency: config.BACKTEST_HISTORY_CONCURRENCY,
     },
     (line) => app.log.info({ scope: "historical" }, line),
   );
@@ -175,14 +245,46 @@ async function fetchSubscriptionRange(
   dateFrom: Date,
   dateTo: Date,
 ): Promise<void> {
-  await client.fetchHistorical1mRange(
-    sub,
-    dateFrom,
-    dateTo,
-    async (candles) => {
-      await repo.insertCandles1m(candles);
-    },
+  addActiveSymbol(sub.symbol);
+  try {
+    await client.fetchHistorical1mRange(
+      sub,
+      dateFrom,
+      dateTo,
+      async (candles) => {
+        await repo.insertCandles1m(candles);
+        bumpProgressChunks();
+      },
+    );
+    bumpProgressSymbol();
+  } finally {
+    removeActiveSymbol(sub.symbol);
+  }
+}
+
+/**
+ * Run fn for every subscription with a concurrency cap. Errors are
+ * surfaced via Promise.all so a single symbol failure aborts the job
+ * (matches previous sequential behavior).
+ */
+async function fetchSubscriptionsInParallel(
+  subscriptions: Array<{ sub: InstrumentSubscription; from: Date; to: Date }>,
+  client: HistoricalClient,
+  concurrency: number,
+): Promise<void> {
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < subscriptions.length) {
+      const index = cursor++;
+      const item = subscriptions[index];
+      await fetchSubscriptionRange(client, item.sub, item.from, item.to);
+    }
+  };
+  const workers = Array.from(
+    { length: Math.min(concurrency, subscriptions.length) },
+    () => worker(),
   );
+  await Promise.all(workers);
 }
 
 async function startHistoryFetchJob(
@@ -193,6 +295,12 @@ async function startHistoryFetchJob(
 ): Promise<void> {
   const client = createHistoricalClient();
 
+  initHistoryProgress(
+    datasetId,
+    "fetch",
+    instruments.length,
+    instruments.length * estimateChunksForRange(dateFrom, dateTo),
+  );
   try {
     await client.connect();
     const subscriptions = await client.resolveContracts(instruments);
@@ -201,9 +309,11 @@ async function startHistoryFetchJob(
         await repo.upsertInstrumentContract(subscription.instrumentContract);
       }
     }
-    for (const sub of subscriptions) {
-      await fetchSubscriptionRange(client, sub, dateFrom, dateTo);
-    }
+    await fetchSubscriptionsInParallel(
+      subscriptions.map((sub) => ({ sub, from: dateFrom, to: dateTo })),
+      client,
+      config.BACKTEST_HISTORY_CONCURRENCY,
+    );
     await ensureHistoricalFxRates(dateFrom, dateTo);
     await repo.rebuildAggregates();
     await repo.finishDataset(datasetId, "ready");
@@ -213,6 +323,7 @@ async function startHistoryFetchJob(
   } finally {
     client.disconnect();
     historyJob = null;
+    clearHistoryProgress();
   }
 }
 
@@ -267,6 +378,12 @@ async function startHistoryResumeJob(
       return;
     }
 
+    const pendingChunks = pending.reduce(
+      (sum, item) => sum + estimateChunksForRange(item.from, item.to),
+      0,
+    );
+    initHistoryProgress(datasetId, "resume", pending.length, pendingChunks);
+
     await client.connect();
     const subscriptions = await client.resolveContracts(
       pending.map((item) => item.instrument),
@@ -279,20 +396,30 @@ async function startHistoryResumeJob(
     const rangeBySymbol = new Map(
       pending.map((item) => [item.instrument.symbol.toUpperCase(), item]),
     );
-    for (const sub of subscriptions) {
-      const range = rangeBySymbol.get(sub.symbol.toUpperCase());
-      if (!range) continue;
-      app.log.info(
-        {
-          scope: "historical",
-          symbol: sub.symbol,
-          dateFrom: range.from.toISOString(),
-          dateTo: range.to.toISOString(),
-        },
-        "resuming historical symbol",
+    const items = subscriptions
+      .map((sub) => {
+        const range = rangeBySymbol.get(sub.symbol.toUpperCase());
+        if (!range) return null;
+        app.log.info(
+          {
+            scope: "historical",
+            symbol: sub.symbol,
+            dateFrom: range.from.toISOString(),
+            dateTo: range.to.toISOString(),
+          },
+          "resuming historical symbol",
+        );
+        return { sub, from: range.from, to: range.to };
+      })
+      .filter(
+        (item): item is { sub: InstrumentSubscription; from: Date; to: Date } =>
+          item !== null,
       );
-      await fetchSubscriptionRange(client, sub, range.from, range.to);
-    }
+    await fetchSubscriptionsInParallel(
+      items,
+      client,
+      config.BACKTEST_HISTORY_CONCURRENCY,
+    );
     await ensureHistoricalFxRates(dateFrom, dateTo);
     await repo.rebuildAggregates();
     await repo.finishDataset(datasetId, "ready");
@@ -302,6 +429,7 @@ async function startHistoryResumeJob(
   } finally {
     client.disconnect();
     historyJob = null;
+    clearHistoryProgress();
   }
 }
 
@@ -324,6 +452,12 @@ async function startHistoryPartialJob(
 ): Promise<void> {
   const client = createHistoricalClient();
 
+  initHistoryProgress(
+    datasetId,
+    "partial",
+    instruments.length,
+    instruments.length * estimateChunksForRange(dateFrom, dateTo),
+  );
   try {
     await client.connect();
     const subscriptions = await client.resolveContracts(instruments);
@@ -342,8 +476,12 @@ async function startHistoryPartialJob(
         },
         "partial-fetch symbol started",
       );
-      await fetchSubscriptionRange(client, sub, dateFrom, dateTo);
     }
+    await fetchSubscriptionsInParallel(
+      subscriptions.map((sub) => ({ sub, from: dateFrom, to: dateTo })),
+      client,
+      config.BACKTEST_HISTORY_CONCURRENCY,
+    );
     await ensureHistoricalFxRates(dateFrom, dateTo);
     await repo.rebuildAggregates();
     await repo.appendDatasetSymbols(
@@ -361,6 +499,7 @@ async function startHistoryPartialJob(
   } finally {
     client.disconnect();
     historyJob = null;
+    clearHistoryProgress();
   }
 }
 
@@ -386,6 +525,7 @@ app.get("/health", async () => ({
 app.get("/backtest/dataset", async () => ({
   dataset: await repo.latestDataset(),
   historyJobRunning: Boolean(historyJob),
+  historyProgress,
 }));
 
 app.post("/backtest/history", async (request, reply) => {

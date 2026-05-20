@@ -19,6 +19,23 @@ let lastBootstrapAt: Date | null = null;
 let lastTickAt: Date | null = null;
 let lastCandleAt: Date | null = null;
 
+interface BackfillProgress {
+  phase: "connecting" | "one_minute" | "native_tf" | "completed";
+  startedAt: string;
+  finishedAt: string | null;
+  totalSymbols: number;
+  totalJobs: number;
+  completedJobs: number;
+  currentTimeframe: string | null;
+  currentSymbol: string | null;
+  completedSymbolsInJob: number;
+  insertedByTimeframe: Record<string, number>;
+  failedTimeframes: string[];
+}
+
+let backfillProgress: BackfillProgress | null = null;
+let bootstrapInFlight = false;
+
 async function flushBufferedCandles(): Promise<void> {
   const buffered = aggregator.flushAll();
   for (const candle of buffered) {
@@ -128,9 +145,14 @@ app.get("/health", async () => ({
   ok: true,
   connected: twsClient.isConnected(),
   bootstrapped: activeSubscriptions.length > 0,
+  bootstrapping: bootstrapInFlight,
   lastBootstrapAt,
   lastTickAt,
   lastCandleAt,
+}));
+
+app.get("/backfill-progress", async () => ({
+  progress: backfillProgress,
 }));
 
 app.get("/watchlist", async () => {
@@ -164,12 +186,36 @@ app.get("/watchlist", async () => {
   return {
     connected: twsClient.isConnected(),
     bootstrapped: activeSubscriptions.length > 0,
+    bootstrapping: bootstrapInFlight,
     lastBootstrapAt,
     watchlist,
   };
 });
 
 app.post("/bootstrap", async () => {
+  if (bootstrapInFlight) {
+    return {
+      alreadyRunning: true,
+      bootstrapping: true,
+      connected: twsClient.isConnected(),
+      bootstrapped: activeSubscriptions.length > 0,
+    };
+  }
+  bootstrapInFlight = true;
+  backfillProgress = {
+    phase: "connecting",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    totalSymbols: 0,
+    totalJobs: 0,
+    completedJobs: 0,
+    currentTimeframe: null,
+    currentSymbol: null,
+    completedSymbolsInJob: 0,
+    insertedByTimeframe: {},
+    failedTimeframes: [],
+  };
+  try {
   await twsClient.connect();
   const accounts = await twsClient.getManagedAccounts();
   const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
@@ -190,6 +236,10 @@ app.post("/bootstrap", async () => {
     if (subscription.instrumentContract) {
       await repo.upsertInstrumentContract(subscription.instrumentContract);
     }
+  }
+  if (backfillProgress) {
+    backfillProgress.phase = "one_minute";
+    backfillProgress.totalSymbols = subscriptions.length;
   }
   const historical = await twsClient.backfillRecentCandles1m(
     subscriptions,
@@ -255,9 +305,27 @@ app.post("/bootstrap", async () => {
   const enabledJobs = higherBackfillJobs.filter((job) => job.count > 0);
   const totalJobs = enabledJobs.length;
   const totalSymbols = subscriptions.length;
+  backfillProgress = {
+    startedAt: backfillProgress?.startedAt ?? new Date().toISOString(),
+    phase: "native_tf",
+    finishedAt: null,
+    totalSymbols,
+    totalJobs,
+    completedJobs: 0,
+    currentTimeframe: null,
+    currentSymbol: null,
+    completedSymbolsInJob: 0,
+    insertedByTimeframe: {},
+    failedTimeframes: [],
+  };
   let jobIndex = 0;
   for (const job of enabledJobs) {
     jobIndex += 1;
+    if (backfillProgress) {
+      backfillProgress.currentTimeframe = job.timeframe;
+      backfillProgress.currentSymbol = null;
+      backfillProgress.completedSymbolsInJob = 0;
+    }
     app.log.info(
       {
         timeframe: job.timeframe,
@@ -272,6 +340,11 @@ app.post("/bootstrap", async () => {
         subscriptions,
         job.timeframe,
         job.count,
+        ({ symbol, index }) => {
+          if (!backfillProgress) return;
+          backfillProgress.currentSymbol = symbol;
+          backfillProgress.completedSymbolsInJob = Math.max(0, index - 1);
+        },
       );
       let inserted = 0;
       for (const entry of results) {
@@ -281,6 +354,12 @@ app.post("/bootstrap", async () => {
         }
       }
       nativeBackfillStats[job.timeframe] = inserted;
+      if (backfillProgress) {
+        backfillProgress.insertedByTimeframe[job.timeframe] = inserted;
+        backfillProgress.completedJobs = jobIndex;
+        backfillProgress.completedSymbolsInJob = totalSymbols;
+        backfillProgress.currentSymbol = null;
+      }
       const pct = Math.round((jobIndex / totalJobs) * 100);
       app.log.info(
         {
@@ -294,6 +373,10 @@ app.post("/bootstrap", async () => {
         `native historical backfill completed [${jobIndex}/${totalJobs} ${pct}%] ${job.timeframe}`,
       );
     } catch (error) {
+      if (backfillProgress) {
+        backfillProgress.failedTimeframes.push(job.timeframe);
+        backfillProgress.completedJobs = jobIndex;
+      }
       app.log.warn(
         {
           timeframe: job.timeframe,
@@ -303,6 +386,12 @@ app.post("/bootstrap", async () => {
         "native historical backfill failed",
       );
     }
+  }
+  if (backfillProgress) {
+    backfillProgress.finishedAt = new Date().toISOString();
+    backfillProgress.phase = "completed";
+    backfillProgress.currentTimeframe = null;
+    backfillProgress.currentSymbol = null;
   }
 
   app.log.info(
@@ -347,6 +436,9 @@ app.post("/bootstrap", async () => {
     },
     subscribed: subscriptions,
   };
+  } finally {
+    bootstrapInFlight = false;
+  }
 });
 
 app.post("/stop", async () => {

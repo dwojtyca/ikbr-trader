@@ -264,6 +264,11 @@ export class TwsClient {
     subscriptions: InstrumentSubscription[],
     timeframe: CandleTimeframe,
     candlesPerSymbol: number,
+    onSymbolProgress?: (info: {
+      symbol: string;
+      index: number;
+      total: number;
+    }) => void,
   ): Promise<HistoricalBackfillResult[]> {
     if (candlesPerSymbol <= 0) return [];
 
@@ -272,6 +277,7 @@ export class TwsClient {
     let index = 0;
     for (const sub of subscriptions) {
       index += 1;
+      onSymbolProgress?.({ symbol: sub.symbol, index, total });
       try {
         const candles = await this.requestHistorical(
           sub,
