@@ -1039,18 +1039,18 @@ export class SignalRepository {
   }
 
   /**
-   * Deletes terminal-status proposed_orders older than `retentionDays`.
-   * Only touches REJECTED / EXPIRED / CANCELLED — never PROPOSED, FILLED,
-   * or any row referenced by a broker fill (FK is ON DELETE SET NULL,
-   * but we still avoid the churn).
+   * Deletes proposed_orders older than `retentionDays`, regardless of status.
+   * proposed_orders is treated as a rolling signal/decision log; the
+   * authoritative trade history lives in broker_execution_fills which has
+   * its own denormalized snapshot of strategy/reason/ai_* fields and an
+   * ON DELETE SET NULL FK back to proposed_orders.
    */
   async cleanupExpiredProposals(retentionDays: number): Promise<number> {
     if (!(retentionDays > 0)) return 0;
     const result = await this.pool.query(
       `
       DELETE FROM proposed_orders
-      WHERE status IN ('REJECTED', 'EXPIRED', 'CANCELLED')
-        AND created_at < NOW() - (($1::INT || ' days')::interval)
+      WHERE created_at < NOW() - (($1::INT || ' days')::interval)
       `,
       [Math.floor(retentionDays)],
     );
