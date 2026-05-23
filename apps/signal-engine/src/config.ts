@@ -46,6 +46,12 @@ const schema = z.object({
   WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
   IB_CURRENCY: z.string().default("USD"),
   SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default(""),
+  SIGNAL_REJECTED_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
+  SIGNAL_REJECTED_CLEANUP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(6 * 60 * 60 * 1000),
 });
 
 const env = schema.parse(process.env);

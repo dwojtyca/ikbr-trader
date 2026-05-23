@@ -221,6 +221,37 @@ app.post("/signals/strategies/:strategyId", async (request, reply) => {
 async function main(): Promise<void> {
   await repo.init();
 
+  // Initial cleanup of terminal-status proposals beyond retention window.
+  if (config.SIGNAL_REJECTED_RETENTION_DAYS > 0) {
+    const deleted = await repo.cleanupExpiredProposals(
+      config.SIGNAL_REJECTED_RETENTION_DAYS,
+    );
+    if (deleted > 0) {
+      app.log.info(
+        `proposed_orders retention: deleted ${deleted} terminal rows older than ${config.SIGNAL_REJECTED_RETENTION_DAYS}d`,
+      );
+    }
+    if (config.SIGNAL_REJECTED_CLEANUP_INTERVAL_MS > 0) {
+      setInterval(() => {
+        repo
+          .cleanupExpiredProposals(config.SIGNAL_REJECTED_RETENTION_DAYS)
+          .then((n) => {
+            if (n > 0) {
+              app.log.info(
+                `proposed_orders retention: deleted ${n} terminal rows`,
+              );
+            }
+          })
+          .catch((err) => {
+            app.log.error(
+              { err },
+              "proposed_orders retention cleanup failed",
+            );
+          });
+      }, config.SIGNAL_REJECTED_CLEANUP_INTERVAL_MS).unref();
+    }
+  }
+
   const address = await app.listen({
     port: config.SIGNAL_PORT,
     host: "0.0.0.0",

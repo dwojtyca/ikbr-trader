@@ -310,6 +310,41 @@ export class ExecutionRepository {
             )
         : null;
 
+    // Snapshot strategy/reason/ai_* onto the fill so Trades survive
+    // any later deletion of the proposed_orders row.
+    let snapshot: {
+      strategy: string | null;
+      entry_reason: string | null;
+      ai_reason: string | null;
+      ai_decision: string | null;
+      decision_source: string | null;
+    } | null = null;
+    if (proposedOrderId !== null) {
+      const snapRes = await this.pool.query(
+        `SELECT strategy, reason, ai_reason, ai_decision, decision_source
+         FROM proposed_orders WHERE id = $1`,
+        [proposedOrderId],
+      );
+      const row = snapRes.rows[0] as
+        | {
+            strategy: string | null;
+            reason: string | null;
+            ai_reason: string | null;
+            ai_decision: string | null;
+            decision_source: string | null;
+          }
+        | undefined;
+      if (row) {
+        snapshot = {
+          strategy: row.strategy,
+          entry_reason: row.reason,
+          ai_reason: row.ai_reason,
+          ai_decision: row.ai_decision,
+          decision_source: row.decision_source,
+        };
+      }
+    }
+
     await this.pool.query(
       `
       INSERT INTO broker_execution_fills (
@@ -327,12 +362,18 @@ export class ExecutionRepository {
         price,
         avg_price,
         executed_at,
+        strategy,
+        entry_reason,
+        ai_reason,
+        ai_decision,
+        decision_source,
         updated_at
       )
       VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, NOW()
+        $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, NOW()
       )
       ON CONFLICT (exec_id) DO UPDATE
       SET order_id = COALESCE(EXCLUDED.order_id, broker_execution_fills.order_id),
@@ -348,6 +389,11 @@ export class ExecutionRepository {
           price = EXCLUDED.price,
           avg_price = COALESCE(EXCLUDED.avg_price, broker_execution_fills.avg_price),
           executed_at = COALESCE(EXCLUDED.executed_at, broker_execution_fills.executed_at),
+          strategy = COALESCE(EXCLUDED.strategy, broker_execution_fills.strategy),
+          entry_reason = COALESCE(EXCLUDED.entry_reason, broker_execution_fills.entry_reason),
+          ai_reason = COALESCE(EXCLUDED.ai_reason, broker_execution_fills.ai_reason),
+          ai_decision = COALESCE(EXCLUDED.ai_decision, broker_execution_fills.ai_decision),
+          decision_source = COALESCE(EXCLUDED.decision_source, broker_execution_fills.decision_source),
           updated_at = NOW()
       `,
       [
@@ -365,6 +411,11 @@ export class ExecutionRepository {
         fill.price,
         fill.avgPrice ?? null,
         this.parseBrokerExecutionTime(fill.executedAt),
+        snapshot?.strategy ?? null,
+        snapshot?.entry_reason ?? null,
+        snapshot?.ai_reason ?? null,
+        snapshot?.ai_decision ?? null,
+        snapshot?.decision_source ?? null,
       ],
     );
 
@@ -622,6 +673,59 @@ export class ExecutionRepository {
       `,
       [ExecutionRepository.IBKR_UNSET_DOUBLE_THRESHOLD],
     );
+
+    // Denormalized context columns so Trades can survive deletion of
+    // proposed_orders rows (which we auto-prune on retention).
+    await this.pool.query(
+      `ALTER TABLE broker_execution_fills ADD COLUMN IF NOT EXISTS strategy TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE broker_execution_fills ADD COLUMN IF NOT EXISTS entry_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE broker_execution_fills ADD COLUMN IF NOT EXISTS ai_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE broker_execution_fills ADD COLUMN IF NOT EXISTS ai_decision TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE broker_execution_fills ADD COLUMN IF NOT EXISTS decision_source TEXT;`,
+    );
+
+    // Loosen FK so retention deletes on proposed_orders don't cascade
+    // or block. Trades have already snapshotted the context they need.
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills
+         DROP CONSTRAINT IF EXISTS broker_execution_fills_proposed_order_id_fkey;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE broker_execution_fills
+         ADD CONSTRAINT broker_execution_fills_proposed_order_id_fkey
+         FOREIGN KEY (proposed_order_id)
+         REFERENCES proposed_orders(id)
+         ON DELETE SET NULL;`,
+      )
+      .catch(() => undefined);
+
+    // Backfill historical fills from proposed_orders once.
+    await this.pool.query(`
+      UPDATE broker_execution_fills f
+      SET strategy = COALESCE(f.strategy, po.strategy),
+          entry_reason = COALESCE(f.entry_reason, po.reason),
+          ai_reason = COALESCE(f.ai_reason, po.ai_reason),
+          ai_decision = COALESCE(f.ai_decision, po.ai_decision),
+          decision_source = COALESCE(f.decision_source, po.decision_source)
+      FROM proposed_orders po
+      WHERE f.proposed_order_id = po.id
+        AND (f.strategy IS NULL
+             OR f.entry_reason IS NULL
+             OR f.ai_reason IS NULL
+             OR f.ai_decision IS NULL
+             OR f.decision_source IS NULL);
+    `);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS proposed_orders_status_idx
@@ -1365,7 +1469,8 @@ export class ExecutionRepository {
     const fills = await this.pool.query(
       `
       SELECT exec_id, broker_order_id, proposed_order_id, symbol, currency,
-             side, shares, price, avg_price, executed_at, commission, realized_pnl
+             side, shares, price, avg_price, executed_at, commission, realized_pnl,
+             strategy, entry_reason, ai_reason, ai_decision, decision_source
       FROM broker_execution_fills
       WHERE symbol IS NOT NULL AND shares IS NOT NULL AND shares > 0
       ORDER BY symbol ASC,
@@ -1386,54 +1491,17 @@ export class ExecutionRepository {
       executed_at: Date | string | null;
       commission: number | null;
       realized_pnl: number | null;
+      strategy: string | null;
+      entry_reason: string | null;
+      ai_reason: string | null;
+      ai_decision: string | null;
+      decision_source: string | null;
     };
     const rows = (fills.rows as FillRow[]).map((r) => ({
       ...r,
       proposed_order_id:
         r.proposed_order_id != null ? Number(r.proposed_order_id) : null,
     }));
-
-    // Collect proposed_order ids to enrich trades with strategy/reason.
-    const proposedIds = Array.from(
-      new Set(
-        rows
-          .map((r) => r.proposed_order_id)
-          .filter((id): id is number => id !== null),
-      ),
-    );
-    const proposedById = new Map<
-      number,
-      {
-        strategy: string | null;
-        reason: string | null;
-        aiReason: string | null;
-        aiDecision: string | null;
-        decisionSource: string | null;
-      }
-    >();
-    if (proposedIds.length > 0) {
-      const propRes = await this.pool.query(
-        `SELECT id, strategy, reason, ai_reason, ai_decision, decision_source
-         FROM proposed_orders WHERE id = ANY($1::bigint[])`,
-        [proposedIds],
-      );
-      for (const r of propRes.rows as Array<{
-        id: number;
-        strategy: string | null;
-        reason: string | null;
-        ai_reason: string | null;
-        ai_decision: string | null;
-        decision_source: string | null;
-      }>) {
-        proposedById.set(Number(r.id), {
-          strategy: r.strategy,
-          reason: r.reason,
-          aiReason: r.ai_reason,
-          aiDecision: r.ai_decision,
-          decisionSource: r.decision_source,
-        });
-      }
-    }
 
     interface OpenLot {
       tradeKey: string;
@@ -1447,6 +1515,11 @@ export class ExecutionRepository {
       entryNotional: number; // shares * price
       entryCommission: number;
       entryFillCount: number;
+      strategy: string | null;
+      entryReason: string | null;
+      aiReason: string | null;
+      aiDecision: string | null;
+      decisionSource: string | null;
     }
     interface AccTrade {
       tradeKey: string;
@@ -1467,6 +1540,11 @@ export class ExecutionRepository {
       exitBrokerOrderIds: Set<string>;
       entryFillCount: number;
       exitFillCount: number;
+      strategy: string | null;
+      entryReason: string | null;
+      aiReason: string | null;
+      aiDecision: string | null;
+      decisionSource: string | null;
     }
 
     const tradesByKey = new Map<string, AccTrade>();
@@ -1494,6 +1572,11 @@ export class ExecutionRepository {
           exitBrokerOrderIds: new Set(),
           entryFillCount: 0,
           exitFillCount: 0,
+          strategy: lot.strategy,
+          entryReason: lot.entryReason,
+          aiReason: lot.aiReason,
+          aiDecision: lot.aiDecision,
+          decisionSource: lot.decisionSource,
         };
         tradesByKey.set(lot.tradeKey, t);
       }
@@ -1532,6 +1615,11 @@ export class ExecutionRepository {
             entryNotional: 0,
             entryCommission: 0,
             entryFillCount: 0,
+            strategy: row.strategy,
+            entryReason: row.entry_reason,
+            aiReason: row.ai_reason,
+            aiDecision: row.ai_decision,
+            decisionSource: row.decision_source,
           };
           lots.push(lot);
           openLotsBySymbol.set(symbol, lots);
@@ -1597,6 +1685,11 @@ export class ExecutionRepository {
             entryNotional: 0,
             entryCommission: 0,
             entryFillCount: 0,
+            strategy: row.strategy,
+            entryReason: row.entry_reason,
+            aiReason: row.ai_reason,
+            aiDecision: row.ai_decision,
+            decisionSource: row.decision_source,
           };
           const trade = ensureTrade(lot);
           // We don't model short positions deeply: mark qtyOpened as
@@ -1631,9 +1724,6 @@ export class ExecutionRepository {
         avgEntry > 0 && trade.qtyClosed > 0
           ? (realized / (avgEntry * trade.qtyClosed)) * 100
           : null;
-      const prop = trade.proposedOrderId
-        ? proposedById.get(trade.proposedOrderId)
-        : undefined;
       result.push({
         tradeKey: trade.tradeKey,
         symbol: trade.symbol,
@@ -1657,11 +1747,11 @@ export class ExecutionRepository {
         proposedOrderId: trade.proposedOrderId,
         entryBrokerOrderId: trade.entryBrokerOrderId,
         exitBrokerOrderIds: Array.from(trade.exitBrokerOrderIds),
-        strategy: prop?.strategy ?? null,
-        reason: prop?.reason ?? null,
-        aiReason: prop?.aiReason ?? null,
-        aiDecision: prop?.aiDecision ?? null,
-        decisionSource: prop?.decisionSource ?? null,
+        strategy: trade.strategy,
+        reason: trade.entryReason,
+        aiReason: trade.aiReason,
+        aiDecision: trade.aiDecision,
+        decisionSource: trade.decisionSource,
         entryFillCount: trade.entryFillCount,
         exitFillCount: trade.exitFillCount,
       });
