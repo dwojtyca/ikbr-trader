@@ -16,12 +16,13 @@ Active by default:
 Implemented but disabled in the default bot/backtest portfolio:
 
 - `range_reversal_v1`
+- `trend_following_long_v1`
 
 Removed:
 
 - `failed_bounce_short_v1`
 
-`range_reversal_v1` remains available through the registry and can be tested in isolated / strategy-lab workflows, but it is currently not part of the default bot portfolio.
+Disabled strategies remain available through the registry and can be tested in isolated / strategy-lab workflows, but they are not part of the default bot portfolio.
 
 ## Market Context Model
 
@@ -957,6 +958,144 @@ Confidence is clamped to:
 
 ---
 
+# trend_following_long_v1
+
+## Status
+
+Implemented but disabled in the default bot/backtest portfolio.
+
+```text
+enabledInBot = false
+```
+
+Available through the registry for isolated research / strategy-lab runs.
+
+## Purpose
+
+Daily-timeframe Donchian-breakout trend-following.
+
+Hypothesis:
+
+```text
+A confirmed multi-week bull regime + a fresh N-day Donchian high on the daily candle, in a non-overbought RSI band, leads to continuation over multi-day to multi-week holding periods.
+```
+
+It is intentionally slower and lower-frequency than `momentum_breakout_long_v1`, and sized using D1 ATR so the stop reflects daily noise, not intraday noise.
+
+## Supported Instruments
+
+```text
+STK
+IND
+```
+
+## Direction
+
+```text
+LONG only
+side = BUY
+```
+
+## Required Market Context
+
+```text
+directionalRegime = bull_trend
+volatilityRegime = normal_volatility | high_volatility
+```
+
+Hard rejects:
+
+```text
+directionalRegime != bull_trend
+volatilityRegime == low_volatility
+regimeScore < 5
+```
+
+## Required Timeframes
+
+```text
+1m  (for live close used as entry/sizing reference)
+1d  (for the breakout setup itself)
+```
+
+Requires at least `donchianWindow + 2` D1 candles.
+
+## Session Window
+
+The entry trigger is gated to an extended UTC session window so the engine doesn't open new D1 trend trades at illiquid hours:
+
+```text
+sessionUtcStartHour = 8
+sessionUtcEndHour   = 20
+```
+
+## Core Filters
+
+```text
+closeD > EMA50D
+RSI14D in [50, 72]
+ATR14D > 0
+```
+
+EMA200 D1 is not used as a hard gate because the current dataset has 121–142 D1 candles per symbol (EMA200 needs 200). The multi-timeframe `regimeScore` and `directionalRegime = bull_trend` carry that role instead.
+
+## Entry Logic — Donchian Breakout
+
+```text
+priorHigh = max(high) over prior 50 D1 candles (excluding the current/latest D1)
+breakoutLevel = priorHigh * (1 + 0.05%)
+closeD > breakoutLevel
+```
+
+## Volume Filter
+
+```text
+avgVol20D = average volume over prior 20 D1 candles (excluding the latest)
+latestD1.volume >= avgVol20D * 1.1
+```
+
+Volume confirmation is required when the average is positive.
+
+## Stop Loss
+
+Sized in D1-noise units, anchored to the live 1m close (which is also the planned entry):
+
+```text
+stop = liveClose - 2.0 * ATR14D
+```
+
+Rejected if the stop ends up at or above the entry.
+
+## Take Profit
+
+```text
+takeProfit = liveClose + 5.0 * (liveClose - stop)
+plannedRewardPct >= 1.5
+```
+
+## Scoring
+
+Base confidence:
+
+```text
+0.88
+```
+
+Bonuses:
+
+- `regimeBonus`     up to `+0.05` based on how far `regimeScore` exceeds 10
+- `breakoutCleanlinessBonus` up to `+0.04` based on how cleanly the daily close beat `priorHigh`
+
+Confidence is clamped to:
+
+```text
+0.88 - 0.97
+```
+
+The high anchor is intentional: when both `momentum_breakout_long_v1` and `trend_following_long_v1` fire on the same candle, the daily setup should dominate.
+
+---
+
 # Portfolio Notes
 
 The portfolio manager runs all active strategy implementations and selects the highest-confidence valid signal.
@@ -979,6 +1118,9 @@ Disabled but implemented:
 ```text
 range_reversal_v1:
   range + normal/high volatility
+
+trend_following_long_v1:
+  bull_trend + normal/high volatility (D1-driven, longer holding period)
 ```
 
 No active strategy currently targets:
