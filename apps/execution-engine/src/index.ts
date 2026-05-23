@@ -776,6 +776,16 @@ app.get("/execution/orders", async (request) => {
   return repo.listOrders(query.limit, filters);
 });
 
+app.get("/execution/trades", async (request) => {
+  const query = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    })
+    .parse(request.query ?? {});
+  const trades = await repo.listTrades(query.limit);
+  return { trades };
+});
+
 app.post("/execution/execute-proposed/:id", async (request, reply) => {
   const params = z
     .object({ id: z.coerce.number().int().positive() })

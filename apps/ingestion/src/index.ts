@@ -216,226 +216,226 @@ app.post("/bootstrap", async () => {
     failedTimeframes: [],
   };
   try {
-  await twsClient.connect();
-  const accounts = await twsClient.getManagedAccounts();
-  const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
-  if (!accountId) {
-    throw new Error("No account available from TWS managed accounts");
-  }
-  if (config.IBKR_ACCOUNT_ID && !accounts.includes(config.IBKR_ACCOUNT_ID)) {
-    app.log.warn(
-      { requested: config.IBKR_ACCOUNT_ID, accounts },
-      "configured IBKR_ACCOUNT_ID not found in managed accounts",
-    );
-  }
-
-  const subscriptions = await twsClient.resolveContracts(
-    config.watchlistInstruments,
-  );
-  for (const subscription of subscriptions) {
-    if (subscription.instrumentContract) {
-      await repo.upsertInstrumentContract(subscription.instrumentContract);
+    await twsClient.connect();
+    const accounts = await twsClient.getManagedAccounts();
+    const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
+    if (!accountId) {
+      throw new Error("No account available from TWS managed accounts");
     }
-  }
-  if (backfillProgress) {
-    backfillProgress.phase = "one_minute";
-    backfillProgress.totalSymbols = subscriptions.length;
-  }
-  const historical = await twsClient.backfillRecentCandles1m(
-    subscriptions,
-    config.backfill1mCandles,
-  );
+    if (config.IBKR_ACCOUNT_ID && !accounts.includes(config.IBKR_ACCOUNT_ID)) {
+      app.log.warn(
+        { requested: config.IBKR_ACCOUNT_ID, accounts },
+        "configured IBKR_ACCOUNT_ID not found in managed accounts",
+      );
+    }
 
-  let backfilledCandles1m = 0;
-  let backfilledCandles5m = 0;
-  let backfilledCandles1h = 0;
-  let backfilledCandles4h = 0;
-  let backfilledCandles12h = 0;
-  let backfilledCandles1d = 0;
-  let backfilledCandles1w = 0;
-  const backfillBySymbol: Array<{
-    symbol: string;
-    conid: string;
-    candles1m: number;
-  }> = [];
-
-  for (const entry of historical) {
-    backfillBySymbol.push({
-      symbol: entry.symbol,
-      conid: entry.conid,
-      candles1m: entry.candles.length,
-    });
-
-    for (const candle of entry.candles) {
-      await repo.upsertCandle(candle);
-      backfilledCandles1m += 1;
-
-      const higher = higherTimeframeAggregator.ingest(candle);
-      for (const higherCandle of higher) {
-        await repo.upsertCandle(higherCandle);
-        if (higherCandle.timeframe === "5m") backfilledCandles5m += 1;
-        if (higherCandle.timeframe === "1h") backfilledCandles1h += 1;
-        if (higherCandle.timeframe === "4h") backfilledCandles4h += 1;
-        if (higherCandle.timeframe === "12h") backfilledCandles12h += 1;
-        if (higherCandle.timeframe === "1d") backfilledCandles1d += 1;
-        if (higherCandle.timeframe === "1w") backfilledCandles1w += 1;
+    const subscriptions = await twsClient.resolveContracts(
+      config.watchlistInstruments,
+    );
+    for (const subscription of subscriptions) {
+      if (subscription.instrumentContract) {
+        await repo.upsertInstrumentContract(subscription.instrumentContract);
       }
     }
-  }
-
-  // Stage 8: native higher-timeframe backfill direct from TWS. The 1m
-  // backfill above only covers ~220 minutes per symbol, so the aggregator
-  // can at best build a handful of 4h/1d/1w bars — far below the 20 bars
-  // required for EMA50/EMA200 and the regime detector to work. Here we
-  // pull true historical bars per timeframe so indicators are sized
-  // correctly from the first tick. Native bars overwrite any aggregated
-  // approximations for the same timestamp (upsert).
-  const higherBackfillJobs: Array<{
-    timeframe: import("@ikbr/shared").CandleTimeframe;
-    count: number;
-  }> = [
-    { timeframe: "5m", count: config.backfill5mCandles },
-    { timeframe: "1h", count: config.backfill1hCandles },
-    { timeframe: "4h", count: config.backfill4hCandles },
-    { timeframe: "12h", count: config.backfill12hCandles },
-    { timeframe: "1d", count: config.backfill1dCandles },
-    { timeframe: "1w", count: config.backfill1wCandles },
-  ];
-  const nativeBackfillStats: Record<string, number> = {};
-  const enabledJobs = higherBackfillJobs.filter((job) => job.count > 0);
-  const totalJobs = enabledJobs.length;
-  const totalSymbols = subscriptions.length;
-  backfillProgress = {
-    startedAt: backfillProgress?.startedAt ?? new Date().toISOString(),
-    phase: "native_tf",
-    finishedAt: null,
-    totalSymbols,
-    totalJobs,
-    completedJobs: 0,
-    currentTimeframe: null,
-    currentSymbol: null,
-    completedSymbolsInJob: 0,
-    insertedByTimeframe: {},
-    failedTimeframes: [],
-  };
-  let jobIndex = 0;
-  for (const job of enabledJobs) {
-    jobIndex += 1;
     if (backfillProgress) {
-      backfillProgress.currentTimeframe = job.timeframe;
-      backfillProgress.currentSymbol = null;
-      backfillProgress.completedSymbolsInJob = 0;
+      backfillProgress.phase = "one_minute";
+      backfillProgress.totalSymbols = subscriptions.length;
     }
-    app.log.info(
-      {
-        timeframe: job.timeframe,
-        progress: `${jobIndex}/${totalJobs}`,
-        symbols: totalSymbols,
-        candlesPerSymbol: job.count,
-      },
-      `native historical backfill starting [${jobIndex}/${totalJobs}] ${job.timeframe}`,
+    const historical = await twsClient.backfillRecentCandles1m(
+      subscriptions,
+      config.backfill1mCandles,
     );
-    try {
-      const results = await twsClient.backfillRecentCandles(
-        subscriptions,
-        job.timeframe,
-        job.count,
-        ({ symbol, index }) => {
-          if (!backfillProgress) return;
-          backfillProgress.currentSymbol = symbol;
-          backfillProgress.completedSymbolsInJob = Math.max(0, index - 1);
-        },
-      );
-      let inserted = 0;
-      for (const entry of results) {
-        for (const candle of entry.candles) {
-          await repo.upsertCandle(candle);
-          inserted += 1;
+
+    let backfilledCandles1m = 0;
+    let backfilledCandles5m = 0;
+    let backfilledCandles1h = 0;
+    let backfilledCandles4h = 0;
+    let backfilledCandles12h = 0;
+    let backfilledCandles1d = 0;
+    let backfilledCandles1w = 0;
+    const backfillBySymbol: Array<{
+      symbol: string;
+      conid: string;
+      candles1m: number;
+    }> = [];
+
+    for (const entry of historical) {
+      backfillBySymbol.push({
+        symbol: entry.symbol,
+        conid: entry.conid,
+        candles1m: entry.candles.length,
+      });
+
+      for (const candle of entry.candles) {
+        await repo.upsertCandle(candle);
+        backfilledCandles1m += 1;
+
+        const higher = higherTimeframeAggregator.ingest(candle);
+        for (const higherCandle of higher) {
+          await repo.upsertCandle(higherCandle);
+          if (higherCandle.timeframe === "5m") backfilledCandles5m += 1;
+          if (higherCandle.timeframe === "1h") backfilledCandles1h += 1;
+          if (higherCandle.timeframe === "4h") backfilledCandles4h += 1;
+          if (higherCandle.timeframe === "12h") backfilledCandles12h += 1;
+          if (higherCandle.timeframe === "1d") backfilledCandles1d += 1;
+          if (higherCandle.timeframe === "1w") backfilledCandles1w += 1;
         }
       }
-      nativeBackfillStats[job.timeframe] = inserted;
+    }
+
+    // Stage 8: native higher-timeframe backfill direct from TWS. The 1m
+    // backfill above only covers ~220 minutes per symbol, so the aggregator
+    // can at best build a handful of 4h/1d/1w bars — far below the 20 bars
+    // required for EMA50/EMA200 and the regime detector to work. Here we
+    // pull true historical bars per timeframe so indicators are sized
+    // correctly from the first tick. Native bars overwrite any aggregated
+    // approximations for the same timestamp (upsert).
+    const higherBackfillJobs: Array<{
+      timeframe: import("@ikbr/shared").CandleTimeframe;
+      count: number;
+    }> = [
+      { timeframe: "5m", count: config.backfill5mCandles },
+      { timeframe: "1h", count: config.backfill1hCandles },
+      { timeframe: "4h", count: config.backfill4hCandles },
+      { timeframe: "12h", count: config.backfill12hCandles },
+      { timeframe: "1d", count: config.backfill1dCandles },
+      { timeframe: "1w", count: config.backfill1wCandles },
+    ];
+    const nativeBackfillStats: Record<string, number> = {};
+    const enabledJobs = higherBackfillJobs.filter((job) => job.count > 0);
+    const totalJobs = enabledJobs.length;
+    const totalSymbols = subscriptions.length;
+    backfillProgress = {
+      startedAt: backfillProgress?.startedAt ?? new Date().toISOString(),
+      phase: "native_tf",
+      finishedAt: null,
+      totalSymbols,
+      totalJobs,
+      completedJobs: 0,
+      currentTimeframe: null,
+      currentSymbol: null,
+      completedSymbolsInJob: 0,
+      insertedByTimeframe: {},
+      failedTimeframes: [],
+    };
+    let jobIndex = 0;
+    for (const job of enabledJobs) {
+      jobIndex += 1;
       if (backfillProgress) {
-        backfillProgress.insertedByTimeframe[job.timeframe] = inserted;
-        backfillProgress.completedJobs = jobIndex;
-        backfillProgress.completedSymbolsInJob = totalSymbols;
+        backfillProgress.currentTimeframe = job.timeframe;
         backfillProgress.currentSymbol = null;
+        backfillProgress.completedSymbolsInJob = 0;
       }
-      const pct = Math.round((jobIndex / totalJobs) * 100);
       app.log.info(
         {
           timeframe: job.timeframe,
           progress: `${jobIndex}/${totalJobs}`,
-          pct,
-          requestedPerSymbol: job.count,
-          inserted,
-          symbols: results.length,
+          symbols: totalSymbols,
+          candlesPerSymbol: job.count,
         },
-        `native historical backfill completed [${jobIndex}/${totalJobs} ${pct}%] ${job.timeframe}`,
+        `native historical backfill starting [${jobIndex}/${totalJobs}] ${job.timeframe}`,
       );
-    } catch (error) {
-      if (backfillProgress) {
-        backfillProgress.failedTimeframes.push(job.timeframe);
-        backfillProgress.completedJobs = jobIndex;
+      try {
+        const results = await twsClient.backfillRecentCandles(
+          subscriptions,
+          job.timeframe,
+          job.count,
+          ({ symbol, index }) => {
+            if (!backfillProgress) return;
+            backfillProgress.currentSymbol = symbol;
+            backfillProgress.completedSymbolsInJob = Math.max(0, index - 1);
+          },
+        );
+        let inserted = 0;
+        for (const entry of results) {
+          for (const candle of entry.candles) {
+            await repo.upsertCandle(candle);
+            inserted += 1;
+          }
+        }
+        nativeBackfillStats[job.timeframe] = inserted;
+        if (backfillProgress) {
+          backfillProgress.insertedByTimeframe[job.timeframe] = inserted;
+          backfillProgress.completedJobs = jobIndex;
+          backfillProgress.completedSymbolsInJob = totalSymbols;
+          backfillProgress.currentSymbol = null;
+        }
+        const pct = Math.round((jobIndex / totalJobs) * 100);
+        app.log.info(
+          {
+            timeframe: job.timeframe,
+            progress: `${jobIndex}/${totalJobs}`,
+            pct,
+            requestedPerSymbol: job.count,
+            inserted,
+            symbols: results.length,
+          },
+          `native historical backfill completed [${jobIndex}/${totalJobs} ${pct}%] ${job.timeframe}`,
+        );
+      } catch (error) {
+        if (backfillProgress) {
+          backfillProgress.failedTimeframes.push(job.timeframe);
+          backfillProgress.completedJobs = jobIndex;
+        }
+        app.log.warn(
+          {
+            timeframe: job.timeframe,
+            progress: `${jobIndex}/${totalJobs}`,
+            err: error,
+          },
+          "native historical backfill failed",
+        );
       }
-      app.log.warn(
-        {
-          timeframe: job.timeframe,
-          progress: `${jobIndex}/${totalJobs}`,
-          err: error,
-        },
-        "native historical backfill failed",
-      );
     }
-  }
-  if (backfillProgress) {
-    backfillProgress.finishedAt = new Date().toISOString();
-    backfillProgress.phase = "completed";
-    backfillProgress.currentTimeframe = null;
-    backfillProgress.currentSymbol = null;
-  }
+    if (backfillProgress) {
+      backfillProgress.finishedAt = new Date().toISOString();
+      backfillProgress.phase = "completed";
+      backfillProgress.currentTimeframe = null;
+      backfillProgress.currentSymbol = null;
+    }
 
-  app.log.info(
-    {
-      requestedPerSymbol: config.backfill1mCandles,
-      backfilledCandles1m,
-      backfilledCandles5m,
-      backfilledCandles1h,
-      backfilledCandles4h,
-      backfilledCandles12h,
-      backfilledCandles1d,
-      backfilledCandles1w,
-      symbols: backfillBySymbol,
-    },
-    "historical backfill completed",
-  );
+    app.log.info(
+      {
+        requestedPerSymbol: config.backfill1mCandles,
+        backfilledCandles1m,
+        backfilledCandles5m,
+        backfilledCandles1h,
+        backfilledCandles4h,
+        backfilledCandles12h,
+        backfilledCandles1d,
+        backfilledCandles1w,
+        symbols: backfillBySymbol,
+      },
+      "historical backfill completed",
+    );
 
-  twsClient.clearSubscriptions();
-  activeSubscriptions = [];
-  twsClient.addSubscriptions(subscriptions);
-  activeSubscriptions = subscriptions;
-  lastBootstrapAt = new Date();
+    twsClient.clearSubscriptions();
+    activeSubscriptions = [];
+    twsClient.addSubscriptions(subscriptions);
+    activeSubscriptions = subscriptions;
+    lastBootstrapAt = new Date();
 
-  return {
-    socket: {
-      host: config.IB_SOCKET_HOST,
-      port: config.IB_SOCKET_PORT,
-      clientId: config.INGESTION_CLIENT_ID,
-    },
-    accounts,
-    accountId,
-    historicalBackfill: {
-      requestedPerSymbol: config.backfill1mCandles,
-      candles1m: backfilledCandles1m,
-      candles5m: backfilledCandles5m,
-      candles1h: backfilledCandles1h,
-      candles4h: backfilledCandles4h,
-      candles12h: backfilledCandles12h,
-      candles1d: backfilledCandles1d,
-      candles1w: backfilledCandles1w,
-      bySymbol: backfillBySymbol,
-    },
-    subscribed: subscriptions,
-  };
+    return {
+      socket: {
+        host: config.IB_SOCKET_HOST,
+        port: config.IB_SOCKET_PORT,
+        clientId: config.INGESTION_CLIENT_ID,
+      },
+      accounts,
+      accountId,
+      historicalBackfill: {
+        requestedPerSymbol: config.backfill1mCandles,
+        candles1m: backfilledCandles1m,
+        candles5m: backfilledCandles5m,
+        candles1h: backfilledCandles1h,
+        candles4h: backfilledCandles4h,
+        candles12h: backfilledCandles12h,
+        candles1d: backfilledCandles1d,
+        candles1w: backfilledCandles1w,
+        bySymbol: backfillBySymbol,
+      },
+      subscribed: subscriptions,
+    };
   } finally {
     bootstrapInFlight = false;
   }

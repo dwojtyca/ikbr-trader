@@ -433,7 +433,7 @@ export class HistoricalClient {
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error(`Timed out waiting historicalData for ${sub.symbol}`));
-      }, 45_000);
+      }, 90_000);
 
       const cleanup = () => {
         clearTimeout(timeout);

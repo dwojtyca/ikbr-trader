@@ -306,6 +306,36 @@ type HistoryProgress = {
   completedChunks: number;
 };
 
+type Trade = {
+  tradeKey: string;
+  symbol: string;
+  currency: string | null;
+  status: "OPEN" | "CLOSED";
+  side: "LONG" | "SHORT";
+  qtyOpened: number;
+  qtyClosed: number;
+  qtyOpenRemaining: number;
+  avgEntryPrice: number;
+  avgExitPrice: number | null;
+  entryAt: string;
+  exitAt: string | null;
+  holdMs: number | null;
+  entryCommission: number;
+  exitCommission: number;
+  realizedPnl: number;
+  realizedPnlPct: number | null;
+  proposedOrderId: number | null;
+  entryBrokerOrderId: string | null;
+  exitBrokerOrderIds: string[];
+  strategy: string | null;
+  reason: string | null;
+  aiReason: string | null;
+  aiDecision: string | null;
+  decisionSource: string | null;
+  entryFillCount: number;
+  exitFillCount: number;
+};
+
 type IngestionBackfillProgress = {
   phase: "connecting" | "one_minute" | "native_tf" | "completed";
   startedAt: string;
@@ -434,7 +464,8 @@ export function App() {
   const [ingestionHealth, setIngestionHealth] = useState<HealthResponse | null>(
     null,
   );
-  const [ingestionBackfillProgress, setIngestionBackfillProgress] = useState<IngestionBackfillProgress | null>(null);
+  const [ingestionBackfillProgress, setIngestionBackfillProgress] =
+    useState<IngestionBackfillProgress | null>(null);
   const [signalHealth, setSignalHealth] = useState<HealthResponse | null>(null);
   const [executionHealth, setExecutionHealth] = useState<HealthResponse | null>(
     null,
@@ -442,6 +473,8 @@ export function App() {
 
   const [watchlist, setWatchlist] = useState<WatchlistResponse | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [trades, setTrades] = useState<Trade[]>([]);
+  const [loadingTrades, setLoadingTrades] = useState(false);
   const [accountSummary, setAccountSummary] =
     useState<AccountSummaryResponse | null>(null);
   const [report, setReport] = useState<SignalReportResponse | null>(null);
@@ -639,7 +672,9 @@ export function App() {
       requestJson<HealthResponse>("/api/execution/health").catch(() => ({
         ok: false,
       })),
-      requestJson<{ progress: IngestionBackfillProgress | null }>("/api/ingestion/backfill-progress").catch(() => ({ progress: null })),
+      requestJson<{ progress: IngestionBackfillProgress | null }>(
+        "/api/ingestion/backfill-progress",
+      ).catch(() => ({ progress: null })),
     ]);
 
     setIngestionHealth(ing);
@@ -675,6 +710,21 @@ export function App() {
       );
     } finally {
       if (!silent) setLoadingOrders(false);
+    }
+  }
+
+  async function refreshTrades(options?: { silent?: boolean }) {
+    const silent = options?.silent ?? false;
+    if (!silent) setLoadingTrades(true);
+    try {
+      const data = await requestJson<{ trades: Trade[] }>(
+        "/api/execution/execution/trades?limit=100",
+      );
+      setTrades(data.trades ?? []);
+    } catch {
+      if (!silent) setTrades([]);
+    } finally {
+      if (!silent) setLoadingTrades(false);
     }
   }
 
@@ -866,6 +916,7 @@ export function App() {
         refreshWatchlist(),
         refreshOrders(),
         refreshAccount(),
+        refreshTrades({ silent: true }),
       ]);
       setLastAction(`Refreshed at ${new Date().toLocaleTimeString()}`);
     } catch (error) {
@@ -1074,6 +1125,7 @@ export function App() {
         .finally(() => {
           ordersPollInFlightRef.current = false;
         });
+      void refreshTrades({ silent: true }).catch(() => {});
     }, 3000);
 
     return () => clearInterval(interval);
@@ -1231,7 +1283,8 @@ export function App() {
                   loadingBacktest ||
                   backtestJobRunning ||
                   backtestRunJobRunning ||
-                  backtestDataset?.status !== "failed"
+                  (backtestDataset?.status !== "failed" &&
+                    backtestDataset?.status !== "fetching")
                 }
                 onClick={() => void resumeBacktestHistory()}
               >
@@ -1769,10 +1822,7 @@ export function App() {
                     Date.now() - new Date(p.startedAt).getTime();
                   const etaMs =
                     p.phase === "native_tf" && p.completedJobs > 0
-                      ? Math.max(
-                          0,
-                          (elapsedMs / pct) * (100 - pct),
-                        )
+                      ? Math.max(0, (elapsedMs / pct) * (100 - pct))
                       : 0;
                   const fmtDur = (ms: number) => {
                     const s = Math.floor(ms / 1000);
@@ -1803,7 +1853,8 @@ export function App() {
                           <strong>{phaseLabel}</strong>
                           {p.currentTimeframe ? (
                             <>
-                              {" "}· tf <strong>{p.currentTimeframe}</strong>
+                              {" "}
+                              · tf <strong>{p.currentTimeframe}</strong>
                               {p.totalJobs > 0
                                 ? ` (${p.completedJobs}/${p.totalJobs})`
                                 : ""}
@@ -1811,8 +1862,8 @@ export function App() {
                           ) : null}
                           {p.currentSymbol ? (
                             <>
-                              {" "}· symbol{" "}
-                              <strong>{p.currentSymbol}</strong> (
+                              {" "}
+                              · symbol <strong>{p.currentSymbol}</strong> (
                               {p.completedSymbolsInJob}/{p.totalSymbols})
                             </>
                           ) : null}
@@ -1857,7 +1908,9 @@ export function App() {
 
             <div className="action-grid">
               <button
-                disabled={Boolean(busyAction) || Boolean(ingestionHealth?.bootstrapping)}
+                disabled={
+                  Boolean(busyAction) || Boolean(ingestionHealth?.bootstrapping)
+                }
                 onClick={() =>
                   void handleAction(
                     watchlist?.bootstrapped
@@ -2150,6 +2203,134 @@ export function App() {
                 </table>
               </div>
             ) : null}
+          </section>
+
+          <section className="panel">
+            <div className="panel-head">
+              <h2>Trades</h2>
+              <span>
+                {loadingTrades
+                  ? "loading..."
+                  : `rows: ${trades.length} (open: ${trades.filter((t) => t.status === "OPEN").length})`}
+              </span>
+            </div>
+            <div className="table-wrap">
+              <table className="orders-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Strategy</th>
+                    <th>Side</th>
+                    <th>Qty</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>P&amp;L</th>
+                    <th>P&amp;L %</th>
+                    <th>Hold</th>
+                    <th>Entry at</th>
+                    <th>Exit at</th>
+                    <th>Status</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.length === 0 ? (
+                    <tr>
+                      <td colSpan={13} className="muted">
+                        No executed trades yet
+                      </td>
+                    </tr>
+                  ) : (
+                    trades.map((trade) => {
+                      const pnlColor =
+                        trade.realizedPnl > 0
+                          ? "#10b981"
+                          : trade.realizedPnl < 0
+                            ? "#f87171"
+                            : "inherit";
+                      const fmtHold = (ms: number | null) => {
+                        if (ms == null) return "-";
+                        const s = Math.floor(ms / 1000);
+                        if (s < 60) return `${s}s`;
+                        const m = Math.floor(s / 60);
+                        if (m < 60) return `${m}m ${s % 60}s`;
+                        const h = Math.floor(m / 60);
+                        return `${h}h ${m % 60}m`;
+                      };
+                      return (
+                        <tr key={trade.tradeKey}>
+                          <td>
+                            <strong>{trade.symbol}</strong>
+                            {trade.currency ? (
+                              <span className="muted">
+                                {" "}
+                                ({trade.currency})
+                              </span>
+                            ) : null}
+                          </td>
+                          <td>{trade.strategy ?? "-"}</td>
+                          <td>{trade.side}</td>
+                          <td>
+                            {formatQty(trade.qtyClosed || trade.qtyOpened)}
+                            {trade.status === "OPEN" &&
+                            trade.qtyOpenRemaining > 0 ? (
+                              <span className="muted">
+                                {" "}
+                                ({formatQty(trade.qtyOpenRemaining)} open)
+                              </span>
+                            ) : null}
+                          </td>
+                          <td>{trade.avgEntryPrice.toFixed(2)}</td>
+                          <td>
+                            {trade.avgExitPrice != null
+                              ? trade.avgExitPrice.toFixed(2)
+                              : "-"}
+                          </td>
+                          <td style={{ color: pnlColor, fontWeight: 600 }}>
+                            {trade.qtyClosed > 0
+                              ? `${trade.realizedPnl >= 0 ? "+" : ""}${trade.realizedPnl.toFixed(2)}`
+                              : "-"}
+                          </td>
+                          <td style={{ color: pnlColor }}>
+                            {trade.realizedPnlPct != null
+                              ? `${trade.realizedPnlPct >= 0 ? "+" : ""}${trade.realizedPnlPct.toFixed(2)}%`
+                              : "-"}
+                          </td>
+                          <td>{fmtHold(trade.holdMs)}</td>
+                          <td>{formatTs(trade.entryAt)}</td>
+                          <td>{trade.exitAt ? formatTs(trade.exitAt) : "-"}</td>
+                          <td>
+                            <span
+                              style={{
+                                padding: "2px 8px",
+                                borderRadius: 4,
+                                background:
+                                  trade.status === "OPEN"
+                                    ? "#1e40af"
+                                    : "#374151",
+                                color: "white",
+                                fontSize: 11,
+                              }}
+                            >
+                              {trade.status}
+                            </span>
+                          </td>
+                          <td
+                            style={{
+                              maxWidth: 240,
+                              whiteSpace: "normal",
+                              fontSize: 12,
+                            }}
+                          >
+                            {trade.reason ?? trade.aiReason ?? "-"}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </section>
 
           <section className="panel">

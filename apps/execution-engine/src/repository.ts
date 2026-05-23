@@ -108,6 +108,45 @@ export interface ActiveSubmittedOrder {
   createdAt: Date;
 }
 
+export interface TradeLegFill {
+  execId: string;
+  brokerOrderId: string | null;
+  shares: number;
+  price: number;
+  executedAt: Date;
+  commission: number | null;
+}
+
+export interface Trade {
+  tradeKey: string;
+  symbol: string;
+  currency: string | null;
+  status: "OPEN" | "CLOSED";
+  side: "LONG" | "SHORT";
+  qtyOpened: number;
+  qtyClosed: number;
+  qtyOpenRemaining: number;
+  avgEntryPrice: number;
+  avgExitPrice: number | null;
+  entryAt: Date;
+  exitAt: Date | null;
+  holdMs: number | null;
+  entryCommission: number;
+  exitCommission: number;
+  realizedPnl: number;
+  realizedPnlPct: number | null;
+  proposedOrderId: number | null;
+  entryBrokerOrderId: string | null;
+  exitBrokerOrderIds: string[];
+  strategy: string | null;
+  reason: string | null;
+  aiReason: string | null;
+  aiDecision: string | null;
+  decisionSource: string | null;
+  entryFillCount: number;
+  exitFillCount: number;
+}
+
 export class ExecutionRepository {
   constructor(private readonly pool: Pool) {}
 
@@ -1312,6 +1351,324 @@ export class ExecutionRepository {
           ? row.created_at
           : new Date(row.created_at),
     }));
+  }
+
+  /**
+   * Reconstructs trades (entries + matched exits) from
+   * broker_execution_fills using per-symbol FIFO matching. A trade is
+   * one BUY-side proposed_order plus the SELL fills that closed the
+   * shares it bought (TP/SL legs of the bracket, or manual flatten).
+   * Returns CLOSED + OPEN trades, newest first by entryAt.
+   */
+  async listTrades(limit = 100): Promise<Trade[]> {
+    const safeLimit = Math.max(1, Math.min(500, limit));
+    const fills = await this.pool.query(
+      `
+      SELECT exec_id, broker_order_id, proposed_order_id, symbol, currency,
+             side, shares, price, avg_price, executed_at, commission, realized_pnl
+      FROM broker_execution_fills
+      WHERE symbol IS NOT NULL AND shares IS NOT NULL AND shares > 0
+      ORDER BY symbol ASC,
+               COALESCE(executed_at, created_at) ASC,
+               exec_id ASC
+      `,
+    );
+    type FillRow = {
+      exec_id: string;
+      broker_order_id: string | null;
+      proposed_order_id: number | string | null;
+      symbol: string;
+      currency: string | null;
+      side: "BUY" | "SELL";
+      shares: number;
+      price: number | null;
+      avg_price: number | null;
+      executed_at: Date | string | null;
+      commission: number | null;
+      realized_pnl: number | null;
+    };
+    const rows = (fills.rows as FillRow[]).map((r) => ({
+      ...r,
+      proposed_order_id:
+        r.proposed_order_id != null ? Number(r.proposed_order_id) : null,
+    }));
+
+    // Collect proposed_order ids to enrich trades with strategy/reason.
+    const proposedIds = Array.from(
+      new Set(
+        rows
+          .map((r) => r.proposed_order_id)
+          .filter((id): id is number => id !== null),
+      ),
+    );
+    const proposedById = new Map<
+      number,
+      {
+        strategy: string | null;
+        reason: string | null;
+        aiReason: string | null;
+        aiDecision: string | null;
+        decisionSource: string | null;
+      }
+    >();
+    if (proposedIds.length > 0) {
+      const propRes = await this.pool.query(
+        `SELECT id, strategy, reason, ai_reason, ai_decision, decision_source
+         FROM proposed_orders WHERE id = ANY($1::bigint[])`,
+        [proposedIds],
+      );
+      for (const r of propRes.rows as Array<{
+        id: number;
+        strategy: string | null;
+        reason: string | null;
+        ai_reason: string | null;
+        ai_decision: string | null;
+        decision_source: string | null;
+      }>) {
+        proposedById.set(Number(r.id), {
+          strategy: r.strategy,
+          reason: r.reason,
+          aiReason: r.ai_reason,
+          aiDecision: r.ai_decision,
+          decisionSource: r.decision_source,
+        });
+      }
+    }
+
+    interface OpenLot {
+      tradeKey: string;
+      symbol: string;
+      currency: string | null;
+      proposedOrderId: number | null;
+      entryBrokerOrderId: string | null;
+      entryAt: Date;
+      remaining: number;
+      qtyOpened: number;
+      entryNotional: number; // shares * price
+      entryCommission: number;
+      entryFillCount: number;
+    }
+    interface AccTrade {
+      tradeKey: string;
+      symbol: string;
+      currency: string | null;
+      proposedOrderId: number | null;
+      entryBrokerOrderId: string | null;
+      entryAt: Date;
+      exitAt: Date | null;
+      qtyOpened: number;
+      qtyClosed: number;
+      qtyOpenRemaining: number;
+      entryNotional: number;
+      exitNotional: number;
+      entryCommission: number;
+      exitCommission: number;
+      realizedPnl: number;
+      exitBrokerOrderIds: Set<string>;
+      entryFillCount: number;
+      exitFillCount: number;
+    }
+
+    const tradesByKey = new Map<string, AccTrade>();
+    const openLotsBySymbol = new Map<string, OpenLot[]>();
+
+    const ensureTrade = (lot: OpenLot): AccTrade => {
+      let t = tradesByKey.get(lot.tradeKey);
+      if (!t) {
+        t = {
+          tradeKey: lot.tradeKey,
+          symbol: lot.symbol,
+          currency: lot.currency,
+          proposedOrderId: lot.proposedOrderId,
+          entryBrokerOrderId: lot.entryBrokerOrderId,
+          entryAt: lot.entryAt,
+          exitAt: null,
+          qtyOpened: 0,
+          qtyClosed: 0,
+          qtyOpenRemaining: 0,
+          entryNotional: 0,
+          exitNotional: 0,
+          entryCommission: 0,
+          exitCommission: 0,
+          realizedPnl: 0,
+          exitBrokerOrderIds: new Set(),
+          entryFillCount: 0,
+          exitFillCount: 0,
+        };
+        tradesByKey.set(lot.tradeKey, t);
+      }
+      return t;
+    };
+
+    for (const row of rows) {
+      const executedAt =
+        row.executed_at instanceof Date
+          ? row.executed_at
+          : row.executed_at
+            ? new Date(row.executed_at)
+            : new Date();
+      const price = Number(row.price ?? row.avg_price ?? 0);
+      const shares = Number(row.shares);
+      const commission = row.commission != null ? Number(row.commission) : 0;
+      const symbol = row.symbol;
+
+      if (row.side === "BUY") {
+        const tradeKey = row.proposed_order_id
+          ? `prop-${row.proposed_order_id}`
+          : `broker-${row.broker_order_id ?? row.exec_id}`;
+        const lots = openLotsBySymbol.get(symbol) ?? [];
+        // If most recent lot has same tradeKey, fold into it; else push new.
+        let lot = lots.length > 0 ? lots[lots.length - 1] : undefined;
+        if (!lot || lot.tradeKey !== tradeKey) {
+          lot = {
+            tradeKey,
+            symbol,
+            currency: row.currency,
+            proposedOrderId: row.proposed_order_id,
+            entryBrokerOrderId: row.broker_order_id,
+            entryAt: executedAt,
+            remaining: 0,
+            qtyOpened: 0,
+            entryNotional: 0,
+            entryCommission: 0,
+            entryFillCount: 0,
+          };
+          lots.push(lot);
+          openLotsBySymbol.set(symbol, lots);
+        }
+        lot.remaining += shares;
+        lot.qtyOpened += shares;
+        lot.entryNotional += shares * price;
+        lot.entryCommission += commission;
+        lot.entryFillCount += 1;
+
+        const trade = ensureTrade(lot);
+        trade.qtyOpened += shares;
+        trade.qtyOpenRemaining += shares;
+        trade.entryNotional += shares * price;
+        trade.entryCommission += commission;
+        trade.entryFillCount += 1;
+      } else {
+        // SELL: FIFO close against open lots
+        let toClose = shares;
+        let commissionRemaining = commission;
+        const realizedFromBroker = row.realized_pnl;
+        const lots = openLotsBySymbol.get(symbol) ?? [];
+        while (toClose > 0 && lots.length > 0) {
+          const lot = lots[0];
+          const close = Math.min(toClose, lot.remaining);
+          const trade = tradesByKey.get(lot.tradeKey);
+          if (!trade) break;
+          // Allocate exit commission proportionally to this slice.
+          const commAlloc =
+            shares > 0 ? commissionRemaining * (close / shares) : 0;
+          trade.qtyClosed += close;
+          trade.qtyOpenRemaining -= close;
+          trade.exitNotional += close * price;
+          trade.exitCommission += commAlloc;
+          trade.exitFillCount += 1;
+          if (row.broker_order_id) {
+            trade.exitBrokerOrderIds.add(row.broker_order_id);
+          }
+          if (!trade.exitAt || executedAt > trade.exitAt) {
+            trade.exitAt = executedAt;
+          }
+          // Prefer broker-supplied realized_pnl (FIFO, fee-aware) if present;
+          // it is allocated proportionally for partial fills.
+          if (realizedFromBroker != null && shares > 0) {
+            trade.realizedPnl += Number(realizedFromBroker) * (close / shares);
+          }
+          lot.remaining -= close;
+          toClose -= close;
+          if (lot.remaining <= 0) lots.shift();
+        }
+        if (toClose > 0) {
+          // SELL without matching BUY (short-open). Track as standalone trade.
+          const tradeKey = `short-${row.broker_order_id ?? row.exec_id}`;
+          const lot: OpenLot = {
+            tradeKey,
+            symbol,
+            currency: row.currency,
+            proposedOrderId: row.proposed_order_id,
+            entryBrokerOrderId: row.broker_order_id,
+            entryAt: executedAt,
+            remaining: 0,
+            qtyOpened: 0,
+            entryNotional: 0,
+            entryCommission: 0,
+            entryFillCount: 0,
+          };
+          const trade = ensureTrade(lot);
+          // We don't model short positions deeply: mark qtyOpened as
+          // negative-style and rely on broker realized_pnl.
+          trade.qtyOpened += toClose;
+          trade.entryNotional += toClose * price;
+          trade.entryCommission += commission * (toClose / shares);
+          trade.entryFillCount += 1;
+        }
+      }
+    }
+
+    // Materialize trades.
+    const result: Trade[] = [];
+    for (const trade of tradesByKey.values()) {
+      const closed = trade.qtyOpenRemaining <= 0.0001 && trade.qtyClosed > 0;
+      const avgEntry =
+        trade.qtyOpened > 0 ? trade.entryNotional / trade.qtyOpened : 0;
+      const avgExit =
+        trade.qtyClosed > 0 ? trade.exitNotional / trade.qtyClosed : null;
+      // If broker realized_pnl missing, compute (sell - buy) * matched - commissions.
+      let realized = trade.realizedPnl;
+      if (realized === 0 && trade.qtyClosed > 0 && avgExit !== null) {
+        const gross = (avgExit - avgEntry) * trade.qtyClosed;
+        const buyCommAlloc =
+          trade.qtyOpened > 0
+            ? trade.entryCommission * (trade.qtyClosed / trade.qtyOpened)
+            : 0;
+        realized = gross - buyCommAlloc - trade.exitCommission;
+      }
+      const pnlPct =
+        avgEntry > 0 && trade.qtyClosed > 0
+          ? (realized / (avgEntry * trade.qtyClosed)) * 100
+          : null;
+      const prop = trade.proposedOrderId
+        ? proposedById.get(trade.proposedOrderId)
+        : undefined;
+      result.push({
+        tradeKey: trade.tradeKey,
+        symbol: trade.symbol,
+        currency: trade.currency,
+        status: closed ? "CLOSED" : "OPEN",
+        side: "LONG",
+        qtyOpened: trade.qtyOpened,
+        qtyClosed: trade.qtyClosed,
+        qtyOpenRemaining: trade.qtyOpenRemaining,
+        avgEntryPrice: avgEntry,
+        avgExitPrice: avgExit,
+        entryAt: trade.entryAt,
+        exitAt: trade.exitAt,
+        holdMs: trade.exitAt
+          ? trade.exitAt.getTime() - trade.entryAt.getTime()
+          : null,
+        entryCommission: trade.entryCommission,
+        exitCommission: trade.exitCommission,
+        realizedPnl: realized,
+        realizedPnlPct: pnlPct,
+        proposedOrderId: trade.proposedOrderId,
+        entryBrokerOrderId: trade.entryBrokerOrderId,
+        exitBrokerOrderIds: Array.from(trade.exitBrokerOrderIds),
+        strategy: prop?.strategy ?? null,
+        reason: prop?.reason ?? null,
+        aiReason: prop?.aiReason ?? null,
+        aiDecision: prop?.aiDecision ?? null,
+        decisionSource: prop?.decisionSource ?? null,
+        entryFillCount: trade.entryFillCount,
+        exitFillCount: trade.exitFillCount,
+      });
+    }
+
+    result.sort((a, b) => b.entryAt.getTime() - a.entryAt.getTime());
+    return result.slice(0, safeLimit);
   }
 
   /**
