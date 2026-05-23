@@ -108,12 +108,13 @@ export interface BacktestCandleSymbolSummary {
 
 export interface LoadedBacktestData {
   dataset: BacktestDataset;
-  candles1m: Candle[];
-  candles5m: Candle[];
-  candles1h: Candle[];
-  candles4h: Candle[];
-  candles12h: Candle[];
-  candles1d: Candle[];
-  candles1w: Candle[];
+  candles1m: Map<string, Candle[]>;
+  candles5m: Map<string, Candle[]>;
+  candles1h: Map<string, Candle[]>;
+  candles4h: Map<string, Candle[]>;
+  candles12h: Map<string, Candle[]>;
+  candles1d: Map<string, Candle[]>;
+  candles1w: Map<string, Candle[]>;
+  candleCount1m: number;
   fxRates: BacktestFxRate[];
 }

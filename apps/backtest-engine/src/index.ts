@@ -708,7 +708,7 @@ app.post("/backtest/run", async (request, reply) => {
           : await (async () => {
               const data = await repo.loadBacktestData();
               return new BacktestSimulator(repo, run.id, data, options).run({
-                total: data.candles1m.length,
+                total: data.candleCount1m,
                 label: "bot backtest",
                 onProgress: (progress) =>
                   repo.updateRunProgress(run.id, progress),

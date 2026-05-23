@@ -170,26 +170,6 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
-function groupCandles(candles: Candle[]): Map<string, Candle[]> {
-  const out = new Map<string, Candle[]>();
-  for (const candle of candles) {
-    const key = candle.symbol.toUpperCase();
-    const rows = out.get(key);
-    if (rows) {
-      rows.push(candle);
-    } else {
-      out.set(key, [candle]);
-    }
-  }
-  for (const [key, rows] of out.entries()) {
-    out.set(
-      key,
-      rows.sort((a, b) => a.ts.getTime() - b.ts.getTime()),
-    );
-  }
-  return out;
-}
-
 function isOrderTouched(order: ProposedOrder, candle: Candle): boolean {
   if (order.orderType === "MKT") return true;
   const entry = order.entry;
@@ -251,16 +231,16 @@ export class BacktestSimulator {
     private readonly data: LoadedBacktestData,
     private readonly options: SimulatorOptions,
   ) {
-    this.candles1mBySymbol = groupCandles(data.candles1m);
-    this.candles1hBySymbol = groupCandles(data.candles1h);
+    this.candles1mBySymbol = data.candles1m;
+    this.candles1hBySymbol = data.candles1h;
     this.candlesByTimeframe = {
-      "1m": this.candles1mBySymbol,
-      "5m": groupCandles(data.candles5m),
-      "1h": this.candles1hBySymbol,
-      "4h": groupCandles(data.candles4h),
-      "12h": groupCandles(data.candles12h),
-      "1d": groupCandles(data.candles1d),
-      "1w": groupCandles(data.candles1w),
+      "1m": data.candles1m,
+      "5m": data.candles5m,
+      "1h": data.candles1h,
+      "4h": data.candles4h,
+      "12h": data.candles12h,
+      "1d": data.candles1d,
+      "1w": data.candles1w,
     };
     this.currentEquity = options.riskLimits.accountEquity;
     const activeStrategyIds = new Set(
@@ -308,16 +288,15 @@ export class BacktestSimulator {
       riskLimits: this.options.riskLimits,
     });
 
-    const events = this.data.candles1m
-      .map((candle) => ({ candle, key: candle.symbol.toUpperCase() }))
-      .sort(
-        (a, b) =>
-          a.candle.ts.getTime() - b.candle.ts.getTime() ||
-          a.key.localeCompare(b.key),
-      );
+    const mergeSymbols = [...this.candles1mBySymbol.keys()].sort();
+    const mergeArrays = mergeSymbols.map(
+      (s) => this.candles1mBySymbol.get(s)!,
+    );
+    const mergeIndices = new Array<number>(mergeSymbols.length).fill(0);
+    const totalEvents = this.data.candleCount1m;
     const cursorBySymbol = new Map<string, number>();
     const progressBase = progress?.baseCurrent ?? 0;
-    const progressTotal = progress?.total ?? events.length;
+    const progressTotal = progress?.total ?? totalEvents;
     const progressLabel = progress?.label ?? "running backtest";
     await progress?.onProgress?.({
       current: progressBase,
@@ -325,7 +304,23 @@ export class BacktestSimulator {
       label: progressLabel,
     });
 
-    for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+    let eventIndex = 0;
+    while (true) {
+      let bestIdx = -1;
+      let bestTs = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < mergeSymbols.length; i++) {
+        if (mergeIndices[i] >= mergeArrays[i].length) continue;
+        const ts = mergeArrays[i][mergeIndices[i]].ts.getTime();
+        if (ts < bestTs) {
+          bestTs = ts;
+          bestIdx = i;
+        }
+      }
+      if (bestIdx === -1) break;
+      const eventCandle = mergeArrays[bestIdx][mergeIndices[bestIdx]];
+      const eventKey = mergeSymbols[bestIdx];
+      mergeIndices[bestIdx] += 1;
+
       if (eventIndex > 0 && eventIndex % YIELD_EVERY_EVENTS === 0) {
         await yieldToEventLoop();
       }
@@ -337,25 +332,25 @@ export class BacktestSimulator {
         });
       }
 
-      const event = events[eventIndex];
-      const index = (cursorBySymbol.get(event.key) ?? -1) + 1;
-      cursorBySymbol.set(event.key, index);
+      const index = (cursorBySymbol.get(eventKey) ?? -1) + 1;
+      cursorBySymbol.set(eventKey, index);
 
-      this.currentCandle = event.candle;
-      this.currentTime = event.candle.ts;
-      this.currentIndexBySymbol.set(event.key, index);
+      this.currentCandle = eventCandle;
+      this.currentTime = eventCandle.ts;
+      this.currentIndexBySymbol.set(eventKey, index);
 
-      await this.processPendingOrders(event.candle);
-      await this.processBracketExit(event.candle);
+      await this.processPendingOrders(eventCandle);
+      await this.processBracketExit(eventCandle);
 
-      if (this.hasPendingOrderForSymbol(event.candle.symbol)) {
+      if (this.hasPendingOrderForSymbol(eventCandle.symbol)) {
+        eventIndex += 1;
         continue;
       }
 
       const order = await signalEngine.runForSymbol(
-        event.candle.symbol,
+        eventCandle.symbol,
         await this.getExposureSnapshot(),
-        event.candle.ts,
+        eventCandle.ts,
       );
       this.recordDiagnostic(order, "analyzed", "all");
       if (
@@ -373,6 +368,7 @@ export class BacktestSimulator {
           "rejected_detail",
           this.rejectionDetail(order.reason),
         );
+        eventIndex += 1;
         continue;
       }
       this.recordDiagnostic(order, "proposed", "pass");
@@ -397,19 +393,20 @@ export class BacktestSimulator {
         partialTakeProfits: order.partialTakeProfits,
         trailingStopPct: order.trailingStopPct,
         trailingStopActivationR: order.trailingStopActivationR,
-        generatedFromCandleTs: event.candle.ts,
-        createdAt: event.candle.ts,
+        generatedFromCandleTs: eventCandle.ts,
+        createdAt: eventCandle.ts,
       });
       this.pendingOrders.push({
         id: orderId,
         order,
-        generatedAt: event.candle.ts,
+        generatedAt: eventCandle.ts,
         remainingCandles: this.options.orderTtlCandles,
       });
+      eventIndex += 1;
     }
 
     await progress?.onProgress?.({
-      current: progressBase + events.length,
+      current: progressBase + eventIndex,
       total: progressTotal,
       label: progressLabel,
     });
@@ -1484,7 +1481,7 @@ export async function runIsolatedStrategyBacktest(
   let trades = 0;
   let wins = 0;
   const profiles = listAllStrategyProfiles();
-  const eventsPerStrategy = data.candles1m.length;
+  const eventsPerStrategy = data.candleCount1m;
   const totalEvents = profiles.length * eventsPerStrategy;
 
   for (

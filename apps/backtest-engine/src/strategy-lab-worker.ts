@@ -24,7 +24,7 @@ try {
   });
   const label = `${input.strategyIndex + 1}/${input.strategyTotal} ${input.strategyId}`;
   const metrics = await simulator.run({
-    total: data.candles1m.length,
+    total: data.candleCount1m,
     label,
     onProgress: (progress) => {
       parentPort?.postMessage({

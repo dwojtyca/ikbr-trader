@@ -700,61 +700,59 @@ export class BacktestRepository {
           .filter(Boolean),
       ),
     );
-    const symbolFilter =
-      normalizedSymbols.length > 0 ? " WHERE symbol = ANY($1::text[])" : "";
-    const symbolParams =
-      normalizedSymbols.length > 0 ? [normalizedSymbols] : [];
-    const [
-      oneMinute,
-      fiveMinute,
-      oneHour,
-      fourHour,
-      twelveHour,
-      oneDay,
-      oneWeek,
-      fxRates,
-    ] = await Promise.all([
-      this.pool.query(
-        `SELECT * FROM backtest_candles_1m${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_5m${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_1h${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_4h${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_12h${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_1d${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        `SELECT * FROM backtest_candles_1w${symbolFilter} ORDER BY ts ASC, symbol ASC`,
-        symbolParams,
-      ),
-      this.pool.query(
-        "SELECT * FROM backtest_fx_rates ORDER BY rate_date ASC, quote_currency ASC",
-      ),
-    ]);
+    let targetSymbols: string[];
+    if (normalizedSymbols.length > 0) {
+      targetSymbols = normalizedSymbols;
+    } else {
+      const distinct = await this.pool.query<{ symbol: string }>(
+        "SELECT DISTINCT symbol FROM backtest_candles_1m ORDER BY symbol ASC",
+      );
+      targetSymbols = distinct.rows.map((r) => r.symbol);
+    }
+    const timeframes: Array<{
+      tf: "1m" | "5m" | "1h" | "4h" | "12h" | "1d" | "1w";
+      table: string;
+    }> = [
+      { tf: "1m", table: "backtest_candles_1m" },
+      { tf: "5m", table: "backtest_candles_5m" },
+      { tf: "1h", table: "backtest_candles_1h" },
+      { tf: "4h", table: "backtest_candles_4h" },
+      { tf: "12h", table: "backtest_candles_12h" },
+      { tf: "1d", table: "backtest_candles_1d" },
+      { tf: "1w", table: "backtest_candles_1w" },
+    ];
+    const maps: Record<string, Map<string, Candle[]>> = {};
+    for (const { tf } of timeframes) maps[tf] = new Map();
+    let candleCount1m = 0;
+    for (const symbol of targetSymbols) {
+      for (const { tf, table } of timeframes) {
+        const result = await this.pool.query(
+          `SELECT * FROM ${table} WHERE symbol = $1 ORDER BY ts ASC`,
+          [symbol],
+        );
+        const rows = result.rows;
+        if (rows.length === 0) continue;
+        const mapped: Candle[] = new Array(rows.length);
+        for (let i = 0; i < rows.length; i++) {
+          mapped[i] = mapCandle(rows[i], tf);
+        }
+        maps[tf].set(symbol, mapped);
+        if (tf === "1m") candleCount1m += mapped.length;
+      }
+    }
+    const fxRates = await this.pool.query(
+      "SELECT * FROM backtest_fx_rates ORDER BY rate_date ASC, quote_currency ASC",
+    );
     return {
       dataset,
-      candles1m: oneMinute.rows.map((row) => mapCandle(row, "1m")),
-      candles5m: fiveMinute.rows.map((row) => mapCandle(row, "5m")),
-      candles1h: oneHour.rows.map((row) => mapCandle(row, "1h")),
-      candles4h: fourHour.rows.map((row) => mapCandle(row, "4h")),
-      candles12h: twelveHour.rows.map((row) => mapCandle(row, "12h")),
-      candles1d: oneDay.rows.map((row) => mapCandle(row, "1d")),
-      candles1w: oneWeek.rows.map((row) => mapCandle(row, "1w")),
+      candles1m: maps["1m"],
+      candles5m: maps["5m"],
+      candles1h: maps["1h"],
+      candles4h: maps["4h"],
+      candles12h: maps["12h"],
+      candles1d: maps["1d"],
+      candles1w: maps["1w"],
+      candleCount1m,
       fxRates: fxRates.rows.map(mapFxRate),
     };
   }
