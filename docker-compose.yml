@@ -116,6 +116,10 @@ services:
       BACKTEST_POSTGRES_ADMIN_URL: postgresql://postgres:postgres@postgres:5432/postgres
       BACKTEST_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader_backtest
       IB_SOCKET_HOST: host.docker.internal
+      # Backtest loads multi-year multi-timeframe candles into memory.
+      # 12M+ 1m rows alone need >4GB. Bump Node heap so OOM doesn't kill
+      # the run before it starts.
+      NODE_OPTIONS: "--max-old-space-size=8192"
     depends_on:
       postgres:
         condition: service_healthy
