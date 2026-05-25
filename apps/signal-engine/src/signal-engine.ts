@@ -87,6 +87,10 @@ interface ConfidenceFloor {
 export class SignalEngine {
   private readonly marketRegimeDetector = new MarketRegimeDetector();
   private readonly portfolioManager: StrategyPortfolioManager;
+  private readonly timeframeSnapshotCache = new Map<
+    string,
+    { lastTs: number; snapshot: TimeframeIndicatorSnapshot | undefined }
+  >();
 
   constructor(
     private readonly repo: SignalRepository,
@@ -206,12 +210,12 @@ export class SignalEngine {
       trendFilterSource: trendFrom1h !== undefined ? "EMA50_1h" : "EMA200_1m",
       secType,
       timeframes: {
-        "5m": this.buildTimeframeSnapshot(candles5m),
-        "1h": this.buildTimeframeSnapshot(candles1h),
-        "4h": this.buildTimeframeSnapshot(candles4h),
-        "12h": this.buildTimeframeSnapshot(candles12h),
-        "1d": this.buildTimeframeSnapshot(candles1d),
-        "1w": this.buildTimeframeSnapshot(candles1w),
+        "5m": this.buildTimeframeSnapshot(candles5m, `${symbol}:5m`),
+        "1h": this.buildTimeframeSnapshot(candles1h, `${symbol}:1h`),
+        "4h": this.buildTimeframeSnapshot(candles4h, `${symbol}:4h`),
+        "12h": this.buildTimeframeSnapshot(candles12h, `${symbol}:12h`),
+        "1d": this.buildTimeframeSnapshot(candles1d, `${symbol}:1d`),
+        "1w": this.buildTimeframeSnapshot(candles1w, `${symbol}:1w`),
       },
       intraday: this.buildIntradaySnapshot(candles),
     };
@@ -823,14 +827,23 @@ export class SignalEngine {
 
   private buildTimeframeSnapshot(
     candles: Candle[],
+    cacheKey?: string,
   ): TimeframeIndicatorSnapshot | undefined {
-    if (candles.length < 20) return undefined;
+    if (candles.length < 20) {
+      if (cacheKey) this.timeframeSnapshotCache.delete(cacheKey);
+      return undefined;
+    }
+    const latest = candles[candles.length - 1];
+    const latestTsMs = latest.ts.getTime();
+    if (cacheKey) {
+      const cached = this.timeframeSnapshotCache.get(cacheKey);
+      if (cached && cached.lastTs === latestTsMs) return cached.snapshot;
+    }
 
     const closes = candles.map((candle) => candle.close);
     const highs = candles.map((candle) => candle.high);
     const lows = candles.map((candle) => candle.low);
     const volumes = candles.map((candle) => candle.volume);
-    const latest = candles[candles.length - 1];
     const ema20 = lastEma(closes, 20);
     const ema50 = lastEma(closes, 50);
     const ema200 = lastEma(closes, 200);
@@ -855,7 +868,7 @@ export class SignalEngine {
     )
       trend = "bearish";
 
-    return {
+    const snapshot: TimeframeIndicatorSnapshot = {
       close: latest.close,
       ema20,
       ema50,
@@ -886,6 +899,13 @@ export class SignalEngine {
       return30Pct: this.returnPct(closes, 30),
       return48Pct: this.returnPct(closes, 48),
     };
+    if (cacheKey) {
+      this.timeframeSnapshotCache.set(cacheKey, {
+        lastTs: latestTsMs,
+        snapshot,
+      });
+    }
+    return snapshot;
   }
 
   private returnPct(closes: number[], lookback: number): number | undefined {

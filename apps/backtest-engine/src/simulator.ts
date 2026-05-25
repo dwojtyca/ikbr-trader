@@ -305,7 +305,19 @@ export class BacktestSimulator {
     });
 
     let eventIndex = 0;
+    const perfEnabled = process.env.BACKTEST_PERF === "1";
+    const perf = {
+      merge: 0,
+      pending: 0,
+      bracket: 0,
+      signal: 0,
+      exposure: 0,
+      diag: 0,
+      insertOrder: 0,
+      lastReport: Date.now(),
+    };
     while (true) {
+      const tMerge = perfEnabled ? performance.now() : 0;
       let bestIdx = -1;
       let bestTs = Number.POSITIVE_INFINITY;
       for (let i = 0; i < mergeSymbols.length; i++) {
@@ -320,6 +332,7 @@ export class BacktestSimulator {
       const eventCandle = mergeArrays[bestIdx][mergeIndices[bestIdx]];
       const eventKey = mergeSymbols[bestIdx];
       mergeIndices[bestIdx] += 1;
+      if (perfEnabled) perf.merge += performance.now() - tMerge;
 
       if (eventIndex > 0 && eventIndex % YIELD_EVERY_EVENTS === 0) {
         await yieldToEventLoop();
@@ -330,6 +343,22 @@ export class BacktestSimulator {
           total: progressTotal,
           label: progressLabel,
         });
+        if (perfEnabled) {
+          const now = Date.now();
+          const elapsed = now - perf.lastReport;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[perf] events=${eventIndex} wall=${elapsed}ms merge=${perf.merge.toFixed(0)} pending=${perf.pending.toFixed(0)} bracket=${perf.bracket.toFixed(0)} exposure=${perf.exposure.toFixed(0)} signal=${perf.signal.toFixed(0)} diag=${perf.diag.toFixed(0)} insertOrder=${perf.insertOrder.toFixed(0)} (ms)`,
+          );
+          perf.merge = 0;
+          perf.pending = 0;
+          perf.bracket = 0;
+          perf.exposure = 0;
+          perf.signal = 0;
+          perf.diag = 0;
+          perf.insertOrder = 0;
+          perf.lastReport = now;
+        }
       }
 
       const index = (cursorBySymbol.get(eventKey) ?? -1) + 1;
@@ -339,19 +368,29 @@ export class BacktestSimulator {
       this.currentTime = eventCandle.ts;
       this.currentIndexBySymbol.set(eventKey, index);
 
+      const tPending = perfEnabled ? performance.now() : 0;
       await this.processPendingOrders(eventCandle);
+      if (perfEnabled) perf.pending += performance.now() - tPending;
+      const tBracket = perfEnabled ? performance.now() : 0;
       await this.processBracketExit(eventCandle);
+      if (perfEnabled) perf.bracket += performance.now() - tBracket;
 
       if (this.hasPendingOrderForSymbol(eventCandle.symbol)) {
         eventIndex += 1;
         continue;
       }
 
+      const tExposure = perfEnabled ? performance.now() : 0;
+      const exposure = await this.getExposureSnapshot();
+      if (perfEnabled) perf.exposure += performance.now() - tExposure;
+      const tSignal = perfEnabled ? performance.now() : 0;
       const order = await signalEngine.runForSymbol(
         eventCandle.symbol,
-        await this.getExposureSnapshot(),
+        exposure,
         eventCandle.ts,
       );
+      if (perfEnabled) perf.signal += performance.now() - tSignal;
+      const tDiag = perfEnabled ? performance.now() : 0;
       this.recordDiagnostic(order, "analyzed", "all");
       if (
         order.riskCheckStatus !== "PASS" ||
@@ -368,11 +407,14 @@ export class BacktestSimulator {
           "rejected_detail",
           this.rejectionDetail(order.reason),
         );
+        if (perfEnabled) perf.diag += performance.now() - tDiag;
         eventIndex += 1;
         continue;
       }
       this.recordDiagnostic(order, "proposed", "pass");
+      if (perfEnabled) perf.diag += performance.now() - tDiag;
 
+      const tInsert = perfEnabled ? performance.now() : 0;
       const orderId = await this.repo.insertOrder({
         runId: this.runId,
         instrument: order.instrument,
@@ -402,6 +444,7 @@ export class BacktestSimulator {
         generatedAt: eventCandle.ts,
         remainingCandles: this.options.orderTtlCandles,
       });
+      if (perfEnabled) perf.insertOrder += performance.now() - tInsert;
       eventIndex += 1;
     }
 

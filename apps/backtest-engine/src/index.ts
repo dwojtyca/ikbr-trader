@@ -97,6 +97,7 @@ const partialHistorySchema = z.object({
 
 const runSchema = z.object({
   mode: z.enum(["bot", "isolated"]).default("bot"),
+  symbols: z.array(z.string().min(1)).optional(),
 });
 
 function parseDateStart(value: string): Date {
@@ -706,7 +707,7 @@ app.post("/backtest/run", async (request, reply) => {
                 app.log.info({ scope: "strategy-lab", runId: run.id }, line),
             )
           : await (async () => {
-              const data = await repo.loadBacktestData();
+              const data = await repo.loadBacktestData(parsed.data.symbols);
               return new BacktestSimulator(repo, run.id, data, options).run({
                 total: data.candleCount1m,
                 label: "bot backtest",
