@@ -9,3 +9,6 @@ packages/*/node_modules
 .gitignore
 .DS_Store
 README.md
+.env
+.env.*
+!.env.example

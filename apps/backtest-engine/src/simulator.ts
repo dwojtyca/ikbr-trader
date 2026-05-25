@@ -1672,6 +1672,12 @@ export async function runParallelIsolatedStrategyBacktest(
             symbols: item.symbols,
             options,
           },
+          // Cap each worker's V8 heap so one runaway worker can't
+          // SIGKILL the whole container (each holds its own copy of
+          // the candle dataset).
+          resourceLimits: {
+            maxOldGenerationSizeMb: 6144,
+          },
         },
       );
 
