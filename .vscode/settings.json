@@ -1,0 +1,13 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "pnpm": true,
+    "/^cd /Users/dawidwojtyca/Development/ikbr-trader/apps/signal-engine && node --test \"src/\\*\\*/\\*\\.test\\.ts\" 2>&1 \\| head -200$/": {
+      "approve": true,
+      "matchCommandLine": true
+    },
+    "/^pnpm build && node --test dist/\\*\\*/\\*\\.test\\.js 2>&1 \\| grep -A 5 \"shouldExit\"$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
+}

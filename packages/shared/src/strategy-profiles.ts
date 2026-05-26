@@ -20,6 +20,12 @@ export interface StrategyProfile {
    * by the SignalEngine for this strategy (case-insensitive).
    */
   excludedSymbols?: string[];
+  /**
+   * Whether to evaluate shouldExit() hook for early position closes on this strategy.
+   * Defaults to false. When true, the strategy's shouldExit implementation may
+   * emit exit signals for active positions before TP/SL is hit.
+   */
+  earlyExitEnabled?: boolean;
 }
 
 const PROFILES: StrategyProfile[] = [
@@ -53,6 +59,7 @@ const PROFILES: StrategyProfile[] = [
     quantityFactor: 1.2,
     spreadFactor: 1,
     requireVolume: true,
+    earlyExitEnabled: true,
     // excludedSymbols: ["MSFT"],
   },
   {

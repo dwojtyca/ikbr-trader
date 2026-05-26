@@ -3,6 +3,8 @@ import type {
   Strategy,
   StrategyContext,
   StrategySignal,
+  ExitContext,
+  ExitSignal,
 } from "./strategy.types.js";
 
 interface MomentumBreakdownParams {
@@ -399,6 +401,102 @@ export class MomentumBreakdownShortStrategy implements Strategy {
 
   private reject(reason: string): null {
     this.lastRejectionReason = reason;
+    return null;
+  }
+
+  shouldExit(context: ExitContext): ExitSignal | null {
+    // Hard exit #1: Reclaim prior low + EMA20 on volume
+    // If price closes above max(priorLow20, EMA20) for 2 consecutive candles
+    // with volume >= avg20 * 1.3, the breakdown is invalidated
+    const candles1m = context.candlesByTimeframe["1m"] ?? [];
+    const { ema20, ema50, ema200 } = context.indicators;
+    const { latestCandle } = context;
+    const close = latestCandle.close;
+
+    if (
+      ema20 === undefined ||
+      ema50 === undefined ||
+      ema200 === undefined ||
+      candles1m.length < 2
+    ) {
+      return null;
+    }
+
+    const priorLow20 = previousLow(candles1m, 20);
+    const reclaimLevel = Math.max(priorLow20 ?? close, ema20);
+    const avgVolume20 = averageVolume(candles1m, 20) ?? 0;
+    const reclaimThresholdVolume = avgVolume20 * 1.3;
+
+    // Check last 2 candles for reclaim pattern
+    const last1 = candles1m.at(-1);
+    const last2 = candles1m.at(-2);
+    if (
+      last1 &&
+      last2 &&
+      last1.close > reclaimLevel &&
+      last2.close > reclaimLevel &&
+      last1.volume >= reclaimThresholdVolume
+    ) {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "BUY", // Inverse of SHORT
+        reason:
+          "Hard exit: Prior low + EMA20 reclaimed on 2 candles and volume confirmation",
+        confidenceScore: 0.95,
+        metadata: {
+          exitReason: "reclaim_priorlow_ema20",
+          reclaimLevel,
+          last1Close: last1.close,
+          last2Close: last2.close,
+          reclaimThresholdVolume,
+          last1Volume: last1.volume,
+        },
+      };
+    }
+
+    // Hard exit #2: Regime flip — directionalRegime is no longer bear_trend or
+    // regimeScore has crossed to bullish (above -minRegimeScore/2)
+    if (
+      context.directionalRegime !== "bear_trend" ||
+      (context.indicators.regimeScore !== undefined &&
+        context.indicators.regimeScore > -8 / 2) // minRegimeScore for entry is 8
+    ) {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "BUY",
+        reason:
+          context.directionalRegime !== "bear_trend"
+            ? `Hard exit: Regime flip detected (now ${context.directionalRegime})`
+            : `Hard exit: Regime score bullish (${context.indicators.regimeScore?.toFixed(1)})`,
+        confidenceScore: 0.9,
+        metadata: {
+          exitReason: "regime_flipped_bullish",
+          newDirectionalRegime: context.directionalRegime,
+          regimeScore: context.indicators.regimeScore,
+          regimeConfidence: context.indicators.regimeConfidence,
+        },
+      };
+    }
+
+    // Hard exit #3: 1h trend flipped to bullish
+    const h1 = context.indicators.timeframes?.["1h"];
+    if (h1 && h1.trend === "bullish") {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "BUY",
+        reason: "Hard exit: 1h trend flipped to bullish",
+        confidenceScore: 0.88,
+        metadata: {
+          exitReason: "h1_trend_bullish",
+          h1Trend: h1.trend,
+          h1Rsi: h1.rsi14,
+        },
+      };
+    }
+
     return null;
   }
 }

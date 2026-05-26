@@ -29,6 +29,10 @@ export class StrategyPortfolioManager {
     return this.strategies[0].id;
   }
 
+  getStrategy(id: string): Strategy | undefined {
+    return this.strategies.find((s) => s.id === id);
+  }
+
   run(
     context: StrategyContext,
     activeStrategyIds = new Set(this.strategyIds),

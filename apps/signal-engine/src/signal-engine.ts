@@ -2,6 +2,7 @@ import {
   SecType,
   Candle,
   CandleTimeframe,
+  DirectionalRegime,
   IndicatorSnapshot,
   PartialTakeProfit,
   ProposedOrder,
@@ -9,6 +10,7 @@ import {
   RiskLimits,
   Side,
   TimeframeIndicatorSnapshot,
+  VolatilityRegime,
   findStrategyProfile,
 } from "@ikbr/shared";
 import {
@@ -32,7 +34,12 @@ import {
   SignalPerformanceStats,
   SignalRepository,
 } from "./repository.js";
-import type { Strategy, StrategySignal } from "./strategies/strategy.types.js";
+import type {
+  Strategy,
+  StrategySignal,
+  ExitSignal,
+  ExitContext,
+} from "./strategies/strategy.types.js";
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -350,6 +357,35 @@ export class SignalEngine {
         "HOLD",
         generatedFromCandleTs,
       );
+    }
+
+    // Evaluate early exit (shouldExit) if position is open
+    if (existingPositionQty !== 0) {
+      const exitSignal = await this.evaluateExit(
+        symbol,
+        latest.conid,
+        secType,
+        regimeAnalysis.directionalRegime,
+        regimeAnalysis.volatilityRegime,
+        latest,
+        indicators,
+        candles,
+        candles5m,
+        candles1h,
+        candles4h,
+        candles12h,
+        candles1d,
+        candles1w,
+        marketState,
+        existingPositionQty,
+        positionContext?.averageCost,
+        riskSnapshot,
+        activeStrategyIds,
+        generatedFromCandleTs,
+      );
+      if (exitSignal) {
+        return exitSignal;
+      }
     }
 
     const portfolioResult = this.portfolioManager.run(
@@ -796,6 +832,115 @@ export class SignalEngine {
       cumulative += fraction;
     }
     return out.length > 0 ? out : undefined;
+  }
+
+  private async evaluateExit(
+    symbol: string,
+    conid: string,
+    secType: SecType,
+    directionalRegime: DirectionalRegime,
+    volatilityRegime: VolatilityRegime,
+    latestCandle: Candle,
+    indicators: IndicatorSnapshot,
+    candles1m: Candle[],
+    candles5m: Candle[],
+    candles1h: Candle[],
+    candles4h: Candle[],
+    candles12h: Candle[],
+    candles1d: Candle[],
+    candles1w: Candle[],
+    marketState: { bid?: number; ask?: number; lastPrice: number; spread?: number; ts?: Date | string },
+    existingPositionQty: number,
+    entryPrice: number | undefined,
+    riskSnapshot: ExposureSnapshot,
+    activeStrategyIds: string[],
+    generatedFromCandleTs?: Date,
+  ): Promise<ProposedOrder | null> {
+    // Look up which strategy opened this position (stored in proposed_orders)
+    const positionInfo = await this.repo.getOpenPositionBySymbol(symbol);
+    if (!positionInfo || !positionInfo.strategyId) {
+      return null; // No position info or didn't come from a strategy
+    }
+
+    // Check if this strategy has earlyExitEnabled
+    const profile = findStrategyProfile(positionInfo.strategyId);
+    if (!profile || !profile.earlyExitEnabled) {
+      return null; // Early exit disabled for this strategy
+    }
+
+    // Get the strategy instance
+    const strategy = this.portfolioManager.getStrategy(positionInfo.strategyId);
+    if (!strategy || !strategy.shouldExit) {
+      return null; // Strategy not found or doesn't implement shouldExit
+    }
+
+    // Build ExitContext
+    const exitContext: ExitContext = {
+      symbol,
+      conid,
+      secType,
+      directionalRegime,
+      volatilityRegime,
+      latestCandle,
+      indicators,
+      candlesByTimeframe: {
+        "1m": candles1m,
+        "5m": candles5m,
+        "1h": candles1h,
+        "4h": candles4h,
+        "12h": candles12h,
+        "1d": candles1d,
+        "1w": candles1w,
+      },
+      marketState,
+      currentPosition: {
+        quantity: existingPositionQty,
+        averageCost: entryPrice,
+        marketPrice: marketState.lastPrice,
+      },
+      exposureSnapshot: riskSnapshot,
+      entryPrice,
+      positionQuantity: Math.abs(existingPositionQty),
+    };
+
+    // Evaluate shouldExit
+    const exitSignal = strategy.shouldExit(exitContext);
+    if (!exitSignal) {
+      return null; // No exit signal
+    }
+
+    // Convert ExitSignal to ProposedOrder
+    // Determine the inverted side for closing the position
+    const closeSide: Side = existingPositionQty > 0 ? "SELL" : "BUY";
+    const quantity = Math.abs(existingPositionQty);
+
+    const order: ProposedOrder = {
+      instrument: symbol,
+      conid,
+      side: closeSide,
+      orderType: "MKT",
+      quantity,
+      entry: entryPrice,
+      stop: undefined,
+      takeProfit: undefined,
+      positionEffect: "CLOSE_OR_REDUCE",
+      reason: `Early exit: ${exitSignal.reason}`,
+      confidence: exitSignal.confidenceScore,
+      timestamp: new Date().toISOString(),
+      riskCheckStatus: "PASS",
+      indicators: undefined,
+      strategy: exitSignal.strategyId,
+      status: "PROPOSED",
+      createdAt: new Date(),
+      generatedFromCandleTs,
+      aiReason: exitSignal.metadata
+        ? JSON.stringify(exitSignal.metadata)
+        : undefined,
+    };
+
+    // Persist and return
+    const id = await this.repo.insertProposedOrder(order);
+    return { ...order, id };
   }
 
   private hasRequiredIndicators(indicators: IndicatorSnapshot): boolean {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Candle } from "@ikbr/shared";
 import { MomentumBreakdownShortStrategy } from "./momentum-breakdown-short.strategy.js";
-import type { StrategyContext } from "./strategy.types.js";
+import type { StrategyContext, ExitContext } from "./strategy.types.js";
 
 function candle(index: number, close: number, volume = 10000): Candle {
   return {
@@ -270,4 +270,143 @@ test("MomentumBreakdownShortStrategy rejects breakdown after strong pre-breakdow
     strategy.getLastRejectionReason(),
     "pre_breakdown_drift_too_low",
   );
+});
+
+// shouldExit tests
+
+test("shouldExit emits exit on 2-candle reclaim of priorLow + EMA20 on volume", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const baseCandles = consolidationCandles(20); // 20 consolidation candles
+  const breakdownCandle = candle(20, 101, 15000); // Entry candle
+  const reclaimCandle1 = candle(21, 102.5, 14000); // Reclaim 1, volume > 1.3x avg
+  const reclaimCandle2 = candle(22, 102.8, 14000); // Reclaim 2, sustained volume
+
+  const context: ExitContext = {
+    ...baseContext(),
+    latestCandle: reclaimCandle2,
+    entryPrice: 100.8,
+    positionQuantity: 100,
+    candlesByTimeframe: {
+      "1m": [...baseCandles, breakdownCandle, reclaimCandle1, reclaimCandle2],
+    },
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.ok(exitSignal, "shouldExit should emit exit on reclaim pattern");
+  assert.equal(exitSignal.side, "BUY");
+  assert.match(exitSignal.reason, /Prior low.*reclaim/i);
+});
+
+test("shouldExit ignores single reclaim candle (needs 2 consecutive)", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const baseCandles = consolidationCandles(20);
+  const breakdownCandle = candle(20, 101, 15000);
+  const reclaimCandle1 = candle(21, 102.5, 13000); // Only 1 candle
+  const driftCandle = candle(22, 101.8, 10000); // Drops back down
+
+  const context: ExitContext = {
+    ...baseContext(),
+    latestCandle: driftCandle,
+    entryPrice: 100.8,
+    positionQuantity: 100,
+    candlesByTimeframe: {
+      "1m": [...baseCandles, breakdownCandle, reclaimCandle1, driftCandle],
+    },
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.equal(
+    exitSignal,
+    null,
+    "shouldExit should not exit on single reclaim candle",
+  );
+});
+
+test("shouldExit emits exit on regime flip to non-bear", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const context: ExitContext = {
+    ...baseContext(),
+    directionalRegime: "range", // No longer bear_trend
+    latestCandle: candle(25, 101),
+    entryPrice: 100.8,
+    positionQuantity: 100,
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.ok(exitSignal, "shouldExit should emit on regime flip");
+  assert.equal(exitSignal.side, "BUY");
+  assert.match(exitSignal.reason, /Regime flip/i);
+});
+
+test("shouldExit emits exit on regime score bullish crossover", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const context: ExitContext = {
+    ...baseContext(),
+    indicators: {
+      ...baseContext().indicators,
+      regimeScore: -3, // Above -4 (which is -minRegimeScore/2)
+    },
+    latestCandle: candle(25, 101),
+    entryPrice: 100.8,
+    positionQuantity: 100,
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.ok(
+    exitSignal,
+    "shouldExit should emit on bullish regime score crossover",
+  );
+  assert.equal(exitSignal.side, "BUY");
+  assert.match(exitSignal.reason, /Regime score bullish/i);
+});
+
+test("shouldExit emits exit on 1h trend flip to bullish", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const context: ExitContext = {
+    ...baseContext(),
+    indicators: {
+      ...baseContext().indicators,
+      timeframes: {
+        ...baseContext().indicators.timeframes,
+        "1h": {
+          ...baseContext().indicators.timeframes?.["1h"],
+          trend: "bullish",
+        },
+      },
+    },
+    latestCandle: candle(25, 101),
+    entryPrice: 100.8,
+    positionQuantity: 100,
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.ok(exitSignal, "shouldExit should emit on 1h trend flip");
+  assert.equal(exitSignal.side, "BUY");
+  assert.match(exitSignal.reason, /1h trend flipped/i);
+});
+
+test("shouldExit returns null when no exit conditions met", () => {
+  const strategy = new MomentumBreakdownShortStrategy();
+
+  const baseCandles = consolidationCandles(20);
+  const breakdownCandle = candle(20, 101, 15000);
+  const continuationCandle = candle(21, 100.5, 12000); // Price still falling, regime intact
+
+  const context: ExitContext = {
+    ...baseContext(),
+    latestCandle: continuationCandle,
+    entryPrice: 100.8,
+    positionQuantity: 100,
+    candlesByTimeframe: {
+      "1m": [...baseCandles, breakdownCandle, continuationCandle],
+    },
+  };
+
+  const exitSignal = strategy.shouldExit(context);
+  assert.equal(exitSignal, null, "shouldExit should return null when no exit");
 });

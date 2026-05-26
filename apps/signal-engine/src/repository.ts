@@ -606,6 +606,37 @@ export class SignalRepository {
     };
   }
 
+  async getOpenPositionBySymbol(
+    symbol: string,
+  ): Promise<{ strategyId: string; entryPrice: number | null } | null> {
+    const result = await this.pool.query(
+      `
+      SELECT strategy, entry
+      FROM proposed_orders
+      WHERE UPPER(symbol) = UPPER($1)
+        AND position_effect = 'OPEN_OR_ADD'
+        AND status = 'FILLED'
+      ORDER BY executed_at DESC
+      LIMIT 1
+      `,
+      [symbol],
+    );
+
+    const row = result.rows[0] as
+      | {
+          strategy: string | null;
+          entry: number | null;
+        }
+      | undefined;
+
+    if (!row || !row.strategy) return null;
+
+    return {
+      strategyId: row.strategy,
+      entryPrice: row.entry !== null ? Number(row.entry) : null,
+    };
+  }
+
   async syncStrategyRuntimeStates(
     strategyIds: string[],
     cooldownMs: number,

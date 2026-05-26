@@ -18,6 +18,7 @@ import type {
   LoadedBacktestData,
 } from "./types.js";
 
+
 export interface SimulatorOptions {
   minCandles: number;
   maxSpreadBps: number;

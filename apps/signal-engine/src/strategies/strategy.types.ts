@@ -71,6 +71,7 @@ export interface StrategyContext {
 
 export interface ExitContext extends StrategyContext {
   entryPrice?: number;
+  entryAt?: Date;
   positionQuantity: number;
 }
 
