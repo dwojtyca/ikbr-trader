@@ -2262,10 +2262,7 @@ export function App() {
                           <td>
                             <strong>{trade.symbol}</strong>
                             {trade.currency ? (
-                              <span className="muted">
-                                {" "}
-                                ({trade.currency})
-                              </span>
+                              <span className="muted"> ({trade.currency})</span>
                             ) : null}
                           </td>
                           <td>{trade.strategy ?? "-"}</td>

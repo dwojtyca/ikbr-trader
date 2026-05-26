@@ -243,10 +243,7 @@ async function main(): Promise<void> {
             }
           })
           .catch((err) => {
-            app.log.error(
-              { err },
-              "proposed_orders retention cleanup failed",
-            );
+            app.log.error({ err }, "proposed_orders retention cleanup failed");
           });
       }, config.SIGNAL_REJECTED_CLEANUP_INTERVAL_MS).unref();
     }

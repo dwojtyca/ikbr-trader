@@ -1083,7 +1083,7 @@ Base confidence:
 
 Bonuses:
 
-- `regimeBonus`     up to `+0.05` based on how far `regimeScore` exceeds 10
+- `regimeBonus` up to `+0.05` based on how far `regimeScore` exceeds 10
 - `breakoutCleanlinessBonus` up to `+0.04` based on how cleanly the daily close beat `priorHigh`
 
 Confidence is clamped to:

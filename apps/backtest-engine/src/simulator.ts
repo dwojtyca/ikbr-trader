@@ -289,9 +289,7 @@ export class BacktestSimulator {
     });
 
     const mergeSymbols = [...this.candles1mBySymbol.keys()].sort();
-    const mergeArrays = mergeSymbols.map(
-      (s) => this.candles1mBySymbol.get(s)!,
-    );
+    const mergeArrays = mergeSymbols.map((s) => this.candles1mBySymbol.get(s)!);
     const mergeIndices = new Array<number>(mergeSymbols.length).fill(0);
     const totalEvents = this.data.candleCount1m;
     const cursorBySymbol = new Map<string, number>();

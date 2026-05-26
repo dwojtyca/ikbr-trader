@@ -1,6 +1,6 @@
-import { parentPort, workerData } from 'node:worker_threads';
-import { BacktestRepository } from './repository.js';
-import { BacktestSimulator, type SimulatorOptions } from './simulator.js';
+import { parentPort, workerData } from "node:worker_threads";
+import { BacktestRepository } from "./repository.js";
+import { BacktestSimulator, type SimulatorOptions } from "./simulator.js";
 
 type WorkerData = {
   postgresUrl: string;
@@ -28,18 +28,18 @@ try {
     label,
     onProgress: (progress) => {
       parentPort?.postMessage({
-        type: 'progress',
+        type: "progress",
         strategyId: input.strategyId,
         current: progress.current,
-        total: progress.total
+        total: progress.total,
       });
-    }
+    },
   });
 
   parentPort?.postMessage({
-    type: 'completed',
+    type: "completed",
     strategyId: input.strategyId,
-    metrics
+    metrics,
   });
 } finally {
   await repo.close();

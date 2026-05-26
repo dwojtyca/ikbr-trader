@@ -23,16 +23,16 @@ Strategy specifications: [STRATEGIES.md](STRATEGIES.md).
 
 ### Services
 
-| App | Port | Role |
-|---|---|---|
-| `apps/ingestion` | 3101 | TWS socket, market data, candle aggregation, persistence |
-| `apps/signal-engine` | 3102 | Indicators, regime detection, strategies, risk engine, `proposed_orders` |
-| `apps/execution-engine` | 3103 | TWS execution, bracket orders, account summary, trades view |
-| `apps/backtest-engine` | 3104 | Historical fetch + simulator + strategy lab |
-| `apps/llm-agent` | — | OpenAI + Marketaux EXECUTE/REJECT gate |
-| `apps/ui` | 5173 | Operator dashboard (Vite + React) |
-| `postgres` | 5432 | Live DB `ikbr_trader` + backtest DB `ikbr_trader_backtest` |
-| `redis` | 6379 | Market-state cache |
+| App                     | Port | Role                                                                     |
+| ----------------------- | ---- | ------------------------------------------------------------------------ |
+| `apps/ingestion`        | 3101 | TWS socket, market data, candle aggregation, persistence                 |
+| `apps/signal-engine`    | 3102 | Indicators, regime detection, strategies, risk engine, `proposed_orders` |
+| `apps/execution-engine` | 3103 | TWS execution, bracket orders, account summary, trades view              |
+| `apps/backtest-engine`  | 3104 | Historical fetch + simulator + strategy lab                              |
+| `apps/llm-agent`        | —    | OpenAI + Marketaux EXECUTE/REJECT gate                                   |
+| `apps/ui`               | 5173 | Operator dashboard (Vite + React)                                        |
+| `postgres`              | 5432 | Live DB `ikbr_trader` + backtest DB `ikbr_trader_backtest`               |
+| `redis`                 | 6379 | Market-state cache                                                       |
 
 ---
 
@@ -49,9 +49,9 @@ You will need:
    - Paper port: `4002`. Live port: `4001`.
 3. **Docker Desktop** (or any Docker + Compose v2 setup).
 4. **Node.js 20+** and **pnpm 9+** if you want to run apps natively for development.
-5. *(Optional)* an **OpenAI API key** if you want the LLM execution gate active. Without it, set `LLM_AGENT_ENABLED=false`.
-6. *(Optional)* a **Marketaux API key** (<https://www.marketaux.com/>) for the LLM agent's news context. Free tier is enough for low polling rates.
-7. *(Optional)* a **Telegram bot token + chat id** for alerts.
+5. _(Optional)_ an **OpenAI API key** if you want the LLM execution gate active. Without it, set `LLM_AGENT_ENABLED=false`.
+6. _(Optional)_ a **Marketaux API key** (<https://www.marketaux.com/>) for the LLM agent's news context. Free tier is enough for low polling rates.
+7. _(Optional)_ a **Telegram bot token + chat id** for alerts.
 
 ---
 
