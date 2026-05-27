@@ -67,7 +67,13 @@ const schema = z.object({
     .min(0)
     .default(12 * 60 * 60 * 1000),
   SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default(""),
-  BACKTEST_COMMISSION_BPS: z.coerce.number().min(0).default(5),
+  BACKTEST_COMMISSION_BPS: z.coerce.number().min(0).default(0),
+  // IBKR Tiered defaults: $0.0035/share, $0.35 min/side, ~1 bps pass-through
+  // (exchange + clearing + regulatory). Set BACKTEST_COMMISSION_PER_SHARE=0
+  // to fall back to the legacy bps-only model.
+  BACKTEST_COMMISSION_PER_SHARE: z.coerce.number().min(0).default(0.0035),
+  BACKTEST_COMMISSION_MIN_PER_SIDE: z.coerce.number().min(0).default(0.35),
+  BACKTEST_COMMISSION_PASSTHROUGH_BPS: z.coerce.number().min(0).default(1),
   BACKTEST_SYNTHETIC_SPREAD_BPS: z.coerce.number().min(0).default(2),
   BACKTEST_ORDER_TTL_CANDLES: z.coerce.number().int().min(1).default(2),
   BACKTEST_STRATEGY_LAB_CONCURRENCY: z.coerce

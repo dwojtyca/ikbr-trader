@@ -18,7 +18,6 @@ import type {
   LoadedBacktestData,
 } from "./types.js";
 
-
 export interface SimulatorOptions {
   minCandles: number;
   maxSpreadBps: number;
@@ -35,6 +34,12 @@ export interface SimulatorOptions {
   priceMultiplierBySymbol: Record<string, number>;
   strategyCooldownMs: number;
   commissionBps: number;
+  /** Per-share fee per side (e.g. IBKR Tiered = 0.0035). 0 disables the per-share model. */
+  commissionPerShare: number;
+  /** Minimum commission per side in account base currency (e.g. IBKR Tiered = $0.35). */
+  commissionMinPerSide: number;
+  /** Exchange + clearing + regulatory pass-through, in bps of notional per side. */
+  commissionPassthroughBps: number;
   syntheticSpreadBps: number;
   orderTtlCandles: number;
   strategyIds?: string[];
@@ -598,6 +603,26 @@ export class BacktestSimulator {
     };
   }
 
+  async getOpenPositionBySymbol(
+    symbol: string,
+  ): Promise<{ strategyId: string; entryPrice: number | null } | null> {
+    const position = this.positions.get(symbol.toUpperCase());
+    if (!position) return null;
+    return {
+      strategyId: position.strategy,
+      entryPrice: Number.isFinite(position.averageCost)
+        ? position.averageCost
+        : null,
+    };
+  }
+
+  async insertProposedOrder(_order: ProposedOrder): Promise<number> {
+    // Backtest persists accepted orders once in the main run loop after
+    // SignalEngine returns them. Keep this adapter side-effect free so early
+    // exit evaluation can reuse SignalEngine without duplicating backtest rows.
+    return 0;
+  }
+
   async syncStrategyRuntimeStates(strategyIds: string[]): Promise<void> {
     for (const strategyId of strategyIds) {
       if (!this.strategyStates.has(strategyId)) {
@@ -1078,7 +1103,8 @@ export class BacktestSimulator {
           priceMultiplier *
           exitFxToBase;
     const commission =
-      ((entryNotional + exitNotional) * this.options.commissionBps) / 10000;
+      this.commissionForSide(closeQtyAbs, entryNotional) +
+      this.commissionForSide(closeQtyAbs, exitNotional);
     const netPnl = grossPnl - commission;
     const pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
 
@@ -1162,7 +1188,8 @@ export class BacktestSimulator {
           priceMultiplier *
           exitFxToBase;
     const commission =
-      ((entryNotional + exitNotional) * this.options.commissionBps) / 10000;
+      this.commissionForSide(quantityAbs, entryNotional) +
+      this.commissionForSide(quantityAbs, exitNotional);
     const netPnl = grossPnl - commission;
     const pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
 
@@ -1446,6 +1473,25 @@ export class BacktestSimulator {
     const multiplier =
       this.options.priceMultiplierBySymbol[symbol.toUpperCase()];
     return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+  }
+
+  /**
+   * Estimate broker commission for a single side of a trade.
+   * Mirrors the IBKR Tiered model:
+   *   per_side = max(min_per_side, shares * per_share + notional * passthrough_bps / 10000)
+   * Falls back to a flat bps-of-notional model when commissionPerShare = 0
+   * (legacy behaviour).
+   */
+  private commissionForSide(shares: number, notional: number): number {
+    const sharesAbs = Math.abs(shares);
+    const notionalAbs = Math.abs(notional);
+    if (this.options.commissionPerShare > 0) {
+      const variable =
+        sharesAbs * this.options.commissionPerShare +
+        (notionalAbs * this.options.commissionPassthroughBps) / 10000;
+      return Math.max(this.options.commissionMinPerSide, variable);
+    }
+    return (notionalAbs * this.options.commissionBps) / 10000;
   }
 
   private currencyForSymbol(symbol: string): string {

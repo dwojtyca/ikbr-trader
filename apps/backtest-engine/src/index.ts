@@ -138,6 +138,9 @@ async function simulatorOptions() {
     priceMultiplierBySymbol: config.priceMultiplierOverrides,
     strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
     commissionBps: config.BACKTEST_COMMISSION_BPS,
+    commissionPerShare: config.BACKTEST_COMMISSION_PER_SHARE,
+    commissionMinPerSide: config.BACKTEST_COMMISSION_MIN_PER_SIDE,
+    commissionPassthroughBps: config.BACKTEST_COMMISSION_PASSTHROUGH_BPS,
     syntheticSpreadBps: config.BACKTEST_SYNTHETIC_SPREAD_BPS,
     orderTtlCandles: config.BACKTEST_ORDER_TTL_CANDLES,
     riskLimits: {
