@@ -135,6 +135,8 @@ export interface Trade {
   exitCommission: number;
   realizedPnl: number;
   realizedPnlPct: number | null;
+  stop: number | null;
+  takeProfit: number | null;
   proposedOrderId: number | null;
   entryBrokerOrderId: string | null;
   exitBrokerOrderIds: string[];
@@ -1503,8 +1505,10 @@ export class ExecutionRepository {
         r.proposed_order_id != null ? Number(r.proposed_order_id) : null,
     }));
 
+    type TradeSide = "LONG" | "SHORT";
     interface OpenLot {
       tradeKey: string;
+      side: TradeSide;
       symbol: string;
       currency: string | null;
       proposedOrderId: number | null;
@@ -1512,7 +1516,7 @@ export class ExecutionRepository {
       entryAt: Date;
       remaining: number;
       qtyOpened: number;
-      entryNotional: number; // shares * price
+      entryNotional: number; // shares * price (price = buy price for LONG, sell price for SHORT)
       entryCommission: number;
       entryFillCount: number;
       strategy: string | null;
@@ -1523,6 +1527,7 @@ export class ExecutionRepository {
     }
     interface AccTrade {
       tradeKey: string;
+      side: TradeSide;
       symbol: string;
       currency: string | null;
       proposedOrderId: number | null;
@@ -1548,13 +1553,17 @@ export class ExecutionRepository {
     }
 
     const tradesByKey = new Map<string, AccTrade>();
-    const openLotsBySymbol = new Map<string, OpenLot[]>();
+    // Separate FIFO queues per direction so SELL-to-open (short) does not
+    // get matched against existing LONG lots and vice versa.
+    const openLongsBySymbol = new Map<string, OpenLot[]>();
+    const openShortsBySymbol = new Map<string, OpenLot[]>();
 
     const ensureTrade = (lot: OpenLot): AccTrade => {
       let t = tradesByKey.get(lot.tradeKey);
       if (!t) {
         t = {
           tradeKey: lot.tradeKey,
+          side: lot.side,
           symbol: lot.symbol,
           currency: lot.currency,
           proposedOrderId: lot.proposedOrderId,
@@ -1583,6 +1592,65 @@ export class ExecutionRepository {
       return t;
     };
 
+    const openOrExtendLot = (
+      openLotsBySymbol: Map<string, OpenLot[]>,
+      side: TradeSide,
+      row: Omit<FillRow, "proposed_order_id"> & {
+        proposed_order_id: number | null;
+      },
+      executedAt: Date,
+      symbol: string,
+      qty: number,
+      price: number,
+      commission: number,
+    ): void => {
+      const tradeKeyPrefix = side === "LONG" ? "prop" : "short-prop";
+      const brokerPrefix = side === "LONG" ? "broker" : "short-broker";
+      const tradeKey = row.proposed_order_id
+        ? `${tradeKeyPrefix}-${row.proposed_order_id}`
+        : `${brokerPrefix}-${row.broker_order_id ?? row.exec_id}`;
+      const lots = openLotsBySymbol.get(symbol) ?? [];
+      const lastLot = lots.length > 0 ? lots[lots.length - 1] : undefined;
+      let lot: OpenLot;
+      if (!lastLot || lastLot.tradeKey !== tradeKey) {
+        lot = {
+          tradeKey,
+          side,
+          symbol,
+          currency: row.currency,
+          proposedOrderId: row.proposed_order_id,
+          entryBrokerOrderId: row.broker_order_id,
+          entryAt: executedAt,
+          remaining: 0,
+          qtyOpened: 0,
+          entryNotional: 0,
+          entryCommission: 0,
+          entryFillCount: 0,
+          strategy: row.strategy,
+          entryReason: row.entry_reason,
+          aiReason: row.ai_reason,
+          aiDecision: row.ai_decision,
+          decisionSource: row.decision_source,
+        };
+        lots.push(lot);
+        openLotsBySymbol.set(symbol, lots);
+      } else {
+        lot = lastLot;
+      }
+      lot.remaining += qty;
+      lot.qtyOpened += qty;
+      lot.entryNotional += qty * price;
+      lot.entryCommission += commission;
+      lot.entryFillCount += 1;
+
+      const trade = ensureTrade(lot);
+      trade.qtyOpened += qty;
+      trade.qtyOpenRemaining += qty;
+      trade.entryNotional += qty * price;
+      trade.entryCommission += commission;
+      trade.entryFillCount += 1;
+    };
+
     for (const row of rows) {
       const executedAt =
         row.executed_at instanceof Date
@@ -1594,110 +1662,66 @@ export class ExecutionRepository {
       const shares = Number(row.shares);
       const commission = row.commission != null ? Number(row.commission) : 0;
       const symbol = row.symbol;
+      const realizedFromBroker = row.realized_pnl;
 
-      if (row.side === "BUY") {
-        const tradeKey = row.proposed_order_id
-          ? `prop-${row.proposed_order_id}`
-          : `broker-${row.broker_order_id ?? row.exec_id}`;
-        const lots = openLotsBySymbol.get(symbol) ?? [];
-        // If most recent lot has same tradeKey, fold into it; else push new.
-        let lot = lots.length > 0 ? lots[lots.length - 1] : undefined;
-        if (!lot || lot.tradeKey !== tradeKey) {
-          lot = {
-            tradeKey,
-            symbol,
-            currency: row.currency,
-            proposedOrderId: row.proposed_order_id,
-            entryBrokerOrderId: row.broker_order_id,
-            entryAt: executedAt,
-            remaining: 0,
-            qtyOpened: 0,
-            entryNotional: 0,
-            entryCommission: 0,
-            entryFillCount: 0,
-            strategy: row.strategy,
-            entryReason: row.entry_reason,
-            aiReason: row.ai_reason,
-            aiDecision: row.ai_decision,
-            decisionSource: row.decision_source,
-          };
-          lots.push(lot);
-          openLotsBySymbol.set(symbol, lots);
-        }
-        lot.remaining += shares;
-        lot.qtyOpened += shares;
-        lot.entryNotional += shares * price;
-        lot.entryCommission += commission;
-        lot.entryFillCount += 1;
+      // BUY closes existing SHORT lots first (cover), then opens/extends LONG.
+      // SELL closes existing LONG lots first, then opens/extends SHORT.
+      const closingLots =
+        row.side === "BUY"
+          ? (openShortsBySymbol.get(symbol) ?? [])
+          : (openLongsBySymbol.get(symbol) ?? []);
 
-        const trade = ensureTrade(lot);
-        trade.qtyOpened += shares;
-        trade.qtyOpenRemaining += shares;
-        trade.entryNotional += shares * price;
-        trade.entryCommission += commission;
-        trade.entryFillCount += 1;
-      } else {
-        // SELL: FIFO close against open lots
-        let toClose = shares;
-        let commissionRemaining = commission;
-        const realizedFromBroker = row.realized_pnl;
-        const lots = openLotsBySymbol.get(symbol) ?? [];
-        while (toClose > 0 && lots.length > 0) {
-          const lot = lots[0];
-          const close = Math.min(toClose, lot.remaining);
-          const trade = tradesByKey.get(lot.tradeKey);
-          if (!trade) break;
-          // Allocate exit commission proportionally to this slice.
-          const commAlloc =
-            shares > 0 ? commissionRemaining * (close / shares) : 0;
-          trade.qtyClosed += close;
-          trade.qtyOpenRemaining -= close;
-          trade.exitNotional += close * price;
-          trade.exitCommission += commAlloc;
-          trade.exitFillCount += 1;
-          if (row.broker_order_id) {
-            trade.exitBrokerOrderIds.add(row.broker_order_id);
-          }
-          if (!trade.exitAt || executedAt > trade.exitAt) {
-            trade.exitAt = executedAt;
-          }
-          // Prefer broker-supplied realized_pnl (FIFO, fee-aware) if present;
-          // it is allocated proportionally for partial fills.
-          if (realizedFromBroker != null && shares > 0) {
-            trade.realizedPnl += Number(realizedFromBroker) * (close / shares);
-          }
-          lot.remaining -= close;
-          toClose -= close;
-          if (lot.remaining <= 0) lots.shift();
+      let toClose = shares;
+      while (toClose > 0 && closingLots.length > 0) {
+        const lot = closingLots[0];
+        const close = Math.min(toClose, lot.remaining);
+        const trade = tradesByKey.get(lot.tradeKey);
+        if (!trade) break;
+        const commAlloc = shares > 0 ? commission * (close / shares) : 0;
+        trade.qtyClosed += close;
+        trade.qtyOpenRemaining -= close;
+        trade.exitNotional += close * price;
+        trade.exitCommission += commAlloc;
+        trade.exitFillCount += 1;
+        if (row.broker_order_id) {
+          trade.exitBrokerOrderIds.add(row.broker_order_id);
         }
-        if (toClose > 0) {
-          // SELL without matching BUY (short-open). Track as standalone trade.
-          const tradeKey = `short-${row.broker_order_id ?? row.exec_id}`;
-          const lot: OpenLot = {
-            tradeKey,
+        if (!trade.exitAt || executedAt > trade.exitAt) {
+          trade.exitAt = executedAt;
+        }
+        if (realizedFromBroker != null && shares > 0) {
+          trade.realizedPnl += Number(realizedFromBroker) * (close / shares);
+        }
+        lot.remaining -= close;
+        toClose -= close;
+        if (lot.remaining <= 0) closingLots.shift();
+      }
+
+      if (toClose > 0) {
+        const qty = toClose;
+        const commAlloc = shares > 0 ? commission * (qty / shares) : commission;
+        if (row.side === "BUY") {
+          openOrExtendLot(
+            openLongsBySymbol,
+            "LONG",
+            row,
+            executedAt,
             symbol,
-            currency: row.currency,
-            proposedOrderId: row.proposed_order_id,
-            entryBrokerOrderId: row.broker_order_id,
-            entryAt: executedAt,
-            remaining: 0,
-            qtyOpened: 0,
-            entryNotional: 0,
-            entryCommission: 0,
-            entryFillCount: 0,
-            strategy: row.strategy,
-            entryReason: row.entry_reason,
-            aiReason: row.ai_reason,
-            aiDecision: row.ai_decision,
-            decisionSource: row.decision_source,
-          };
-          const trade = ensureTrade(lot);
-          // We don't model short positions deeply: mark qtyOpened as
-          // negative-style and rely on broker realized_pnl.
-          trade.qtyOpened += toClose;
-          trade.entryNotional += toClose * price;
-          trade.entryCommission += commission * (toClose / shares);
-          trade.entryFillCount += 1;
+            qty,
+            price,
+            commAlloc,
+          );
+        } else {
+          openOrExtendLot(
+            openShortsBySymbol,
+            "SHORT",
+            row,
+            executedAt,
+            symbol,
+            qty,
+            price,
+            commAlloc,
+          );
         }
       }
     }
@@ -1710,10 +1734,15 @@ export class ExecutionRepository {
         trade.qtyOpened > 0 ? trade.entryNotional / trade.qtyOpened : 0;
       const avgExit =
         trade.qtyClosed > 0 ? trade.exitNotional / trade.qtyClosed : null;
-      // If broker realized_pnl missing, compute (sell - buy) * matched - commissions.
+      // If broker realized_pnl missing, compute from prices and commissions.
+      // For LONG: (sell - buy) * matched; for SHORT: (sell - buy) where
+      // entryNotional was sell-side and exitNotional was buy-side.
       let realized = trade.realizedPnl;
       if (realized === 0 && trade.qtyClosed > 0 && avgExit !== null) {
-        const gross = (avgExit - avgEntry) * trade.qtyClosed;
+        const gross =
+          trade.side === "LONG"
+            ? (avgExit - avgEntry) * trade.qtyClosed
+            : (avgEntry - avgExit) * trade.qtyClosed;
         const buyCommAlloc =
           trade.qtyOpened > 0
             ? trade.entryCommission * (trade.qtyClosed / trade.qtyOpened)
@@ -1729,7 +1758,7 @@ export class ExecutionRepository {
         symbol: trade.symbol,
         currency: trade.currency,
         status: closed ? "CLOSED" : "OPEN",
-        side: "LONG",
+        side: trade.side,
         qtyOpened: trade.qtyOpened,
         qtyClosed: trade.qtyClosed,
         qtyOpenRemaining: trade.qtyOpenRemaining,
@@ -1744,6 +1773,8 @@ export class ExecutionRepository {
         exitCommission: trade.exitCommission,
         realizedPnl: realized,
         realizedPnlPct: pnlPct,
+        stop: null,
+        takeProfit: null,
         proposedOrderId: trade.proposedOrderId,
         entryBrokerOrderId: trade.entryBrokerOrderId,
         exitBrokerOrderIds: Array.from(trade.exitBrokerOrderIds),
@@ -1758,7 +1789,47 @@ export class ExecutionRepository {
     }
 
     result.sort((a, b) => b.entryAt.getTime() - a.entryAt.getTime());
-    return result.slice(0, safeLimit);
+    const trimmed = result.slice(0, safeLimit);
+
+    // Enrich with stop / take_profit from the originating proposed_orders.
+    const proposedOrderIds = Array.from(
+      new Set(
+        trimmed
+          .map((t) => t.proposedOrderId)
+          .filter((id): id is number => id != null),
+      ),
+    );
+    if (proposedOrderIds.length > 0) {
+      const bracketRows = await this.pool.query(
+        `SELECT id, stop, take_profit FROM proposed_orders WHERE id = ANY($1::int[])`,
+        [proposedOrderIds],
+      );
+      const bracketById = new Map<
+        number,
+        { stop: number | null; takeProfit: number | null }
+      >();
+      for (const row of bracketRows.rows as Array<{
+        id: number;
+        stop: number | string | null;
+        take_profit: number | string | null;
+      }>) {
+        bracketById.set(Number(row.id), {
+          stop: row.stop != null ? Number(row.stop) : null,
+          takeProfit: row.take_profit != null ? Number(row.take_profit) : null,
+        });
+      }
+      for (const trade of trimmed) {
+        if (trade.proposedOrderId != null) {
+          const bracket = bracketById.get(trade.proposedOrderId);
+          if (bracket) {
+            trade.stop = bracket.stop;
+            trade.takeProfit = bracket.takeProfit;
+          }
+        }
+      }
+    }
+
+    return trimmed;
   }
 
   /**

@@ -324,6 +324,8 @@ type Trade = {
   exitCommission: number;
   realizedPnl: number;
   realizedPnlPct: number | null;
+  stop: number | null;
+  takeProfit: number | null;
   proposedOrderId: number | null;
   entryBrokerOrderId: string | null;
   exitBrokerOrderIds: string[];
@@ -1025,33 +1027,6 @@ export function App() {
     for (const order of proposed) {
       await executeOrder(order.id as number);
     }
-  }
-
-  async function executePositionExit(position: AccountPositionSnapshot) {
-    const qty = Math.abs(position.position);
-    if (!(qty > 0)) return;
-
-    const side: "BUY" | "SELL" = position.position > 0 ? "SELL" : "BUY";
-    const positionEffect: "CLOSE_OR_REDUCE" = "CLOSE_OR_REDUCE";
-
-    await requestJson("/api/execution/execution/execute-ticket", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        ticket: {
-          instrument: position.symbol,
-          conid: position.conid,
-          side,
-          positionEffect,
-          orderType: "MKT",
-          quantity: qty,
-          reason: `Manual close/reduce from UI (${side})`,
-          confidence: 1,
-          riskCheckStatus: "PASS",
-        },
-        persist: true,
-      }),
-    });
   }
 
   useEffect(() => {
@@ -2028,105 +2003,6 @@ export function App() {
                     value={formatNum(accountSummary.totals.grossExposure)}
                   />
                 </div>
-
-                <div className="panel-head compact">
-                  <h3>Open Positions</h3>
-                  <span>
-                    {accountSummary.totals.positionsCount} positions, updated{" "}
-                    {formatTs(accountSummary.retrievedAt)}
-                  </span>
-                </div>
-
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Symbol</th>
-                        <th>Conid</th>
-                        <th>Qty</th>
-                        <th>Price</th>
-                        <th>Market Value</th>
-                        <th>Avg Cost</th>
-                        <th>Unrealized PnL (base)</th>
-                        <th>Realized PnL (base)</th>
-                        <th>Exchange</th>
-                        <th>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {accountSummary.positions.length === 0 ? (
-                        <tr>
-                          <td colSpan={10} className="muted">
-                            No open positions
-                          </td>
-                        </tr>
-                      ) : (
-                        accountSummary.positions.map((position) => (
-                          <tr
-                            key={`${position.conid ?? position.symbol}-${position.symbol}`}
-                          >
-                            <td>{position.symbol}</td>
-                            <td>{position.conid ?? "-"}</td>
-                            <td>{formatQty(position.position)}</td>
-                            <td>{formatNum(position.marketPrice)}</td>
-                            <td>{formatNum(position.marketValue)}</td>
-                            <td>{formatNum(position.averageCost)}</td>
-                            <td
-                              className={toToneClass(
-                                position.unrealizedPnLBase ??
-                                  position.unrealizedPnL,
-                              )}
-                            >
-                              {formatNum(
-                                position.unrealizedPnLBase ??
-                                  position.unrealizedPnL,
-                              )}
-                            </td>
-                            <td
-                              className={toToneClass(
-                                position.realizedPnLBase ??
-                                  position.realizedPnL,
-                              )}
-                            >
-                              {formatNum(
-                                position.realizedPnLBase ??
-                                  position.realizedPnL,
-                              )}
-                            </td>
-                            <td>{position.exchange ?? "-"}</td>
-                            <td>
-                              <button
-                                disabled={
-                                  Boolean(busyAction) ||
-                                  !(Math.abs(position.position) > 0)
-                                }
-                                onClick={() => {
-                                  const side =
-                                    position.position > 0 ? "SELL" : "BUY";
-                                  const qty = Math.abs(position.position);
-                                  const verb =
-                                    side === "SELL" ? "Sell" : "Buy to cover";
-                                  const confirmed = window.confirm(
-                                    `${verb} ${qty} ${position.symbol} (MKT)?`,
-                                  );
-                                  if (!confirmed) return;
-                                  void handleAction(
-                                    `${verb} ${position.symbol}`,
-                                    async () => executePositionExit(position),
-                                  );
-                                }}
-                              >
-                                {position.position > 0
-                                  ? "Sell"
-                                  : "Buy to cover"}
-                              </button>
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
               </>
             ) : (
               <div className="muted">
@@ -2223,6 +2099,8 @@ export function App() {
                     <th>Side</th>
                     <th>Qty</th>
                     <th>Entry</th>
+                    <th>SL</th>
+                    <th>TP</th>
                     <th>Exit</th>
                     <th>P&amp;L</th>
                     <th>P&amp;L %</th>
@@ -2236,18 +2114,12 @@ export function App() {
                 <tbody>
                   {trades.length === 0 ? (
                     <tr>
-                      <td colSpan={13} className="muted">
+                      <td colSpan={15} className="muted">
                         No executed trades yet
                       </td>
                     </tr>
                   ) : (
                     trades.map((trade) => {
-                      const pnlColor =
-                        trade.realizedPnl > 0
-                          ? "#10b981"
-                          : trade.realizedPnl < 0
-                            ? "#f87171"
-                            : "inherit";
                       const fmtHold = (ms: number | null) => {
                         if (ms == null) return "-";
                         const s = Math.floor(ms / 1000);
@@ -2257,6 +2129,44 @@ export function App() {
                         const h = Math.floor(m / 60);
                         return `${h}h ${m % 60}m`;
                       };
+                      const stopLoss = trade.stop;
+                      const takeProfit = trade.takeProfit;
+                      const livePosition =
+                        trade.status === "OPEN"
+                          ? accountSummary?.positions.find(
+                              (p) =>
+                                p.symbol.toUpperCase() ===
+                                trade.symbol.toUpperCase(),
+                            )
+                          : undefined;
+                      const isShort = trade.side === "SHORT";
+                      const directionSign = isShort ? -1 : 1;
+                      let displayPnl: number | null = null;
+                      let displayPnlPct: number | null = null;
+                      let pnlIsLive = false;
+                      if (
+                        trade.status === "OPEN" &&
+                        livePosition?.marketPrice != null &&
+                        trade.qtyOpenRemaining > 0 &&
+                        trade.avgEntryPrice > 0
+                      ) {
+                        const priceDelta =
+                          (livePosition.marketPrice - trade.avgEntryPrice) *
+                          directionSign;
+                        displayPnl = priceDelta * trade.qtyOpenRemaining;
+                        displayPnlPct =
+                          (priceDelta / trade.avgEntryPrice) * 100;
+                        pnlIsLive = true;
+                      } else if (trade.qtyClosed > 0) {
+                        displayPnl = trade.realizedPnl;
+                        displayPnlPct = trade.realizedPnlPct;
+                      }
+                      const pnlColor =
+                        displayPnl != null && displayPnl > 0
+                          ? "#10b981"
+                          : displayPnl != null && displayPnl < 0
+                            ? "#f87171"
+                            : "inherit";
                       return (
                         <tr key={trade.tradeKey}>
                           <td>
@@ -2279,18 +2189,26 @@ export function App() {
                           </td>
                           <td>{trade.avgEntryPrice.toFixed(2)}</td>
                           <td>
+                            {stopLoss != null ? stopLoss.toFixed(2) : "-"}
+                          </td>
+                          <td>
+                            {takeProfit != null
+                              ? takeProfit.toFixed(2)
+                              : "-"}
+                          </td>
+                          <td>
                             {trade.avgExitPrice != null
                               ? trade.avgExitPrice.toFixed(2)
                               : "-"}
                           </td>
                           <td style={{ color: pnlColor, fontWeight: 600 }}>
-                            {trade.qtyClosed > 0
-                              ? `${trade.realizedPnl >= 0 ? "+" : ""}${trade.realizedPnl.toFixed(2)}`
+                            {displayPnl != null
+                              ? `${displayPnl >= 0 ? "+" : ""}${displayPnl.toFixed(2)}${pnlIsLive ? "*" : ""}`
                               : "-"}
                           </td>
                           <td style={{ color: pnlColor }}>
-                            {trade.realizedPnlPct != null
-                              ? `${trade.realizedPnlPct >= 0 ? "+" : ""}${trade.realizedPnlPct.toFixed(2)}%`
+                            {displayPnlPct != null
+                              ? `${displayPnlPct >= 0 ? "+" : ""}${displayPnlPct.toFixed(2)}%`
                               : "-"}
                           </td>
                           <td>{fmtHold(trade.holdMs)}</td>
