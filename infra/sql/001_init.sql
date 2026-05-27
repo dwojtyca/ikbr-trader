@@ -99,7 +99,7 @@ ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS executed_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS signal_outcomes (
   id BIGSERIAL PRIMARY KEY,
-  proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id),
+  proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id) ON DELETE CASCADE,
   evaluated_at TIMESTAMPTZ NOT NULL,
   pnl_pct DOUBLE PRECISION,
   hit_stop BOOLEAN,
@@ -121,7 +121,7 @@ ON proposed_orders (processing_claimed_at DESC);
 
 CREATE TABLE IF NOT EXISTS llm_order_decisions (
   id BIGSERIAL PRIMARY KEY,
-  proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id),
+  proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id) ON DELETE CASCADE,
   symbol TEXT NOT NULL,
   decision TEXT NOT NULL,
   decision_reason TEXT NOT NULL,

@@ -46,7 +46,7 @@ export class LlmAgentRepository {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS llm_order_decisions (
         id BIGSERIAL PRIMARY KEY,
-        proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id),
+        proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id) ON DELETE CASCADE,
         symbol TEXT NOT NULL,
         decision TEXT NOT NULL,
         decision_reason TEXT NOT NULL,
@@ -60,6 +60,25 @@ export class LlmAgentRepository {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+
+    // Older deployments created this table without ON DELETE CASCADE, which
+    // broke proposed_orders retention cleanup. Re-add the FK with CASCADE
+    // semantics if the existing constraint lacks it.
+    await this.pool
+      .query(
+        `ALTER TABLE llm_order_decisions
+         DROP CONSTRAINT IF EXISTS llm_order_decisions_proposed_order_id_fkey;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE llm_order_decisions
+         ADD CONSTRAINT llm_order_decisions_proposed_order_id_fkey
+         FOREIGN KEY (proposed_order_id)
+         REFERENCES proposed_orders(id)
+         ON DELETE CASCADE;`,
+      )
+      .catch(() => undefined);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS llm_order_decisions_order_idx

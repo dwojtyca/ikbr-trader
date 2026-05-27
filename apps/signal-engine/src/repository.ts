@@ -395,7 +395,7 @@ export class SignalRepository {
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS signal_outcomes (
         id BIGSERIAL PRIMARY KEY,
-        proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id),
+        proposed_order_id BIGINT NOT NULL REFERENCES proposed_orders(id) ON DELETE CASCADE,
         evaluated_at TIMESTAMPTZ NOT NULL,
         pnl_pct DOUBLE PRECISION,
         hit_stop BOOLEAN,
@@ -403,6 +403,24 @@ export class SignalRepository {
         notes TEXT
       );
     `);
+
+    // Older deployments created this table without ON DELETE CASCADE, which
+    // broke proposed_orders retention cleanup. Re-add the FK with CASCADE.
+    await this.pool
+      .query(
+        `ALTER TABLE signal_outcomes
+         DROP CONSTRAINT IF EXISTS signal_outcomes_proposed_order_id_fkey;`,
+      )
+      .catch(() => undefined);
+    await this.pool
+      .query(
+        `ALTER TABLE signal_outcomes
+         ADD CONSTRAINT signal_outcomes_proposed_order_id_fkey
+         FOREIGN KEY (proposed_order_id)
+         REFERENCES proposed_orders(id)
+         ON DELETE CASCADE;`,
+      )
+      .catch(() => undefined);
 
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS signal_outcomes_order_idx
