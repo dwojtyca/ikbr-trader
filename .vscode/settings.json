@@ -8,6 +8,7 @@
     "/^pnpm build && node --test dist/\\*\\*/\\*\\.test\\.js 2>&1 \\| grep -A 5 \"shouldExit\"$/": {
       "approve": true,
       "matchCommandLine": true
-    }
+    },
+    "docker compose": true
   }
 }

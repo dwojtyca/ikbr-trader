@@ -849,7 +849,13 @@ export class SignalEngine {
     candles12h: Candle[],
     candles1d: Candle[],
     candles1w: Candle[],
-    marketState: { bid?: number; ask?: number; lastPrice: number; spread?: number; ts?: Date | string },
+    marketState: {
+      bid?: number;
+      ask?: number;
+      lastPrice: number;
+      spread?: number;
+      ts?: Date | string;
+    },
     existingPositionQty: number,
     entryPrice: number | undefined,
     riskSnapshot: ExposureSnapshot,
