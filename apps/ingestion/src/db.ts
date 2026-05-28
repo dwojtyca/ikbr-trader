@@ -1,11 +1,19 @@
-import { Pool } from 'pg';
-import { Candle, InstrumentContract, MarketState } from '@ikbr/shared';
+import { Pool } from "pg";
+import { Candle, InstrumentContract, MarketState } from "@ikbr/shared";
 
 export class MarketRepository {
   constructor(private readonly pool: Pool) {}
 
   async init(): Promise<void> {
-    for (const timeframe of ['1m', '5m', '1h', '4h', '12h', '1d', '1w'] as const) {
+    for (const timeframe of [
+      "1m",
+      "5m",
+      "1h",
+      "4h",
+      "12h",
+      "1d",
+      "1w",
+    ] as const) {
       const table = this.tableForTimeframe(timeframe);
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
@@ -90,8 +98,8 @@ export class MarketRepository {
         contract.displayName ?? null,
         contract.contractJson ?? null,
         contract.detailsJson ?? null,
-        contract.source
-      ]
+        contract.source,
+      ],
     );
   }
 
@@ -117,16 +125,22 @@ export class MarketRepository {
         candle.high,
         candle.low,
         candle.close,
-        candle.volume
-      ]
+        candle.volume,
+      ],
     );
   }
 
-  async writeMarketState(redis: { set: (k: string, v: string) => Promise<unknown> }, state: MarketState): Promise<void> {
+  async writeMarketState(
+    redis: { set: (k: string, v: string) => Promise<unknown> },
+    state: MarketState,
+  ): Promise<void> {
     await redis.set(`market-state:${state.conid}`, JSON.stringify(state));
   }
 
-  async readMarketState(redis: { get: (k: string) => Promise<string | null> }, conid: string): Promise<MarketState | null> {
+  async readMarketState(
+    redis: { get: (k: string) => Promise<string | null> },
+    conid: string,
+  ): Promise<MarketState | null> {
     const raw = await redis.get(`market-state:${conid}`);
     if (!raw) return null;
 
@@ -148,14 +162,46 @@ export class MarketRepository {
         bid: parsed.bid,
         ask: parsed.ask,
         spread: parsed.spread,
-        ts: new Date(parsed.ts)
+        ts: new Date(parsed.ts),
       };
     } catch {
       return null;
     }
   }
 
-  async getLatestCandles1mByConids(conids: string[]): Promise<Map<string, Candle>> {
+  /**
+   * Returns the most recent candle timestamp per conid for the given
+   * timeframe. Used by the bootstrap to skip historical re-fetches for
+   * (symbol, timeframe) pairs that already have fresh data in the DB,
+   * staying under IBKR's 60-historical-requests/10-minute pacing cap.
+   */
+  async getLatestCandleTsByConids(
+    timeframe: Candle["timeframe"],
+    conids: string[],
+  ): Promise<Map<string, Date>> {
+    if (conids.length === 0) {
+      return new Map();
+    }
+    const table = this.tableForTimeframe(timeframe);
+    const result = await this.pool.query(
+      `
+      SELECT conid, MAX(ts) AS ts
+      FROM ${table}
+      WHERE conid = ANY($1::text[])
+      GROUP BY conid
+      `,
+      [conids],
+    );
+    const map = new Map<string, Date>();
+    for (const row of result.rows) {
+      map.set(String(row.conid), new Date(row.ts));
+    }
+    return map;
+  }
+
+  async getLatestCandles1mByConids(
+    conids: string[],
+  ): Promise<Map<string, Candle>> {
     if (conids.length === 0) {
       return new Map();
     }
@@ -168,7 +214,7 @@ export class MarketRepository {
       WHERE conid = ANY($1::text[])
       ORDER BY conid, ts DESC
       `,
-      [conids]
+      [conids],
     );
 
     const map = new Map<string, Candle>();
@@ -176,26 +222,26 @@ export class MarketRepository {
       map.set(String(row.conid), {
         conid: String(row.conid),
         symbol: String(row.symbol),
-        timeframe: '1m',
+        timeframe: "1m",
         ts: new Date(row.ts),
         open: Number(row.open),
         high: Number(row.high),
         low: Number(row.low),
         close: Number(row.close),
-        volume: Number(row.volume)
+        volume: Number(row.volume),
       });
     }
 
     return map;
   }
 
-  private tableForTimeframe(timeframe: Candle['timeframe']): string {
-    if (timeframe === '1m') return 'candles_1m';
-    if (timeframe === '5m') return 'candles_5m';
-    if (timeframe === '1h') return 'candles_1h';
-    if (timeframe === '4h') return 'candles_4h';
-    if (timeframe === '12h') return 'candles_12h';
-    if (timeframe === '1d') return 'candles_1d';
-    return 'candles_1w';
+  private tableForTimeframe(timeframe: Candle["timeframe"]): string {
+    if (timeframe === "1m") return "candles_1m";
+    if (timeframe === "5m") return "candles_5m";
+    if (timeframe === "1h") return "candles_1h";
+    if (timeframe === "4h") return "candles_4h";
+    if (timeframe === "12h") return "candles_12h";
+    if (timeframe === "1d") return "candles_1d";
+    return "candles_1w";
   }
 }

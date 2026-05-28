@@ -8,6 +8,19 @@ import { CandleAggregator } from "./candle-aggregator.js";
 import { HigherTimeframeAggregator } from "./higher-timeframe-aggregator.js";
 import { InstrumentSubscription } from "./types.js";
 
+const TIMEFRAME_INTERVAL_MS: Record<
+  import("@ikbr/shared").CandleTimeframe,
+  number
+> = {
+  "1m": 60_000,
+  "5m": 5 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+  "12h": 12 * 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+  "1w": 7 * 24 * 60 * 60_000,
+};
+
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pg = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
@@ -326,18 +339,36 @@ app.post("/bootstrap", async () => {
         backfillProgress.currentSymbol = null;
         backfillProgress.completedSymbolsInJob = 0;
       }
+      // Differential bootstrap: skip symbols whose latest candle for this
+      // timeframe is already fresh (younger than 2x the bar interval). Avoids
+      // hammering IBKR's 60-requests/10-min historical pacing limit on
+      // restarts where most data is already in Postgres.
+      const intervalMs = TIMEFRAME_INTERVAL_MS[job.timeframe];
+      const freshnessThresholdMs = intervalMs * 2;
+      const latestTsByConid = await repo.getLatestCandleTsByConids(
+        job.timeframe,
+        subscriptions.map((s) => s.conid),
+      );
+      const now = Date.now();
+      const subsToFetch = subscriptions.filter((sub) => {
+        const latest = latestTsByConid.get(sub.conid);
+        if (!latest) return true;
+        return now - latest.getTime() > freshnessThresholdMs;
+      });
+      const skippedCount = subscriptions.length - subsToFetch.length;
       app.log.info(
         {
           timeframe: job.timeframe,
           progress: `${jobIndex}/${totalJobs}`,
-          symbols: totalSymbols,
+          symbols: subsToFetch.length,
+          skipped: skippedCount,
           candlesPerSymbol: job.count,
         },
-        `native historical backfill starting [${jobIndex}/${totalJobs}] ${job.timeframe}`,
+        `native historical backfill starting [${jobIndex}/${totalJobs}] ${job.timeframe} (skipped ${skippedCount} fresh)`,
       );
       try {
         const results = await twsClient.backfillRecentCandles(
-          subscriptions,
+          subsToFetch,
           job.timeframe,
           job.count,
           ({ symbol, index }) => {

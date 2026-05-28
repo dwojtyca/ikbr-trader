@@ -29,6 +29,19 @@ const schema = z.object({
   EXECUTION_ORDER_TIMEOUT_MS: z.coerce.number().default(15000),
   EXECUTION_SUBMITTED_AUTO_CANCEL_MS: z.coerce.number().int().min(0).default(0),
   EXECUTION_RETRY_AS_MKT_ON_CODE_110: z.string().default("false"),
+  // Fractional-share whitelist. Symbols listed here may be sent to the
+  // broker with non-integer quantities (mega-cap US stocks/ETFs that
+  // support fractional trading). Any symbol NOT in this list will have
+  // its quantity floored to a whole share at the execution boundary as
+  // a defense-in-depth guard against IBKR cancel code 320.
+  EXECUTION_FRACTIONAL_SYMBOLS: z.string().default(""),
+  // US Regular Trading Hours guard. When enabled, orders for US stocks
+  // (USD currency) are rejected outside 09:30-16:00 America/New_York.
+  // The buffer fields shrink the allowed window by N minutes after open
+  // and N minutes before close to avoid auto-cancel timeouts at the bell.
+  EXECUTION_BLOCK_OUTSIDE_US_RTH: z.string().default("true"),
+  EXECUTION_US_RTH_OPEN_BUFFER_MIN: z.coerce.number().min(0).default(0),
+  EXECUTION_US_RTH_CLOSE_BUFFER_MIN: z.coerce.number().min(0).default(10),
   // Daily loss kill-switch. When daily realized PnL (in base currency)
   // drops by more than this percent of last-known account netLiquidation,
   // the execution-engine refuses any new OPEN_OR_ADD orders.
@@ -129,6 +142,13 @@ export const config = {
   defaultSecurityType: DEFAULT_SECURITY_TYPE,
   executionRetryAsMktOnCode110:
     env.EXECUTION_RETRY_AS_MKT_ON_CODE_110.toLowerCase() === "true",
+  blockOutsideUsRth:
+    env.EXECUTION_BLOCK_OUTSIDE_US_RTH.toLowerCase() === "true",
+  fractionalSymbols: new Set(
+    env.EXECUTION_FRACTIONAL_SYMBOLS.split(",")
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean),
+  ),
   contractFallbackByConid: parseContractFallbackByConid(
     env.WATCHLIST_CONTRACT_OVERRIDES,
   ),

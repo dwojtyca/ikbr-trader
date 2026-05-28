@@ -2192,9 +2192,7 @@ export function App() {
                             {stopLoss != null ? stopLoss.toFixed(2) : "-"}
                           </td>
                           <td>
-                            {takeProfit != null
-                              ? takeProfit.toFixed(2)
-                              : "-"}
+                            {takeProfit != null ? takeProfit.toFixed(2) : "-"}
                           </td>
                           <td>
                             {trade.avgExitPrice != null

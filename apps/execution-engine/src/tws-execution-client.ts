@@ -12,6 +12,10 @@ interface TwsExecutionConfig {
   orderTimeoutMs: number;
   submittedAutoCancelMs?: number;
   retryAsMktOnCode110?: boolean;
+  fractionalSymbols?: Set<string>;
+  blockOutsideUsRth?: boolean;
+  usRthOpenBufferMin?: number;
+  usRthCloseBufferMin?: number;
   contractFallbackByConid?: Record<
     string,
     {
@@ -57,7 +61,7 @@ interface ResolvedContract {
 
 interface EffectiveTick {
   tick?: number;
-  source: "none" | "minTick" | "wse_ladder";
+  source: "none" | "minTick" | "wse_ladder" | "us_sec612";
 }
 
 interface PlannedOrder {
@@ -358,22 +362,34 @@ export class TwsExecutionClient {
 
     const resolvedContract = await this.resolveContract(ticket);
     const contract = resolvedContract.contract;
+
+    // Defense-in-depth: floor non-integer qty for symbols outside the
+    // fractional whitelist. Signal-engine should already do this via
+    // quantityStepForSymbol, but a stale or misconfigured profile could
+    // leak fractional shares and trigger IBKR cancel code 320.
+    const guardedTicket = this.enforceIntegerQuantityIfNeeded(ticket);
+
+    // Block entries outside US RTH window. SUBMITTED limit orders sit
+    // unfilled until auto-cancel timeout fires, wasting slots. Always
+    // allow CLOSE_OR_REDUCE so the bot can flatten outside hours.
+    this.assertUsRthAllows(contract, guardedTicket);
+
     const effectiveTick = this.determineEffectiveTick(
       contract,
-      ticket,
+      guardedTicket,
       resolvedContract.minTick,
     );
     const normalizedTicket = this.normalizeTicketPrices(
-      ticket,
+      guardedTicket,
       effectiveTick.tick,
     );
 
     if (
       effectiveTick.tick &&
-      this.wasTicketNormalized(ticket, normalizedTicket)
+      this.wasTicketNormalized(guardedTicket, normalizedTicket)
     ) {
       this.onLog(
-        `execution price normalization conid=${ticket.conid ?? "n/a"} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? "n/a"} effectiveTick=${effectiveTick.tick} entry=${ticket.entry ?? "n/a"}->${normalizedTicket.entry ?? "n/a"} stop=${ticket.stop ?? "n/a"}->${normalizedTicket.stop ?? "n/a"} tp=${ticket.takeProfit ?? "n/a"}->${normalizedTicket.takeProfit ?? "n/a"}`,
+        `execution price normalization conid=${guardedTicket.conid ?? "n/a"} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? "n/a"} effectiveTick=${effectiveTick.tick} entry=${guardedTicket.entry ?? "n/a"}->${normalizedTicket.entry ?? "n/a"} stop=${guardedTicket.stop ?? "n/a"}->${normalizedTicket.stop ?? "n/a"} tp=${guardedTicket.takeProfit ?? "n/a"}->${normalizedTicket.takeProfit ?? "n/a"}`,
       );
     }
 
@@ -388,7 +404,7 @@ export class TwsExecutionClient {
       const message = (error as Error).message;
       const shouldRetryAsMkt =
         this.config.retryAsMktOnCode110 === true &&
-        String(ticket.orderType || "").toUpperCase() === "LMT" &&
+        String(guardedTicket.orderType || "").toUpperCase() === "LMT" &&
         message.includes("code=110");
 
       if (!shouldRetryAsMkt) {
@@ -402,7 +418,7 @@ export class TwsExecutionClient {
       };
 
       this.onLog(
-        `execution retry-as-mkt triggered symbol=${ticket.instrument} conid=${ticket.conid ?? "n/a"} reason=code110`,
+        `execution retry-as-mkt triggered symbol=${guardedTicket.instrument} conid=${guardedTicket.conid ?? "n/a"} reason=code110`,
       );
 
       return this.placeSignalOrderAttempt(
@@ -1448,10 +1464,96 @@ export class TwsExecutionClient {
       return { tick: validMinTick, source: "minTick" };
     }
 
+    // SEC Rule 612 (sub-penny rule): US-listed stocks priced >= $1.00
+    // must trade in $0.01 increments for LIMIT orders, even though
+    // IBKR contractDetails may report a finer minTick (e.g. 0.0001 for
+    // RIOT). Override to the legal increment to avoid cancel code 110.
+    if (this.isUsStockContract(contract)) {
+      const ref = refPrice && refPrice > 0 ? refPrice : 1;
+      const secTick = ref >= 1 ? 0.01 : 0.0001;
+      if (validMinTick === undefined || validMinTick < secTick) {
+        return { tick: secTick, source: "us_sec612" };
+      }
+      return { tick: validMinTick, source: "minTick" };
+    }
+
     if (validMinTick !== undefined) {
       return { tick: validMinTick, source: "minTick" };
     }
     return { source: "none" };
+  }
+
+  private isUsStockContract(contract: ContractShape): boolean {
+    const currency = (contract.currency ?? "").toUpperCase();
+    const secType = (contract.secType ?? "").toUpperCase();
+    if (currency !== "USD") return false;
+    if (secType && secType !== "STK") return false;
+    return true;
+  }
+
+  private enforceIntegerQuantityIfNeeded(ticket: SignalTicket): SignalTicket {
+    const qty = Number(ticket.quantity);
+    if (!Number.isFinite(qty) || qty <= 0) return ticket;
+    const symbol = String(ticket.instrument ?? "").toUpperCase();
+    const fractionalAllowed =
+      this.config.fractionalSymbols?.has(symbol) === true;
+    if (fractionalAllowed) return ticket;
+    if (Number.isInteger(qty)) return ticket;
+    const floored = Math.floor(qty);
+    if (floored <= 0) {
+      throw new Error(
+        `Quantity guard: ${symbol} not in fractional whitelist and qty=${qty} floors to 0`,
+      );
+    }
+    this.onLog(
+      `execution quantity floored symbol=${symbol} ${qty}->${floored} (non-fractional)`,
+    );
+    return { ...ticket, quantity: floored };
+  }
+
+  private assertUsRthAllows(
+    contract: ContractShape,
+    ticket: SignalTicket,
+  ): void {
+    if (this.config.blockOutsideUsRth !== true) return;
+    if (!this.isUsStockContract(contract)) return;
+    // Always permit exits — we must be able to close positions when
+    // an early-warning trigger fires outside RTH.
+    if (ticket.positionEffect === "CLOSE_OR_REDUCE") return;
+
+    const openBufferMin = Math.max(0, this.config.usRthOpenBufferMin ?? 0);
+    const closeBufferMin = Math.max(0, this.config.usRthCloseBufferMin ?? 10);
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false,
+    }).formatToParts(now);
+
+    const weekday =
+      parts.find((p) => p.type === "weekday")?.value ?? "";
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+    const minute = Number(
+      parts.find((p) => p.type === "minute")?.value ?? "0",
+    );
+
+    if (weekday === "Sat" || weekday === "Sun") {
+      throw new Error(
+        `US RTH guard: weekend (${weekday}) — order rejected for ${ticket.instrument}`,
+      );
+    }
+
+    const minutesOfDay = hour * 60 + minute;
+    const openMin = 9 * 60 + 30 + openBufferMin;
+    const closeMin = 16 * 60 - closeBufferMin;
+
+    if (minutesOfDay < openMin || minutesOfDay >= closeMin) {
+      throw new Error(
+        `US RTH guard: outside window ${String(Math.floor(openMin / 60)).padStart(2, "0")}:${String(openMin % 60).padStart(2, "0")}-${String(Math.floor(closeMin / 60)).padStart(2, "0")}:${String(closeMin % 60).padStart(2, "0")} ET (now ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} ET) — order rejected for ${ticket.instrument}`,
+      );
+    }
   }
 
   private isWseContract(contract: ContractShape): boolean {

@@ -1,20 +1,20 @@
-import { Pool } from 'pg';
-import { IndicatorSnapshot, ProposedOrder, Side } from '@ikbr/shared';
+import { Pool } from "pg";
+import { IndicatorSnapshot, ProposedOrder, Side } from "@ikbr/shared";
 
 interface ClaimedOrderRow {
   id: number;
   instrument: string;
   conid: string | null;
   side: Side;
-  position_effect: 'OPEN_OR_ADD' | 'CLOSE_OR_REDUCE' | null;
-  order_type: 'MKT' | 'LMT' | 'STP';
+  position_effect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" | null;
+  order_type: "MKT" | "LMT" | "STP";
   quantity: number;
   entry: number | null;
   stop: number | null;
   take_profit: number | null;
   reason: string;
   confidence: number;
-  risk_check_status: 'PASS' | 'REJECT';
+  risk_check_status: "PASS" | "REJECT";
   status: string;
   strategy: string | null;
   indicator_snapshot: IndicatorSnapshot | string | null;
@@ -28,7 +28,7 @@ export interface ClaimedOrder extends ProposedOrder {
 export interface LlmDecisionInsert {
   proposedOrderId: number;
   symbol: string;
-  decision: 'EXECUTE' | 'REJECT';
+  decision: "EXECUTE" | "REJECT";
   decisionReason: string;
   model?: string;
   promptVersion?: string;
@@ -90,19 +90,42 @@ export class LlmAgentRepository {
       ON llm_order_decisions (symbol, created_at DESC);
     `);
 
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`);
-    await this.pool.query(`ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`);
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_owner TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS processing_claimed_at TIMESTAMPTZ;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT 'signal';`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS decision_actor TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_reason TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_model TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS ai_decision_confidence DOUBLE PRECISION;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS llm_decision_id BIGINT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS source_error TEXT;`,
+    );
   }
 
-  async claimNextProposed(workerId: string, staleMs: number): Promise<ClaimedOrder | null> {
+  async claimNextProposed(
+    workerId: string,
+    staleMs: number,
+  ): Promise<ClaimedOrder | null> {
     const result = await this.pool.query(
       `
       WITH candidate AS (
@@ -127,7 +150,7 @@ export class LlmAgentRepository {
                 po.reason, po.confidence, po.risk_check_status, po.status,
                 po.strategy, po.indicator_snapshot, po.created_at
       `,
-      [workerId, staleMs]
+      [workerId, staleMs],
     );
 
     if (!result.rows[0]) return null;
@@ -143,7 +166,7 @@ export class LlmAgentRepository {
       WHERE id = $1
         AND processing_owner = $2
       `,
-      [orderId, workerId]
+      [orderId, workerId],
     );
   }
 
@@ -154,7 +177,7 @@ export class LlmAgentRepository {
       WHERE id = $1
         AND status = 'PROPOSED'
       `,
-      [orderId]
+      [orderId],
     );
 
     return Number(result.rowCount ?? 0) > 0;
@@ -193,27 +216,35 @@ export class LlmAgentRepository {
         input.promptVersion ?? null,
         input.decisionConfidence ?? null,
         input.newsCount,
-        input.positionSnapshotJson ? JSON.stringify(input.positionSnapshotJson) : null,
+        input.positionSnapshotJson
+          ? JSON.stringify(input.positionSnapshotJson)
+          : null,
         input.newsSnapshotJson ? JSON.stringify(input.newsSnapshotJson) : null,
-        input.sourceError ?? null
-      ]
+        input.sourceError ?? null,
+      ],
     );
 
     return Number(result.rows[0].id);
   }
 
-  async updateDecisionError(decisionId: number, sourceError: string): Promise<void> {
+  async updateDecisionError(
+    decisionId: number,
+    sourceError: string,
+  ): Promise<void> {
     await this.pool.query(
       `
       UPDATE llm_order_decisions
       SET source_error = $2
       WHERE id = $1
       `,
-      [decisionId, sourceError]
+      [decisionId, sourceError],
     );
   }
 
-  async isSymbolInCooldown(symbol: string, cooldownMs: number): Promise<boolean> {
+  async isSymbolInCooldown(
+    symbol: string,
+    cooldownMs: number,
+  ): Promise<boolean> {
     if (cooldownMs <= 0) return false;
 
     const result = await this.pool.query(
@@ -226,14 +257,17 @@ export class LlmAgentRepository {
       ORDER BY created_at DESC
       LIMIT 1
       `,
-      [symbol.toUpperCase(), cooldownMs]
+      [symbol.toUpperCase(), cooldownMs],
     );
 
     return Boolean(result.rows[0]);
   }
 
   private mapClaimedOrder(row: ClaimedOrderRow): ClaimedOrder {
-    const createdAt = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    const createdAt =
+      row.created_at instanceof Date
+        ? row.created_at
+        : new Date(row.created_at);
 
     return {
       id: row.id,
@@ -250,16 +284,18 @@ export class LlmAgentRepository {
       confidence: row.confidence,
       timestamp: createdAt.toISOString(),
       riskCheckStatus: row.risk_check_status,
-      status: row.status === 'PROPOSED' ? 'PROPOSED' : 'REJECTED',
+      status: row.status === "PROPOSED" ? "PROPOSED" : "REJECTED",
       strategy: row.strategy ?? undefined,
       indicators: this.normalizeIndicators(row.indicator_snapshot),
-      createdAt
+      createdAt,
     };
   }
 
-  private normalizeIndicators(value: IndicatorSnapshot | string | null): IndicatorSnapshot | undefined {
+  private normalizeIndicators(
+    value: IndicatorSnapshot | string | null,
+  ): IndicatorSnapshot | undefined {
     if (!value) return undefined;
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       try {
         return JSON.parse(value) as IndicatorSnapshot;
       } catch {
