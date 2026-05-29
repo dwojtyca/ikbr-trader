@@ -1532,12 +1532,9 @@ export class TwsExecutionClient {
       hour12: false,
     }).formatToParts(now);
 
-    const weekday =
-      parts.find((p) => p.type === "weekday")?.value ?? "";
+    const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
     const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
-    const minute = Number(
-      parts.find((p) => p.type === "minute")?.value ?? "0",
-    );
+    const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
 
     if (weekday === "Sat" || weekday === "Sun") {
       throw new Error(

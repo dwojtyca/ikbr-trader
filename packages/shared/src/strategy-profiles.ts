@@ -21,12 +21,54 @@ export interface StrategyProfile {
    */
   excludedSymbols?: string[];
   /**
+   * Optional per-strategy symbol whitelist. When set and non-empty, only
+   * symbols listed here are eligible for this strategy (case-insensitive).
+   * Used to scope thematic/thin-liquidity strategies (e.g. small-caps)
+   * to a curated universe without polluting the main watchlist plumbing.
+   * `includedSymbols` is intersected with `excludedSymbols` — a symbol must
+   * be in `includedSymbols` AND not in `excludedSymbols` to pass.
+   */
+  includedSymbols?: string[];
+  /**
    * Whether to evaluate shouldExit() hook for early position closes on this strategy.
    * Defaults to false. When true, the strategy's shouldExit implementation may
    * emit exit signals for active positions before TP/SL is hit.
    */
   earlyExitEnabled?: boolean;
 }
+
+/**
+ * Curated universe of thin-liquidity / thematic small-cap names that the
+ * generic intraday strategies should skip (their volume/spread assumptions
+ * break on these names) and which the dedicated `smallcap_*` strategies
+ * exclusively target. Themes: space, drones/UAV, uranium, SMR nuclear.
+ */
+export const SMALL_CAP_UNIVERSE: string[] = [
+  // US drones / UAV / eVTOL
+  "AVAV",
+  "KTOS",
+  "RCAT",
+  "ONDS",
+  "EH",
+  "JOBY",
+  // US space / satcom
+  "RKLB",
+  "ASTS",
+  "RDW",
+  "PL",
+  "LUNR",
+  "IRDM",
+  // US uranium
+  "UEC",
+  "UUUU",
+  "DNN",
+  "NXE",
+  // US SMR / enrichment / nuclear
+  "OKLO",
+  "SMR",
+  "LEU",
+  "BWXT",
+];
 
 const PROFILES: StrategyProfile[] = [
   {
@@ -45,7 +87,9 @@ const PROFILES: StrategyProfile[] = [
     quantityFactor: 1.4,
     spreadFactor: 1,
     requireVolume: true,
-    // excludedSymbols: ["ALE", "PZU"],
+    // 2026-05-29: skip thin-liquidity / thematic small-caps; they are handled
+    // by the dedicated smallcap_donchian_* strategies on 4h timeframe.
+    excludedSymbols: SMALL_CAP_UNIVERSE,
   },
   {
     id: "momentum_breakdown_short_v1",
@@ -63,7 +107,9 @@ const PROFILES: StrategyProfile[] = [
     spreadFactor: 1,
     requireVolume: true,
     earlyExitEnabled: true,
-    // excludedSymbols: ["MSFT"],
+    // 2026-05-29: skip thin-liquidity / thematic small-caps; they are handled
+    // by the dedicated smallcap_donchian_* strategies on 4h timeframe.
+    excludedSymbols: SMALL_CAP_UNIVERSE,
   },
   {
     id: "range_reversal_v1",
@@ -101,6 +147,9 @@ const PROFILES: StrategyProfile[] = [
     quantityFactor: 1,
     spreadFactor: 1,
     requireVolume: true,
+    // 2026-05-29: skip thin-liquidity / thematic small-caps; handled by
+    // dedicated smallcap_donchian_* strategies.
+    excludedSymbols: SMALL_CAP_UNIVERSE,
   },
   {
     // Daily-timeframe Donchian-50 breakout. Lane-separated from
@@ -123,6 +172,45 @@ const PROFILES: StrategyProfile[] = [
     quantityFactor: 1,
     spreadFactor: 1,
     requireVolume: true,
+  },
+  {
+    // 4h Donchian breakout long, scoped to the SMALL_CAP_UNIVERSE thematic
+    // universe (space, drones, uranium, SMR). Lane-separated from
+    // momentum_breakout_long_v1 by symbol scope and by 4h vs 1m trigger TF.
+    id: "smallcap_donchian_breakout_long_v1",
+    secType: ["STK"],
+    directionalRegimes: ["bull_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
+    style: "breakout",
+    enabledInBot: true,
+    entryScore: 0.5,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    // Thinner names — smaller per-trade notional.
+    quantityFactor: 0.6,
+    // Wider acceptable spread (small caps trade with bigger spreads).
+    spreadFactor: 1.8,
+    requireVolume: false,
+    includedSymbols: SMALL_CAP_UNIVERSE,
+  },
+  {
+    // 4h Donchian breakdown short, mirror of smallcap_donchian_breakout_long_v1.
+    // Note: shorting GPW small-caps (CRI/CRQ/LBW) is typically rejected by
+    // the broker; those names will get filtered out at the execution layer.
+    id: "smallcap_donchian_breakdown_short_v1",
+    secType: ["STK"],
+    directionalRegimes: ["bear_trend"],
+    volatilityRegimes: ["normal_volatility", "high_volatility"],
+    style: "breakout",
+    enabledInBot: true,
+    entryScore: 0.5,
+    decisionEdge: 0.08,
+    minConfidenceMultiplier: 1,
+    quantityFactor: 0.5,
+    spreadFactor: 1.8,
+    requireVolume: false,
+    earlyExitEnabled: true,
+    includedSymbols: SMALL_CAP_UNIVERSE,
   },
 ];
 

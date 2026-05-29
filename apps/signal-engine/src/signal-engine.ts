@@ -265,6 +265,18 @@ export class SignalEngine {
         disabledReasons.push(`${strategyId} excluded for ${symbolUpper}`);
         continue;
       }
+      if (
+        profile?.includedSymbols &&
+        profile.includedSymbols.length > 0 &&
+        !profile.includedSymbols.some(
+          (included) => included.toUpperCase() === symbolUpper,
+        )
+      ) {
+        disabledReasons.push(
+          `${strategyId} not in includedSymbols for ${symbolUpper}`,
+        );
+        continue;
+      }
       const runtimeState = await this.repo.getStrategyRuntimeState(strategyId);
       if (!runtimeState.enabled || runtimeState.permanentlyDisabled) {
         disabledReasons.push(`${strategyId} is disabled`);
