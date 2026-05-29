@@ -3,6 +3,8 @@ import type {
   Strategy,
   StrategyContext,
   StrategySignal,
+  ExitContext,
+  ExitSignal,
 } from "./strategy.types.js";
 
 interface MomentumBreakoutParams {
@@ -385,6 +387,103 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       },
       generatedFromCandleTs: context.latestCandle.ts,
     };
+  }
+
+  shouldExit(context: ExitContext): ExitSignal | null {
+    // Hard exit #1: Lose prior breakout level + EMA20 on volume
+    // If price closes below min(priorHigh20, EMA20) for 2 consecutive 1m candles
+    // with volume >= avg20 * 1.3, the breakout is invalidated. Mirrors
+    // momentum_breakdown_short_v1.shouldExit().
+    const candles1m = context.candlesByTimeframe["1m"] ?? [];
+    const { ema20, ema50, ema200 } = context.indicators;
+    const { latestCandle } = context;
+    const close = latestCandle.close;
+
+    if (
+      ema20 === undefined ||
+      ema50 === undefined ||
+      ema200 === undefined ||
+      candles1m.length < 2
+    ) {
+      return null;
+    }
+
+    const priorHigh20 = previousHigh(candles1m, 20);
+    const lossLevel = Math.min(priorHigh20 ?? close, ema20);
+    const avgVolume20 = averageVolume(candles1m, 20) ?? 0;
+    const lossThresholdVolume = avgVolume20 * 1.3;
+
+    const last1 = candles1m.at(-1);
+    const last2 = candles1m.at(-2);
+    if (
+      last1 &&
+      last2 &&
+      last1.close < lossLevel &&
+      last2.close < lossLevel &&
+      last1.volume >= lossThresholdVolume
+    ) {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "SELL", // Inverse of LONG
+        reason:
+          "Hard exit: Prior high + EMA20 lost on 2 candles and volume confirmation",
+        confidenceScore: 0.95,
+        metadata: {
+          exitReason: "lost_priorhigh_ema20",
+          lossLevel,
+          last1Close: last1.close,
+          last2Close: last2.close,
+          lossThresholdVolume,
+          last1Volume: last1.volume,
+        },
+      };
+    }
+
+    // Hard exit #2: Regime flip — directionalRegime is no longer bull_trend or
+    // regimeScore has crossed to bearish (below +minRegimeScore/2). Entry
+    // minRegimeScore is 5 (see paramsForSecType), so threshold is 2.5.
+    if (
+      context.directionalRegime !== "bull_trend" ||
+      (context.indicators.regimeScore !== undefined &&
+        context.indicators.regimeScore < 5 / 2)
+    ) {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "SELL",
+        reason:
+          context.directionalRegime !== "bull_trend"
+            ? `Hard exit: Regime flip detected (now ${context.directionalRegime})`
+            : `Hard exit: Regime score bearish (${context.indicators.regimeScore?.toFixed(1)})`,
+        confidenceScore: 0.9,
+        metadata: {
+          exitReason: "regime_flipped_bearish",
+          newDirectionalRegime: context.directionalRegime,
+          regimeScore: context.indicators.regimeScore,
+          regimeConfidence: context.indicators.regimeConfidence,
+        },
+      };
+    }
+
+    // Hard exit #3: 1h trend flipped to bearish
+    const h1 = context.indicators.timeframes?.["1h"];
+    if (h1 && h1.trend === "bearish") {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "SELL",
+        reason: "Hard exit: 1h trend flipped to bearish",
+        confidenceScore: 0.88,
+        metadata: {
+          exitReason: "h1_trend_bearish",
+          h1Trend: h1.trend,
+          h1Rsi: h1.rsi14,
+        },
+      };
+    }
+
+    return null;
   }
 
   private reject(reason: string): null {

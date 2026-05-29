@@ -3,6 +3,8 @@ import type {
   Strategy,
   StrategyContext,
   StrategySignal,
+  ExitContext,
+  ExitSignal,
 } from "./strategy.types.js";
 
 interface SmallcapDonchianShortParams {
@@ -289,5 +291,91 @@ export class SmallcapDonchianBreakdownShortStrategy implements Strategy {
       },
       generatedFromCandleTs: context.latestCandle.ts,
     };
+  }
+
+  shouldExit(context: ExitContext): ExitSignal | null {
+    // All exit checks use 4h timeframe (consistent with entry TF).
+    const candles4h = context.candlesByTimeframe["4h"] ?? [];
+    const h4 = context.indicators.timeframes?.["4h"];
+    const d1 = context.indicators.timeframes?.["1d"];
+    if (!h4 || candles4h.length < 2) return null;
+
+    const ema50h4 = h4.ema50;
+
+    // Hard exit #1: Two consecutive 4h closes above EMA50(4h) on volume.
+    // EMA50_4h is the core downtrend gate that entry required; regaining it = thesis broken.
+    if (ema50h4 !== undefined) {
+      const last1 = candles4h.at(-1);
+      const last2 = candles4h.at(-2);
+      const avgVol = averageVolume(candles4h, 20);
+      const volThreshold = (avgVol ?? 0) * 1.3;
+      if (
+        last1 &&
+        last2 &&
+        last1.close > ema50h4 &&
+        last2.close > ema50h4 &&
+        avgVol !== undefined &&
+        last1.volume >= volThreshold
+      ) {
+        return {
+          strategyId: this.id,
+          symbol: context.symbol,
+          side: "BUY",
+          reason:
+            "Hard exit: 4h close above EMA50 on 2 consecutive candles + volume",
+          confidenceScore: 0.95,
+          metadata: {
+            exitReason: "h4_reclaimed_ema50",
+            ema50h4,
+            last1Close: last1.close,
+            last2Close: last2.close,
+            volThreshold,
+            last1Volume: last1.volume,
+          },
+        };
+      }
+    }
+
+    // Hard exit #2: Regime flip from bear_trend or regimeScore > -minRegimeScore/2.
+    if (
+      context.directionalRegime !== "bear_trend" ||
+      (context.indicators.regimeScore !== undefined &&
+        context.indicators.regimeScore > -4 / 2)
+    ) {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "BUY",
+        reason:
+          context.directionalRegime !== "bear_trend"
+            ? `Hard exit: Regime flip detected (now ${context.directionalRegime})`
+            : `Hard exit: Regime score bullish (${context.indicators.regimeScore?.toFixed(1)})`,
+        confidenceScore: 0.9,
+        metadata: {
+          exitReason: "regime_flipped_bullish",
+          newDirectionalRegime: context.directionalRegime,
+          regimeScore: context.indicators.regimeScore,
+          regimeConfidence: context.indicators.regimeConfidence,
+        },
+      };
+    }
+
+    // Hard exit #3: Daily trend flipped to bullish.
+    if (d1 && d1.trend === "bullish") {
+      return {
+        strategyId: this.id,
+        symbol: context.symbol,
+        side: "BUY",
+        reason: "Hard exit: 1d trend flipped to bullish",
+        confidenceScore: 0.88,
+        metadata: {
+          exitReason: "d1_trend_bullish",
+          d1Trend: d1.trend,
+          d1Rsi: d1.rsi14,
+        },
+      };
+    }
+
+    return null;
   }
 }

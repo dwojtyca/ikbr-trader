@@ -87,6 +87,7 @@ const PROFILES: StrategyProfile[] = [
     quantityFactor: 1.4,
     spreadFactor: 1,
     requireVolume: true,
+    earlyExitEnabled: true,
     // 2026-05-29: skip thin-liquidity / thematic small-caps; they are handled
     // by the dedicated smallcap_donchian_* strategies on 4h timeframe.
     excludedSymbols: SMALL_CAP_UNIVERSE,
@@ -191,6 +192,7 @@ const PROFILES: StrategyProfile[] = [
     // Wider acceptable spread (small caps trade with bigger spreads).
     spreadFactor: 1.8,
     requireVolume: false,
+    earlyExitEnabled: true,
     includedSymbols: SMALL_CAP_UNIVERSE,
   },
   {
