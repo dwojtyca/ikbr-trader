@@ -170,8 +170,7 @@ export class SmallcapDonchianBreakdownShortStrategy implements Strategy {
     if (closeH4 >= ema50h4) return this.reject("h4_close_above_ema50");
 
     // Daily trend must not oppose.
-    if (d1Snapshot.trend === "bullish")
-      return this.reject("d1_trend_bullish");
+    if (d1Snapshot.trend === "bullish") return this.reject("d1_trend_bullish");
 
     // Trend strength.
     if (adx14h4 === undefined) return this.reject("h4_adx_unavailable");

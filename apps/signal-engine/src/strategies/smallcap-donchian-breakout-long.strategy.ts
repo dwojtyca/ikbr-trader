@@ -180,8 +180,7 @@ export class SmallcapDonchianBreakoutLongStrategy implements Strategy {
     if (closeH4 <= ema50h4) return this.reject("h4_close_below_ema50");
 
     // Daily trend must not oppose.
-    if (d1Snapshot.trend === "bearish")
-      return this.reject("d1_trend_bearish");
+    if (d1Snapshot.trend === "bearish") return this.reject("d1_trend_bearish");
 
     // Trend strength.
     if (adx14h4 === undefined) return this.reject("h4_adx_unavailable");
