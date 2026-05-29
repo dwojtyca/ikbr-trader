@@ -37,9 +37,11 @@ const PROFILES: StrategyProfile[] = [
     style: "breakout",
     enabledInBot: true,
     // entryScore: 0.58,
-    entryScore: 0.4,
+    // 2026-05-29: tightened 0.4 -> 0.5 alongside GPW watchlist expansion
+    // to keep signal volume bounded as new symbols come online.
+    entryScore: 0.5,
     decisionEdge: 0.08,
-    minConfidenceMultiplier: 1,
+    minConfidenceMultiplier: 1.1,
     quantityFactor: 1.4,
     spreadFactor: 1,
     requireVolume: true,
@@ -53,9 +55,10 @@ const PROFILES: StrategyProfile[] = [
     style: "breakout",
     enabledInBot: true,
     // entryScore: 0.58,
-    entryScore: 0.4,
+    // 2026-05-29: tightened 0.4 -> 0.5 alongside GPW watchlist expansion.
+    entryScore: 0.5,
     decisionEdge: 0.08,
-    minConfidenceMultiplier: 1,
+    minConfidenceMultiplier: 1.1,
     quantityFactor: 1.2,
     spreadFactor: 1,
     requireVolume: true,
@@ -91,9 +94,10 @@ const PROFILES: StrategyProfile[] = [
     // -> WR 3%). Now stopMinPct floor of 0.6% prevents micro-noise stopouts.
     enabledInBot: true,
     // entryScore: 0.6,
-    entryScore: 0.4,
+    // 2026-05-29: tightened 0.4 -> 0.5 alongside GPW watchlist expansion.
+    entryScore: 0.5,
     decisionEdge: 0.08,
-    minConfidenceMultiplier: 1,
+    minConfidenceMultiplier: 1.1,
     quantityFactor: 1,
     spreadFactor: 1,
     requireVolume: true,

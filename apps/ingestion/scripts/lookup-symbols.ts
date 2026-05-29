@@ -69,7 +69,7 @@ const CANDIDATES: Array<{ label: string; attempts: Attempt[] }> = [
   })),
 
   // WSE (Warsaw) PLN
-  ...["PKN", "PKO", "SPL", "CDR", "JSW", "CCC", "MBK", "TPE"].map((s) => ({
+  ...["PKN", "PKO", "SPL", "CDR", "JSW", "CCC", "MBK", "TPE", "PGE", "CPS", "KRU", "BDX", "11B", "KTY"].map((s) => ({
     label: s,
     attempts: [
       {
