@@ -15,6 +15,13 @@ import {
   AuthFailureBurstTracker,
   registerExecutionAuth,
 } from "./auth.js";
+import {
+  EnvironmentGuardConfig,
+  EnvironmentGuardError,
+  assertEnvironmentAllowsWrite,
+  whitelistForEnvironment,
+} from "./env-guard.js";
+import { evaluateReadiness } from "./readiness.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -171,6 +178,45 @@ let accountSnapshotCache: {
 let accountSnapshotInFlight: Promise<AccountSnapshot> | null = null;
 let executionSyncCache: { accountId: string; syncedAtMs: number } | null = null;
 let executionSyncInFlight: Promise<void> | null = null;
+
+// TODO(reconciliation-sot): Target design in ADR-001 makes the reconciliation
+// state table the source of truth for the active broker account and the last
+// reconciliation timestamp, so both survive restarts and stay consistent
+// across multiple execution-engine instances. For Phase 1 we keep them as
+// mutable in-process state.
+let lastActiveAccountId: string | null = null;
+let lastReconciliationAt: Date | null = null;
+
+function envGuardConfig(): EnvironmentGuardConfig {
+  return {
+    environment: config.IBKR_ENVIRONMENT,
+    tradingEnabled: config.tradingEnabled,
+    allowedPaperAccounts: config.allowedPaperAccounts,
+    allowedLiveAccounts: config.allowedLiveAccounts,
+  };
+}
+
+const READY_AUDIT_CACHE_TTL_MS = 7_000;
+let auditWriteHealthCache: { ok: boolean; checkedAtMs: number } | null = null;
+
+async function probeAuditWriteAvailable(): Promise<boolean> {
+  const now = Date.now();
+  if (
+    auditWriteHealthCache &&
+    now - auditWriteHealthCache.checkedAtMs < READY_AUDIT_CACHE_TTL_MS
+  ) {
+    return auditWriteHealthCache.ok;
+  }
+  let ok = false;
+  try {
+    await pool.query("SELECT 1");
+    ok = true;
+  } catch (err) {
+    app.log.warn({ err }, "audit write health probe failed");
+  }
+  auditWriteHealthCache = { ok, checkedAtMs: now };
+  return ok;
+}
 
 async function syncRecentExecutions(accountId: string): Promise<void> {
   if (
@@ -500,6 +546,9 @@ async function runReconciliation(): Promise<ReconciliationReport> {
     app.log.info({ report }, "position reconciliation clean");
   }
 
+  // Update on both matches and mismatches — the check ran end-to-end.
+  lastReconciliationAt = new Date();
+
   return report;
 }
 
@@ -523,6 +572,35 @@ async function ensureBrokerSession(): Promise<{
     );
   }
 
+  // Paper/Live environment guard on the resolved broker account. On
+  // failure we emit a CRITICAL SAFETY alert (bypasses ALERT_MIN_SEVERITY)
+  // and throw an EnvironmentGuardError that the Fastify error handler
+  // translates into HTTP 423 Locked.
+  const whitelist = whitelistForEnvironment(envGuardConfig());
+  if (!whitelist.includes(accountId)) {
+    const reason =
+      config.IBKR_ENVIRONMENT === "live"
+        ? "account_not_allowed_for_live"
+        : "account_not_allowed_for_paper";
+    const message = `SAFETY:ACCOUNT_ENVIRONMENT_MISMATCH — broker account ${accountId} is not in ALLOWED_${config.IBKR_ENVIRONMENT.toUpperCase()}_ACCOUNTS`;
+    void alerts.record({
+      severity: "CRITICAL",
+      kind: "safety_account_environment_mismatch",
+      message,
+      payload: {
+        accountId,
+        environment: config.IBKR_ENVIRONMENT,
+        whitelist: [...whitelist],
+        managedAccounts: accounts,
+      },
+    });
+    // Do NOT cache mismatched accountId. Force operators to fix config
+    // before any state is retained.
+    lastActiveAccountId = null;
+    throw new EnvironmentGuardError(reason, message);
+  }
+
+  lastActiveAccountId = accountId;
   return { accountId, accounts };
 }
 
@@ -611,6 +689,40 @@ async function executePersistedOrder(
 }
 
 app.get("/health", async () => ({ ok: true, twsConnected: tws.isConnected() }));
+
+app.get("/ready", async (request, reply) => {
+  const auditWriteAvailable = await probeAuditWriteAvailable();
+
+  const guardCfg = envGuardConfig();
+  const whitelist = whitelistForEnvironment(guardCfg);
+  const accountAllowed =
+    lastActiveAccountId !== null && whitelist.includes(lastActiveAccountId);
+
+  const result = evaluateReadiness({
+    now: new Date(),
+    environment: config.IBKR_ENVIRONMENT,
+    tradingEnabled: config.tradingEnabled,
+    brokerSocketUp: tws.isConnected(),
+    activeAccountId: lastActiveAccountId,
+    accountAllowedByEnvironment: accountAllowed,
+    auditWriteAvailable,
+    lastReconciliationAt,
+    reconciliationMaxAgeSeconds:
+      config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
+  });
+
+  return reply.code(result.statusCode).send(result.body);
+});
+
+app.setErrorHandler((error, request, reply) => {
+  if (error instanceof EnvironmentGuardError) {
+    return reply.code(error.statusCode).send({
+      error: error.message,
+      reason: error.reason,
+    });
+  }
+  reply.send(error);
+});
 
 app.get("/execution/kill-switch", async () => {
   return evaluateKillSwitch();
@@ -1036,6 +1148,23 @@ async function main(): Promise<void> {
     burstTracker,
     writeAudit: (row) => repo.insertExecutionAuditLog(row),
     logger: app.log,
+  });
+
+  // Environment guard for every mutating /execution/* request.
+  // Registered after auth so unauthenticated callers still receive 401
+  // instead of 423. Rejections throw EnvironmentGuardError which the
+  // global error handler translates into HTTP 423 Locked.
+  app.addHook("preHandler", async (request) => {
+    if (
+      request.method !== "POST" &&
+      request.method !== "PUT" &&
+      request.method !== "PATCH" &&
+      request.method !== "DELETE"
+    ) {
+      return;
+    }
+    if (!request.url.startsWith("/execution/")) return;
+    assertEnvironmentAllowsWrite(envGuardConfig(), lastActiveAccountId);
   });
 
   const address = await app.listen({

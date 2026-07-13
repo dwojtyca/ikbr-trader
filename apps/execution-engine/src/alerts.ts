@@ -26,7 +26,8 @@ export type AlertKind =
   | "startup"
   | "system"
   | "auth_failure_burst"
-  | "direct_ticket_used";
+  | "direct_ticket_used"
+  | "safety_account_environment_mismatch";
 
 export interface AlertInput {
   severity: AlertSeverity;
