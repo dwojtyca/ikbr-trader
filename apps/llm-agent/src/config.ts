@@ -44,13 +44,14 @@ const env = schema.parse(process.env);
 
 const llmAgentEnabled = env.LLM_AGENT_ENABLED.toLowerCase() === "true";
 if (llmAgentEnabled && !env.EXECUTION_API_TOKEN) {
-  // PR1: schema-only warning (no throw). Turns into a hard error in PR2
-  // once the execution-engine actually requires Bearer.
+  // PR2: execution-engine now requires Bearer on every /execution/* call.
+  // An llm-agent without a token will get 401 on every request. We warn
+  // instead of throwing so the process can still boot for observation.
   // eslint-disable-next-line no-console
   console.warn(
     "[llm-agent config] EXECUTION_API_TOKEN is empty; " +
-      "execution-engine will start requiring it from PR2. " +
-      "Set it in .env before merging PR2.",
+      "execution-engine will reject every /execution/* request with 401. " +
+      "Set it in .env to a value matching the execution-engine's token.",
   );
 }
 

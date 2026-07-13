@@ -36,6 +36,7 @@ const engine = new SignalEngine(repo, {
   currencyBySymbol: config.currencyBySymbol,
   priceMultiplierBySymbol: config.priceMultiplierOverrides,
   executionBaseUrl: config.SIGNAL_EXECUTION_BASE_URL,
+  executionApiToken: config.EXECUTION_API_TOKEN ?? "",
   strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
   riskLimits: {
     accountEquity: config.SIGNAL_ACCOUNT_EQUITY,
@@ -67,6 +68,7 @@ async function runAndPersist(
   await repo.expireStalePendingSignals(config.SIGNAL_PROPOSAL_TTL_MS);
   const exposureSnapshot = await repo.getExposureSnapshot(
     config.SIGNAL_EXECUTION_BASE_URL,
+    config.EXECUTION_API_TOKEN ?? "",
   );
   for (const symbol of symbols) {
     let order: ProposedOrder;

@@ -11,6 +11,10 @@ import {
 } from "./repository.js";
 import { AccountSnapshot, TwsExecutionClient } from "./tws-execution-client.js";
 import { AlertService } from "./alerts.js";
+import {
+  AuthFailureBurstTracker,
+  registerExecutionAuth,
+} from "./auth.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -631,7 +635,7 @@ app.get("/execution/alerts", async (request) => {
 app.post("/execution/alerts/test", async (request) => {
   const body = z
     .object({
-      severity: z.enum(["info", "warn", "error"]).default("warn"),
+      severity: z.enum(["info", "warn", "error", "CRITICAL"]).default("warn"),
       message: z.string().default("Test alert from /execution/alerts/test"),
     })
     .parse(request.body ?? {});
@@ -1002,9 +1006,41 @@ app.post("/execution/execute-ticket", async (request, reply) => {
 
 async function main(): Promise<void> {
   await repo.init();
+
+  // Phase 1 / PR2: enforce Bearer auth on every non-public route,
+  // stamp x-correlation-id on every response, and write one audit row
+  // per request in onResponse. Registered AFTER repo.init() so the
+  // execution_audit_log table exists before the first insert.
+  const burstTracker = new AuthFailureBurstTracker((burst) => {
+    void alerts.record({
+      severity: "warn",
+      kind: "auth_failure_burst",
+      message: `Auth failure burst: ${burst.count} 401s from ip=${burst.ip ?? "unknown"} within ${burst.windowMs}ms`,
+      payload: {
+        ip: burst.ip,
+        count: burst.count,
+        windowMs: burst.windowMs,
+      },
+    });
+  });
+  const expectedToken = config.EXECUTION_API_TOKEN ?? "";
+  if (!expectedToken) {
+    app.log.warn(
+      "EXECUTION_API_TOKEN is empty; every /execution/* request will be denied. " +
+        "Set EXECUTION_API_TOKEN in .env (openssl rand -hex 32) to allow clients through.",
+    );
+  }
+  registerExecutionAuth(app, {
+    token: expectedToken,
+    publicPaths: new Set(["/health"]),
+    burstTracker,
+    writeAudit: (row) => repo.insertExecutionAuditLog(row),
+    logger: app.log,
+  });
+
   const address = await app.listen({
     port: config.EXECUTION_PORT,
-    host: "0.0.0.0",
+    host: config.EXECUTION_BIND_HOST,
   });
   app.log.info(`execution-engine listening on ${address}`);
 

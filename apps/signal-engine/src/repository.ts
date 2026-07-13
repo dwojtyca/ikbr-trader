@@ -546,10 +546,13 @@ export class SignalRepository {
 
   async getExposureSnapshot(
     executionBaseUrl?: string,
+    executionApiToken?: string,
   ): Promise<ExposureSnapshot> {
     if (executionBaseUrl) {
-      const fromExecution =
-        await this.tryLoadExposureFromExecution(executionBaseUrl);
+      const fromExecution = await this.tryLoadExposureFromExecution(
+        executionBaseUrl,
+        executionApiToken,
+      );
       if (fromExecution) return fromExecution;
     }
 
@@ -1751,6 +1754,7 @@ export class SignalRepository {
 
   private async tryLoadExposureFromExecution(
     executionBaseUrl: string,
+    executionApiToken?: string,
   ): Promise<ExposureSnapshot | null> {
     try {
       const base = executionBaseUrl.endsWith("/")
@@ -1761,8 +1765,13 @@ export class SignalRepository {
       const timeout = setTimeout(() => controller.abort(), 3500);
 
       try {
+        const headers: Record<string, string> = {};
+        if (executionApiToken) {
+          headers.authorization = `Bearer ${executionApiToken}`;
+        }
         const response = await fetch(url, {
           method: "GET",
+          headers,
           signal: controller.signal,
         });
         if (!response.ok) return null;

@@ -71,7 +71,7 @@ export interface ExpectedNetPosition {
 
 export interface SystemAlertRow {
   id: number;
-  severity: "info" | "warn" | "error";
+  severity: "info" | "warn" | "error" | "CRITICAL";
   kind: string;
   message: string;
   payload: Record<string, unknown> | null;
@@ -793,6 +793,37 @@ export class ExecutionRepository {
       CREATE INDEX IF NOT EXISTS system_alerts_kind_idx
       ON system_alerts (kind, created_at DESC);
     `);
+
+    // Phase 1 / PR2: per-request audit log for every /execution/* call.
+    // Written fire-and-forget from the auth plugin's onResponse hook.
+    // No token values — only `sha256(token).slice(0, 12)` fingerprint.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS execution_audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        correlation_id UUID NOT NULL,
+        route TEXT NOT NULL,
+        method TEXT NOT NULL,
+        actor_kind TEXT NOT NULL,
+        token_fingerprint TEXT,
+        ip TEXT,
+        request_hash TEXT,
+        outcome TEXT NOT NULL,
+        reason TEXT
+      );
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS execution_audit_log_ts_idx
+      ON execution_audit_log (ts DESC);
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS execution_audit_log_correlation_idx
+      ON execution_audit_log (correlation_id);
+    `);
+    await this.pool.query(`
+      CREATE INDEX IF NOT EXISTS execution_audit_log_outcome_idx
+      ON execution_audit_log (outcome, ts DESC);
+    `);
   }
 
   async insertProposedFromTicket(
@@ -1406,7 +1437,7 @@ export class ExecutionRepository {
   }
 
   async insertSystemAlert(input: {
-    severity: "info" | "warn" | "error";
+    severity: "info" | "warn" | "error" | "CRITICAL";
     kind: string;
     message: string;
     payload?: Record<string, unknown>;
@@ -1434,6 +1465,45 @@ export class ExecutionRepository {
     );
   }
 
+  /**
+   * Persists a single row into the Phase 1 execution audit log. Called
+   * fire-and-forget by the auth Fastify plugin's onResponse hook. All
+   * fields except `correlation_id`, `route`, `method`, `actor_kind`, and
+   * `outcome` are optional; empty strings are stored as NULL.
+   */
+  async insertExecutionAuditLog(input: {
+    correlationId: string;
+    route: string;
+    method: string;
+    actorKind: "authenticated" | "unauthenticated";
+    tokenFingerprint: string | null;
+    ip: string | null;
+    requestHash: string | null;
+    outcome: "ALLOW" | "DENY_AUTH" | "DENY_GUARD" | "ERROR";
+    reason: string | null;
+  }): Promise<void> {
+    await this.pool.query(
+      `
+      INSERT INTO execution_audit_log (
+        correlation_id, route, method, actor_kind,
+        token_fingerprint, ip, request_hash, outcome, reason
+      )
+      VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        input.correlationId,
+        input.route,
+        input.method,
+        input.actorKind,
+        input.tokenFingerprint || null,
+        input.ip || null,
+        input.requestHash || null,
+        input.outcome,
+        input.reason || null,
+      ],
+    );
+  }
+
   async listSystemAlerts(limit = 100): Promise<SystemAlertRow[]> {
     const safeLimit = Math.max(1, Math.min(500, limit));
     const result = await this.pool.query(
@@ -1447,7 +1517,7 @@ export class ExecutionRepository {
     );
     return result.rows.map((row) => ({
       id: Number(row.id),
-      severity: row.severity as "info" | "warn" | "error",
+      severity: row.severity as "info" | "warn" | "error" | "CRITICAL",
       kind: String(row.kind),
       message: String(row.message),
       payload: (row.payload as Record<string, unknown> | null) ?? null,

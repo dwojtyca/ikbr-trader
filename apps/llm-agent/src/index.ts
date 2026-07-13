@@ -11,6 +11,7 @@ const repo = new LlmAgentRepository(pool);
 const executionApi = new ExecutionApiClient(
   config.LLM_AGENT_EXECUTION_BASE_URL,
   config.LLM_AGENT_HTTP_TIMEOUT_MS,
+  config.EXECUTION_API_TOKEN ?? "",
 );
 const marketaux = new MarketAuxClient({
   apiKey: config.LLM_AGENT_MARKETAUX_API_KEY,

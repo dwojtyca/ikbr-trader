@@ -458,6 +458,97 @@ decyzji operatora, która natychmiast pojawia się w audycie i na Telegramie.
   baseline, target pipeline, north-star.
 - [PHASE_1_PLAN.md](../implementation/PHASE_1_PLAN.md) — implementacja
   tego ADR w podziale na PR1–PR6.
+- [PHASE_1_REPORT.md](../implementation/PHASE_1_REPORT.md) — raport
+  wykonawczy z PR1..PR2.
 - OWASP ASVS 4.0 §V2.1 (Authentication) — Bearer token best practices.
 - [RFC 4918 §11.3](https://datatracker.ietf.org/doc/html/rfc4918#section-11.3)
   — HTTP `423 Locked` semantics.
+
+---
+
+## 8. Uwagi implementacyjne (post-PR2)
+
+Ta sekcja odnotowuje decyzje detaliczne, które zapadły podczas
+implementacji PR2 i wykroczyły poza pierwotny opis w §3.1 / §3.7.
+
+### 8.1 Constant-time compare z długością jako dyskryminantem
+
+`crypto.timingSafeEqual` wymaga dwóch buforów tej samej długości. Naiwne
+`Buffer.alloc(size, 0)` + copy sprawiałoby, że dwa tokeny o wspólnym
+prefixie, ale różnej długości, porównałyby się jako równe (bo padding to
+same zera). Dlatego przed porównaniem dokładamy długość każdego bufora
+jako XOR do ostatniego bajta padded copy — długość działa jako
+dyskryminant, a ścieżka pozostaje branch-free względem wartości tokenu:
+
+```ts
+const size = Math.max(providedBuf.length, expectedBuf.length, 32);
+const a = Buffer.alloc(size, 0);
+const b = Buffer.alloc(size, 0);
+providedBuf.copy(a);
+expectedBuf.copy(b);
+a[size - 1] ^= providedBuf.length & 0xff;
+b[size - 1] ^= expectedBuf.length & 0xff;
+timingSafeEqual(a, b);
+```
+
+Wszystkie tryby porażki (`missing_header`, `malformed`, `wrong_token`,
+`wrong_length`) zwracają jednakowe HTTP 401 z pustym body. Powód wpada do
+`execution_audit_log.reason` — nie do odpowiedzi.
+
+### 8.2 `X-Correlation-ID`: walidacja UUID v4
+
+Nagłówek `X-Correlation-ID` jest akceptowany tylko gdy pasuje do regexa
+RFC 4122 v1–5 (`[0-9a-f]{8}-[0-9a-f]{4}-[1-5]…`). W przeciwnym razie
+generowany jest świeży `randomUUID()`. To blokuje próby log-injection
+(np. `'; DROP TABLE audit; --`) i utrzymuje `execution_audit_log.correlation_id`
+w spójnym formacie UUID (kolumna jest typu `UUID`, więc niepoprawna
+wartość skutkowałaby błędem SQL i utratą wpisu audytowego).
+
+### 8.3 Empty `EXECUTION_API_TOKEN` → fail-closed
+
+Jeśli `EXECUTION_API_TOKEN` na serwerze jest pusty przy starcie,
+`execution-engine` emituje pojedynczy `WARN` do loga i **odrzuca każde**
+żądanie do `/execution/*` z HTTP 401. Nie ma trybu soft-open ani okna
+tolerancji. `GET /health` pozostaje publiczny (i nie jest audytowany),
+żeby liveness-check w docker-compose nadal działał.
+
+### 8.4 `AuthFailureBurstTracker`: proces-local sliding window
+
+Bursting rate-limit jest utrzymywany w pamięci procesu (Map<IP, timestamps[]>)
+z oknem 60s i progiem 3. Po emisji alertu bucket dla danego IP jest
+resetowany, więc kolejne 3 błędy uwierzytelnienia w oknie ponownie
+wywołają alert (nie ma cichej klapy).
+
+Świadomie NIE używamy Postgresa/Redisa jako źródła prawdy o bursting —
+Phase 1 celowo pomija distributed rate-limiting; jest to nadinżynieria
+przy pojedynczym instancji execution-engine.
+
+### 8.5 Audit: jeden wpis na request w `onResponse`
+
+Zamiast dwóch wpisów (jeden w preHandler przy 401, drugi w onResponse
+przy sukcesie) audyt zapisywany jest **dokładnie raz** w hooku
+`onResponse`. Rezultat (`ALLOW` / `DENY_AUTH` / `DENY_GUARD` / `ERROR`)
+wywnioskowany jest z `reply.statusCode` + stanu auth przechowywanego na
+symbolu przypisanym do `request`. Zapis jest fire-and-forget: błąd
+zapisu do audytu loguje `WARN`, ale NIGDY nie blokuje odpowiedzi
+(preferujemy dostarczyć klientowi odpowiedź i stracić 1 wpis audytu niż
+odwrotnie).
+
+### 8.6 `AlertSeverity` rozszerzony o `CRITICAL`
+
+`alerts.ts` dodaje piąty poziom `CRITICAL` **powyżej** `error`. `CRITICAL`
+bypassuje filtr `ALERT_MIN_SEVERITY` i zawsze idzie na Telegram (jeśli
+skonfigurowany). W PR2 używa go tylko przygotowane (nieużywane jeszcze)
+kind = `direct_ticket_used`; `auth_failure_burst` jest `warn`, bo
+oczekujemy okazjonalnych "burst-ów" (dev testujący kończąc się i błędnie
+skonfigurowany monitor) — nie chcemy ich promować do Telegrama u każdego
+operatora.
+
+### 8.7 UI: token po stronie serwera Vite, nigdy w bundle
+
+`apps/ui/vite.config.ts` czyta `process.env.EXECUTION_API_TOKEN`
+server-side i wstrzykuje go w `configure(proxy).proxyReq.setHeader(...)`.
+Nazwa envu **nie** ma prefixu `VITE_`, więc Vite jej NIE inlinuje do
+bundla klienckiego. Zweryfikowane manualnie:
+`grep tokentokentoken apps/ui/dist/assets/*.js` = brak dopasowań przy
+buildzie z niepustą zmienną.

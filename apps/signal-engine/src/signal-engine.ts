@@ -77,6 +77,7 @@ interface SignalEngineOptions {
   currencyBySymbol: Record<string, string>;
   priceMultiplierBySymbol: Record<string, number>;
   executionBaseUrl: string;
+  executionApiToken: string;
   strategyCooldownMs: number;
   riskLimits: RiskLimits;
 }
@@ -333,7 +334,10 @@ export class SignalEngine {
 
     const riskSnapshot =
       exposureSnapshot ??
-      (await this.repo.getExposureSnapshot(this.options.executionBaseUrl));
+      (await this.repo.getExposureSnapshot(
+        this.options.executionBaseUrl,
+        this.options.executionApiToken,
+      ));
     const existingPositionQty =
       riskSnapshot.positionsBySymbol[symbol.toUpperCase()] ?? 0;
     const positionContext =

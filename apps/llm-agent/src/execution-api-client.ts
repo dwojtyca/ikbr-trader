@@ -67,7 +67,8 @@ export interface RejectProposedPayload {
 export class ExecutionApiClient {
   constructor(
     private readonly baseUrl: string,
-    private readonly timeoutMs: number
+    private readonly timeoutMs: number,
+    private readonly bearerToken: string
   ) {}
 
   async getAccountSummary(force = false): Promise<AccountSummary> {
@@ -95,11 +96,15 @@ export class ExecutionApiClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
+      const headers: Record<string, string> = {
+        'content-type': 'application/json'
+      };
+      if (this.bearerToken) {
+        headers.authorization = `Bearer ${this.bearerToken}`;
+      }
       const response = await fetch(url, {
         method: options.method ?? 'GET',
-        headers: {
-          'content-type': 'application/json'
-        },
+        headers,
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal
       });

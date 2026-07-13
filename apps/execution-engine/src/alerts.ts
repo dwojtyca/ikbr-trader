@@ -1,12 +1,18 @@
 import { config } from "./config.js";
 import type { ExecutionRepository } from "./repository.js";
 
-export type AlertSeverity = "info" | "warn" | "error";
+// Phase 1 / PR2: `CRITICAL` extends the severity ladder above `error` so
+// that specific safety events (e.g. DIRECT_TICKET_USED in PR4) can always
+// be delivered to Telegram regardless of the operator's `ALERT_MIN_SEVERITY`
+// filter. `AUTH_FAILURE_BURST` uses `warn` — it is expected periodic noise
+// in production and should not page the operator every time.
+export type AlertSeverity = "info" | "warn" | "error" | "CRITICAL";
 
 const SEVERITY_RANK: Record<AlertSeverity, number> = {
   info: 0,
   warn: 1,
   error: 2,
+  CRITICAL: 3,
 };
 
 export type AlertKind =
@@ -18,7 +24,9 @@ export type AlertKind =
   | "reconciliation_mismatch"
   | "reconciliation_run"
   | "startup"
-  | "system";
+  | "system"
+  | "auth_failure_burst"
+  | "direct_ticket_used";
 
 export interface AlertInput {
   severity: AlertSeverity;
@@ -70,7 +78,13 @@ export class AlertService implements AlertNotifier {
     }
 
     if (!this.telegramEnabled) return;
-    if (SEVERITY_RANK[alert.severity] < this.minRank) return;
+    // CRITICAL always ships to Telegram, ignoring ALERT_MIN_SEVERITY.
+    if (
+      alert.severity !== "CRITICAL" &&
+      SEVERITY_RANK[alert.severity] < this.minRank
+    ) {
+      return;
+    }
 
     void this.sendTelegram(alert)
       .then(async () => {
@@ -99,11 +113,13 @@ export class AlertService implements AlertNotifier {
     if (!token || !chatId) return;
 
     const icon =
-      alert.severity === "error"
-        ? "🔴"
-        : alert.severity === "warn"
-          ? "🟡"
-          : "🔵";
+      alert.severity === "CRITICAL"
+        ? "🚨"
+        : alert.severity === "error"
+          ? "🔴"
+          : alert.severity === "warn"
+            ? "🟡"
+            : "🔵";
     const lines = [
       `${icon} <b>${escapeHtml(alert.kind)}</b>`,
       escapeHtml(alert.message),
