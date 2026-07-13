@@ -12,4 +12,4 @@ dist
 # Vite config compiled from vite.config.ts by the `composite`
 # tsconfig.node.json project reference. Regenerated on every build.
 apps/ui/vite.config.js
-apps/ui/vite.config.d.ts
+apps/ui/vite.config.d.tsdiff.txt

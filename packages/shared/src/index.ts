@@ -371,3 +371,4 @@ export {
 } from "./instruments/definitions.js";
 export * from "./market-context/index.js";
 export * from "./decision-engine/index.js";
+export * from "./risk-engine/index.js";
