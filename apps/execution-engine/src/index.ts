@@ -13,6 +13,7 @@ import { AccountSnapshot, TwsExecutionClient } from "./tws-execution-client.js";
 import { AlertService } from "./alerts.js";
 import {
   AuthFailureBurstTracker,
+  getExecutionAuthContext,
   registerExecutionAuth,
 } from "./auth.js";
 import {
@@ -22,6 +23,7 @@ import {
   whitelistForEnvironment,
 } from "./env-guard.js";
 import { evaluateReadiness } from "./readiness.js";
+import { planDirectTicketDispatch } from "./direct-ticket-guard.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -44,6 +46,8 @@ const tws = new TwsExecutionClient(
     usRthOpenBufferMin: config.EXECUTION_US_RTH_OPEN_BUFFER_MIN,
     usRthCloseBufferMin: config.EXECUTION_US_RTH_CLOSE_BUFFER_MIN,
     contractFallbackByConid: config.contractFallbackByConid,
+    environment: config.IBKR_ENVIRONMENT,
+    allowDirectTicket: config.allowDirectTicket,
   },
   (line) => app.log.info(line),
   (update) => {
@@ -159,6 +163,9 @@ const executeTicketBodySchema = z.object({
   ticket: ticketSchema,
   persist: z.boolean().default(true),
   strategy: z.string().default("manual_ticket"),
+  decisionSource: z
+    .enum(["signal", "llm", "user", "user_override"])
+    .optional(),
 });
 
 const executeProposedBodySchema = decisionMetadataSchema.extend({
@@ -648,6 +655,7 @@ async function executePersistedOrder(
       order,
       accountId,
       config.EXECUTION_DEFAULT_TIF,
+      { proposedOrderId: order.id },
     );
     if (result.status === "FILLED") {
       await repo.markFilled(
@@ -1064,9 +1072,31 @@ app.post("/execution/execute-ticket", async (request, reply) => {
   }
 
   if (!body.persist) {
+    const dispatch = planDirectTicketDispatch({
+      persist: body.persist,
+      allowDirectTicket: config.allowDirectTicket,
+      decisionSource: body.decisionSource,
+      auth: getExecutionAuthContext(request),
+      symbol: ticket.instrument,
+      side: ticket.side,
+      quantity: ticket.quantity,
+    });
+    if (dispatch.kind === "deny") {
+      return reply.code(dispatch.statusCode).send(dispatch.body);
+    }
+
     const validationError = validateExecutableTicket(ticket);
     if (validationError) {
       return reply.code(400).send({ error: validationError });
+    }
+
+    if (dispatch.kind === "allow") {
+      await alerts.record({
+        severity: dispatch.alert.severity,
+        kind: dispatch.alert.kind,
+        message: dispatch.alert.message,
+        payload: { ...dispatch.alert.payload },
+      });
     }
 
     try {

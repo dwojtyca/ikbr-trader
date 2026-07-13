@@ -15,6 +15,21 @@ const SEVERITY_RANK: Record<AlertSeverity, number> = {
   CRITICAL: 3,
 };
 
+/**
+ * Routing predicate for the Telegram sink. `CRITICAL` alerts always
+ * pass regardless of the operator's `ALERT_MIN_SEVERITY` filter — this
+ * is how safety events (`safety_account_environment_mismatch`,
+ * `direct_ticket_used`) reach paging no matter how noisily the operator
+ * has muted the channel. Everything else must clear `minSeverity`.
+ */
+export function shouldForwardToTelegram(
+  severity: AlertSeverity,
+  minSeverity: AlertSeverity,
+): boolean {
+  if (severity === "CRITICAL") return true;
+  return SEVERITY_RANK[severity] >= SEVERITY_RANK[minSeverity];
+}
+
 export type AlertKind =
   | "tws_connection"
   | "order_rejected"
@@ -53,15 +68,15 @@ interface AlertLogger {
  * trading path is never blocked by a flaky notification channel.
  */
 export class AlertService implements AlertNotifier {
-  private readonly minRank: number;
+  private readonly minSeverity: AlertSeverity;
   private readonly telegramEnabled: boolean;
 
   constructor(
     private readonly repo: ExecutionRepository,
     private readonly logger: AlertLogger,
   ) {
-    const min = (config.ALERT_MIN_SEVERITY as AlertSeverity) ?? "warn";
-    this.minRank = SEVERITY_RANK[min] ?? SEVERITY_RANK.warn;
+    this.minSeverity =
+      (config.ALERT_MIN_SEVERITY as AlertSeverity) ?? "warn";
     this.telegramEnabled = Boolean(
       config.ALERT_TELEGRAM_BOT_TOKEN && config.ALERT_TELEGRAM_CHAT_ID,
     );
@@ -79,11 +94,7 @@ export class AlertService implements AlertNotifier {
     }
 
     if (!this.telegramEnabled) return;
-    // CRITICAL always ships to Telegram, ignoring ALERT_MIN_SEVERITY.
-    if (
-      alert.severity !== "CRITICAL" &&
-      SEVERITY_RANK[alert.severity] < this.minRank
-    ) {
+    if (!shouldForwardToTelegram(alert.severity, this.minSeverity)) {
       return;
     }
 

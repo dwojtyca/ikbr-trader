@@ -552,3 +552,106 @@ Nazwa envu **nie** ma prefixu `VITE_`, więc Vite jej NIE inlinuje do
 bundla klienckiego. Zweryfikowane manualnie:
 `grep tokentokentoken apps/ui/dist/assets/*.js` = brak dopasowań przy
 buildzie z niepustą zmienną.
+
+## 9. Uwagi implementacyjne (post-PR3)
+
+### 9.1 Central preHandler zamiast per-handler guardów
+
+Env-guard jest egzekwowany przez jeden `app.addHook("preHandler", ...)`
+zarejestrowany w `main()` **po** `registerExecutionAuth`, co gwarantuje
+że request bez tokenu dostaje `401` przed sprawdzeniem `423`. Hook filtruje
+metodę (`POST/PUT/PATCH/DELETE`) i prefix (`/execution/*`) — automatycznie
+chroni każdy nowy mutujący endpoint bez modyfikacji handlera. Rzucany
+`EnvironmentGuardError` jest przekładany globalnie na `423 { error, reason }`
+przez `app.setErrorHandler`.
+
+### 9.2 Whitelist enforcement w `ensureBrokerSession`, nie w kliencie TWS
+
+Konto brokera jest walidowane w miejscu, w którym `IBKR_ACCOUNT_ID`
+override zderza się z rzeczywistym wynikiem `reqManagedAccts`. Zły
+match → CRITICAL alert `safety_account_environment_mismatch` (bypass
+`ALERT_MIN_SEVERITY`), `lastActiveAccountId = null` (mismatch NIE jest
+cachowany), throw `EnvironmentGuardError`. Poprawny match → cache
+`lastActiveAccountId` używane przez preHandler i `/ready`.
+
+### 9.3 `/ready` z 7 s cache dla audit-write probe
+
+`GET /ready` pyta `SELECT 1` przez pool, ale cachuje wynik na 7 s
+(`READY_AUDIT_CACHE_TTL_MS`). Pozwala orchestratorowi pollować ready
+często bez konkurowania z realnym ruchem o połączenia z Postgresem.
+Cache trzyma zarówno wynik pozytywny jak i negatywny — awaria DB jest
+raportowana z opóźnieniem max 7 s.
+
+### 9.4 Decision D7 zachowana
+
+`TRADING_ENABLED=false` w live NIE flipuje `/ready` na 503. Test
+`returns 200 with tradingEnabled=false in LIVE (decision D7)` utrwala
+kontrakt. Response body zawiera `tradingEnabled: false`, więc UI /
+orchestrator odróżnia "ready and trading" od "ready but paused".
+
+### 9.5 `lastActiveAccountId` jako Phase 1 in-memory state
+
+Zarówno `lastActiveAccountId` jak i `lastReconciliationAt` żyją w pamięci
+procesu. Znak `TODO(reconciliation-sot)` wskazuje docelowy design:
+oba pola pochodzić będą z tabeli reconciliation state, żeby przetrwać
+restart i pozostać spójne przy multi-instancji execution-engine.
+Rozstrzygnięcie odsunięte poza Fazę 1.
+
+## 10. Uwagi implementacyjne (post-PR4)
+
+### 10.1 Refaktor do `planDirectTicketDispatch`
+
+Cała polityka direct-ticket (persist=false) jest zamknięta w jednej
+czystej funkcji `planDirectTicketDispatch(inputs)` zwracającej
+`{ kind: 'not_applicable' | 'deny' | 'allow', ... }`. Handler HTTP
+w `index.ts` jest cienką warstwą wiring: nie podejmuje żadnych decyzji
+poza wykonaniem outputu planera. Pozwoliło to na wyczerpujące testy
+jednostkowe polityki bez konieczności integracji Fastify + broker mock.
+
+### 10.2 Precedencja `EXECUTION_ALLOW_DIRECT_TICKET`
+
+Kolejność bram (utrwalona testem `flag precedence`):
+
+1. `EXECUTION_ALLOW_DIRECT_TICKET=false` → 403 `direct_ticket_disabled`,
+   niezależnie od `decisionSource`.
+2. `EXECUTION_ALLOW_DIRECT_TICKET=true` **i** `decisionSource !== 'user_override'`
+   → 400 `direct_ticket_requires_user_override`.
+3. Obie → CRITICAL alert `direct_ticket_used`, potem `placeSignalOrder`.
+
+Flaga jest master switchem — magiczny `decisionSource` nie wystarczy.
+
+### 10.3 Belt-and-suspenders w `TwsExecutionClient`
+
+`placeSignalOrder(ticket, accountId, tif, context?)` akceptuje opcjonalny
+`context.proposedOrderId`. Przy braku ID + `environment === 'live'` +
+brak `allowDirectTicket=true`, klient throw'uje przed jakąkolwiek
+komunikacją z socketem TWS. Ochrona przed hipotetycznym callerem, który
+obszedłby handler HTTP.
+
+`TwsExecutionClient` dostaje `environment` i `allowDirectTicket` przez
+konstruktor jednorazowo (zmiana wymaga restartu procesu — te same envy
+są egzekwowane globalnie).
+
+### 10.4 Alert payload nigdy nie zawiera surowego tokenu
+
+`getExecutionAuthContext(request)` udostępnia tylko `correlationId` +
+`tokenFingerprint` (8-znakowy hex ze `fingerprintToken`). Handler
+buduje alert z tych pól — nigdy nie sięga po `request.headers.authorization`.
+Utrwalone testem `alert message + payload never carry a raw Bearer token`.
+
+### 10.5 `shouldForwardToTelegram` wyekstrahowany do pure fn
+
+Predykat routingu Telegramu wyjęty z `AlertService.record` do wolnej
+funkcji `shouldForwardToTelegram(severity, minSeverity)`. CRITICAL zawsze
+zwraca `true` niezależnie od `ALERT_MIN_SEVERITY`. Testy w
+[alerts.test.ts](../../apps/execution-engine/src/alerts.test.ts) utrwalają
+kontrakt — `direct_ticket_used` (CRITICAL) dochodzi do Telegramu nawet
+przy `ALERT_MIN_SEVERITY=error`.
+
+### 10.6 Bez rate-limitu na CRITICAL
+
+Każde użycie `persist=false` emituje pełny alert (bez throttle). Cel:
+sygnalizować operatorowi każdy sięg po hot-fix path. Jeżeli w Fazie 2
+okaże się, że generuje szum (np. testy operacyjne w cyklu), doda się
+per-minute cap na kind = `direct_ticket_used`. Nie planowany w Fazie 1.
+

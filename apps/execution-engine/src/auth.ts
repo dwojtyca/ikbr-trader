@@ -208,6 +208,24 @@ function setState(req: FastifyRequest, state: AuthDecoration): void {
   (req as RequestWithAudit)[AUTH_SYMBOL] = state;
 }
 
+/**
+ * Public accessor for handler code that needs to record correlation
+ * metadata into audit trails or alert payloads. Returns `null` when
+ * the request predates the auth hook (only possible for public paths
+ * like `/health`). Never exposes the raw Bearer token — only its
+ * 8-char fingerprint.
+ */
+export function getExecutionAuthContext(
+  req: FastifyRequest,
+): { correlationId: string; tokenFingerprint: string | null } | null {
+  const state = getState(req);
+  if (!state) return null;
+  return {
+    correlationId: state.correlationId,
+    tokenFingerprint: state.tokenFingerprint,
+  };
+}
+
 function isUuidV4Like(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
 }

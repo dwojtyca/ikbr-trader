@@ -1,5 +1,6 @@
 import IB from "ib";
 import { SignalTicket } from "@ikbr/shared";
+import { assertClientDirectTicketAllowed } from "./direct-ticket-guard.js";
 
 interface TwsExecutionConfig {
   host: string;
@@ -26,6 +27,8 @@ interface TwsExecutionConfig {
       currency?: string;
     }
   >;
+  environment?: "paper" | "live";
+  allowDirectTicket?: boolean;
 }
 
 interface ContractShape {
@@ -357,7 +360,14 @@ export class TwsExecutionClient {
     ticket: SignalTicket,
     accountId: string,
     tif: string,
+    context?: { proposedOrderId?: number | string | null },
   ): Promise<PlaceOrderResult> {
+    assertClientDirectTicketAllowed({
+      proposedOrderId: context?.proposedOrderId ?? null,
+      environment: this.config.environment ?? "paper",
+      allowDirectTicket: this.config.allowDirectTicket === true,
+    });
+
     await this.connect();
 
     const resolvedContract = await this.resolveContract(ticket);

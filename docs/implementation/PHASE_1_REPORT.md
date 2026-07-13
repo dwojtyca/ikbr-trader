@@ -214,6 +214,173 @@ Weryfikacja bezpieczeństwa UI bundle:
 
 ---
 
-## PR3 — TBD (guards + /ready)
+## PR3 — Paper/Live env guards, /ready, account mismatch alert
 
-Nie rozpoczęte.
+Zakomitowany jako `00adc7f`.
+
+### Zakres implementacji
+
+| Warstwa | Plik | Zmiana |
+| --- | --- | --- |
+| Guard (pure) | [apps/execution-engine/src/env-guard.ts](../../apps/execution-engine/src/env-guard.ts) | `assertEnvironmentAllowsWrite(cfg, activeAccountId)`, `whitelistForEnvironment(cfg)`, `EnvironmentGuardError` (statusCode 423, reason discriminant) |
+| Readiness (pure) | [apps/execution-engine/src/readiness.ts](../../apps/execution-engine/src/readiness.ts) | `evaluateReadiness({...})` → `{ statusCode, body }` |
+| HTTP | [apps/execution-engine/src/index.ts](../../apps/execution-engine/src/index.ts) | Global `preHandler` gate na wszystkie `POST/PUT/PATCH/DELETE /execution/*` (rejestrowany po `registerExecutionAuth` żeby 401 wyprzedził 423); `GET /ready` z 7 s TTL cache dla `SELECT 1`; `setErrorHandler` przekłada `EnvironmentGuardError` na 423 `{ error, reason }`; `ensureBrokerSession` egzekwuje whitelistę na `getManagedAccounts` i przy mismatchu emituje CRITICAL `safety_account_environment_mismatch` (bypass `ALERT_MIN_SEVERITY`); `runReconciliation` stempluje `lastReconciliationAt` |
+| Alert | [apps/execution-engine/src/alerts.ts](../../apps/execution-engine/src/alerts.ts) | Nowy `AlertKind` `safety_account_environment_mismatch` |
+
+### Kluczowe rozstrzygnięcia
+
+- **Port ignorowany**: `IBKR_ENVIRONMENT` jest jedynym źródłem prawdy
+  (ADR-001 §3.2). Test regresyjny w [env-guard.test.ts](../../apps/execution-engine/src/env-guard.test.ts)
+  utrwala kontrakt.
+- **Decision D7 zachowana**: w live + `TRADING_ENABLED=false` `/ready`
+  zwraca 200 z `tradingEnabled=false` — administracyjna pauza nie jest
+  awarią readiness (ADR-001 §3.6).
+- **Bootstrap chicken-and-egg**: preHandler przepuszcza `POST /execution/bootstrap`
+  gdy `lastActiveAccountId=null` (guard tylko egzekwuje `TRADING_ENABLED`
+  w live), a `ensureBrokerSession` dopiero po `getManagedAccounts` sprawdza
+  whitelistę i cachuje wynik.
+- **TODO(reconciliation-sot)**: `lastActiveAccountId` + `lastReconciliationAt`
+  żyją w pamięci procesu; docelowo mają pochodzić z tabeli reconciliation state.
+- **`/ready` audit-write cache (7 s TTL)**: probe `SELECT 1` uruchamia się
+  co najwyżej raz na 7 s niezależnie od częstotliwości pollingu, chroniąc
+  pool przed konkurencją z real traffic.
+
+### Testy
+
+- Nowe: 15 × env-guard + 11 × readiness (razem 26).
+- Suma: 102 pass w execution-engine, żadnych regresji.
+- Typecheck `tsc --noEmit` — czysto.
+- `pnpm -r build` — wszystkie 7 pakietów.
+
+### Hostile review
+
+- **Q: Czy operator może obejść guard portem?**
+  **A:** Nie. Guard nie ma pola port. Test `does not look at any port field`
+  utrwala kontrakt: nawet paper account na porcie 4001 przechodzi, o ile
+  `IBKR_ENVIRONMENT=paper` i konto jest w `ALLOWED_PAPER_ACCOUNTS`.
+- **Q: Co jeśli `ensureBrokerSession` rzuci EnvironmentGuardError w środku
+  handlera nie łapiącego wyjątków?**
+  **A:** `setErrorHandler` łapie na końcu łańcucha i zwraca 423
+  `{ error, reason }`. Nie ma potrzeby try/catch w każdym handlerze.
+- **Q: Bootstrap w live + `TRADING_ENABLED=false` — czy blokuje
+  observation-mode?**
+  **A:** Tak, celowo. Observation-only wymaga `IBKR_ENVIRONMENT=paper`.
+  W live wszystkie mutujące endpointy są zamknięte gdy trading wyłączony.
+- **Q: Czy CRITICAL alert może zalać Telegram przy powtarzającym się
+  mismatchu?**
+  **A:** Alert emitowany jest przy każdym niecacheowanym wywołaniu
+  `ensureBrokerSession`. Cache się nie wypełnia (mismatch resetuje
+  `lastActiveAccountId = null`), więc kolejne write'y regenerują alert.
+  To celowe — mismatch w live musi być głośny. Rate-limit odsunięty do
+  Fazy 2 gdyby okazało się problematyczny.
+- **Q: Co jeśli `lastReconciliationAt` nigdy się nie stempluje (broker
+  offline od startu)?**
+  **A:** `/ready` zwraca 503 `no_reconciliation_yet`; `/health` dalej 200.
+  Kubernetes/orchestrator nie restartuje procesu, ale nie kieruje ruchu.
+
+### Poza zakresem PR3
+
+- `EXECUTION_ALLOW_DIRECT_TICKET` enforcement + `DIRECT_TICKET_USED`
+  alert → PR4.
+- `EXECUTION_ALLOW_MKT` enforcement + `MKT` default → PR5.
+- `.env.example`, root scripts, `README.md` update → PR6.
+
+---
+
+## PR4 — Direct-ticket (persist=false) hardening
+
+### Zakres implementacji
+
+| Warstwa | Plik | Zmiana |
+| --- | --- | --- |
+| Guard (pure) | [apps/execution-engine/src/direct-ticket-guard.ts](../../apps/execution-engine/src/direct-ticket-guard.ts) | `evaluateDirectTicket`, `buildDirectTicketAuditRecord`, `planDirectTicketDispatch`, `assertClientDirectTicketAllowed`. Reason discriminants: `direct_ticket_disabled` (403), `direct_ticket_requires_user_override` (400) |
+| Auth (public accessor) | [apps/execution-engine/src/auth.ts](../../apps/execution-engine/src/auth.ts) | `getExecutionAuthContext(request)` — zwraca `{ correlationId, tokenFingerprint }` bez ujawniania surowego tokenu |
+| HTTP | [apps/execution-engine/src/index.ts](../../apps/execution-engine/src/index.ts) | `executeTicketBodySchema` rozszerzony o `decisionSource: 'signal' \| 'llm' \| 'user' \| 'user_override'` (opcjonalne); handler `POST /execution/execute-ticket` używa `planDirectTicketDispatch` — deny → 403/400, allow → `alerts.record({severity:'CRITICAL', kind:'direct_ticket_used', ...})` przed `placeSignalOrder`; standardowa ścieżka `persist=true` nietknięta |
+| Broker client | [apps/execution-engine/src/tws-execution-client.ts](../../apps/execution-engine/src/tws-execution-client.ts) | `TwsExecutionConfig` przyjmuje `environment` i `allowDirectTicket`; `placeSignalOrder` przyjmuje `context?: { proposedOrderId }`; belt-and-suspenders guard: `live + brak proposedOrderId + brak opt-in` → throw |
+| Alerts (pure) | [apps/execution-engine/src/alerts.ts](../../apps/execution-engine/src/alerts.ts) | Ekstrakcja `shouldForwardToTelegram(severity, minSeverity)` — CRITICAL zawsze przechodzi |
+
+### Kluczowe rozstrzygnięcia
+
+- **Refaktor do planera**: `planDirectTicketDispatch(...)` zwraca
+  `{ kind: 'not_applicable' \| 'deny' \| 'allow', ... }`. Handler w
+  `index.ts` jest cienką warstwą wiring bez własnych decyzji — cała
+  polityka pokryta testami jednostkowymi na czystej funkcji.
+- **Precedencja flag**: flaga `EXECUTION_ALLOW_DIRECT_TICKET=false`
+  odrzuca również request z `decisionSource=user_override`. Operator
+  MUSI jawnie przełączyć flagę; magiczne pole źródła nie wystarczy.
+  Utrwalone testem `flag precedence`.
+- **Alert payload**: CRITICAL `direct_ticket_used` z payloadem
+  `{ correlationId, tokenFingerprint, symbol, side, quantity }`.
+  Surowy Bearer token nigdy nie trafia do payloadu — `getExecutionAuthContext`
+  eksponuje wyłącznie fingerprint. Utrwalone testem `never includes the
+  raw token in message or payload`.
+- **Belt-and-suspenders w kliencie brokera**: nawet gdyby ktoś obszedł
+  handler HTTP i wywołał `placeSignalOrder` bez `proposedOrderId` w live
+  bez opt-in, `assertClientDirectTicketAllowed` throw'uje. Konfigurację
+  środowiska klient dostaje z jednorazowego konstruktora `TwsExecutionClient`.
+- **Bez rate-limitu**: każde użycie `persist=false` generuje pełny alert.
+  To celowe — sygnalizuje operatorowi, że ktoś sięga po hot-fix path
+  (ADR-001 §3.5).
+
+### Testy
+
+- Nowe: 24 × direct-ticket-guard + 7 × alerts routing (razem 31).
+- Suma: **132 pass** w execution-engine (102 → 132), zero regresji.
+- Typecheck `tsc --noEmit` — czysto.
+- `pnpm -r build` — wszystkie 7 pakietów.
+
+Pokrycie w stosunku do specyfikacji PR4:
+
+| Wymaganie | Test |
+| --- | --- |
+| `persist=false + flaga false → 403` | `evaluateDirectTicket → 403 direct_ticket_disabled` + `planDirectTicketDispatch → deny 403` |
+| `persist=false + flaga true + zły decisionSource → 400` | `evaluateDirectTicket` (3 warianty: undefined, `user`, `llm`) + `planDirectTicketDispatch → deny 400` |
+| `persist=false + flaga true + user_override → przechodzi` | `evaluateDirectTicket → allowed` + `planDirectTicketDispatch → allow` |
+| Poprawne użycie tworzy CRITICAL `system_alert` | `planDirectTicketDispatch: allow with CRITICAL alert` + integracja handler-level (alerts.record spy przez existing infrastructure) |
+| Alert przekazywany do Telegram sink | `shouldForwardToTelegram(CRITICAL, error) === true` (3 warianty min-severity) |
+| Token nie pojawia się w alercie ani logach | `buildDirectTicketAuditRecord: never includes the raw token` + `planDirectTicketDispatch: alert message + payload never carry a raw Bearer token` |
+| `persist=true` bez regresji | Typecheck + build; ścieżka nie została zmieniona strukturalnie |
+| Client-side guard blokuje live direct bez opt-in | `assertClientDirectTicketAllowed` — 6 wariantów (paper/live × id/no-id × flag) |
+
+### Hostile review
+
+- **Q: Czy `decisionSource=user_override` może być podszyty przez
+  klienta?**
+  **A:** Tak — nie ma podpisu. Ale wymóg jest defense-in-depth:
+  pierwsza brama to `EXECUTION_ALLOW_DIRECT_TICKET`, druga to
+  `user_override`. Wewnętrzny klient (llm-agent, signal-engine) nie ustawia
+  `user_override` w normalnym ruchu, więc zły request pochodzi tylko od
+  operatora lub kompromitowanego klienta — a wtedy alert CRITICAL na
+  Telegram jest natychmiastowy.
+- **Q: Co jeśli operator ustawi `ALERT_TELEGRAM_BOT_TOKEN=''`?**
+  **A:** `telegramEnabled === false`, alert idzie tylko do `system_alerts`
+  (persystencja jest gwarantowana). Operator zobaczy w UI/DB, ale nie
+  dostanie pagera. To decyzja operatora — dokumentowana w README (PR6).
+- **Q: Czy handler może zapisać alert i zwrócić 500 zanim wykona order?**
+  **A:** Tak — jeśli `alerts.record` throw'uje z powodu awarii DB,
+  handler kończy się błędem 500 (unhandled). To celowe: **nie chcemy**
+  wykonać direct ticketu bez śladu audit. Można wzmocnić w PR6 przez
+  jawny 500 + osobny log. Nie zmieniam w PR4 (poza zakresem).
+- **Q: Czy `getExecutionAuthContext` może zwrócić dane innego requestu
+  (race)?**
+  **A:** Nie. Stan trzymany na `req[AUTH_SYMBOL]` — per-request; brak
+  współdzielenia stanu między requestami.
+- **Q: Czy `placeSignalOrder` z `context.proposedOrderId=undefined`
+  degraduje persist=true?**
+  **A:** Nie. `executePersistedOrder` przekazuje `{ proposedOrderId: order.id }`
+  gdzie `order.id` jest wymagany (rzuca wcześniej "persisted order id is
+  missing"). Brak regresji na standardowej ścieżce.
+- **Q: Czy client-side guard wygeneruje false-positive w paper?**
+  **A:** Nie. Warunek: `environment === 'live' AND brak proposedOrderId
+  AND brak opt-in`. Test `paper + no proposedOrderId + flag off → allowed`
+  utrwala.
+
+### Poza zakresem PR4
+
+- `EXECUTION_ALLOW_MKT` enforcement + `MKT` default → PR5.
+- `.env.example`, root scripts, `README.md` update, ostrzeżenia startowe
+  o aktywnym `EXECUTION_ALLOW_DIRECT_TICKET=true` → PR6.
+- Rate-limit alertów CRITICAL — nie planowany w Fazie 1.
+- Multi-token auth per klient (osobny fingerprint per klient w alertach)
+  → Faza 5+.
+
