@@ -32,12 +32,30 @@ const schema = z.object({
     .string()
     .default("https://api.marketaux.com/v1/news/all"),
   MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().min(0).max(1000).default(100),
+  // Phase 1 / PR1 (schema-only): Bearer token for the execution-engine API.
+  // ADR-001: in Phase 1 the shared EXECUTION_API_TOKEN value is used by
+  // every internal client. Per-client tokens are deferred until the
+  // execution-engine supports multi-token auth.
+  // The HTTP client attaches this header starting in PR2.
+  EXECUTION_API_TOKEN: optionalTrimmedString,
 });
 
 const env = schema.parse(process.env);
 
+const llmAgentEnabled = env.LLM_AGENT_ENABLED.toLowerCase() === "true";
+if (llmAgentEnabled && !env.EXECUTION_API_TOKEN) {
+  // PR1: schema-only warning (no throw). Turns into a hard error in PR2
+  // once the execution-engine actually requires Bearer.
+  // eslint-disable-next-line no-console
+  console.warn(
+    "[llm-agent config] EXECUTION_API_TOKEN is empty; " +
+      "execution-engine will start requiring it from PR2. " +
+      "Set it in .env before merging PR2.",
+  );
+}
+
 export const config = {
   ...env,
-  llmAgentEnabled: env.LLM_AGENT_ENABLED.toLowerCase() === "true",
+  llmAgentEnabled,
   llmAgentFailClosed: env.LLM_AGENT_FAIL_CLOSED.toLowerCase() === "true",
 };

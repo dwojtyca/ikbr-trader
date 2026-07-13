@@ -64,6 +64,8 @@ services:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
       SIGNAL_EXECUTION_BASE_URL: http://execution-engine:3103
+      # Phase 1 / PR1 (schema-only). Runtime attach in PR2.
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,6 +84,18 @@ services:
       EXECUTION_PORT: 3103
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       IB_SOCKET_HOST: host.docker.internal
+      # Phase 1 / PR1 (schema-only). Runtime bind change lands in PR2.
+      # Docker containers can only reach a sibling service on 0.0.0.0;
+      # the auth middleware in PR2 is the actual security boundary here.
+      EXECUTION_BIND_HOST: 0.0.0.0
+      IBKR_ENVIRONMENT: ${IBKR_ENVIRONMENT:-paper}
+      TRADING_ENABLED: ${TRADING_ENABLED:-false}
+      ALLOWED_PAPER_ACCOUNTS: ${ALLOWED_PAPER_ACCOUNTS:-}
+      ALLOWED_LIVE_ACCOUNTS: ${ALLOWED_LIVE_ACCOUNTS:-}
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
+      EXECUTION_ALLOW_MKT: ${EXECUTION_ALLOW_MKT:-false}
+      EXECUTION_ALLOW_DIRECT_TICKET: ${EXECUTION_ALLOW_DIRECT_TICKET:-false}
+      EXECUTION_READY_RECONCILIATION_MAX_AGE_S: ${EXECUTION_READY_RECONCILIATION_MAX_AGE_S:-900}
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +113,8 @@ services:
     environment:
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       LLM_AGENT_EXECUTION_BASE_URL: http://execution-engine:3103
+      # Phase 1 / PR1 (schema-only). Runtime attach in PR2.
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -139,6 +155,8 @@ services:
       UI_SIGNAL_PROXY_TARGET: http://signal-engine:3102
       UI_EXECUTION_PROXY_TARGET: http://execution-engine:3103
       UI_BACKTEST_PROXY_TARGET: http://backtest-engine:3104
+      # Phase 1 / PR1 (schema-only). Vite proxy attaches this header from PR2.
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
     depends_on:
       - ingestion
       - signal-engine

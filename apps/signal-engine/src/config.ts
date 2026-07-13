@@ -52,6 +52,16 @@ const schema = z.object({
     .int()
     .min(0)
     .default(6 * 60 * 60 * 1000),
+  // Phase 1 / PR1 (schema-only): Bearer token for the execution-engine API.
+  // ADR-001: in Phase 1 the shared EXECUTION_API_TOKEN value is used by
+  // every internal client. Per-client tokens are deferred until the
+  // execution-engine supports multi-token auth.
+  // getExposureSnapshot() starts attaching this header from PR2.
+  EXECUTION_API_TOKEN: z.preprocess(
+    (value) =>
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.string().optional(),
+  ),
 });
 
 const env = schema.parse(process.env);
