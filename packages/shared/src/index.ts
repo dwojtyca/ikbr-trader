@@ -363,3 +363,9 @@ export function deriveOrderDiagnostics(
 }
 
 export * from "./strategy-profiles.js";
+export * from "./instruments/types.js";
+export { InstrumentRegistry } from "./instruments/registry.js";
+export {
+  INSTRUMENT_DEFINITIONS,
+  defaultInstrumentRegistry,
+} from "./instruments/definitions.js";
