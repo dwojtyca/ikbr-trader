@@ -370,3 +370,4 @@ export {
   defaultInstrumentRegistry,
 } from "./instruments/definitions.js";
 export * from "./market-context/index.js";
+export * from "./decision-engine/index.js";
