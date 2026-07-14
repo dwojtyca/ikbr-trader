@@ -374,3 +374,4 @@ export * from "./decision-engine/index.js";
 export * from "./risk-engine/index.js";
 export * from "./signal-engine/index.js";
 export * from "./execution-ticket/index.js";
+export * from "./trading-pipeline/index.js";
