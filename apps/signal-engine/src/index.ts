@@ -2,12 +2,24 @@ import Fastify from "fastify";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
-import { ProposedOrder } from "@ikbr/shared";
+import { ProposedOrder, defaultInstrumentRegistry } from "@ikbr/shared";
 import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
 import { SignalEngine } from "./signal-engine.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
 import { createStrategies } from "./strategies/strategy-registry.js";
+import {
+  MarketDataRuntime,
+  buildRuntimeFreshnessPolicy,
+} from "./runtime/runtime.js";
+import { PriceContextProvider } from "./runtime/price-provider.js";
+import {
+  SignalRepositoryContractResolver,
+  SignalRepositoryMarketDataReader,
+} from "./runtime/market-data-reader.js";
+import { createRuntimeEngines } from "./runtime/engines.js";
+import { runtimeRoutesPlugin } from "./runtime/routes.js";
+import { DEFAULT_FRESHNESS_POLICY } from "@ikbr/shared";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -219,6 +231,44 @@ app.post("/signals/strategies/:strategyId", async (request, reply) => {
   );
   return { strategyId, runtime };
 });
+
+// ---------------------------------------------------------------------------
+// PR12 — Market Data Runtime (dry-run only). Isolated from the legacy
+// signal pipeline above: uses the shared engines and reads market state
+// through a dedicated reader; NEVER submits orders, NEVER writes to
+// proposed_orders, NEVER calls execution-engine. See
+// docs/architecture/MARKET_DATA_RUNTIME.md.
+// ---------------------------------------------------------------------------
+if (config.runtimeEnabled) {
+  const resolver = new SignalRepositoryContractResolver({
+    repo,
+    cacheTtlMs: config.instrumentContractCacheTtlMs,
+  });
+  const reader = new SignalRepositoryMarketDataReader({ repo, resolver });
+  const priceProvider = new PriceContextProvider({
+    reader,
+    freshnessTtlMs: config.marketContextMaxTickAgeMs,
+  });
+  const { pipeline } = createRuntimeEngines({
+    registry: defaultInstrumentRegistry,
+  });
+  const marketDataRuntime = new MarketDataRuntime({
+    registry: defaultInstrumentRegistry,
+    providers: [priceProvider],
+    pipeline,
+    freshnessPolicy: buildRuntimeFreshnessPolicy({
+      base: DEFAULT_FRESHNESS_POLICY,
+      maxTickAgeMs: config.marketContextMaxTickAgeMs,
+    }),
+  });
+  await app.register(runtimeRoutesPlugin, {
+    runtime: marketDataRuntime,
+    readinessDeps: { redis, postgres: pool },
+  });
+  app.log.info("runtime: /runtime/* endpoints registered (dry-run only)");
+} else {
+  app.log.warn("runtime: RUNTIME_ENABLED=false — /runtime/* endpoints not registered");
+}
 
 async function main(): Promise<void> {
   await repo.init();

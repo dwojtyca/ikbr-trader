@@ -62,6 +62,29 @@ const schema = z.object({
       typeof value === "string" && value.trim() === "" ? undefined : value,
     z.string().optional(),
   ),
+  // ---------------------------------------------------------------
+  // Phase 2 / PR12 — Market Data Runtime (dry-run only).
+  // ---------------------------------------------------------------
+  // These envs govern the isolated /runtime/* endpoints added by
+  // PR12 and are unrelated to the legacy signal-engine pipeline.
+  // Explicitly OUT of scope for PR12: ORCH_LOOP_ENABLED, retry
+  // policy, reconciliation, execution-engine URL, candle providers.
+  RUNTIME_ENABLED: z.string().default("true"),
+  MARKET_CONTEXT_MAX_TICK_AGE_S: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(30),
+  // Cache TTL for symbol → conid lookups from `instrument_contracts`.
+  // A short window bounds the staleness introduced by front-month
+  // futures rolls (ingestion re-resolves the contract, the runtime
+  // must pick up the new conid without waiting for a restart).
+  // Set to `0` to disable caching entirely.
+  INSTRUMENT_CONTRACT_CACHE_TTL_S: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(60),
 });
 
 const env = schema.parse(process.env);
@@ -126,6 +149,9 @@ export const config = {
   ...env,
   watchlistSymbols: parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
   signalEventDriven: env.SIGNAL_EVENT_DRIVEN.toLowerCase() === "true",
+  runtimeEnabled: env.RUNTIME_ENABLED.toLowerCase() === "true",
+  marketContextMaxTickAgeMs: env.MARKET_CONTEXT_MAX_TICK_AGE_S * 1000,
+  instrumentContractCacheTtlMs: env.INSTRUMENT_CONTRACT_CACHE_TTL_S * 1000,
   volumeFilterMode:
     env.IB_MARKET_DATA_TYPE === 1 ? ("strict" as const) : ("off" as const),
   currencyBySymbol: parseContractCurrencies(

@@ -102,7 +102,13 @@ asynchronously via reconciliation and existing status updates.
 - OPEN DECISION (OD-1): Orchestrator process placement — new
   dedicated app, module inside `apps/signal-engine`, or a third
   option. The kit does **not** assume `apps/orchestrator` exists.
-  Resolved before PR12.
+  - **Resolved for PR12 (Market Data Runtime)** — hosted inside
+    `apps/signal-engine/src/runtime/` as an isolated module. See
+    [../../architecture/MARKET_DATA_RUNTIME.md](../../architecture/MARKET_DATA_RUNTIME.md)
+    for the rationale (reuses existing Fastify + Redis + Postgres
+    wiring; legacy `runAndPersist` pipeline untouched).
+  - **Still open for PR13 (Execution Runtime).** The write edge
+    may warrant its own lifecycle. Resolved before PR13.
 - OPEN DECISION (OD-4): Does the Orchestrator call the existing
   `POST /execution/execute-ticket` endpoint with a mandatory
   `proposedOrderId`, or a new `POST /execution/tickets` endpoint?
