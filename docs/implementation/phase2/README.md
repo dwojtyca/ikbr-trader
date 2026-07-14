@@ -80,17 +80,31 @@ documents where they arise:
 - OD-1 Orchestrator process placement — new dedicated app,
   host inside `apps/signal-engine`, or a third option. Nothing
   in this kit assumes `apps/orchestrator` exists yet.
+  **Resolved (PR12 + PR13)**: hosted inside `apps/signal-engine`
+  under `src/runtime/` (dry-run) and `src/runtime/execution/`
+  (write). See MARKET_DATA_RUNTIME.md, EXECUTION_RUNTIME.md.
 - OD-2 Ticket persistence: dedicated `execution_tickets` table vs.
   inlined JSONB column on `proposed_orders`.
+  **Resolved (PR13)**: reuse `proposed_orders`; PR13 added
+  `client_order_id` + `client_order_hash` columns.
 - OD-3 Idempotency key surface: `client_order_id UNIQUE` column on
   `proposed_orders` vs. dedicated `order_idempotency` table.
+  **Resolved (PR13)**: partial unique index on
+  `proposed_orders.client_order_id`.
 - OD-4 Ticket submission API: new `POST /execution/tickets` vs.
   reuse `POST /execution/execute-ticket` with mandatory
   `proposedOrderId`.
+  **Resolved (PR13)**: reuse `POST /execution/execute-ticket`
+  with `persist=true` extended by `clientOrderId` +
+  `clientOrderHash`.
 - OD-5 Scheduler owner: cron inside Orchestrator vs. external
   trigger from `apps/ingestion` candle-close events.
+  Still open; PR14.
 - OD-6 Retry ownership: Orchestrator only vs. shared retry helper
   in `packages/shared`.
+  **Resolved (PR13)**: PR13 has no runtime-level retries. A
+  shared-retry helper is deferred to a later PR if a second
+  caller needs one.
 
 Every open decision is resolved *before* the PR that depends on it
 starts. See [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md) for gating.

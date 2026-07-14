@@ -20,6 +20,11 @@ import {
 import { createRuntimeEngines } from "./runtime/engines.js";
 import { runtimeRoutesPlugin } from "./runtime/routes.js";
 import { DEFAULT_FRESHNESS_POLICY } from "@ikbr/shared";
+import { ExecutionRuntime } from "./runtime/execution/execution-runtime.js";
+import { HttpExecutionTicketSubmitter } from "./runtime/execution/submitter.js";
+import { HttpReadyProbe } from "./runtime/execution/ready-probe.js";
+import { PaperGuard } from "./runtime/execution/paper-guard.js";
+import { executionRuntimeRoutesPlugin } from "./runtime/execution/routes.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
@@ -266,6 +271,53 @@ if (config.runtimeEnabled) {
     readinessDeps: { redis, postgres: pool },
   });
   app.log.info("runtime: /runtime/* endpoints registered (dry-run only)");
+
+  // -------------------------------------------------------------------------
+  // PR13 — Execution Runtime (paper-only write endpoint). Registered ONLY
+  // when EXECUTION_RUNTIME_ENABLED=true. Off by default. Live is impossible
+  // via env alone: EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT is a schema
+  // literal AND every submission verifies execution-engine's /ready reports
+  // environment="paper". See docs/architecture/EXECUTION_RUNTIME.md.
+  // -------------------------------------------------------------------------
+  if (config.executionRuntime.enabled) {
+    const engineUrl = config.executionRuntime.engineUrl;
+    const bearerToken = config.EXECUTION_API_TOKEN ?? "";
+    if (!bearerToken) {
+      app.log.warn(
+        "execution-runtime: EXECUTION_API_TOKEN is empty; POST /runtime/execute will deny every request",
+      );
+    }
+    const readyProbe = new HttpReadyProbe({
+      engineUrl,
+      requestTimeoutMs: config.executionRuntime.requestTimeoutMs,
+    });
+    const paperGuard = new PaperGuard({
+      probe: readyProbe,
+      expectedEnvironment: config.executionRuntime.expectedEnvironment,
+    });
+    const submitter = new HttpExecutionTicketSubmitter({
+      engineUrl,
+      bearerToken,
+      requestTimeoutMs: config.executionRuntime.requestTimeoutMs,
+    });
+    const executionRuntime = new ExecutionRuntime({
+      dryRun: marketDataRuntime,
+      paperGuard,
+      submitter,
+    });
+    await app.register(executionRuntimeRoutesPlugin, {
+      runtime: executionRuntime,
+      bearerToken,
+      readinessDeps: { redis, postgres: pool, paperGuard },
+    });
+    app.log.info(
+      "execution-runtime: /runtime/execute registered (paper-only, bearer-protected)",
+    );
+  } else {
+    app.log.warn(
+      "execution-runtime: EXECUTION_RUNTIME_ENABLED=false — /runtime/execute NOT registered",
+    );
+  }
 } else {
   app.log.warn("runtime: RUNTIME_ENABLED=false — /runtime/* endpoints not registered");
 }

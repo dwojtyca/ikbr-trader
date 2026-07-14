@@ -1,6 +1,11 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 
+import {
+  buildExecutionRuntimeConfig,
+  executionRuntimeSchema,
+} from "./runtime/execution/config.js";
+
 dotenv.config();
 
 const schema = z.object({
@@ -85,7 +90,9 @@ const schema = z.object({
     .int()
     .min(0)
     .default(60),
-});
+})
+  // Phase 2 / PR13 — Execution Runtime (paper-only write endpoint).
+  .merge(executionRuntimeSchema);
 
 const env = schema.parse(process.env);
 
@@ -152,6 +159,10 @@ export const config = {
   runtimeEnabled: env.RUNTIME_ENABLED.toLowerCase() === "true",
   marketContextMaxTickAgeMs: env.MARKET_CONTEXT_MAX_TICK_AGE_S * 1000,
   instrumentContractCacheTtlMs: env.INSTRUMENT_CONTRACT_CACHE_TTL_S * 1000,
+  executionRuntime: buildExecutionRuntimeConfig({
+    env,
+    fallbackEngineUrl: env.SIGNAL_EXECUTION_BASE_URL,
+  }),
   volumeFilterMode:
     env.IB_MARKET_DATA_TYPE === 1 ? ("strict" as const) : ("off" as const),
   currencyBySymbol: parseContractCurrencies(

@@ -107,14 +107,24 @@ asynchronously via reconciliation and existing status updates.
     [../../architecture/MARKET_DATA_RUNTIME.md](../../architecture/MARKET_DATA_RUNTIME.md)
     for the rationale (reuses existing Fastify + Redis + Postgres
     wiring; legacy `runAndPersist` pipeline untouched).
-  - **Still open for PR13 (Execution Runtime).** The write edge
-    may warrant its own lifecycle. Resolved before PR13.
+  - **Resolved for PR13 (Execution Runtime)** — hosted next to
+    the dry-run runtime inside
+    `apps/signal-engine/src/runtime/execution/`. Same rationale:
+    reuses infrastructure, shares 100% of its runtime deps with
+    the dry-run module. See
+    [../../architecture/EXECUTION_RUNTIME.md](../../architecture/EXECUTION_RUNTIME.md).
 - OPEN DECISION (OD-4): Does the Orchestrator call the existing
   `POST /execution/execute-ticket` endpoint with a mandatory
   `proposedOrderId`, or a new `POST /execution/tickets` endpoint?
-  Resolved before PR13.
+  - **Resolved for PR13** — reuse the existing
+    `POST /execution/execute-ticket` with `persist=true`, extended
+    with two optional fields (`clientOrderId`, `clientOrderHash`)
+    for end-to-end idempotency. `proposedOrderId` remains an
+    internal identifier; the runtime supplies the client-side key
+    instead. See EXECUTION_RUNTIME.md §Idempotency.
 - OPEN DECISION (OD-5): Scheduler ownership — internal cron in
   Orchestrator or event-driven from candle-close in `ingestion`?
+  Still open; PR14.
 
 OUT OF SCOPE for this document: modify / cancel / partial-close
 flows (Phase 3 in [main ROADMAP.md](../ROADMAP.md)).

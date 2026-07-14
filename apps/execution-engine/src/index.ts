@@ -1,4 +1,6 @@
 import Fastify from "fastify";
+import { hostname } from "node:os";
+import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ProposedOrder, ProposedOrderStatus, SignalTicket } from "@ikbr/shared";
@@ -24,11 +26,20 @@ import {
 } from "./env-guard.js";
 import { evaluateReadiness } from "./readiness.js";
 import { planDirectTicketDispatch } from "./direct-ticket-guard.js";
+import { orchestrateExecuteTicket } from "./execute-ticket-orchestrator.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const repo = new ExecutionRepository(pool);
 const alerts = new AlertService(repo, app.log);
+// Per-process identity for the PR13 submission claim. Combines
+// the host name (helps operators correlate the claim with a
+// machine) with a boot-time random suffix. This is observability
+// only — safety comes from the atomic fencing marker
+// (`execution_attempted_at` set in the same UPDATE as the claim),
+// which permanently prevents a second broker submission for the
+// same row regardless of any owner state or wall-clock time.
+const EXECUTION_PROCESS_OWNER_ID = `execution-engine:${hostname()}:${randomUUID().slice(0, 8)}`;
 const tws = new TwsExecutionClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -166,6 +177,15 @@ const executeTicketBodySchema = z.object({
   decisionSource: z
     .enum(["signal", "llm", "user", "user_override"])
     .optional(),
+  // Phase 2 / PR13 — end-to-end idempotency.
+  // Callers (execution-runtime) supply a stable `clientOrderId` and
+  // a `clientOrderHash` fingerprinting the order-critical fields.
+  // - Same key + same hash → duplicate-replay (200, no broker call).
+  // - Same key + different hash → idempotency conflict (409).
+  // - Missing keys → legacy behaviour (no dedup); kept for backwards
+  //   compatibility with existing callers.
+  clientOrderId: z.string().min(1).optional(),
+  clientOrderHash: z.string().min(1).optional(),
 });
 
 const executeProposedBodySchema = decisionMetadataSchema.extend({
@@ -318,6 +338,18 @@ function buildSubmittedConflictMessage(
   existing: { id: number; brokerOrderId?: string; createdAt: Date },
 ): string {
   return `Execution blocked for ${symbol}: active SUBMITTED order already exists (id=${existing.id}, brokerOrderId=${existing.brokerOrderId ?? "n/a"}, createdAt=${existing.createdAt.toISOString()})`;
+}
+
+/**
+ * Detect a Postgres unique-constraint violation. Matches by SQLSTATE
+ * `23505`; the `pg` driver exposes it on the error's `code` property.
+ * Used by /execution/execute-ticket to resolve the race between the
+ * up-front duplicate check and the INSERT statement.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "23505";
 }
 
 function startOfTodayUtc(): Date {
@@ -1053,25 +1085,50 @@ app.post("/execution/cancel-proposed/:id", async (request, reply) => {
 app.post("/execution/execute-ticket", async (request, reply) => {
   const body = executeTicketBodySchema.parse(request.body ?? {});
   const ticket = body.ticket as SignalTicket;
-  const activeSubmitted = await repo.findActiveSubmittedByInstrument(
-    ticket.instrument,
-  );
-  if (activeSubmitted) {
-    return reply.code(409).send({
-      error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted),
+
+  // Both idempotency fields must be provided together — enforcing
+  // this at the schema level would break legacy callers that supply
+  // neither, so it is enforced here.
+  const hasClientOrderId = typeof body.clientOrderId === "string";
+  const hasClientOrderHash = typeof body.clientOrderHash === "string";
+  if (hasClientOrderId !== hasClientOrderHash) {
+    return reply.code(400).send({
+      error:
+        "clientOrderId and clientOrderHash must be provided together (or both omitted)",
     });
   }
 
-  try {
-    await assertKillSwitchOk({
-      instrument: ticket.instrument,
-      positionEffect: ticket.positionEffect,
-    });
-  } catch (error) {
-    return reply.code(423).send({ error: (error as Error).message });
-  }
+  // Duplicate-replay / resume / conflict handling is delegated to
+  // `orchestrateExecuteTicket` for the persist=true + idempotent
+  // path (see the top of that module for the full state-aware
+  // decision table). The activeSubmitted + kill-switch pre-checks
+  // that used to run here would incorrectly reject a legitimate
+  // idempotent replay on an already-SUBMITTED row, so those checks
+  // now live inside the paths that actually need them (persist=false
+  // direct dispatch below, and `executePersistedOrder` on the
+  // persist=true path).
 
   if (!body.persist) {
+    const activeSubmitted = await repo.findActiveSubmittedByInstrument(
+      ticket.instrument,
+    );
+    if (activeSubmitted) {
+      return reply.code(409).send({
+        error: buildSubmittedConflictMessage(
+          ticket.instrument,
+          activeSubmitted,
+        ),
+      });
+    }
+    try {
+      await assertKillSwitchOk({
+        instrument: ticket.instrument,
+        positionEffect: ticket.positionEffect,
+      });
+    } catch (error) {
+      return reply.code(423).send({ error: (error as Error).message });
+    }
+
     const dispatch = planDirectTicketDispatch({
       persist: body.persist,
       allowDirectTicket: config.allowDirectTicket,
@@ -1119,7 +1176,115 @@ app.post("/execution/execute-ticket", async (request, reply) => {
     }
   }
 
-  const insertedId = await repo.insertProposedFromTicket(ticket, body.strategy);
+  // -----------------------------------------------------------------
+  // persist=true + PR13 idempotency
+  // -----------------------------------------------------------------
+  if (hasClientOrderId) {
+    const outcome = await orchestrateExecuteTicket(
+      {
+        getIdempotencyRecord: (id) => repo.getIdempotencyRecord(id),
+        insertProposedFromTicket: (t, s, i) =>
+          repo.insertProposedFromTicket(t, s, i),
+        getProposedOrderById: (id) => repo.getProposedOrderById(id),
+        executePersistedOrder: (order) =>
+          executePersistedOrder(order, {
+            decisionSource: "user",
+            decisionActor: "user",
+          }),
+        isUniqueViolation,
+        tryStartSubmission: (input) => repo.tryStartSubmission(input),
+        ownerId: () => EXECUTION_PROCESS_OWNER_ID,
+      },
+      {
+        ticket,
+        strategy: body.strategy,
+        clientOrderId: body.clientOrderId!,
+        clientOrderHash: body.clientOrderHash!,
+      },
+    );
+
+    switch (outcome.kind) {
+      case "conflict":
+        return reply.code(409).send({
+          outcome: "CONFLICT",
+          error: "idempotency_conflict",
+          message:
+            outcome.order === null
+              ? "clientOrderId conflict"
+              : "clientOrderId already exists with a different clientOrderHash",
+          ...(outcome.order ? { order: outcome.order } : {}),
+        });
+      case "duplicate_submitted":
+        return reply.code(200).send({
+          outcome: "DUPLICATE_SUBMITTED",
+          duplicate: true,
+          order: outcome.order,
+        });
+      case "duplicate_terminal":
+        return reply.code(200).send({
+          outcome: "DUPLICATE_TERMINAL",
+          duplicate: true,
+          order: outcome.order,
+        });
+      case "duplicate_pending_ambiguous":
+        return reply.code(200).send({
+          outcome: "DUPLICATE_PENDING_AMBIGUOUS",
+          duplicate: true,
+          order: outcome.order,
+        });
+      case "pending_claimed":
+        return reply.code(200).send({
+          outcome: "PENDING_CLAIMED",
+          duplicate: true,
+          order: outcome.order,
+        });
+      case "submitted":
+        return {
+          outcome: "SUBMITTED",
+          order: outcome.order,
+          execution: outcome.execution,
+        };
+      case "resumed":
+        return {
+          outcome: "RESUMED",
+          order: outcome.order,
+          execution: outcome.execution,
+          resumed: true,
+        };
+      case "execution_error":
+        return reply.code(400).send({
+          outcome: "EXECUTION_ERROR",
+          error: outcome.message,
+          order: outcome.order,
+          ...(outcome.resumed ? { resumed: true } : {}),
+        });
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // persist=true + no idempotency key (legacy callers)
+  // -----------------------------------------------------------------
+  const activeSubmitted = await repo.findActiveSubmittedByInstrument(
+    ticket.instrument,
+  );
+  if (activeSubmitted) {
+    return reply.code(409).send({
+      error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted),
+    });
+  }
+  try {
+    await assertKillSwitchOk({
+      instrument: ticket.instrument,
+      positionEffect: ticket.positionEffect,
+    });
+  } catch (error) {
+    return reply.code(423).send({ error: (error as Error).message });
+  }
+
+  const insertedId = await repo.insertProposedFromTicket(
+    ticket,
+    body.strategy,
+  );
   const inserted = await repo.getProposedOrderById(insertedId);
   if (!inserted) {
     return reply

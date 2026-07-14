@@ -749,6 +749,25 @@ export class ExecutionRepository {
       ON proposed_orders (processing_claimed_at DESC);
     `);
 
+    // Phase 2 / PR13 — end-to-end idempotency for /execution/execute-ticket.
+    // `client_order_id` is a caller-supplied opaque string (typically a
+    // UUID). Uniqueness is enforced by a partial index so pre-PR13 rows
+    // (NULL) do not collide. `client_order_hash` is a stable fingerprint
+    // of the ticket's order-critical fields; on a UNIQUE collision the
+    // endpoint compares hashes to distinguish "same payload = duplicate
+    // replay" from "different payload = idempotency conflict".
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS client_order_id TEXT;`,
+    );
+    await this.pool.query(
+      `ALTER TABLE proposed_orders ADD COLUMN IF NOT EXISTS client_order_hash TEXT;`,
+    );
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS proposed_orders_client_order_id_uidx
+      ON proposed_orders (client_order_id)
+      WHERE client_order_id IS NOT NULL;
+    `);
+
     await this.pool.query(`
       CREATE INDEX IF NOT EXISTS broker_execution_fills_order_idx
       ON broker_execution_fills (broker_order_id, executed_at DESC);
@@ -829,6 +848,10 @@ export class ExecutionRepository {
   async insertProposedFromTicket(
     ticket: SignalTicket,
     strategy = "manual_ticket",
+    idempotency?: {
+      readonly clientOrderId: string;
+      readonly clientOrderHash: string;
+    },
   ): Promise<number> {
     const result = await this.pool.query(
       `
@@ -848,12 +871,15 @@ export class ExecutionRepository {
         status,
         strategy,
         decision_source,
+        client_order_id,
+        client_order_hash,
         created_at
       )
       VALUES (
         $1, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
-        $11, $12, 'PROPOSED', $13, 'user', NOW()
+        $11, $12, 'PROPOSED', $13, 'user',
+        $14, $15, NOW()
       )
       RETURNING id
       `,
@@ -871,10 +897,50 @@ export class ExecutionRepository {
         ticket.confidence,
         ticket.riskCheckStatus,
         strategy,
+        idempotency?.clientOrderId ?? null,
+        idempotency?.clientOrderHash ?? null,
       ],
     );
 
     return Number(result.rows[0].id);
+  }
+
+  /**
+   * Look up a proposed order previously inserted with the given
+   * `client_order_id`, plus its stored `client_order_hash`. Returns
+   * `null` if no such row exists. Used by the `execute-ticket`
+   * handler on a UNIQUE-index collision. The `order` (via
+   * `mapRow`) carries `status`, `executionAttemptedAt` and
+   * `brokerOrderId` — every field the idempotency helper needs to
+   * decide between `duplicate_replay`, `duplicate_terminal`,
+   * `resume` and `conflict`.
+   */
+  async getIdempotencyRecord(
+    clientOrderId: string,
+  ): Promise<{ order: ProposedOrder; clientOrderHash: string | null } | null> {
+    const result = await this.pool.query(
+      `
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
+             decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
+             llm_decision_id, source_error, processing_owner, processing_claimed_at,
+             broker_order_id, execution_account_id, execution_message, last_error,
+             execution_attempted_at, executed_at, created_at,
+             client_order_hash
+      FROM proposed_orders
+      WHERE client_order_id = $1
+      LIMIT 1
+      `,
+      [clientOrderId],
+    );
+
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      order: this.mapRow(row as ProposedOrderRow),
+      clientOrderHash:
+        typeof row.client_order_hash === "string" ? row.client_order_hash : null,
+    };
   }
 
   async getProposedOrderById(id: number): Promise<ProposedOrder | null> {
@@ -1072,6 +1138,94 @@ export class ExecutionRepository {
         metadata?.sourceError ?? null,
       ],
     );
+  }
+
+  /**
+   * PR13 — atomic submission claim with a fencing marker.
+   *
+   * Every broker submission — fresh INSERT **and** resume — MUST
+   * acquire this claim before any broker call. The UNIQUE
+   * constraint on `client_order_id` alone does NOT prevent two
+   * concurrent broker submissions:
+   *
+   *   1. Request A INSERTs and pauses before submission.
+   *   2. Request B sees the clean PROPOSED row (either via the
+   *      up-front idempotency lookup, or via the racy-INSERT
+   *      re-lookup after UNIQUE violation) and calls
+   *      `tryStartSubmission`.
+   *   3. WITHOUT this method being called on BOTH paths, A and B
+   *      would each proceed to `executePersistedOrder` and the
+   *      broker would receive TWO orders under the same
+   *      idempotency key.
+   *
+   * The `execution_attempted_at IS NULL` clause in the WHERE
+   * combined with the SET `execution_attempted_at = NOW()`
+   * guarantees at-most-once broker submission ACROSS EVERY
+   * possible race — fresh INSERT vs resume, resume vs resume, or
+   * fresh vs racing-fresh-via-unique-violation:
+   *
+   *   1. Two callers `A`, `B` observe a `PROPOSED` row with no
+   *      marker.
+   *   2. Both call `tryStartSubmission`. PostgreSQL serialises
+   *      the two UPDATEs.
+   *   3. The winner flips `execution_attempted_at` to NOW()
+   *      atomically with the claim and receives its id in
+   *      RETURNING.
+   *   4. The loser observes the row now has
+   *      `execution_attempted_at != NULL` → its WHERE clause
+   *      excludes the row → UPDATE affects zero rows → returns
+   *      false → orchestrator surfaces
+   *      `duplicate_pending_ambiguous` / `duplicate_submitted` /
+   *      `duplicate_terminal` (whichever matches the freshest
+   *      state on re-read) and NEVER contacts the broker.
+   *
+   * This works EVEN IF the winner pauses arbitrarily long between
+   * the claim and the broker call. A pure TTL lease would let a
+   * second caller take over after the TTL expires; the marker
+   * prevents that.
+   *
+   *   UPDATE proposed_orders
+   *   SET processing_owner = $owner,
+   *       processing_claimed_at = NOW(),
+   *       execution_attempted_at = NOW()
+   *   WHERE id = $id
+   *     AND status = 'PROPOSED'
+   *     AND execution_attempted_at IS NULL
+   *     AND broker_order_id IS NULL
+   *   RETURNING id
+   *
+   * Consequence: a `PROPOSED` row can be SUBMITTED at most ONCE.
+   * If the winner crashes AFTER the atomic claim but BEFORE a
+   * terminal transition, the row becomes permanently ambiguous
+   * (status=PROPOSED, executionAttemptedAt set, no brokerOrderId)
+   * and reconciliation is the ONLY recovery path. This is the
+   * intentional safety trade-off: we prefer "requires human /
+   * reconciliation intervention" over "broker gets two orders".
+   *
+   * `processing_owner` and `processing_claimed_at` are still
+   * written for observability. Every terminal transition
+   * (`markSubmitted`, `markFilled`, `markCancelled`,
+   * `markRejected`) clears them.
+   */
+  async tryStartSubmission(input: {
+    readonly id: number;
+    readonly owner: string;
+  }): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+      UPDATE proposed_orders
+      SET processing_owner = $2,
+          processing_claimed_at = NOW(),
+          execution_attempted_at = NOW()
+      WHERE id = $1
+        AND status = 'PROPOSED'
+        AND execution_attempted_at IS NULL
+        AND broker_order_id IS NULL
+      RETURNING id
+      `,
+      [input.id, input.owner],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async markSubmitted(
