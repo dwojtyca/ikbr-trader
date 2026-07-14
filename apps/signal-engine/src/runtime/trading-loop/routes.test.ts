@@ -92,8 +92,10 @@ function registry(ids: readonly string[]): InstrumentRegistry {
     getByBrokerContract: () => undefined,
     listAll: () => list,
     listExecutionEnabled: () => list.filter((i) => i.trading.executionEnabled),
-    listSignalEnabled: () => list.filter((i) => i.trading.signalGenerationEnabled),
-    listMonitoringEnabled: () => list.filter((i) => i.trading.monitoringEnabled),
+    listSignalEnabled: () =>
+      list.filter((i) => i.trading.signalGenerationEnabled),
+    listMonitoringEnabled: () =>
+      list.filter((i) => i.trading.monitoringEnabled),
     listAiEnabled: () => list.filter((i) => i.trading.aiAnalysisEnabled),
   } as unknown as InstrumentRegistry;
 }
@@ -107,17 +109,83 @@ function makeSnapshot(iso: string): MarketContextSnapshot {
     overallStatus: "fresh",
     warnings: [],
     sections: {
-      instrument: { status: "fresh", observedAt, source: "t", data: null, warnings: [] },
-      price: { status: "fresh", observedAt, source: "t", data: { last: 100 }, warnings: [] },
-      technical: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      macro: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      crossAsset: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      positioning: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      flows: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      inventory: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      calendar: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      news: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
-      brokerState: { status: "unavailable", observedAt: null, source: null, data: null, warnings: [] },
+      instrument: {
+        status: "fresh",
+        observedAt,
+        source: "t",
+        data: null,
+        warnings: [],
+      },
+      price: {
+        status: "fresh",
+        observedAt,
+        source: "t",
+        data: { last: 100 },
+        warnings: [],
+      },
+      technical: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      macro: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      crossAsset: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      positioning: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      flows: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      inventory: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      calendar: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      news: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
+      brokerState: {
+        status: "unavailable",
+        observedAt: null,
+        source: null,
+        data: null,
+        warnings: [],
+      },
     },
   } as unknown as MarketContextSnapshot;
 }
@@ -208,9 +276,14 @@ function paperFailGuard(reason: string): PaperGuard {
   return new PaperGuard({ probe, expectedEnvironment: "paper" });
 }
 
-function makeMarketDataRuntime(pipeline: TradingPipelineResult): MarketDataRuntime {
+function makeMarketDataRuntime(
+  pipeline: TradingPipelineResult,
+): MarketDataRuntime {
   return {
-    async dryRun(instrumentId: string, _policy: ExecutionTicketPolicy): Promise<DryRunResult> {
+    async dryRun(
+      instrumentId: string,
+      _policy: ExecutionTicketPolicy,
+    ): Promise<DryRunResult> {
       void _policy;
       return {
         instrumentId,
@@ -221,7 +294,9 @@ function makeMarketDataRuntime(pipeline: TradingPipelineResult): MarketDataRunti
   } as unknown as MarketDataRuntime;
 }
 
-function makeExecutionRuntime(outcome: ExecutionRuntimeOutcome): ExecutionRuntime {
+function makeExecutionRuntime(
+  outcome: ExecutionRuntimeOutcome,
+): ExecutionRuntime {
   return {
     async execute(_i: ExecuteInput) {
       throw new Error("route path must not call execute()");
@@ -285,8 +360,12 @@ async function buildApp(opts: {
 }) {
   const app = Fastify({ logger: false });
   const reg = registry(["aapl"]);
-  const marketDataRuntime = makeMarketDataRuntime(opts.pipeline ?? SUCCESS_PIPELINE);
-  const executionRuntime = makeExecutionRuntime(opts.runtimeOutcome ?? SUBMITTED_OUTCOME);
+  const marketDataRuntime = makeMarketDataRuntime(
+    opts.pipeline ?? SUCCESS_PIPELINE,
+  );
+  const executionRuntime = makeExecutionRuntime(
+    opts.runtimeOutcome ?? SUBMITTED_OUTCOME,
+  );
   const exposureReader = opts.exposureReader ?? clearReader();
   const svc = new TradingLoopService({
     config: buildTradingLoopConfig({
@@ -320,7 +399,10 @@ async function buildApp(opts: {
 describe("GET /runtime/trading-loop/status", () => {
   it("returns disabled state with empty history before any run", async () => {
     const { app } = await buildApp({});
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/status" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/status",
+    });
     assert.equal(res.statusCode, 200);
     const body = res.json() as {
       enabled: boolean;
@@ -338,9 +420,15 @@ describe("GET /runtime/trading-loop/status", () => {
   it("reports the most recent outcome after runOnce", async () => {
     const { app, svc } = await buildApp({});
     await svc.runOnce();
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/status" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/status",
+    });
     const body = res.json() as {
-      lastOutcomes: Record<string, { outcome: { kind: string; idempotencyKey?: string } }>;
+      lastOutcomes: Record<
+        string,
+        { outcome: { kind: string; idempotencyKey?: string } }
+      >;
       cycleCount: number;
     };
     assert.equal(body.cycleCount, 1);
@@ -390,7 +478,10 @@ describe("GET /runtime/trading-loop/ready", () => {
       },
     };
     const { app } = await buildApp({ readinessDeps: readiness });
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/ready" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/ready",
+    });
     assert.equal(res.statusCode, 200);
     const body = res.json() as { ready: boolean; enabled: boolean };
     assert.equal(body.ready, true);
@@ -407,7 +498,10 @@ describe("GET /runtime/trading-loop/ready", () => {
     const { app } = await buildApp({
       configOverrides: { TRADING_LOOP_ENABLED: "true" },
     });
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/ready" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/ready",
+    });
     assert.equal(res.statusCode, 200);
     const body = res.json() as {
       ready: boolean;
@@ -431,7 +525,10 @@ describe("GET /runtime/trading-loop/ready", () => {
       configOverrides: { TRADING_LOOP_ENABLED: "true" },
       paperGuard: paperFailGuard("env=live"),
     });
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/ready" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/ready",
+    });
     assert.equal(res.statusCode, 503);
     const body = res.json() as { ready: boolean };
     assert.equal(body.ready, false);
@@ -454,7 +551,10 @@ describe("GET /runtime/trading-loop/ready", () => {
         },
       },
     });
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/ready" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/ready",
+    });
     assert.equal(res.statusCode, 503);
     const body = res.json() as {
       ready: boolean;
@@ -479,7 +579,10 @@ describe("GET /runtime/trading-loop/ready", () => {
         exposureReader: clearReader(),
       },
     });
-    const res = await app.inject({ method: "GET", url: "/runtime/trading-loop/ready" });
+    const res = await app.inject({
+      method: "GET",
+      url: "/runtime/trading-loop/ready",
+    });
     assert.equal(res.statusCode, 503);
     await app.close();
   });
@@ -527,14 +630,14 @@ describe("POST /runtime/trading-loop/run-once", () => {
     });
     assert.equal(res.statusCode, 200);
     const body = res.json() as {
-      reports: Array<{ instrumentId: string; outcome: { kind: string; idempotencyKey?: string } }>;
+      reports: Array<{
+        instrumentId: string;
+        outcome: { kind: string; idempotencyKey?: string };
+      }>;
     };
     assert.equal(body.reports.length, 1);
     assert.equal(body.reports[0].outcome.kind, "SUBMITTED");
-    assert.equal(
-      body.reports[0].outcome.idempotencyKey,
-      EXPECTED_INTENT_KEY,
-    );
+    assert.equal(body.reports[0].outcome.idempotencyKey, EXPECTED_INTENT_KEY);
     await app.close();
   });
 
@@ -577,7 +680,9 @@ describe("POST /runtime/trading-loop/run-once", () => {
     });
     assert.equal(res.statusCode, 200);
     const body = res.json() as {
-      reports: Array<{ outcome: { kind: string; reason?: string; message?: string } }>;
+      reports: Array<{
+        outcome: { kind: string; reason?: string; message?: string };
+      }>;
     };
     assert.equal(body.reports[0].outcome.kind, "SKIPPED");
     assert.equal(body.reports[0].outcome.reason, "EXPOSURE_BLOCKED");

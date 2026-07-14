@@ -75,13 +75,13 @@ export const tradingLoopRoutesPlugin: FastifyPluginAsync<
             durationMs: report.durationMs,
             outcome: {
               kind: report.outcome.kind,
-              ...(("idempotencyKey" in report.outcome)
+              ...("idempotencyKey" in report.outcome
                 ? { idempotencyKey: report.outcome.idempotencyKey }
                 : {}),
-              ...(("reason" in report.outcome)
+              ...("reason" in report.outcome
                 ? { reason: report.outcome.reason }
                 : {}),
-              ...(("message" in report.outcome)
+              ...("message" in report.outcome
                 ? { message: report.outcome.message }
                 : {}),
             },
@@ -111,9 +111,13 @@ export const tradingLoopRoutesPlugin: FastifyPluginAsync<
           ok: false,
           error: error instanceof Error ? error.message : String(error),
         })),
-      options.readinessDeps.exposureReader.probeReady().then((r) =>
-        r.ok ? { ok: true as const } : { ok: false as const, error: r.message },
-      ),
+      options.readinessDeps.exposureReader
+        .probeReady()
+        .then((r) =>
+          r.ok
+            ? { ok: true as const }
+            : { ok: false as const, error: r.message },
+        ),
       probe(() => options.readinessDeps.redis.ping()),
       probe(() => options.readinessDeps.postgres.query("SELECT 1")),
     ]);
@@ -154,13 +158,13 @@ export const tradingLoopRoutesPlugin: FastifyPluginAsync<
           durationMs: report.durationMs,
           outcome: {
             kind: report.outcome.kind,
-            ...(("idempotencyKey" in report.outcome)
+            ...("idempotencyKey" in report.outcome
               ? { idempotencyKey: report.outcome.idempotencyKey }
               : {}),
-            ...(("reason" in report.outcome)
+            ...("reason" in report.outcome
               ? { reason: report.outcome.reason }
               : {}),
-            ...(("message" in report.outcome)
+            ...("message" in report.outcome
               ? { message: report.outcome.message }
               : {}),
           },
@@ -183,4 +187,3 @@ async function probe(
     };
   }
 }
-

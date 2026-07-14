@@ -242,8 +242,7 @@ describe("HttpExecutionTicketSubmitter.submit — outcome mapping (PR13 discrimi
 
   it("200 without a recognised outcome → unknown (defensive; no silent fall-through to submitted)", async () => {
     const result = await submitWith(
-      () =>
-        new Response(JSON.stringify({ hello: "world" }), { status: 200 }),
+      () => new Response(JSON.stringify({ hello: "world" }), { status: 200 }),
     );
     assert.equal(result.kind, "unknown");
   });
@@ -254,10 +253,9 @@ describe("HttpExecutionTicketSubmitter.submit — outcome mapping (PR13 discrimi
     // tell submitted from terminal from pending.
     const result = await submitWith(
       () =>
-        new Response(
-          JSON.stringify({ duplicate: true, order: { id: 42 } }),
-          { status: 200 },
-        ),
+        new Response(JSON.stringify({ duplicate: true, order: { id: 42 } }), {
+          status: 200,
+        }),
     );
     assert.equal(result.kind, "unknown");
   });
@@ -265,10 +263,9 @@ describe("HttpExecutionTicketSubmitter.submit — outcome mapping (PR13 discrimi
   it("409 → conflict", async () => {
     const result = await submitWith(
       () =>
-        new Response(
-          JSON.stringify({ error: "idempotency_conflict" }),
-          { status: 409 },
-        ),
+        new Response(JSON.stringify({ error: "idempotency_conflict" }), {
+          status: 409,
+        }),
     );
     assert.equal(result.kind, "conflict");
   });

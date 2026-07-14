@@ -17,10 +17,7 @@ import {
   type TradingPipeline as TradingPipelineType,
 } from "@ikbr/shared";
 
-import {
-  MarketDataRuntime,
-  buildRuntimeFreshnessPolicy,
-} from "../runtime.js";
+import { MarketDataRuntime, buildRuntimeFreshnessPolicy } from "../runtime.js";
 import { PriceContextProvider } from "../price-provider.js";
 import type {
   MarketDataRuntimeReader,
@@ -645,8 +642,9 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     if (dryRunResult.pipeline.outcome !== "SUCCESS") {
       throw new Error("expected pipeline to succeed");
     }
-    const expectedHash = (await import("./client-order-hash.js"))
-      .computeClientOrderHash(dryRunResult.pipeline.ticket);
+    const expectedHash = (
+      await import("./client-order-hash.js")
+    ).computeClientOrderHash(dryRunResult.pipeline.ticket);
     await runtime.executePrepared({
       dryRunResult,
       idempotencyKey: "idem-precomputed-hash-1",
@@ -660,7 +658,8 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     // is `(input: { dryRunResult; idempotencyKey }) => ...`.
     // Adding a `clientOrderHash` field would fail this cast.
     type Input = Parameters<ExecutionRuntime["executePrepared"]>[0];
-    const forbidden: "clientOrderHash" extends keyof Input ? true : false = false;
+    const forbidden: "clientOrderHash" extends keyof Input ? true : false =
+      false;
     assert.equal(forbidden, false);
   });
 });

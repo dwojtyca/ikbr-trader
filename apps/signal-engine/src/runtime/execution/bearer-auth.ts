@@ -17,7 +17,11 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
-import type { FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from "fastify";
+import type {
+  FastifyReply,
+  FastifyRequest,
+  preHandlerAsyncHookHandler,
+} from "fastify";
 
 export interface RuntimeBearerAuthOptions {
   /**

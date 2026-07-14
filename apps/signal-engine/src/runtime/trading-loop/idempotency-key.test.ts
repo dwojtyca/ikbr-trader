@@ -21,10 +21,7 @@ function build(
 
 describe("TradingLoopIdempotencyKeyBuilder — v4 determinism", () => {
   it("same (instrument, strategy, trigger) → same key", () => {
-    assert.equal(
-      build("AAPL", STRAT, TRIG1),
-      build("AAPL", STRAT, TRIG1),
-    );
+    assert.equal(build("AAPL", STRAT, TRIG1), build("AAPL", STRAT, TRIG1));
   });
 
   it("format: loop:v4:<id>:<strategy>:<trigger>  (no intent-hash suffix)", () => {
@@ -46,10 +43,7 @@ describe("TradingLoopIdempotencyKeyBuilder — clientOrderId is trigger-only (ro
     // that emit different tickets get the SAME clientOrderId so
     // execution-engine's UNIQUE(client_order_id) surfaces a
     // legitimate CONFLICT on the mismatched hash.
-    assert.equal(
-      build("AAPL", STRAT, TRIG1),
-      build("AAPL", STRAT, TRIG1),
-    );
+    assert.equal(build("AAPL", STRAT, TRIG1), build("AAPL", STRAT, TRIG1));
   });
 
   it("new trigger → new clientOrderId (even with an identical downstream ticket)", () => {
@@ -64,10 +58,7 @@ describe("TradingLoopIdempotencyKeyBuilder — clientOrderId is trigger-only (ro
   });
 
   it("different instruments → different ids", () => {
-    assert.notEqual(
-      build("AAPL", STRAT, TRIG1),
-      build("MSFT", STRAT, TRIG1),
-    );
+    assert.notEqual(build("AAPL", STRAT, TRIG1), build("MSFT", STRAT, TRIG1));
   });
 
   it("process restart evaluating the same trigger → identical clientOrderId", () => {

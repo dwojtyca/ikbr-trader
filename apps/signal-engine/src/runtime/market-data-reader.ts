@@ -53,9 +53,7 @@ export interface MarketDataRuntimeReader {
    * if ingestion has not published a tick / cannot resolve a conid
    * for the instrument.
    */
-  readMarketState(
-    instrument: Instrument,
-  ): Promise<RuntimeMarketState | null>;
+  readMarketState(instrument: Instrument): Promise<RuntimeMarketState | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +132,10 @@ export class SignalRepositoryContractResolver implements ContractResolver {
   readonly #now: () => number;
 
   constructor(options: SignalRepositoryContractResolverOptions) {
-    if (!options?.repo || typeof options.repo.getInstrumentContract !== "function") {
+    if (
+      !options?.repo ||
+      typeof options.repo.getInstrumentContract !== "function"
+    ) {
       throw new Error(
         "SignalRepositoryContractResolver: repo with getInstrumentContract() is required",
       );
@@ -222,9 +223,7 @@ export interface SignalRepositoryMarketDataReaderOptions {
  * marks the price section `unavailable` — the pipeline cannot
  * proceed to SUCCESS on data that belongs to a different contract.
  */
-export class SignalRepositoryMarketDataReader
-  implements MarketDataRuntimeReader
-{
+export class SignalRepositoryMarketDataReader implements MarketDataRuntimeReader {
   readonly #repo: MarketStateReadPort;
   readonly #resolver: ContractResolver;
 

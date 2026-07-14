@@ -69,8 +69,7 @@ export class HttpReadyProbe implements ReadyProbe {
           body.checks?.accountMatchesEnvironment === true,
       };
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       return {
         kind: "error",
         message: /aborted/i.test(message)

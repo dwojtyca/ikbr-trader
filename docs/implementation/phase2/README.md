@@ -17,14 +17,14 @@ IBKR Paper — **without** rewriting `apps/execution-engine`,
 
 ## Documents
 
-| File | Scope |
-| ---- | ----- |
-| [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md) | Ordered PR-by-PR plan for PR11 → PR18 with acceptance criteria. |
-| [CONFIGURATION.md](CONFIGURATION.md) | New env vars introduced across Phase 2 (owner / default / description). |
-| [RUNTIME_FLOW.md](RUNTIME_FLOW.md) | End-to-end request flow, sync/async boundaries, module ownership. |
-| [STATE_AND_RECONCILIATION.md](STATE_AND_RECONCILIATION.md) | Source of truth, order lifecycle, restart recovery, idempotency. |
-| [FAILURE_AND_RECOVERY.md](FAILURE_AND_RECOVERY.md) | Retry taxonomy, timeouts, fail-closed rules, kill switch, alerts. |
-| [TESTING_AND_ROLLOUT.md](TESTING_AND_ROLLOUT.md) | Test layers, paper E2E gate, live-readiness checklist. |
+| File                                                       | Scope                                                                   |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------- |
+| [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md)                   | Ordered PR-by-PR plan for PR11 → PR18 with acceptance criteria.         |
+| [CONFIGURATION.md](CONFIGURATION.md)                       | New env vars introduced across Phase 2 (owner / default / description). |
+| [RUNTIME_FLOW.md](RUNTIME_FLOW.md)                         | End-to-end request flow, sync/async boundaries, module ownership.       |
+| [STATE_AND_RECONCILIATION.md](STATE_AND_RECONCILIATION.md) | Source of truth, order lifecycle, restart recovery, idempotency.        |
+| [FAILURE_AND_RECOVERY.md](FAILURE_AND_RECOVERY.md)         | Retry taxonomy, timeouts, fail-closed rules, kill switch, alerts.       |
+| [TESTING_AND_ROLLOUT.md](TESTING_AND_ROLLOUT.md)           | Test layers, paper E2E gate, live-readiness checklist.                  |
 
 ## Non-goals
 
@@ -49,7 +49,7 @@ IBKR Paper — **without** rewriting `apps/execution-engine`,
    short-circuits to a structured rejection — never a best-effort
    submission.
 3. **`execution-engine` is the only component that talks to
-   IBKR for writes.** The Orchestrator (PR11) *proposes*; it does
+   IBKR for writes.** The Orchestrator (PR11) _proposes_; it does
    not `placeOrder`. Broker calls stay in
    [apps/execution-engine/src/tws-execution-client.ts](../../../apps/execution-engine/src/tws-execution-client.ts).
 4. **Broker is the source of truth for open orders, fills, and
@@ -106,7 +106,7 @@ documents where they arise:
   shared-retry helper is deferred to a later PR if a second
   caller needs one.
 
-Every open decision is resolved *before* the PR that depends on it
+Every open decision is resolved _before_ the PR that depends on it
 starts. See [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md) for gating.
 
 ## Out of scope for Phase 2

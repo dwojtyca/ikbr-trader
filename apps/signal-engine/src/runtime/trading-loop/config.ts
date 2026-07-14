@@ -111,7 +111,10 @@ function toBoolean(raw: string): boolean {
  * ids. Whitespace around commas is tolerated.
  */
 function parseCsvIds(raw: string): readonly string[] {
-  const parts = raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
   return Array.from(new Set(parts));
 }
 

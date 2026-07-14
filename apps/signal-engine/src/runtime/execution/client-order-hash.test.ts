@@ -72,10 +72,7 @@ describe("computeClientOrderHash — determinism & stability", () => {
         correlationId: "corr-y",
       },
     });
-    assert.equal(
-      computeClientOrderHash(base),
-      computeClientOrderHash(noisy),
-    );
+    assert.equal(computeClientOrderHash(base), computeClientOrderHash(noisy));
   });
 });
 
@@ -153,10 +150,7 @@ describe("computeClientOrderHash — canonicalisation", () => {
     const bad = baseTicket({
       order: { ...baseTicket().order, quantity: Number.NaN },
     });
-    assert.throws(
-      () => computeClientOrderHash(bad),
-      /must be finite/,
-    );
+    assert.throws(() => computeClientOrderHash(bad), /must be finite/);
   });
 
   it("canonical form starts with the version prefix", () => {

@@ -109,11 +109,7 @@ const rawSchema = z.object({
   // `/execution/account/summary` DISPLAY endpoint (UI cache TTL).
   // NOT used by the write-path exposure guard; see
   // `EXECUTION_POSITION_GUARD_MAX_AGE_S`.
-  EXECUTION_POSITION_MAX_AGE_S: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .default(60),
+  EXECUTION_POSITION_MAX_AGE_S: z.coerce.number().int().min(1).default(60),
   // PR14 round-7 blocker — SEPARATE freshness threshold for the
   // authoritative write-path exposure guard
   // (`tryStartSubmissionWithExposureGuard` +

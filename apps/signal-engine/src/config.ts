@@ -12,89 +12,89 @@ import {
 
 dotenv.config();
 
-const schema = z.object({
-  SIGNAL_PORT: z.coerce.number().default(3102),
-  LOG_LEVEL: z.string().default("info"),
-  POSTGRES_URL: z
-    .string()
-    .default("postgresql://postgres:postgres@localhost:5432/ikbr_trader"),
-  REDIS_URL: z.string().default("redis://localhost:6379"),
-  SIGNAL_EXECUTION_BASE_URL: z.string().default("http://localhost:3103"),
-  IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
-  WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
-  SIGNAL_EVENT_DRIVEN: z.string().default("true"),
-  SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
-  SIGNAL_PROPOSAL_TTL_MS: z.coerce.number().int().min(0).default(120000),
-  SIGNAL_ACCOUNT_EQUITY: z.coerce.number().default(100000),
-  SIGNAL_MAX_MARKET_STATE_AGE_MS: z.coerce.number().int().min(0).default(90000),
-  SIGNAL_MAX_RISK_PER_TRADE_PCT: z.coerce.number().default(0.5),
-  SIGNAL_TARGET_RISK_PER_TRADE_PCT: z
-    .preprocess(
-      (value) => (value === undefined || value === "" ? undefined : value),
-      z.coerce.number().positive().optional(),
-    )
-    .optional(),
-  SIGNAL_MAX_EXPOSURE_PCT: z.coerce.number().default(25),
-  MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
-  SIGNAL_MAX_OPEN_POSITIONS: z.coerce.number().default(5),
-  SIGNAL_MAX_SPREAD_BPS: z.coerce.number().default(12),
-  SIGNAL_MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),
-  SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(0.55),
-  SIGNAL_LMT_ENTRY_MODE: z.enum(["touch", "last", "mid"]).default("touch"),
-  SIGNAL_LMT_ENTRY_BUFFER_BPS: z.coerce.number().min(0).default(0),
-  SIGNAL_FRACTIONAL_SYMBOLS: z.string().default(""),
-  SIGNAL_FRACTIONAL_QUANTITY_STEP: z.coerce.number().positive().default(0.0001),
-  SIGNAL_MIN_STOP_BPS_STK: z.coerce.number().min(0).default(12),
-  SIGNAL_MIN_STOP_BPS_IND: z.coerce.number().min(0).default(10),
-  SIGNAL_MIN_STOP_BPS_CMDTY: z.coerce.number().min(0).default(14),
-  SIGNAL_STRATEGY_COOLDOWN_MS: z.coerce
-    .number()
-    .int()
-    .min(0)
-    .default(12 * 60 * 60 * 1000),
-  WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
-  IB_CURRENCY: z.string().default("USD"),
-  SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default(""),
-  SIGNAL_REJECTED_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
-  SIGNAL_REJECTED_CLEANUP_INTERVAL_MS: z.coerce
-    .number()
-    .int()
-    .min(0)
-    .default(6 * 60 * 60 * 1000),
-  // Phase 1 / PR1 (schema-only): Bearer token for the execution-engine API.
-  // ADR-001: in Phase 1 the shared EXECUTION_API_TOKEN value is used by
-  // every internal client. Per-client tokens are deferred until the
-  // execution-engine supports multi-token auth.
-  // getExposureSnapshot() starts attaching this header from PR2.
-  EXECUTION_API_TOKEN: z.preprocess(
-    (value) =>
-      typeof value === "string" && value.trim() === "" ? undefined : value,
-    z.string().optional(),
-  ),
-  // ---------------------------------------------------------------
-  // Phase 2 / PR12 — Market Data Runtime (dry-run only).
-  // ---------------------------------------------------------------
-  // These envs govern the isolated /runtime/* endpoints added by
-  // PR12 and are unrelated to the legacy signal-engine pipeline.
-  // Explicitly OUT of scope for PR12: ORCH_LOOP_ENABLED, retry
-  // policy, reconciliation, execution-engine URL, candle providers.
-  RUNTIME_ENABLED: z.string().default("true"),
-  MARKET_CONTEXT_MAX_TICK_AGE_S: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .default(30),
-  // Cache TTL for symbol → conid lookups from `instrument_contracts`.
-  // A short window bounds the staleness introduced by front-month
-  // futures rolls (ingestion re-resolves the contract, the runtime
-  // must pick up the new conid without waiting for a restart).
-  // Set to `0` to disable caching entirely.
-  INSTRUMENT_CONTRACT_CACHE_TTL_S: z.coerce
-    .number()
-    .int()
-    .min(0)
-    .default(60),
-})
+const schema = z
+  .object({
+    SIGNAL_PORT: z.coerce.number().default(3102),
+    LOG_LEVEL: z.string().default("info"),
+    POSTGRES_URL: z
+      .string()
+      .default("postgresql://postgres:postgres@localhost:5432/ikbr_trader"),
+    REDIS_URL: z.string().default("redis://localhost:6379"),
+    SIGNAL_EXECUTION_BASE_URL: z.string().default("http://localhost:3103"),
+    IB_MARKET_DATA_TYPE: z.coerce.number().default(3),
+    WATCHLIST_SYMBOLS: z.string().default("AAPL,MSFT,XOM"),
+    SIGNAL_EVENT_DRIVEN: z.string().default("true"),
+    SIGNAL_MIN_CANDLES: z.coerce.number().default(220),
+    SIGNAL_PROPOSAL_TTL_MS: z.coerce.number().int().min(0).default(120000),
+    SIGNAL_ACCOUNT_EQUITY: z.coerce.number().default(100000),
+    SIGNAL_MAX_MARKET_STATE_AGE_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(90000),
+    SIGNAL_MAX_RISK_PER_TRADE_PCT: z.coerce.number().default(0.5),
+    SIGNAL_TARGET_RISK_PER_TRADE_PCT: z
+      .preprocess(
+        (value) => (value === undefined || value === "" ? undefined : value),
+        z.coerce.number().positive().optional(),
+      )
+      .optional(),
+    SIGNAL_MAX_EXPOSURE_PCT: z.coerce.number().default(25),
+    MAX_NOTIONAL_PER_TRADE_PCT: z.coerce.number().default(10),
+    SIGNAL_MAX_OPEN_POSITIONS: z.coerce.number().default(5),
+    SIGNAL_MAX_SPREAD_BPS: z.coerce.number().default(12),
+    SIGNAL_MIN_CANDLE_VOLUME_1M: z.coerce.number().default(100),
+    SIGNAL_MIN_CONFIDENCE: z.coerce.number().default(0.55),
+    SIGNAL_LMT_ENTRY_MODE: z.enum(["touch", "last", "mid"]).default("touch"),
+    SIGNAL_LMT_ENTRY_BUFFER_BPS: z.coerce.number().min(0).default(0),
+    SIGNAL_FRACTIONAL_SYMBOLS: z.string().default(""),
+    SIGNAL_FRACTIONAL_QUANTITY_STEP: z.coerce
+      .number()
+      .positive()
+      .default(0.0001),
+    SIGNAL_MIN_STOP_BPS_STK: z.coerce.number().min(0).default(12),
+    SIGNAL_MIN_STOP_BPS_IND: z.coerce.number().min(0).default(10),
+    SIGNAL_MIN_STOP_BPS_CMDTY: z.coerce.number().min(0).default(14),
+    SIGNAL_STRATEGY_COOLDOWN_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(12 * 60 * 60 * 1000),
+    WATCHLIST_CONTRACT_OVERRIDES: z.string().default(""),
+    IB_CURRENCY: z.string().default("USD"),
+    SIGNAL_PRICE_MULTIPLIER_OVERRIDES: z.string().default(""),
+    SIGNAL_REJECTED_RETENTION_DAYS: z.coerce.number().int().min(0).default(7),
+    SIGNAL_REJECTED_CLEANUP_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(6 * 60 * 60 * 1000),
+    // Phase 1 / PR1 (schema-only): Bearer token for the execution-engine API.
+    // ADR-001: in Phase 1 the shared EXECUTION_API_TOKEN value is used by
+    // every internal client. Per-client tokens are deferred until the
+    // execution-engine supports multi-token auth.
+    // getExposureSnapshot() starts attaching this header from PR2.
+    EXECUTION_API_TOKEN: z.preprocess(
+      (value) =>
+        typeof value === "string" && value.trim() === "" ? undefined : value,
+      z.string().optional(),
+    ),
+    // ---------------------------------------------------------------
+    // Phase 2 / PR12 — Market Data Runtime (dry-run only).
+    // ---------------------------------------------------------------
+    // These envs govern the isolated /runtime/* endpoints added by
+    // PR12 and are unrelated to the legacy signal-engine pipeline.
+    // Explicitly OUT of scope for PR12: ORCH_LOOP_ENABLED, retry
+    // policy, reconciliation, execution-engine URL, candle providers.
+    RUNTIME_ENABLED: z.string().default("true"),
+    MARKET_CONTEXT_MAX_TICK_AGE_S: z.coerce.number().int().min(1).default(30),
+    // Cache TTL for symbol → conid lookups from `instrument_contracts`.
+    // A short window bounds the staleness introduced by front-month
+    // futures rolls (ingestion re-resolves the contract, the runtime
+    // must pick up the new conid without waiting for a restart).
+    // Set to `0` to disable caching entirely.
+    INSTRUMENT_CONTRACT_CACHE_TTL_S: z.coerce.number().int().min(0).default(60),
+  })
   // Phase 2 / PR13 — Execution Runtime (paper-only write endpoint).
   .merge(executionRuntimeSchema)
   // Phase 2 / PR14 — Trading Loop scheduler (paper-only, disabled by default).

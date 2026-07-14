@@ -61,8 +61,7 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
     overrides.decision === undefined
       ? buildDecision({ action: "LONG", confidence: 80 })
       : overrides.decision;
-  const risk =
-    overrides.risk === undefined ? buildRisk() : overrides.risk;
+  const risk = overrides.risk === undefined ? buildRisk() : overrides.risk;
   const status = overrides.status ?? "GENERATED";
   return {
     signalId: "signal-fixture",
@@ -92,7 +91,9 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
   };
 }
 
-function buildTicket(overrides: Partial<ExecutionTicket> = {}): ExecutionTicket {
+function buildTicket(
+  overrides: Partial<ExecutionTicket> = {},
+): ExecutionTicket {
   return {
     ticketId: overrides.ticketId ?? "ticket-fixture",
     createdAt: overrides.createdAt ?? new Date("2026-07-13T12:00:06Z"),
@@ -250,7 +251,10 @@ describe("TradingPipeline — constructor", () => {
     assert.throws(
       () =>
         new TradingPipeline({
-          signalEngine: fakeSignalEngine({ kind: "return", signal: buildSignal() }),
+          signalEngine: fakeSignalEngine({
+            kind: "return",
+            signal: buildSignal(),
+          }),
           // @ts-expect-error — deliberate misuse
           ticketBuilder: {},
         }),
@@ -275,7 +279,11 @@ describe("TradingPipeline — SUCCESS", () => {
       nowValues: [new Date("2026-07-13T13:00:00Z")],
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
@@ -328,7 +336,11 @@ describe("TradingPipeline — SUCCESS", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
@@ -352,7 +364,11 @@ describe("TradingPipeline — NO_TRADE (HOLD is not a failure)", () => {
       ticket: builder,
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "NO_TRADE");
     if (result.outcome !== "NO_TRADE") return;
@@ -392,7 +408,11 @@ describe("TradingPipeline — NO_TRADE (HOLD is not a failure)", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "NO_TRADE");
     if (result.outcome !== "NO_TRADE") return;
     assert.deepEqual(result.warnings, [
@@ -415,7 +435,11 @@ describe("TradingPipeline — NO_TRADE (HOLD is not a failure)", () => {
       perfValues: [10, 27],
       nowValues: [new Date("2028-02-02T00:00:00.000Z")],
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "NO_TRADE");
     if (result.outcome !== "NO_TRADE") return;
     assert.equal(result.durationMs, 17);
@@ -450,7 +474,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -489,7 +517,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -524,7 +556,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -555,7 +591,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -582,7 +622,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -609,7 +653,11 @@ describe("TradingPipeline — FAILURE from signal status", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -635,13 +683,20 @@ describe("TradingPipeline — TICKET failure", () => {
         },
       ],
     };
-    const builder = fakeTicketBuilder({ kind: "return", result: ticketFailure });
+    const builder = fakeTicketBuilder({
+      kind: "return",
+      result: ticketFailure,
+    });
     const pipeline = makePipeline({
       signal: fakeSignalEngine({ kind: "return", signal }),
       ticket: builder,
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -713,7 +768,11 @@ describe("TradingPipeline — error isolation (UNKNOWN)", () => {
       ticket: builder,
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -738,7 +797,11 @@ describe("TradingPipeline — error isolation (UNKNOWN)", () => {
       }),
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -758,7 +821,11 @@ describe("TradingPipeline — error isolation (UNKNOWN)", () => {
         result: { ok: true, ticket: buildTicket(), warnings: [] },
       }),
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
     assert.doesNotMatch(result.blockers[0].message, /\[object Object\]/);
@@ -781,7 +848,11 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
       nowValues: [ranAt],
       perfValues: [0, 5],
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.metadata.ranAt.toISOString(), ranAt.toISOString());
   });
 
@@ -797,7 +868,11 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
       }),
       perfValues: [500, 812],
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.durationMs, 312);
   });
 
@@ -820,7 +895,11 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
       perfValues: [10, 25],
       nowValues: [new Date("2028-01-01T00:00:00.000Z")],
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
     assert.equal(result.durationMs, 15);
@@ -828,7 +907,10 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
       result.metadata.ranAt.toISOString(),
       "2028-01-01T00:00:00.000Z",
     );
-    assert.equal(result.metadata.engineVersions.pipeline, TRADING_PIPELINE_VERSION);
+    assert.equal(
+      result.metadata.engineVersions.pipeline,
+      TRADING_PIPELINE_VERSION,
+    );
     // ticketBuilder version absent because ticket stage did not run.
     assert.equal(result.metadata.engineVersions.ticketBuilder, undefined);
   });
@@ -847,7 +929,11 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
       }),
       version: "test-pipeline-1",
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
     assert.deepEqual(result.metadata.engineVersions, {
@@ -867,7 +953,11 @@ describe("TradingPipeline — deterministic clocks & metadata", () => {
         result: { ok: true, ticket: buildTicket(), warnings: [] },
       }),
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
     assert.deepEqual(result.metadata.engineVersions, {
@@ -888,13 +978,15 @@ describe("TradingPipeline — deep freeze", () => {
         result: {
           ok: true,
           ticket: buildTicket(),
-          warnings: [
-            { code: "W", message: "m", source: "pricing" },
-          ],
+          warnings: [{ code: "W", message: "m", source: "pricing" }],
         },
       }),
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(Object.isFrozen(result), true);
     assert.equal(Object.isFrozen(result.warnings), true);
     assert.equal(Object.isFrozen(result.metadata), true);
@@ -918,7 +1010,11 @@ describe("TradingPipeline — deep freeze", () => {
         result: { ok: true, ticket: buildTicket(), warnings: [] },
       }),
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(Object.isFrozen(result), true);
     assert.equal(result.outcome, "NO_TRADE");
     if (result.outcome !== "NO_TRADE") return;
@@ -946,7 +1042,11 @@ describe("TradingPipeline — deep freeze", () => {
         result: { ok: true, ticket: buildTicket(), warnings: [] },
       }),
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(Object.isFrozen(result), true);
     assert.equal(result.outcome, "FAILURE");
     if (result.outcome !== "FAILURE") return;
@@ -989,7 +1089,11 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       },
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
@@ -1021,7 +1125,11 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       },
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
@@ -1052,7 +1160,11 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       },
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
 
     assert.equal(result.outcome, "SUCCESS");
     if (result.outcome !== "SUCCESS") return;
@@ -1073,7 +1185,11 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       now: () => new Date(NaN),
       performanceNow: () => 42,
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.metadata.ranAt.getTime(), 0);
   });
 
@@ -1090,90 +1206,87 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       now: () => new Date("2027-01-01T00:00:00.000Z"),
       performanceNow: () => Number.POSITIVE_INFINITY,
     });
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.durationMs, 0);
   });
 
-  it(
-    "measureDuration() memoized: end clock throws in one branch, then a further internal error fires; performanceNow still called exactly twice",
-    () => {
-      // Timeline:
-      //   1. run() reads start clock: perf(1) → 500 (ok)
-      //   2. signal engine throws → runSignalStep captures the throw.
-      //   3. In the `signalOutcome.errored` branch, `measureDuration()`
-      //      runs BEFORE the blocker literal (defensive ordering).
-      //      That is the first call to `measureDuration`:
-      //        - perf(2) → THROWS
-      //        - cached duration = 0
-      //   4. The blocker literal then evaluates
-      //      `describeUnknownError(hostileError)`, which reads
-      //      `error.message`. That getter is hostile → throws.
-      //   5. The top-level `run()` catch fires.
-      //      It calls `measureDuration()` again via `trySafe`.
-      //      Memoization MUST make it return the cached 0 without
-      //      re-invoking `performanceNow` — otherwise perf would be
-      //      called a third time here.
-      //
-      // Assertions:
-      //   - perf call count === 2 (never a third call)
-      //   - outcome FAILURE / PIPELINE_INTERNAL_ERROR
-      //   - durationMs === 0
-      let perfCalls = 0;
-      const perf = () => {
-        perfCalls += 1;
-        if (perfCalls === 1) return 500;
-        throw new Error(`perf broken on call ${perfCalls}`);
-      };
+  it("measureDuration() memoized: end clock throws in one branch, then a further internal error fires; performanceNow still called exactly twice", () => {
+    // Timeline:
+    //   1. run() reads start clock: perf(1) → 500 (ok)
+    //   2. signal engine throws → runSignalStep captures the throw.
+    //   3. In the `signalOutcome.errored` branch, `measureDuration()`
+    //      runs BEFORE the blocker literal (defensive ordering).
+    //      That is the first call to `measureDuration`:
+    //        - perf(2) → THROWS
+    //        - cached duration = 0
+    //   4. The blocker literal then evaluates
+    //      `describeUnknownError(hostileError)`, which reads
+    //      `error.message`. That getter is hostile → throws.
+    //   5. The top-level `run()` catch fires.
+    //      It calls `measureDuration()` again via `trySafe`.
+    //      Memoization MUST make it return the cached 0 without
+    //      re-invoking `performanceNow` — otherwise perf would be
+    //      called a third time here.
+    //
+    // Assertions:
+    //   - perf call count === 2 (never a third call)
+    //   - outcome FAILURE / PIPELINE_INTERNAL_ERROR
+    //   - durationMs === 0
+    let perfCalls = 0;
+    const perf = () => {
+      perfCalls += 1;
+      if (perfCalls === 1) return 500;
+      throw new Error(`perf broken on call ${perfCalls}`);
+    };
 
-      // Hostile Error-like: `instanceof Error` is true (so
-      // `describeUnknownError` takes the `.message` branch), but
-      // reading `.message` throws.
-      const hostileError = new Error("outer") as Error;
-      Object.defineProperty(hostileError, "message", {
-        get: () => {
-          throw new Error("hostile message getter");
-        },
-        configurable: false,
-      });
+    // Hostile Error-like: `instanceof Error` is true (so
+    // `describeUnknownError` takes the `.message` branch), but
+    // reading `.message` throws.
+    const hostileError = new Error("outer") as Error;
+    Object.defineProperty(hostileError, "message", {
+      get: () => {
+        throw new Error("hostile message getter");
+      },
+      configurable: false,
+    });
 
-      const pipeline = new TradingPipeline({
-        signalEngine: fakeSignalEngine({
-          kind: "throw",
-          error: hostileError,
-        }),
-        ticketBuilder: fakeTicketBuilder({
-          kind: "return",
-          result: { ok: true, ticket: buildTicket(), warnings: [] },
-        }),
-        now: () => new Date("2027-05-05T05:05:05.000Z"),
-        performanceNow: perf,
-      });
+    const pipeline = new TradingPipeline({
+      signalEngine: fakeSignalEngine({
+        kind: "throw",
+        error: hostileError,
+      }),
+      ticketBuilder: fakeTicketBuilder({
+        kind: "return",
+        result: { ok: true, ticket: buildTicket(), warnings: [] },
+      }),
+      now: () => new Date("2027-05-05T05:05:05.000Z"),
+      performanceNow: perf,
+    });
 
-      let result: ReturnType<TradingPipeline["run"]>;
-      assert.doesNotThrow(() => {
-        result = pipeline.run(
-          baseSnapshot(),
-          baseInstrument(),
-          policyFixture(),
-        );
-      });
+    let result: ReturnType<TradingPipeline["run"]>;
+    assert.doesNotThrow(() => {
+      result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    });
 
-      // Memoization is the whole point: perf MUST be invoked at
-      // most twice per `run()` even when multiple code paths call
-      // `measureDuration()`.
-      assert.equal(
-        perfCalls,
-        2,
-        `performanceNow should be called exactly twice, got ${perfCalls}`,
-      );
-      assert.equal(result!.outcome, "FAILURE");
-      if (result!.outcome !== "FAILURE") return;
-      assert.equal(result!.failedStage, "UNKNOWN");
-      assert.equal(result!.blockers.length, 1);
-      assert.equal(result!.blockers[0].code, "PIPELINE_INTERNAL_ERROR");
-      assert.equal(result!.durationMs, 0);
-    },
-  );
+    // Memoization is the whole point: perf MUST be invoked at
+    // most twice per `run()` even when multiple code paths call
+    // `measureDuration()`.
+    assert.equal(
+      perfCalls,
+      2,
+      `performanceNow should be called exactly twice, got ${perfCalls}`,
+    );
+    assert.equal(result!.outcome, "FAILURE");
+    if (result!.outcome !== "FAILURE") return;
+    assert.equal(result!.failedStage, "UNKNOWN");
+    assert.equal(result!.blockers.length, 1);
+    assert.equal(result!.blockers[0].code, "PIPELINE_INTERNAL_ERROR");
+    assert.equal(result!.durationMs, 0);
+  });
 
   it("measureDuration() memoized in the happy path too: performanceNow called exactly twice", () => {
     // Baseline: even without any error, performanceNow must be
@@ -1197,7 +1310,11 @@ describe("TradingPipeline — full error isolation (clocks)", () => {
       },
     });
 
-    const result = pipeline.run(baseSnapshot(), baseInstrument(), policyFixture());
+    const result = pipeline.run(
+      baseSnapshot(),
+      baseInstrument(),
+      policyFixture(),
+    );
     assert.equal(result.outcome, "SUCCESS");
     assert.equal(perfCalls, 2);
     assert.equal(result.durationMs, 100);
@@ -1247,7 +1364,10 @@ describe("TradingPipeline — full error isolation (hostile signal object)", () 
     assert.equal(result!.blockers[0].stage, "UNKNOWN");
     assert.match(result!.blockers[0].message, /hostile status getter/);
     // ranAt / durationMs still populated (from the pre-computed safe values).
-    assert.equal(result!.metadata.engineVersions.pipeline, TRADING_PIPELINE_VERSION);
+    assert.equal(
+      result!.metadata.engineVersions.pipeline,
+      TRADING_PIPELINE_VERSION,
+    );
     assert.equal(typeof result!.durationMs, "number");
     assert.ok(Number.isFinite(result!.durationMs));
   });
@@ -1299,7 +1419,8 @@ describe("TradingPipeline — full error isolation (hostile signal object)", () 
       ...base,
       metadata: {
         ...base.metadata,
-        engineVersions: hostileEngineVersions as unknown as SignalEvaluation["metadata"]["engineVersions"],
+        engineVersions:
+          hostileEngineVersions as unknown as SignalEvaluation["metadata"]["engineVersions"],
       },
     };
 
@@ -1318,7 +1439,10 @@ describe("TradingPipeline — full error isolation (hostile signal object)", () 
     assert.equal(result!.outcome, "SUCCESS");
     if (result!.outcome !== "SUCCESS") return;
     // Signal version silently omitted; pipeline version always present.
-    assert.equal(result!.metadata.engineVersions.pipeline, TRADING_PIPELINE_VERSION);
+    assert.equal(
+      result!.metadata.engineVersions.pipeline,
+      TRADING_PIPELINE_VERSION,
+    );
     assert.equal(result!.metadata.engineVersions.signal, undefined);
   });
 });
@@ -1406,4 +1530,3 @@ describe("TradingPipeline — full error isolation (freeze / result assembly)", 
     assert.deepEqual(result!.blockers, []);
   });
 });
-

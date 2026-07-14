@@ -63,10 +63,22 @@ export interface DuplicateResponseBody {
 export type SubmitResult =
   | { readonly kind: "submitted"; readonly response: SubmittedResponseBody }
   | { readonly kind: "resumed"; readonly response: SubmittedResponseBody }
-  | { readonly kind: "duplicate_submitted"; readonly response: DuplicateResponseBody }
-  | { readonly kind: "duplicate_terminal"; readonly response: DuplicateResponseBody }
-  | { readonly kind: "duplicate_pending_ambiguous"; readonly response: DuplicateResponseBody }
-  | { readonly kind: "pending_claimed"; readonly response: DuplicateResponseBody }
+  | {
+      readonly kind: "duplicate_submitted";
+      readonly response: DuplicateResponseBody;
+    }
+  | {
+      readonly kind: "duplicate_terminal";
+      readonly response: DuplicateResponseBody;
+    }
+  | {
+      readonly kind: "duplicate_pending_ambiguous";
+      readonly response: DuplicateResponseBody;
+    }
+  | {
+      readonly kind: "pending_claimed";
+      readonly response: DuplicateResponseBody;
+    }
   | { readonly kind: "conflict"; readonly message: string }
   | {
       /**
@@ -106,7 +118,11 @@ export type SubmitResult =
         | "no_active_account"
         | "wrong_session";
     }
-  | { readonly kind: "not_submitted"; readonly message: string; readonly statusCode: number }
+  | {
+      readonly kind: "not_submitted";
+      readonly message: string;
+      readonly statusCode: number;
+    }
   | { readonly kind: "unknown"; readonly reason: string };
 
 export interface ExecutionTicketSubmitter {
@@ -254,7 +270,7 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
             message:
               typeof body.message === "string"
                 ? body.message
-                : extractErrorMessage(parsed) ?? "active_intent_exists",
+                : (extractErrorMessage(parsed) ?? "active_intent_exists"),
             ...(typeof body.existingOrderId === "number"
               ? { existingOrderId: body.existingOrderId }
               : {}),
@@ -270,7 +286,7 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
             message:
               typeof body.message === "string"
                 ? body.message
-                : extractErrorMessage(parsed) ?? "open_position_exists",
+                : (extractErrorMessage(parsed) ?? "open_position_exists"),
             ...(typeof body.quantity === "number"
               ? { quantity: body.quantity }
               : {}),
@@ -298,7 +314,7 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
             message:
               typeof body.message === "string"
                 ? body.message
-                : extractErrorMessage(parsed) ?? "position_state_unavailable",
+                : (extractErrorMessage(parsed) ?? "position_state_unavailable"),
             ...(body.reason === "missing" ||
             body.reason === "stale" ||
             body.reason === "incomplete" ||
@@ -338,8 +354,7 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
     } catch (error) {
       // AbortError → timeout. Any other fetch throw → network
       // error. Both are ambiguous by definition.
-      const message =
-        error instanceof Error ? error.message : String(error);
+      const message = error instanceof Error ? error.message : String(error);
       return {
         kind: "unknown",
         reason: /aborted/i.test(message)

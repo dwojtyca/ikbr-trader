@@ -145,10 +145,7 @@ describe("SignalRepositoryContractResolver.resolveConid — happy paths", () => 
       repo,
       cacheTtlMs: 60_000,
     });
-    await assert.rejects(
-      () => resolver.resolveConid(KNOWN),
-      /pg unreachable/,
-    );
+    await assert.rejects(() => resolver.resolveConid(KNOWN), /pg unreachable/);
   });
 });
 
@@ -157,7 +154,10 @@ describe("SignalRepositoryContractResolver.resolveConid — TTL cache", () => {
     let now = 1_000_000;
     let currentConid = "111";
     const repo = fakeContractRepo({
-      getInstrumentContract: async (symbol) => ({ conid: currentConid, symbol }),
+      getInstrumentContract: async (symbol) => ({
+        conid: currentConid,
+        symbol,
+      }),
     });
     const resolver = new SignalRepositoryContractResolver({
       repo,
@@ -190,7 +190,10 @@ describe("SignalRepositoryContractResolver.resolveConid — TTL cache", () => {
     let now = 1_000_000;
     let currentConid = "AAA"; // pre-roll
     const repo = fakeContractRepo({
-      getInstrumentContract: async (symbol) => ({ conid: currentConid, symbol }),
+      getInstrumentContract: async (symbol) => ({
+        conid: currentConid,
+        symbol,
+      }),
     });
     const resolver = new SignalRepositoryContractResolver({
       repo,
@@ -265,14 +268,11 @@ describe("SignalRepositoryContractResolver.resolveConid — TTL cache", () => {
     now += 60_000; // 70s total > 60s TTL
     const afterRoll = await reader.readMarketState(KNOWN);
     assert.equal(afterRoll?.source, "redis:market-state:POST_ROLL");
-    assert.deepEqual(
-      marketStateRepo.calls,
-      [
-        "getMarketState:PRE_ROLL",
-        "getMarketState:PRE_ROLL",
-        "getMarketState:POST_ROLL",
-      ],
-    );
+    assert.deepEqual(marketStateRepo.calls, [
+      "getMarketState:PRE_ROLL",
+      "getMarketState:PRE_ROLL",
+      "getMarketState:POST_ROLL",
+    ]);
   });
 
   it("Postgres refresh error does NOT resurrect the expired entry", async () => {
@@ -312,7 +312,10 @@ describe("SignalRepositoryContractResolver.resolveConid — TTL cache", () => {
   it("TTL = 0 disables caching (every call hits Postgres)", async () => {
     let currentConid = "A";
     const repo = fakeContractRepo({
-      getInstrumentContract: async (symbol) => ({ conid: currentConid, symbol }),
+      getInstrumentContract: async (symbol) => ({
+        conid: currentConid,
+        symbol,
+      }),
     });
     const resolver = new SignalRepositoryContractResolver({
       repo,
@@ -403,10 +406,7 @@ describe("SignalRepositoryMarketDataReader.readMarketState — happy + storage f
     assert.equal(result!.bid, 100.2);
     assert.equal(result!.ask, 100.3);
     assert.equal(result!.spread, 0.1);
-    assert.equal(
-      result!.observedAt.toISOString(),
-      "2026-07-14T12:00:00.000Z",
-    );
+    assert.equal(result!.observedAt.toISOString(), "2026-07-14T12:00:00.000Z");
     assert.equal(result!.source, "redis:market-state:123456");
     assert.deepEqual(repo.calls, ["getMarketState:123456"]);
   });
@@ -465,10 +465,7 @@ describe("SignalRepositoryMarketDataReader.readMarketState — happy + storage f
       repo,
       resolver: staticResolver("123456"),
     });
-    await assert.rejects(
-      () => reader.readMarketState(KNOWN),
-      /redis down/,
-    );
+    await assert.rejects(() => reader.readMarketState(KNOWN), /redis down/);
   });
 
   it("propagates resolver errors", async () => {
@@ -477,10 +474,7 @@ describe("SignalRepositoryMarketDataReader.readMarketState — happy + storage f
       repo,
       resolver: throwingResolver(new Error("pg unreachable")),
     });
-    await assert.rejects(
-      () => reader.readMarketState(KNOWN),
-      /pg unreachable/,
-    );
+    await assert.rejects(() => reader.readMarketState(KNOWN), /pg unreachable/);
     assert.deepEqual(repo.calls, []);
   });
 });

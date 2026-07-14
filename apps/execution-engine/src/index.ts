@@ -114,11 +114,9 @@ const tws = new TwsExecutionClient(
         }
         await repo.applyBrokerStatusUpdate(update);
         if (status === "FILLED" && lastActiveAccountId !== null) {
-          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(
-            () => {
-              /* logged inside refreshBrokerPositionSnapshot */
-            },
-          );
+          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(() => {
+            /* logged inside refreshBrokerPositionSnapshot */
+          });
         }
       } catch (err) {
         app.log.warn(
@@ -202,8 +200,7 @@ const tws = new TwsExecutionClient(
       try {
         const eventAccount = fill.accountId ?? lastActiveAccountId;
         const shouldApply =
-          eventAccount !== null &&
-          eventAccount === lastActiveAccountId;
+          eventAccount !== null && eventAccount === lastActiveAccountId;
         if (!shouldApply && eventAccount !== null) {
           app.log.warn(
             {
@@ -223,11 +220,9 @@ const tws = new TwsExecutionClient(
         }
         await repo.upsertBrokerExecutionFill(fill);
         if (shouldApply && lastActiveAccountId !== null) {
-          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(
-            () => {
-              /* logged inside refreshBrokerPositionSnapshot */
-            },
-          );
+          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(() => {
+            /* logged inside refreshBrokerPositionSnapshot */
+          });
         }
       } catch (err) {
         app.log.warn({ fill, err }, "failed to persist broker execution fill");
@@ -383,16 +378,11 @@ function markSnapshotInvalidated(accountId: string, generation: number): void {
   });
 }
 
-async function refreshBrokerPositionSnapshot(
-  accountId: string,
-): Promise<void> {
+async function refreshBrokerPositionSnapshot(accountId: string): Promise<void> {
   await refreshCoordinator.refresh(accountId);
   // Reflect the coordinator's final health into the local map
   // consumed by `/ready` and by `/execution/account/summary`.
-  snapshotHealthByAccount.set(
-    accountId,
-    refreshCoordinator.health(accountId),
-  );
+  snapshotHealthByAccount.set(accountId, refreshCoordinator.health(accountId));
 }
 
 function toReadinessSnapshotHealth(
@@ -1508,15 +1498,13 @@ app.post("/execution/execute-ticket", async (request, reply) => {
             // the display cache TTL. Exposure-increasing writes
             // require a fresh broker snapshot; a 60 s window is
             // wide enough for many fills to land undetected.
-            maxSnapshotAgeMs:
-              config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
+            maxSnapshotAgeMs: config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
           }
         : { kind: "unavailable", reason: "no_active_account" };
     // Round-7 blocker: `allowCrossContractExposure` is NOT
     // caller-controlled. Hardcoded to the safe server-side
     // default (`false`) for PR14.
-    const allowCrossContractExposure =
-      SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE;
+    const allowCrossContractExposure = SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE;
     const outcome = await orchestrateExecuteTicket(
       {
         getIdempotencyRecord: (id) => repo.getIdempotencyRecord(id),
@@ -1662,8 +1650,7 @@ app.post("/execution/execute-ticket", async (request, reply) => {
           kind: "available",
           accountId: lastActiveAccountId,
           sessionId: EXECUTION_PROCESS_OWNER_ID,
-          maxSnapshotAgeMs:
-            config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
+          maxSnapshotAgeMs: config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
         }
       : { kind: "unavailable", reason: "no_active_account" };
   const insertOutcome = await repo.insertProposedFromTicket(

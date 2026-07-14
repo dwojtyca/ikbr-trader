@@ -32,8 +32,7 @@ class FakeUniqueViolation extends Error {
 
 function isFakeUniqueViolation(error: unknown): boolean {
   return (
-    error instanceof Error &&
-    (error as { code?: unknown }).code === "23505"
+    error instanceof Error && (error as { code?: unknown }).code === "23505"
   );
 }
 
@@ -180,7 +179,9 @@ class FakeRepo {
         reason: "incomplete",
       };
     }
-    let match: { instrument: string; conid: string | null; quantity: number } | undefined;
+    let match:
+      | { instrument: string; conid: string | null; quantity: number }
+      | undefined;
     if (!input.allowCrossContractExposure) {
       match = snap.positions.find(
         (p) => p.instrument === input.instrument && p.quantity !== 0,
@@ -215,9 +216,7 @@ class FakeRepo {
   async insertProposedFromTicket(
     ticket: SignalTicket,
     strategy: string,
-    idempotency:
-      | { clientOrderId: string; clientOrderHash: string }
-      | undefined,
+    idempotency: { clientOrderId: string; clientOrderHash: string } | undefined,
     positionGuard?: FakePositionGuardContext,
     options?: { readonly allowCrossContractExposure?: boolean },
   ): Promise<
@@ -594,7 +593,10 @@ describe("orchestrateExecuteTicket — duplicate variants (fine-grained)", () =>
       const repo = new FakeRepo();
       await seed(repo, status, false, true);
       const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
-      const result = await orchestrateExecuteTicket(deps(repo, executor), INPUT);
+      const result = await orchestrateExecuteTicket(
+        deps(repo, executor),
+        INPUT,
+      );
       assert.equal(result.kind, "duplicate_terminal");
       assert.equal(executor.callCount, 0);
     });
@@ -779,7 +781,11 @@ describe("orchestrateExecuteTicket — fencing marker (at-most-once)", () => {
     // A direct claim attempt by B (bypassing the orchestrator)
     // must also fail — the marker is the ultimate fence.
     const bClaimed = await repo.tryStartSubmission({ id: 1, owner: "B" });
-    assert.equal(bClaimed, false, "atomic marker must block all subsequent claims");
+    assert.equal(
+      bClaimed,
+      false,
+      "atomic marker must block all subsequent claims",
+    );
   });
 
   it("crash between marker and broker call → next retry sees duplicate_pending_ambiguous, zero broker calls", async () => {
@@ -800,13 +806,19 @@ describe("orchestrateExecuteTicket — fencing marker (at-most-once)", () => {
 
     // Retry sees the ambiguous state.
     const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
-    const result = await orchestrateExecuteTicket(deps(repo, executor, "B"), INPUT);
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "B"),
+      INPUT,
+    );
     assert.equal(result.kind, "duplicate_pending_ambiguous");
     assert.equal(executor.callCount, 0);
 
     // Even repeated retries must all refuse.
     for (let i = 0; i < 3; i += 1) {
-      const retry = await orchestrateExecuteTicket(deps(repo, executor, `B${i}`), INPUT);
+      const retry = await orchestrateExecuteTicket(
+        deps(repo, executor, `B${i}`),
+        INPUT,
+      );
       assert.equal(retry.kind, "duplicate_pending_ambiguous");
     }
     assert.equal(executor.callCount, 0);
@@ -829,7 +841,10 @@ describe("orchestrateExecuteTicket — fencing marker (at-most-once)", () => {
 function pausableDeps(
   repo: FakeRepo,
   executor: OrchestratorDeps["executePersistedOrder"],
-  gate: { readonly release: () => void; readonly waitForRelease: () => Promise<void> },
+  gate: {
+    readonly release: () => void;
+    readonly waitForRelease: () => Promise<void>;
+  },
   ownerOverride: string,
 ): OrchestratorDeps {
   let paused = false;
@@ -1005,7 +1020,11 @@ describe("orchestrateExecuteTicket — fresh INSERT vs concurrent retry race", (
 // ---------------------------------------------------------------------------
 
 describe("orchestrateExecuteTicket — atomic instrument-level exposure guard", () => {
-  const OTHER_KEY_INPUT = { ...INPUT, clientOrderId: "idem-B", clientOrderHash: "def" };
+  const OTHER_KEY_INPUT = {
+    ...INPUT,
+    clientOrderId: "idem-B",
+    clientOrderHash: "def",
+  };
 
   it("existing PROPOSED for the same instrument + different clientOrderId → active_intent_exists", async () => {
     const repo = new FakeRepo();
@@ -1102,8 +1121,16 @@ describe("orchestrateExecuteTicket — atomic instrument-level exposure guard", 
     const repo = new FakeRepo();
     const executor = fakeExecutor(repo, { outcome: "SUBMITTED", ticks: 3 });
 
-    const inputA = { ...INPUT, clientOrderId: "idem-A", clientOrderHash: "hash-A" };
-    const inputB = { ...INPUT, clientOrderId: "idem-B", clientOrderHash: "hash-B" };
+    const inputA = {
+      ...INPUT,
+      clientOrderId: "idem-A",
+      clientOrderHash: "hash-A",
+    };
+    const inputB = {
+      ...INPUT,
+      clientOrderId: "idem-B",
+      clientOrderHash: "hash-B",
+    };
 
     const [a, b] = await Promise.all([
       orchestrateExecuteTicket(deps(repo, executor), inputA),
@@ -1242,7 +1269,10 @@ async function seedCleanProposed(
   const result = await repo.insertProposedFromTicket(
     TICKET,
     INPUT.strategy,
-    { clientOrderId: INPUT.clientOrderId, clientOrderHash: INPUT.clientOrderHash },
+    {
+      clientOrderId: INPUT.clientOrderId,
+      clientOrderHash: INPUT.clientOrderHash,
+    },
     guard,
   );
   assert.equal(result.kind, "inserted");
@@ -1303,7 +1333,12 @@ describe("orchestrateExecuteTicket — resume path re-runs the exposure guard (r
     // Guard now claims a DIFFERENT sessionId.
     const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
     const result = await orchestrateExecuteTicket(
-      deps(repo, executor, "retry-owner", availableGuard({ sessionId: "sess-NEW" })),
+      deps(
+        repo,
+        executor,
+        "retry-owner",
+        availableGuard({ sessionId: "sess-NEW" }),
+      ),
       INPUT,
     );
     assert.equal(result.kind, "position_state_unavailable");
@@ -1321,9 +1356,7 @@ describe("orchestrateExecuteTicket — resume path re-runs the exposure guard (r
       sessionId: SESS,
       observedAt: new Date(),
       complete: true,
-      positions: [
-        { instrument: TICKET.instrument, conid: null, quantity: 42 },
-      ],
+      positions: [{ instrument: TICKET.instrument, conid: null, quantity: 42 }],
     });
     const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
     const result = await orchestrateExecuteTicket(
@@ -1353,8 +1386,14 @@ describe("orchestrateExecuteTicket — resume path re-runs the exposure guard (r
     await seedCleanProposed(repo, availableGuard());
     const executor = fakeExecutor(repo, { outcome: "SUBMITTED", ticks: 2 });
     const [a, b] = await Promise.all([
-      orchestrateExecuteTicket(deps(repo, executor, "A", availableGuard()), INPUT),
-      orchestrateExecuteTicket(deps(repo, executor, "B", availableGuard()), INPUT),
+      orchestrateExecuteTicket(
+        deps(repo, executor, "A", availableGuard()),
+        INPUT,
+      ),
+      orchestrateExecuteTicket(
+        deps(repo, executor, "B", availableGuard()),
+        INPUT,
+      ),
     ]);
     assert.equal(executor.callCount, 1);
     const kinds = [a.kind, b.kind].sort();

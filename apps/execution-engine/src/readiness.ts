@@ -63,10 +63,7 @@ export function evaluateReadiness(input: ReadinessInputs): ReadinessResult {
 
   const ageMs =
     input.lastReconciliationAt !== null
-      ? Math.max(
-          0,
-          input.now.getTime() - input.lastReconciliationAt.getTime(),
-        )
+      ? Math.max(0, input.now.getTime() - input.lastReconciliationAt.getTime())
       : null;
   const ageSeconds = ageMs === null ? null : Math.floor(ageMs / 1000);
   const reconciliationFresh =

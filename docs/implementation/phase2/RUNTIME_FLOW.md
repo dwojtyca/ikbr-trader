@@ -48,22 +48,22 @@ flowchart TD
 
 ## Component responsibilities
 
-| Component | Owns | Never does |
-| --- | --- | --- |
-| `apps/ingestion` | Market data socket, candle persistence, Redis cache | Places orders, evaluates strategies |
-| `MarketContextBuilder` | Deterministic snapshot assembly from candles + cache | Fetches data, mutates state |
-| `SignalEngine` | Orchestrates Decision + Risk into a `SignalEvaluation` | Talks to broker or LLM |
-| `ExecutionTicketBuilder` | Turns a `GENERATED` signal into a deep-frozen ticket | Persists, submits, retries |
+| Component                     | Owns                                                                                                                                | Never does                                          |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `apps/ingestion`              | Market data socket, candle persistence, Redis cache                                                                                 | Places orders, evaluates strategies                 |
+| `MarketContextBuilder`        | Deterministic snapshot assembly from candles + cache                                                                                | Fetches data, mutates state                         |
+| `SignalEngine`                | Orchestrates Decision + Risk into a `SignalEvaluation`                                                                              | Talks to broker or LLM                              |
+| `ExecutionTicketBuilder`      | Turns a `GENERATED` signal into a deep-frozen ticket                                                                                | Persists, submits, retries                          |
 | **Orchestrator** (new, PR11+) | Runs the pipeline, holds idempotency key, submits ticket to `execution-engine`, tracks in-flight requests, reacts to reconciliation | Calls IBKR directly, holds broker session, runs LLM |
-| `apps/execution-engine` | Only writer to IBKR. Persists `proposed_orders`. Runs reconciliation. Emits alerts | Contains strategy or AI logic |
-| `apps/llm-agent` | Autonomous EXECUTE/REJECT gate for `PROPOSED` orders (existing) | Bypass Risk Engine or proposal flow |
+| `apps/execution-engine`       | Only writer to IBKR. Persists `proposed_orders`. Runs reconciliation. Emits alerts                                                  | Contains strategy or AI logic                       |
+| `apps/llm-agent`              | Autonomous EXECUTE/REJECT gate for `PROPOSED` orders (existing)                                                                     | Bypass Risk Engine or proposal flow                 |
 
 ## Module boundaries
 
 - Shared library (`packages/shared`): pure. No `pg`, no `ib`, no `fs`,
   no timers except injected `now()`.
 - Orchestrator process: allowed HTTP client to `execution-engine`,
-  allowed Postgres *read* on candles, allowed Redis *read* on
+  allowed Postgres _read_ on candles, allowed Redis _read_ on
   market state. **No** direct `ib` import, **no** Postgres writes.
 - `execution-engine`: sole holder of the broker session and the sole
   writer of `proposed_orders`, `broker_execution_fills`,
@@ -71,17 +71,17 @@ flowchart TD
 
 ## Sync vs async
 
-| Hop | Mode | Notes |
-| --- | --- | --- |
-| Ingestion → Postgres/Redis | async, continuous | Existing. |
-| Trigger → Orchestrator run | async, event-driven | Candle-close / scheduler tick. See OD-5. |
-| Snapshot assembly → Signal → Ticket | **sync** in-process | Deterministic, no I/O, ~ms budget. |
+| Hop                                                         | Mode                          | Notes                                                   |
+| ----------------------------------------------------------- | ----------------------------- | ------------------------------------------------------- |
+| Ingestion → Postgres/Redis                                  | async, continuous             | Existing.                                               |
+| Trigger → Orchestrator run                                  | async, event-driven           | Candle-close / scheduler tick. See OD-5.                |
+| Snapshot assembly → Signal → Ticket                         | **sync** in-process           | Deterministic, no I/O, ~ms budget.                      |
 | Orchestrator → `execution-engine` `POST /execution/tickets` | sync HTTP with strict timeout | See [FAILURE_AND_RECOVERY.md](FAILURE_AND_RECOVERY.md). |
-| `execution-engine` → IBKR `placeOrder` | async at broker level | Order status flows back over the same socket. |
-| Broker → fills / open-order updates | async push | Already handled by `tws-execution-client`. |
-| Reconciliation → Orchestrator | async pull | Orchestrator polls a lightweight report endpoint. |
+| `execution-engine` → IBKR `placeOrder`                      | async at broker level         | Order status flows back over the same socket.           |
+| Broker → fills / open-order updates                         | async push                    | Already handled by `tws-execution-client`.              |
+| Reconciliation → Orchestrator                               | async pull                    | Orchestrator polls a lightweight report endpoint.       |
 
-The Orchestrator's HTTP call is treated as a *ticket handoff*,
+The Orchestrator's HTTP call is treated as a _ticket handoff_,
 not a broker submission. A `2xx` from `execution-engine` means
 "we accepted responsibility for this ticket and recorded intent"
 — not "the order is live at the broker". Broker-live is observed

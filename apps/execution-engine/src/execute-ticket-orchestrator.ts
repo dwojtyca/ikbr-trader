@@ -116,9 +116,7 @@ export interface ExecutionExecutionResult {
 export interface OrchestratorDeps {
   readonly getIdempotencyRecord: (
     clientOrderId: string,
-  ) => Promise<
-    { order: ProposedOrder; clientOrderHash: string | null } | null
-  >;
+  ) => Promise<{ order: ProposedOrder; clientOrderHash: string | null } | null>;
   readonly insertProposedFromTicket: (
     ticket: SignalTicket,
     strategy: string,

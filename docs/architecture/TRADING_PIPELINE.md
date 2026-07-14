@@ -51,9 +51,9 @@ class TradingPipeline {
 interface TradingPipelineOptions {
   readonly signalEngine: SignalEngineLike;
   readonly ticketBuilder: ExecutionTicketBuilderLike;
-  readonly now?: () => Date;              // default: () => new Date()
+  readonly now?: () => Date; // default: () => new Date()
   readonly performanceNow?: () => number; // default: () => performance.now()
-  readonly version?: string;              // default: TRADING_PIPELINE_VERSION
+  readonly version?: string; // default: TRADING_PIPELINE_VERSION
 }
 ```
 
@@ -96,20 +96,20 @@ Every `run()` invocation returns a discriminated union tagged by
 ## Pipeline stages
 
 1. **Signal.** `signalEngine.evaluate(snapshot)` inside a `try /
-   catch`. Any thrown exception (which the signal engine is
+catch`. Any thrown exception (which the signal engine is
    contracted not to raise) becomes a `PIPELINE_SIGNAL_STAGE_THREW`
    blocker with `outcome: "FAILURE"`, `failedStage: "UNKNOWN"` and
    `signal: null`.
 2. **Terminal-status branch.**
-   - `HOLD`   → `outcome: "NO_TRADE"`, no ticket builder call.
+   - `HOLD` → `outcome: "NO_TRADE"`, no ticket builder call.
    - `BLOCKED` / `REJECTED` / `ERROR` → `outcome: "FAILURE"` with
      `failedStage` derived from the status (and, for `ERROR`, the
      first warning's source). No ticket builder call.
 3. **Ticket.** `ticketBuilder.build({ signal, snapshot, instrument,
-   policy })` inside a `try / catch`. Exceptions become
+policy })` inside a `try / catch`. Exceptions become
    `PIPELINE_TICKET_STAGE_THREW` with `failedStage: "UNKNOWN"`.
 4. **Ticket result branch.**
-   - `ticket.ok === true`  → `outcome: "SUCCESS"`.
+   - `ticket.ok === true` → `outcome: "SUCCESS"`.
    - `ticket.ok === false` → `outcome: "FAILURE"`,
      `failedStage: "TICKET"`, one pipeline blocker per ticket
      blocker (stamped `stage: "TICKET"`).
@@ -124,16 +124,16 @@ The pipeline maps signal status + warning source to
 only place where the pipeline "interprets" upstream state — it
 never re-scores or re-validates.
 
-| Signal `status` | Warning `source` (first)                       | Outcome     | `failedStage`                     |
-| --------------- | ---------------------------------------------- | ----------- | --------------------------------- |
-| `HOLD`          | —                                              | `NO_TRADE`  | — (not a failure)                 |
-| `BLOCKED`       | —                                              | `FAILURE`   | `DECISION`                        |
-| `REJECTED`      | —                                              | `FAILURE`   | `RISK`                            |
-| `ERROR`         | `decision-engine`                              | `FAILURE`   | `DECISION`                        |
-| `ERROR`         | `risk-engine`                                  | `FAILURE`   | `RISK`                            |
-| `ERROR`         | `signal-engine` / `instrument-registry` / none | `FAILURE`   | `SIGNAL`                          |
+| Signal `status` | Warning `source` (first)                       | Outcome                | `failedStage`                     |
+| --------------- | ---------------------------------------------- | ---------------------- | --------------------------------- |
+| `HOLD`          | —                                              | `NO_TRADE`             | — (not a failure)                 |
+| `BLOCKED`       | —                                              | `FAILURE`              | `DECISION`                        |
+| `REJECTED`      | —                                              | `FAILURE`              | `RISK`                            |
+| `ERROR`         | `decision-engine`                              | `FAILURE`              | `DECISION`                        |
+| `ERROR`         | `risk-engine`                                  | `FAILURE`              | `RISK`                            |
+| `ERROR`         | `signal-engine` / `instrument-registry` / none | `FAILURE`              | `SIGNAL`                          |
 | `GENERATED`     | (ticket stage)                                 | `SUCCESS` or `FAILURE` | `TICKET` if `ticket.ok === false` |
-| (thrown)        | —                                              | `FAILURE`   | `UNKNOWN`                         |
+| (thrown)        | —                                              | `FAILURE`              | `UNKNOWN`                         |
 
 ## `blockers` policy
 
@@ -148,9 +148,9 @@ diagnostics directly from the `SignalEvaluation`:
 
 Pipeline blockers exist **only** for:
 
-| `failedStage` | Blockers                                                                  |
-| ------------- | ------------------------------------------------------------------------- |
-| `TICKET`      | One per `ticket.blockers`, stamped `stage: "TICKET"`.                     |
+| `failedStage` | Blockers                                                                    |
+| ------------- | --------------------------------------------------------------------------- |
+| `TICKET`      | One per `ticket.blockers`, stamped `stage: "TICKET"`.                       |
 | `UNKNOWN`     | Single synthetic `PIPELINE_*_STAGE_THREW` blocker quoting the caught error. |
 
 ## Error isolation
@@ -165,10 +165,10 @@ code path, not just the two engine calls:
    once and MUST NOT be re-invoked while assembling the result.
    Fallbacks: `ranAt = new Date(0)`, `durationMs = 0`.
    `performanceNow` is called **at most twice per `run()`** (start
-   + end); the computed `durationMs` is memoized so any later
-   `measureDuration()` call — including the one in the top-level
-   catch — reuses the cached value without touching the clock
-   again.
+   - end); the computed `durationMs` is memoized so any later
+     `measureDuration()` call — including the one in the top-level
+     catch — reuses the cached value without touching the clock
+     again.
 2. **Engine calls.** `SignalEngine.evaluate` and
    `ExecutionTicketBuilder.build` are wrapped by
    `runSignalStep` / `runTicketStep`. Non-`Error` throws are

@@ -104,8 +104,10 @@ export class TradingLoopService {
   readonly #lastOutcomes = new Map<string, TradingLoopInstrumentReport>();
 
   constructor(options: TradingLoopServiceOptions) {
-    if (!options?.config) throw new Error("TradingLoopService: config is required");
-    if (!options.registry) throw new Error("TradingLoopService: registry is required");
+    if (!options?.config)
+      throw new Error("TradingLoopService: config is required");
+    if (!options.registry)
+      throw new Error("TradingLoopService: registry is required");
     if (!options.marketDataRuntime) {
       throw new Error("TradingLoopService: marketDataRuntime is required");
     }
@@ -115,7 +117,8 @@ export class TradingLoopService {
     if (!options.exposureReader) {
       throw new Error("TradingLoopService: exposureReader is required");
     }
-    if (!options.logger) throw new Error("TradingLoopService: logger is required");
+    if (!options.logger)
+      throw new Error("TradingLoopService: logger is required");
     this.#config = options.config;
     this.#registry = options.registry;
     this.#marketDataRuntime = options.marketDataRuntime;
@@ -237,7 +240,8 @@ export class TradingLoopService {
     }
     return {
       enabled: this.#config.enabled,
-      running: this.#config.enabled && this.#startedAt !== null && !this.#stopping,
+      running:
+        this.#config.enabled && this.#startedAt !== null && !this.#stopping,
       startedAt: this.#startedAt,
       lastCycleAt: this.#lastCycleAt,
       nextCycleAt: this.#nextCycleAt,
@@ -475,7 +479,8 @@ export class TradingLoopService {
           reason: "PIPELINE_FAILURE",
         },
         reason: "TRIGGER_UNAVAILABLE",
-        message: "snapshot.sections.price.observedAt is null — cannot derive triggerId",
+        message:
+          "snapshot.sections.price.observedAt is null — cannot derive triggerId",
       });
     }
 
@@ -513,7 +518,11 @@ export class TradingLoopService {
       cycleId,
       instrument.id,
       startedAt,
-      this.#classifyRuntimeOutcome(instrument.id, idempotencyKey, runtimeOutcome),
+      this.#classifyRuntimeOutcome(
+        instrument.id,
+        idempotencyKey,
+        runtimeOutcome,
+      ),
     );
   }
 
@@ -602,7 +611,9 @@ export class TradingLoopService {
           idempotencyKey,
           runtime,
           reason: runtime.reason,
-          ...(runtime.message !== undefined ? { message: runtime.message } : {}),
+          ...(runtime.message !== undefined
+            ? { message: runtime.message }
+            : {}),
         };
     }
   }
@@ -824,4 +835,3 @@ export function deriveTriggerIdentity(
     observedAt,
   };
 }
-

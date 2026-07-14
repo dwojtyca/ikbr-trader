@@ -15,16 +15,16 @@ write edge (HTTP + persistence + idempotency) in a single PR,
 then layer scheduling, reconciliation, an E2E paper window,
 observability, and a live-readiness gate that never flips live on.
 
-| PR   | Name                             | Gates on               |
-| ---- | -------------------------------- | ---------------------- |
-| PR11 | Execution Orchestrator           | OD-1, OD-6             |
-| PR12 | Market Data Runtime              | PR11                   |
-| PR13 | Execution Runtime                | PR12, OD-1, OD-2, OD-3, OD-4 |
-| PR14 | Scheduler / trading loop         | PR13, OD-5             |
-| PR15 | Reconciliation loop              | PR14                   |
-| PR16 | Position / exit management       | PR15                   |
-| PR17 | Observability                    | PR16                   |
-| PR18 | Live-readiness (docs + gates)    | PR17                   |
+| PR   | Name                          | Gates on                     |
+| ---- | ----------------------------- | ---------------------------- |
+| PR11 | Execution Orchestrator        | OD-1, OD-6                   |
+| PR12 | Market Data Runtime           | PR11                         |
+| PR13 | Execution Runtime             | PR12, OD-1, OD-2, OD-3, OD-4 |
+| PR14 | Scheduler / trading loop      | PR13, OD-5                   |
+| PR15 | Reconciliation loop           | PR14                         |
+| PR16 | Position / exit management    | PR15                         |
+| PR17 | Observability                 | PR16                         |
+| PR18 | Live-readiness (docs + gates) | PR17                         |
 
 ---
 

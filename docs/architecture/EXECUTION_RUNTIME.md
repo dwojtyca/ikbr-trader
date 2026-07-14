@@ -28,7 +28,7 @@ dependencies with the PR12 module.
 - `execution-engine`: sole owner of `proposed_orders` writes and
   the sole component that talks to IBKR. PR13 extends its existing
   `/execution/execute-ticket` endpoint with a `clientOrderId +
-  clientOrderHash` idempotency contract; no new endpoint.
+clientOrderHash` idempotency contract; no new endpoint.
 
 ## Request flow
 
@@ -65,10 +65,10 @@ submission.
 `proposed_orders` gains two columns (PR13 migration executed by
 `SignalRepository.init()`):
 
-| Column | Type | Notes |
-| ------ | ---- | ----- |
-| `client_order_id` | `TEXT` | Client-supplied opaque key. `NULL` allowed for pre-PR13 rows and legacy callers. |
-| `client_order_hash` | `TEXT` | Server-visible fingerprint of the order-critical fields. Versioned (`v1|…`) — a bump invalidates all prior hashes and correctly surfaces as CONFLICT for in-flight retries. |
+| Column              | Type   | Notes                                                                            |
+| ------------------- | ------ | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `client_order_id`   | `TEXT` | Client-supplied opaque key. `NULL` allowed for pre-PR13 rows and legacy callers. |
+| `client_order_hash` | `TEXT` | Server-visible fingerprint of the order-critical fields. Versioned (`v1          | …`) — a bump invalidates all prior hashes and correctly surfaces as CONFLICT for in-flight retries. |
 
 Plus a partial unique index:
 
@@ -88,16 +88,16 @@ the order — an INSERT that succeeded and then crashed before the
 atomic submission claim leaves a `PROPOSED` row without the
 fencing marker that is safe to **resume** on the next retry.
 
-| Existing row | Hash | Status / evidence | Orchestrator outcome | HTTP body `outcome` |
-| --- | --- | --- | --- | --- |
-| none | — | — | `submitted` (INSERT + `tryStartSubmission` + execute) | `SUBMITTED` |
-| yes | differs | any | `conflict` | 409 `CONFLICT` |
-| yes | `NULL` (pre-PR13 legacy row) | any | `conflict` | 409 |
-| yes | matches | `SUBMITTED` / `FILLED` | `duplicate_submitted` | 200 `DUPLICATE_SUBMITTED` |
-| yes | matches | `REJECTED` / `CANCELLED` / `SUPERSEDED` / `EXPIRED` | `duplicate_terminal` | 200 `DUPLICATE_TERMINAL` |
-| yes | matches | `PROPOSED` + `executionAttemptedAt` or `brokerOrderId` set (ambiguous) | `duplicate_pending_ambiguous` | 200 `DUPLICATE_PENDING_AMBIGUOUS` |
-| yes | matches | `PROPOSED`, no `executionAttemptedAt`, no `brokerOrderId`, **atomic claim acquired** | `resumed` (re-drive `executePersistedOrder`) | 200 `RESUMED` |
-| yes | matches | same as above but **claim held by another request** (marker set atomically with claim) | (re-classified from freshest row: `duplicate_submitted` / `duplicate_terminal` / `duplicate_pending_ambiguous`) OR `pending_claimed` when the marker was not yet visible | 200 as above |
+| Existing row | Hash                         | Status / evidence                                                                      | Orchestrator outcome                                                                                                                                                     | HTTP body `outcome`               |
+| ------------ | ---------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| none         | —                            | —                                                                                      | `submitted` (INSERT + `tryStartSubmission` + execute)                                                                                                                    | `SUBMITTED`                       |
+| yes          | differs                      | any                                                                                    | `conflict`                                                                                                                                                               | 409 `CONFLICT`                    |
+| yes          | `NULL` (pre-PR13 legacy row) | any                                                                                    | `conflict`                                                                                                                                                               | 409                               |
+| yes          | matches                      | `SUBMITTED` / `FILLED`                                                                 | `duplicate_submitted`                                                                                                                                                    | 200 `DUPLICATE_SUBMITTED`         |
+| yes          | matches                      | `REJECTED` / `CANCELLED` / `SUPERSEDED` / `EXPIRED`                                    | `duplicate_terminal`                                                                                                                                                     | 200 `DUPLICATE_TERMINAL`          |
+| yes          | matches                      | `PROPOSED` + `executionAttemptedAt` or `brokerOrderId` set (ambiguous)                 | `duplicate_pending_ambiguous`                                                                                                                                            | 200 `DUPLICATE_PENDING_AMBIGUOUS` |
+| yes          | matches                      | `PROPOSED`, no `executionAttemptedAt`, no `brokerOrderId`, **atomic claim acquired**   | `resumed` (re-drive `executePersistedOrder`)                                                                                                                             | 200 `RESUMED`                     |
+| yes          | matches                      | same as above but **claim held by another request** (marker set atomically with claim) | (re-classified from freshest row: `duplicate_submitted` / `duplicate_terminal` / `duplicate_pending_ambiguous`) OR `pending_claimed` when the marker was not yet visible | 200 as above                      |
 
 ### Unified atomic submission claim with a fencing marker
 
@@ -161,12 +161,12 @@ After a losing `tryStartSubmission`, the orchestrator does a
 fresh SELECT and classifies from the observed state — never
 blind-returns `pending_claimed` when the row already transitioned:
 
-| Freshest state | Outcome |
-| --- | --- |
-| `SUBMITTED` / `FILLED` | `duplicate_submitted` |
-| `REJECTED` / `CANCELLED` / `SUPERSEDED` / `EXPIRED` | `duplicate_terminal` |
-| `PROPOSED` + `executionAttemptedAt` (or `brokerOrderId`) | `duplicate_pending_ambiguous` |
-| `PROPOSED`, no marker, no broker id (rare read/write ordering) | `pending_claimed` |
+| Freshest state                                                 | Outcome                       |
+| -------------------------------------------------------------- | ----------------------------- |
+| `SUBMITTED` / `FILLED`                                         | `duplicate_submitted`         |
+| `REJECTED` / `CANCELLED` / `SUPERSEDED` / `EXPIRED`            | `duplicate_terminal`          |
+| `PROPOSED` + `executionAttemptedAt` (or `brokerOrderId`)       | `duplicate_pending_ambiguous` |
+| `PROPOSED`, no marker, no broker id (rare read/write ordering) | `pending_claimed`             |
 
 #### Crash windows
 
@@ -197,15 +197,15 @@ The runtime maps the six execution-engine outcomes to four
 public runtime outcomes so callers can act correctly without
 guessing at the wire format:
 
-| Submitter kind | Runtime `outcome` | Meaning for the caller |
-| --- | --- | --- |
-| `submitted` | `SUBMITTED` | Fresh submission — broker got the order. |
-| `resumed` | `SUBMITTED` (with `resumed: true`) | Orphan row was re-driven — broker got the order. |
-| `duplicate_submitted` | `DUPLICATE` | A prior attempt with the same key already succeeded (`previousExecution.order.status` = SUBMITTED / FILLED). |
-| `duplicate_terminal` | `DUPLICATE` | A prior attempt terminated non-successfully (`previousExecution.order.status` = REJECTED / CANCELLED / SUPERSEDED / EXPIRED). **NOT a success** — a fresh retry needs a fresh idempotency key. |
-| `duplicate_pending_ambiguous` | `PENDING` (reason `ambiguous_attempt`) | The broker MAY have received the order; reconciliation resolves. Do NOT resubmit. |
-| `pending_claimed` | `PENDING` (reason `claim_held_by_other`) | Another request is running the submission right now. Retry AFTER it finishes. |
-| `conflict` | `CONFLICT` | Same key, different intent. |
+| Submitter kind                | Runtime `outcome`                        | Meaning for the caller                                                                                                                                                                         |
+| ----------------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submitted`                   | `SUBMITTED`                              | Fresh submission — broker got the order.                                                                                                                                                       |
+| `resumed`                     | `SUBMITTED` (with `resumed: true`)       | Orphan row was re-driven — broker got the order.                                                                                                                                               |
+| `duplicate_submitted`         | `DUPLICATE`                              | A prior attempt with the same key already succeeded (`previousExecution.order.status` = SUBMITTED / FILLED).                                                                                   |
+| `duplicate_terminal`          | `DUPLICATE`                              | A prior attempt terminated non-successfully (`previousExecution.order.status` = REJECTED / CANCELLED / SUPERSEDED / EXPIRED). **NOT a success** — a fresh retry needs a fresh idempotency key. |
+| `duplicate_pending_ambiguous` | `PENDING` (reason `ambiguous_attempt`)   | The broker MAY have received the order; reconciliation resolves. Do NOT resubmit.                                                                                                              |
+| `pending_claimed`             | `PENDING` (reason `claim_held_by_other`) | Another request is running the submission right now. Retry AFTER it finishes.                                                                                                                  |
+| `conflict`                    | `CONFLICT`                               | Same key, different intent.                                                                                                                                                                    |
 
 `clientOrderHash` covers: instrument identity, order side / qty /
 type / TIF / limit / stop / rth flag / transmit flag, and every
@@ -311,7 +311,7 @@ resolves via `GET /execution/orders`.
 - Incoming (`POST /runtime/execute`): Bearer token compared with
   `EXECUTION_API_TOKEN` in constant time (`crypto.timingSafeEqual`
   with padding). Empty configured token → deny all. `GET
-  /runtime/execute/ready` is NOT authenticated (same policy as
+/runtime/execute/ready` is NOT authenticated (same policy as
   the PR12 `/runtime/ready`).
 - Outgoing (`POST /execution/execute-ticket`): sends
   `Authorization: Bearer <EXECUTION_API_TOKEN>` — the shared
@@ -341,10 +341,10 @@ when the write runtime is disabled.
 
 ## Configuration
 
-| Env | Default | Purpose |
-| --- | ------- | ------- |
-| `EXECUTION_RUNTIME_ENABLED` | `"false"` | Kill-switch for `POST /runtime/execute` and its readiness route. |
-| `EXECUTION_RUNTIME_ENGINE_URL` | `SIGNAL_EXECUTION_BASE_URL` | Execution-engine base URL. |
-| `EXECUTION_RUNTIME_REQUEST_TIMEOUT_MS` | `5000` | Per-request total timeout. |
-| `EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT` | `"paper"` | `z.literal("paper")`. Non-paper values fail startup. |
-| `EXECUTION_API_TOKEN` | (existing) | Bearer for incoming AND outgoing calls. |
+| Env                                      | Default                     | Purpose                                                          |
+| ---------------------------------------- | --------------------------- | ---------------------------------------------------------------- |
+| `EXECUTION_RUNTIME_ENABLED`              | `"false"`                   | Kill-switch for `POST /runtime/execute` and its readiness route. |
+| `EXECUTION_RUNTIME_ENGINE_URL`           | `SIGNAL_EXECUTION_BASE_URL` | Execution-engine base URL.                                       |
+| `EXECUTION_RUNTIME_REQUEST_TIMEOUT_MS`   | `5000`                      | Per-request total timeout.                                       |
+| `EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT` | `"paper"`                   | `z.literal("paper")`. Non-paper values fail startup.             |
+| `EXECUTION_API_TOKEN`                    | (existing)                  | Bearer for incoming AND outgoing calls.                          |

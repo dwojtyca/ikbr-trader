@@ -13,3 +13,5 @@ dist
 # tsconfig.node.json project reference. Regenerated on every build.
 apps/ui/vite.config.js
 apps/ui/vite.config.d.ts
+
+diff.txt

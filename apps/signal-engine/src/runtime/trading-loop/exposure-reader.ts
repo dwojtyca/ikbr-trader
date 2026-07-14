@@ -36,10 +36,7 @@
 
 import { z } from "zod";
 
-import type {
-  TradingExposure,
-  TradingExposureReader,
-} from "./types.js";
+import type { TradingExposure, TradingExposureReader } from "./types.js";
 
 export class TradingExposureReadError extends Error {
   readonly code: string;
@@ -211,13 +208,19 @@ export class HttpTradingExposureReader implements TradingExposureReader {
     }
     const parts: string[] = [];
     if (!ordersResult.ok) parts.push(`orders: ${ordersResult.message}`);
-    if (!summaryResult.ok) parts.push(`account_summary: ${summaryResult.message}`);
+    if (!summaryResult.ok)
+      parts.push(`account_summary: ${summaryResult.message}`);
     return { ok: false, message: parts.join("; ") };
   }
 
   async #probeEndpoint(
     url: string,
-    schema: { safeParse: (input: unknown) => { success: boolean; error?: { message: string } } },
+    schema: {
+      safeParse: (input: unknown) => {
+        success: boolean;
+        error?: { message: string };
+      };
+    },
   ): Promise<
     { readonly ok: true } | { readonly ok: false; readonly message: string }
   > {
@@ -225,7 +228,10 @@ export class HttpTradingExposureReader implements TradingExposureReader {
       const body = await this.#getJson(url);
       const parsed = schema.safeParse(body);
       if (!parsed.success) {
-        return { ok: false, message: `malformed: ${parsed.error?.message ?? "schema"}` };
+        return {
+          ok: false,
+          message: `malformed: ${parsed.error?.message ?? "schema"}`,
+        };
       }
       return { ok: true };
     } catch (error) {
@@ -338,8 +344,7 @@ export function classifyExposure(
         const hasMarker =
           (order.executionAttemptedAt !== undefined &&
             order.executionAttemptedAt !== null) ||
-          (order.brokerOrderId !== undefined &&
-            order.brokerOrderId !== null);
+          (order.brokerOrderId !== undefined && order.brokerOrderId !== null);
         if (hasMarker) {
           hasAmbiguousSubmission = true;
         } else {

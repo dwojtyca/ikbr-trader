@@ -50,9 +50,7 @@ export interface PriceContextProviderOptions {
   readonly id?: string;
 }
 
-export class PriceContextProvider
-  implements MarketContextProvider<"price">
-{
+export class PriceContextProvider implements MarketContextProvider<"price"> {
   readonly id: string;
   readonly section = "price" as const;
   readonly timeoutMs: number;

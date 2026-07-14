@@ -363,7 +363,9 @@ if (config.runtimeEnabled) {
     );
   }
 } else {
-  app.log.warn("runtime: RUNTIME_ENABLED=false — /runtime/* endpoints not registered");
+  app.log.warn(
+    "runtime: RUNTIME_ENABLED=false — /runtime/* endpoints not registered",
+  );
 }
 
 async function main(): Promise<void> {

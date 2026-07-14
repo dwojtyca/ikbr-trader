@@ -207,8 +207,7 @@ export class RefreshCoordinator {
       // version BEFORE the final status read so an invalidation
       // landing between that read and the healthy set is
       // detected and forces another iteration.
-      const versionBefore =
-        this.#invalidationVersion.get(accountId) ?? 0;
+      const versionBefore = this.#invalidationVersion.get(accountId) ?? 0;
       let status;
       try {
         status = await this.#deps.getStatus(accountId);
@@ -217,8 +216,7 @@ export class RefreshCoordinator {
         return;
       }
       const desired = this.#desiredGeneration.get(accountId) ?? 0;
-      const versionAfter =
-        this.#invalidationVersion.get(accountId) ?? 0;
+      const versionAfter = this.#invalidationVersion.get(accountId) ?? 0;
       const canFinalise =
         status.kind === "present" &&
         status.complete === true &&
@@ -248,11 +246,9 @@ export class RefreshCoordinator {
           iteration: iter + 1,
           ourGeneration: generation,
           desiredGeneration: desired,
-          statusSession:
-            status.kind === "present" ? status.sessionId : null,
+          statusSession: status.kind === "present" ? status.sessionId : null,
           ownSession: this.#deps.sessionId,
-          statusComplete:
-            status.kind === "present" ? status.complete : null,
+          statusComplete: status.kind === "present" ? status.complete : null,
           invalidationRaced: versionAfter !== versionBefore,
           outcome: completeOutcome.kind,
         },

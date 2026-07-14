@@ -26,11 +26,10 @@ describe("executionRuntimeSchema", () => {
 
   it("rejects any non-paper value (paper, anything, else)", () => {
     for (const bad of ["PAPER", "Paper", "prod", "live", "sandbox", ""]) {
-      assert.throws(
-        () =>
-          executionRuntimeSchema.parse({
-            EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT: bad,
-          }),
+      assert.throws(() =>
+        executionRuntimeSchema.parse({
+          EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT: bad,
+        }),
       );
     }
   });
@@ -86,7 +85,11 @@ describe("buildExecutionRuntimeConfig", () => {
         env,
         fallbackEngineUrl: "http://x",
       });
-      assert.equal(config.enabled, false, `${JSON.stringify(value)} MUST NOT enable writes`);
+      assert.equal(
+        config.enabled,
+        false,
+        `${JSON.stringify(value)} MUST NOT enable writes`,
+      );
     }
   });
 });

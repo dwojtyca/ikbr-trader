@@ -77,9 +77,12 @@ export function toLegacySignalTicket(ticket: ExecutionTicket): SignalTicket {
   if (order.orderType === "STP") {
     const bracketSignals: string[] = [];
     if (ticket.protection.bracketEnabled) bracketSignals.push("bracketEnabled");
-    if (ticket.protection.stopLoss !== undefined) bracketSignals.push("stopLoss");
-    if (ticket.protection.takeProfit !== undefined) bracketSignals.push("takeProfit");
-    if (ticket.protection.trailingStop !== undefined) bracketSignals.push("trailingStop");
+    if (ticket.protection.stopLoss !== undefined)
+      bracketSignals.push("stopLoss");
+    if (ticket.protection.takeProfit !== undefined)
+      bracketSignals.push("takeProfit");
+    if (ticket.protection.trailingStop !== undefined)
+      bracketSignals.push("trailingStop");
     if (bracketSignals.length > 0) {
       throw new UnsupportedOrderCombinationError(
         `STP orders cannot carry bracket protection on the write edge — ` +

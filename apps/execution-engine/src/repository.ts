@@ -1050,10 +1050,9 @@ export class ExecutionRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-        [`snap:${input.accountId}`],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
+        `snap:${input.accountId}`,
+      ]);
       const result = await client.query(
         `
         INSERT INTO broker_snapshot_syncs
@@ -1113,10 +1112,9 @@ export class ExecutionRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-        [`snap:${input.accountId}`],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
+        `snap:${input.accountId}`,
+      ]);
       const genRow = await client.query(
         "SELECT generation FROM broker_snapshot_syncs WHERE account_id = $1",
         [input.accountId],
@@ -1211,9 +1209,7 @@ export class ExecutionRepository {
    *     already completed on our behalf; we can exit healthy
    *     without another broker fetch.
    */
-  async getPositionSnapshotStatus(
-    accountId: string,
-  ): Promise<
+  async getPositionSnapshotStatus(accountId: string): Promise<
     | { readonly kind: "missing" }
     | {
         readonly kind: "present";
@@ -1347,10 +1343,9 @@ export class ExecutionRepository {
       // Serialises concurrent inserts for the same instrument
       // without any table-level locking. Released automatically at
       // COMMIT / ROLLBACK.
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-        [ticket.instrument],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
+        ticket.instrument,
+      ]);
 
       // Look for any non-terminal row that is NOT the resume
       // target of the current caller (same client_order_id).
@@ -1499,7 +1494,9 @@ export class ExecutionRepository {
     return {
       order: this.mapRow(row as ProposedOrderRow),
       clientOrderHash:
-        typeof row.client_order_hash === "string" ? row.client_order_hash : null,
+        typeof row.client_order_hash === "string"
+          ? row.client_order_hash
+          : null,
     };
   }
 
@@ -1854,10 +1851,9 @@ export class ExecutionRepository {
           [`snap:${input.positionGuard.accountId}`],
         );
       }
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-        [input.instrument],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
+        input.instrument,
+      ]);
 
       const guarded = await this.#runExposureGuard(client, {
         instrument: input.instrument,
@@ -1982,7 +1978,10 @@ export class ExecutionRepository {
     // session's snapshot MUST be rejected even if it's still
     // within maxSnapshotAgeMs. Only the sessionId that wrote the
     // snapshot may be trusted to reason about the account state.
-    if (typeof syncRow.session_id !== "string" || syncRow.session_id !== g.sessionId) {
+    if (
+      typeof syncRow.session_id !== "string" ||
+      syncRow.session_id !== g.sessionId
+    ) {
       return {
         kind: "blocked",
         outcome: {

@@ -15,10 +15,7 @@ import {
   type Rule,
 } from "@ikbr/shared";
 
-import {
-  MarketDataRuntime,
-  buildRuntimeFreshnessPolicy,
-} from "../runtime.js";
+import { MarketDataRuntime, buildRuntimeFreshnessPolicy } from "../runtime.js";
 import { PriceContextProvider } from "../price-provider.js";
 import type {
   MarketDataRuntimeReader,
@@ -26,7 +23,11 @@ import type {
 } from "../market-data-reader.js";
 import { ExecutionRuntime } from "./execution-runtime.js";
 import { PaperGuard } from "./paper-guard.js";
-import type { ExecutionTicketSubmitter, SubmitInput, SubmitResult } from "./submitter.js";
+import type {
+  ExecutionTicketSubmitter,
+  SubmitInput,
+  SubmitResult,
+} from "./submitter.js";
 import { executionRuntimeRoutesPlugin } from "./routes.js";
 
 // ---------------------------------------------------------------------------

@@ -26,10 +26,7 @@ import {
   deriveTriggerIdentity,
   resolveInstrumentPolicy,
 } from "./trading-loop-service.js";
-import type {
-  TradingExposure,
-  TradingExposureReader,
-} from "./types.js";
+import type { TradingExposure, TradingExposureReader } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -116,7 +113,9 @@ function makeRegistry(instruments: readonly Instrument[]): InstrumentRegistry {
   } as unknown as InstrumentRegistry;
 }
 
-function makeTicket(overrides: Partial<ExecutionTicket["order"]> = {}): ExecutionTicket {
+function makeTicket(
+  overrides: Partial<ExecutionTicket["order"]> = {},
+): ExecutionTicket {
   return {
     ticketId: "tix-1",
     createdAt: new Date("2026-07-14T12:00:00.000Z"),
@@ -213,11 +212,17 @@ function makeMarketDataRuntime(behaviour: {
   ticket?: ExecutionTicket;
   outcome?: "SUCCESS" | "NO_TRADE" | "FAILURE";
   priceObservedAtIso?: string | null;
-}): MarketDataRuntime & { calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }> } {
-  const calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }> = [];
+}): MarketDataRuntime & {
+  calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }>;
+} {
+  const calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }> =
+    [];
   return {
     calls,
-    async dryRun(instrumentId: string, policy: ExecutionTicketPolicy): Promise<DryRunResult> {
+    async dryRun(
+      instrumentId: string,
+      policy: ExecutionTicketPolicy,
+    ): Promise<DryRunResult> {
       calls.push({ instrumentId, policy });
       const outcome = behaviour.outcome ?? "SUCCESS";
       const snapshot = makeSnapshot(
@@ -265,7 +270,9 @@ function makeMarketDataRuntime(behaviour: {
 
 const SUBMITTED_OUTCOME: ExecutionRuntimeOutcome = {
   outcome: "SUBMITTED",
-  pipeline: { outcome: "SUCCESS" } as unknown as ExecutionRuntimeOutcome extends {
+  pipeline: {
+    outcome: "SUCCESS",
+  } as unknown as ExecutionRuntimeOutcome extends {
     pipeline: infer P;
   }
     ? P
@@ -288,9 +295,17 @@ const UNKNOWN_OUTCOME: ExecutionRuntimeOutcome = {
 function makeExecutionRuntime(
   behaviour:
     | ExecutionRuntimeOutcome
-    | ((input: { dryRunResult: DryRunResult; idempotencyKey: string; clientOrderHash?: string }) => ExecutionRuntimeOutcome | Promise<ExecutionRuntimeOutcome>),
+    | ((input: {
+        dryRunResult: DryRunResult;
+        idempotencyKey: string;
+        clientOrderHash?: string;
+      }) => ExecutionRuntimeOutcome | Promise<ExecutionRuntimeOutcome>),
 ): ExecutionRuntime & {
-  preparedCalls: Array<{ dryRunResult: DryRunResult; idempotencyKey: string; clientOrderHash?: string }>;
+  preparedCalls: Array<{
+    dryRunResult: DryRunResult;
+    idempotencyKey: string;
+    clientOrderHash?: string;
+  }>;
 } {
   const preparedCalls: Array<{
     dryRunResult: DryRunResult;
@@ -308,20 +323,32 @@ function makeExecutionRuntime(
       clientOrderHash?: string;
     }) {
       preparedCalls.push(input);
-      return typeof behaviour === "function" ? await behaviour(input) : behaviour;
+      return typeof behaviour === "function"
+        ? await behaviour(input)
+        : behaviour;
     },
   } as unknown as ExecutionRuntime & {
-    preparedCalls: Array<{ dryRunResult: DryRunResult; idempotencyKey: string; clientOrderHash?: string }>;
+    preparedCalls: Array<{
+      dryRunResult: DryRunResult;
+      idempotencyKey: string;
+      clientOrderHash?: string;
+    }>;
   };
 }
 
 function makeLogger(): FastifyBaseLogger {
   const noop = () => undefined;
   const l = {
-    info: noop, warn: noop, error: noop, debug: noop,
-    fatal: noop, trace: noop,
-    child: () => l, silent: () => {},
-    level: "info", bindings: () => ({}),
+    info: noop,
+    warn: noop,
+    error: noop,
+    debug: noop,
+    fatal: noop,
+    trace: noop,
+    child: () => l,
+    silent: () => {},
+    level: "info",
+    bindings: () => ({}),
     isLevelEnabled: () => true,
   };
   return l as unknown as FastifyBaseLogger;
@@ -332,18 +359,24 @@ function makeConfig(overrides: Record<string, string> = {}) {
   return buildTradingLoopConfig({ env });
 }
 
-function makeService(overrides: {
-  config?: ReturnType<typeof makeConfig>;
-  instruments?: readonly Instrument[];
-  exposure?: TradingExposure;
-  ticket?: ExecutionTicket;
-  pipelineOutcome?: "SUCCESS" | "NO_TRADE" | "FAILURE";
-  priceObservedAtIso?: string | null;
-  runtimeOutcome?:
-    | ExecutionRuntimeOutcome
-    | ((input: { dryRunResult: DryRunResult; idempotencyKey: string; clientOrderHash?: string }) => ExecutionRuntimeOutcome | Promise<ExecutionRuntimeOutcome>);
-  clock?: () => Date;
-} = {}) {
+function makeService(
+  overrides: {
+    config?: ReturnType<typeof makeConfig>;
+    instruments?: readonly Instrument[];
+    exposure?: TradingExposure;
+    ticket?: ExecutionTicket;
+    pipelineOutcome?: "SUCCESS" | "NO_TRADE" | "FAILURE";
+    priceObservedAtIso?: string | null;
+    runtimeOutcome?:
+      | ExecutionRuntimeOutcome
+      | ((input: {
+          dryRunResult: DryRunResult;
+          idempotencyKey: string;
+          clientOrderHash?: string;
+        }) => ExecutionRuntimeOutcome | Promise<ExecutionRuntimeOutcome>);
+    clock?: () => Date;
+  } = {},
+) {
   const instruments = overrides.instruments ?? [makeInstrument("aapl")];
   const marketDataRuntime = makeMarketDataRuntime({
     ticket: overrides.ticket,
@@ -403,7 +436,11 @@ describe("resolveInstrumentPolicy — per-instrument policy resolution", () => {
   it("defaultOrderType not in allowedOrderTypes → ok:false", () => {
     const result = resolveInstrumentPolicy(
       makeInstrument("aapl", {
-        executionPolicy: { ...AAPL_POLICY, allowedOrderTypes: ["LMT"], defaultOrderType: "STP" },
+        executionPolicy: {
+          ...AAPL_POLICY,
+          allowedOrderTypes: ["LMT"],
+          defaultOrderType: "STP",
+        },
       }),
     );
     assert.equal(result.ok, false);

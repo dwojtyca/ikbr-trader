@@ -81,9 +81,7 @@ describe("execution-engine readiness", () => {
         accountAllowedByEnvironment: false,
       });
       assert.equal(result.statusCode, 503);
-      assert.ok(
-        result.body.reasons.includes("account_not_allowed_for_paper"),
-      );
+      assert.ok(result.body.reasons.includes("account_not_allowed_for_paper"));
     });
 
     it("account mismatch (live) → 503 account_not_allowed_for_live", () => {
@@ -94,9 +92,7 @@ describe("execution-engine readiness", () => {
         accountAllowedByEnvironment: false,
       });
       assert.equal(result.statusCode, 503);
-      assert.ok(
-        result.body.reasons.includes("account_not_allowed_for_live"),
-      );
+      assert.ok(result.body.reasons.includes("account_not_allowed_for_live"));
     });
 
     it("audit write unavailable → 503 audit_write_unavailable", () => {

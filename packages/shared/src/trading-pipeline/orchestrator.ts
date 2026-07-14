@@ -127,8 +127,7 @@ export class TradingPipeline {
     this.#signalEngine = options.signalEngine;
     this.#ticketBuilder = options.ticketBuilder;
     this.#now = options.now ?? (() => new Date());
-    this.#performanceNow =
-      options.performanceNow ?? (() => performance.now());
+    this.#performanceNow = options.performanceNow ?? (() => performance.now());
     this.#version = options.version ?? TRADING_PIPELINE_VERSION;
   }
 
@@ -236,7 +235,9 @@ export class TradingPipeline {
       // memoized `measureDuration` will then return this same value
       // without re-invoking the clock.
       const durationMs = measureDuration();
-      const versions: TradingPipelineEngineVersions = { pipeline: this.#version };
+      const versions: TradingPipelineEngineVersions = {
+        pipeline: this.#version,
+      };
       return this.#buildFailure({
         signal: null,
         blockers: [
@@ -403,9 +404,7 @@ export class TradingPipeline {
    * Any hostile getter on `signal.metadata.engineVersions` is
    * swallowed and the corresponding field is simply omitted.
    */
-  #readSignalVersions(
-    signal: unknown,
-  ): TradingPipelineEngineVersions {
+  #readSignalVersions(signal: unknown): TradingPipelineEngineVersions {
     const versions: TradingPipelineEngineVersions = { pipeline: this.#version };
     const inner = trySafe(
       () =>

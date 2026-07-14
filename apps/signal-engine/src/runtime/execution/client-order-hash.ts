@@ -74,10 +74,7 @@ export function canonicaliseTicket(ticket: ExecutionTicket): string {
     ["protection.stopLoss", optionalNum(ticket.protection.stopLoss)],
     ["protection.takeProfit", optionalNum(ticket.protection.takeProfit)],
     ["protection.trailingStop", optionalNum(ticket.protection.trailingStop)],
-    [
-      "protection.bracketEnabled",
-      ticket.protection.bracketEnabled ? "1" : "0",
-    ],
+    ["protection.bracketEnabled", ticket.protection.bracketEnabled ? "1" : "0"],
   ];
   return `${CLIENT_ORDER_HASH_VERSION}|${fields.map(([k, v]) => `${k}=${v}`).join("|")}`;
 }

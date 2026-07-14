@@ -60,10 +60,11 @@ describe("buildTradingLoopConfig — instrument id parsing", () => {
     const env = tradingLoopSchema.parse({
       TRADING_LOOP_INSTRUMENT_IDS: "  AAPL , MSFT ,AAPL,,   TSLA  ",
     });
-    assert.deepEqual(
-      buildTradingLoopConfig({ env }).instrumentIds,
-      ["AAPL", "MSFT", "TSLA"],
-    );
+    assert.deepEqual(buildTradingLoopConfig({ env }).instrumentIds, [
+      "AAPL",
+      "MSFT",
+      "TSLA",
+    ]);
   });
 });
 

@@ -33,9 +33,7 @@ export const executeTicketBodySchema = z.object({
   ticket: ticketSchema,
   persist: z.boolean().default(true),
   strategy: z.string().default("manual_ticket"),
-  decisionSource: z
-    .enum(["signal", "llm", "user", "user_override"])
-    .optional(),
+  decisionSource: z.enum(["signal", "llm", "user", "user_override"]).optional(),
   clientOrderId: z.string().min(1).optional(),
   clientOrderHash: z.string().min(1).optional(),
 });

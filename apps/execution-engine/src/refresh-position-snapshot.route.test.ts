@@ -43,10 +43,10 @@ function buildRefreshHarness(): Harness {
   registerExecutionAuth(app, {
     token: TOKEN,
     publicPaths: new Set(["/health"]),
-    burstTracker: new AuthFailureBurstTracker(
-      () => undefined,
-      { windowMs: 60_000, threshold: 3 },
-    ),
+    burstTracker: new AuthFailureBurstTracker(() => undefined, {
+      windowMs: 60_000,
+      threshold: 3,
+    }),
     writeAudit: (row) => {
       audits.push(row);
     },
@@ -56,20 +56,17 @@ function buildRefreshHarness(): Harness {
   // Stub of the production endpoint. Mirrors the response shape
   // in `apps/execution-engine/src/index.ts` — 200 on healthy,
   // 503 on failed.
-  app.post(
-    "/execution/refresh-position-snapshot",
-    async (_request, reply) => {
-      refreshCalls += 1;
-      if (refreshOutcome.kind === "healthy") {
-        return { accountId: "PAPER-ACCT", status: "healthy" };
-      }
-      return reply.code(503).send({
-        accountId: "PAPER-ACCT",
-        status: "failed",
-        error: refreshOutcome.error,
-      });
-    },
-  );
+  app.post("/execution/refresh-position-snapshot", async (_request, reply) => {
+    refreshCalls += 1;
+    if (refreshOutcome.kind === "healthy") {
+      return { accountId: "PAPER-ACCT", status: "healthy" };
+    }
+    return reply.code(503).send({
+      accountId: "PAPER-ACCT",
+      status: "failed",
+      error: refreshOutcome.error,
+    });
+  });
 
   return {
     app,

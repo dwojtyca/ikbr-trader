@@ -50,9 +50,7 @@ export const executionRuntimeSchema = z.object({
    * AND satisfy the checklist in
    * `docs/implementation/phase2/PHASE_2_ROADMAP.md` (PR18).
    */
-  EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT: z
-    .literal("paper")
-    .default("paper"),
+  EXECUTION_RUNTIME_EXPECTED_ENVIRONMENT: z.literal("paper").default("paper"),
 });
 
 export type ExecutionRuntimeEnv = z.infer<typeof executionRuntimeSchema>;

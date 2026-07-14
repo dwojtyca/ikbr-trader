@@ -66,47 +66,47 @@ export interface RuntimeRoutesOptions {
   readonly readinessDeps: RuntimeReadinessDeps;
 }
 
-export const runtimeRoutesPlugin: FastifyPluginAsync<RuntimeRoutesOptions> =
-  async (app: FastifyInstance, options: RuntimeRoutesOptions) => {
-    if (!options?.runtime) {
-      throw new Error("runtimeRoutesPlugin: runtime is required");
-    }
-    if (!options.readinessDeps) {
-      throw new Error("runtimeRoutesPlugin: readinessDeps is required");
-    }
-    const { runtime, readinessDeps } = options;
+export const runtimeRoutesPlugin: FastifyPluginAsync<
+  RuntimeRoutesOptions
+> = async (app: FastifyInstance, options: RuntimeRoutesOptions) => {
+  if (!options?.runtime) {
+    throw new Error("runtimeRoutesPlugin: runtime is required");
+  }
+  if (!options.readinessDeps) {
+    throw new Error("runtimeRoutesPlugin: readinessDeps is required");
+  }
+  const { runtime, readinessDeps } = options;
 
-    app.get("/runtime/health", async () => ({ ok: true }));
+  app.get("/runtime/health", async () => ({ ok: true }));
 
-    app.get("/runtime/ready", async (_request, reply) => {
-      const result = await checkRuntimeReadiness(readinessDeps);
-      reply.status(result.ready ? 200 : 503);
+  app.get("/runtime/ready", async (_request, reply) => {
+    const result = await checkRuntimeReadiness(readinessDeps);
+    reply.status(result.ready ? 200 : 503);
+    return result;
+  });
+
+  app.post("/runtime/dry-run", async (request, reply) => {
+    const parsed = dryRunBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.status(400);
+      return { error: "invalid_body", issues: parsed.error.issues };
+    }
+
+    const { instrumentId, policy } = parsed.data;
+    try {
+      const result = await runtime.dryRun(instrumentId, policy);
       return result;
-    });
-
-    app.post("/runtime/dry-run", async (request, reply) => {
-      const parsed = dryRunBodySchema.safeParse(request.body ?? {});
-      if (!parsed.success) {
-        reply.status(400);
-        return { error: "invalid_body", issues: parsed.error.issues };
+    } catch (error) {
+      // Unknown instrument (registry throws) is the only expected
+      // error path; treat anything else as a 500 with a structured
+      // message so operators can distinguish it from bad input.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/instrument/i.test(message) && /not|unknown/i.test(message)) {
+        reply.status(404);
+        return { error: "instrument_not_found", message };
       }
-
-      const { instrumentId, policy } = parsed.data;
-      try {
-        const result = await runtime.dryRun(instrumentId, policy);
-        return result;
-      } catch (error) {
-        // Unknown instrument (registry throws) is the only expected
-        // error path; treat anything else as a 500 with a structured
-        // message so operators can distinguish it from bad input.
-        const message =
-          error instanceof Error ? error.message : String(error);
-        if (/instrument/i.test(message) && /not|unknown/i.test(message)) {
-          reply.status(404);
-          return { error: "instrument_not_found", message };
-        }
-        reply.status(500);
-        return { error: "runtime_error", message };
-      }
-    });
-  };
+      reply.status(500);
+      return { error: "runtime_error", message };
+    }
+  });
+};

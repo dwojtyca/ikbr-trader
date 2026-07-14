@@ -148,11 +148,11 @@ coordinator with a **two-phase** contract:
    — set `broker_snapshot_syncs.complete = false`. Every
    write-path guard consulted between this call and the matching
    complete-call fail-closes with `POSITION_STATE_UNAVAILABLE
-   (incomplete)`.
+(incomplete)`.
 2. Fetch broker state from TWS (`getAccountSnapshot` — no
    transaction held during the network call).
 3. `completePositionSnapshotRefresh(accountId, sessionId,
-   observedAt, positions)` — atomically replace the position
+observedAt, positions)` — atomically replace the position
    rows AND flip `complete = true` in a single transaction.
 
 Trigger points:
@@ -338,8 +338,9 @@ clientOrderHash  = computeClientOrderHash(ticket)   (unchanged)
 ```
 
 Where:
+
 - `strategyId` from `Instrument.executionPolicy.strategyId`
-- `triggerId`  = `evaluation.<timeframe>.<bucketStartMs>` —
+- `triggerId` = `evaluation.<timeframe>.<bucketStartMs>` —
   `snapshot.sections.price.observedAt` rounded DOWN to the
   strategy's timeframe. The label is **`evaluation`**, not
   `candle`, because PR14 has no ingestion-emitted candle-close
@@ -359,13 +360,13 @@ via the UNIQUE(client_order_id) + hash-match rules.
 
 Guarantees:
 
-| Scenario                                              | Behaviour |
-| ----------------------------------------------------- | --------- |
-| Same trigger + same ticket, many ticks                | Same id + same hash → `DUPLICATE` |
-| Same trigger + CHANGED order-critical field           | Same id + different hash → `CONFLICT` |
-| New evaluation bucket + identical ticket              | New id + same hash → new submission, subject to atomic guards |
-| UNKNOWN retry with same trigger                       | Same id |
-| Process restart evaluating the same trigger           | Same id (pure function of `(id, strategyId, triggerId)`) |
+| Scenario                                    | Behaviour                                                     |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| Same trigger + same ticket, many ticks      | Same id + same hash → `DUPLICATE`                             |
+| Same trigger + CHANGED order-critical field | Same id + different hash → `CONFLICT`                         |
+| New evaluation bucket + identical ticket    | New id + same hash → new submission, subject to atomic guards |
+| UNKNOWN retry with same trigger             | Same id                                                       |
+| Process restart evaluating the same trigger | Same id (pure function of `(id, strategyId, triggerId)`)      |
 
 ### `clientOrderHash` is never trusted from the caller
 
@@ -430,16 +431,16 @@ One structured pino entry per instrument run:
 
 ## Outcome union
 
-| Kind                                     | Meaning |
-| ---------------------------------------- | ------- |
-| `SUBMITTED` / `DUPLICATE` / `PENDING` / `CONFLICT` / `UNKNOWN` | pass-through from `ExecutionRuntime` |
-| `NOT_SUBMITTED` reasons                  | `NO_TRADE`, `PIPELINE_FAILURE`, `PAPER_GUARD_FAILED`, `UNSUPPORTED_TICKET_SHAPE`, `ACTIVE_INTENT_EXISTS`, `OPEN_POSITION_EXISTS`, `POSITION_STATE_UNAVAILABLE`, `INSTRUMENT_POLICY_UNAVAILABLE`, `TRIGGER_UNAVAILABLE` |
-| `SKIPPED / LOOP_DISABLED`                | scheduler stopped mid-cycle |
-| `SKIPPED / RUN_IN_PROGRESS`              | per-instrument non-overlap |
-| `SKIPPED / CONCURRENCY_CAP`              | global cap reached |
-| `SKIPPED / EXPOSURE_BLOCKED`             | any of the four pre-check flags true |
-| `SKIPPED / EXPOSURE_READ_FAILED`         | fail-closed skip on validation / http / stale / timeout |
-| `ERROR`                                  | unexpected runtime exception |
+| Kind                                                           | Meaning                                                                                                                                                                                                                |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SUBMITTED` / `DUPLICATE` / `PENDING` / `CONFLICT` / `UNKNOWN` | pass-through from `ExecutionRuntime`                                                                                                                                                                                   |
+| `NOT_SUBMITTED` reasons                                        | `NO_TRADE`, `PIPELINE_FAILURE`, `PAPER_GUARD_FAILED`, `UNSUPPORTED_TICKET_SHAPE`, `ACTIVE_INTENT_EXISTS`, `OPEN_POSITION_EXISTS`, `POSITION_STATE_UNAVAILABLE`, `INSTRUMENT_POLICY_UNAVAILABLE`, `TRIGGER_UNAVAILABLE` |
+| `SKIPPED / LOOP_DISABLED`                                      | scheduler stopped mid-cycle                                                                                                                                                                                            |
+| `SKIPPED / RUN_IN_PROGRESS`                                    | per-instrument non-overlap                                                                                                                                                                                             |
+| `SKIPPED / CONCURRENCY_CAP`                                    | global cap reached                                                                                                                                                                                                     |
+| `SKIPPED / EXPOSURE_BLOCKED`                                   | any of the four pre-check flags true                                                                                                                                                                                   |
+| `SKIPPED / EXPOSURE_READ_FAILED`                               | fail-closed skip on validation / http / stale / timeout                                                                                                                                                                |
+| `ERROR`                                                        | unexpected runtime exception                                                                                                                                                                                           |
 
 ## Real PostgreSQL integration test
 

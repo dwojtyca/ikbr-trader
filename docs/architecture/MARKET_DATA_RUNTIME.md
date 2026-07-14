@@ -20,10 +20,10 @@ write-runtime scope stays open.
 
 ## Data sources (all read-only, all pre-existing)
 
-| Section | Source | Access |
-| ------- | ------ | ------ |
-| `price` | Redis `market-state:<conid>` (written by `apps/ingestion`) | `SignalRepository.getMarketState()` |
-| every other section | — | left `unavailable` in PR12 |
+| Section             | Source                                                     | Access                              |
+| ------------------- | ---------------------------------------------------------- | ----------------------------------- |
+| `price`             | Redis `market-state:<conid>` (written by `apps/ingestion`) | `SignalRepository.getMarketState()` |
+| every other section | —                                                          | left `unavailable` in PR12          |
 
 PR12 wires **only the `price` provider**. Other sections stay
 `unavailable`, which is a valid `SectionStatus`. No new tables,
@@ -85,15 +85,15 @@ not the Redis cache hit time. Every failure mode collapses the
 `price` section to `stale` or `unavailable`, which prevents a
 `SUCCESS` outcome downstream:
 
-| Condition | `Section.status` | Pipeline outcome ceiling |
-| --------- | ---------------- | ----------------------- |
-| Symbol not resolved by ingestion yet | `unavailable` | `FAILURE` / `NO_TRADE` |
-| Redis key missing | `unavailable` | `FAILURE` / `NO_TRADE` |
-| Redis payload `conid` / `symbol` disagrees with request | `unavailable` | `FAILURE` / `NO_TRADE` |
-| JSON corrupt / bad timestamp | `unavailable` | `FAILURE` / `NO_TRADE` |
-| `lastPrice` non-finite | `unavailable` | `FAILURE` / `NO_TRADE` |
-| `observedAt` older than `MARKET_CONTEXT_MAX_TICK_AGE_S` | `stale` | `FAILURE` / `NO_TRADE` |
-| Redis / Postgres read throws | `unavailable` | `FAILURE` / `NO_TRADE` |
+| Condition                                               | `Section.status` | Pipeline outcome ceiling |
+| ------------------------------------------------------- | ---------------- | ------------------------ |
+| Symbol not resolved by ingestion yet                    | `unavailable`    | `FAILURE` / `NO_TRADE`   |
+| Redis key missing                                       | `unavailable`    | `FAILURE` / `NO_TRADE`   |
+| Redis payload `conid` / `symbol` disagrees with request | `unavailable`    | `FAILURE` / `NO_TRADE`   |
+| JSON corrupt / bad timestamp                            | `unavailable`    | `FAILURE` / `NO_TRADE`   |
+| `lastPrice` non-finite                                  | `unavailable`    | `FAILURE` / `NO_TRADE`   |
+| `observedAt` older than `MARKET_CONTEXT_MAX_TICK_AGE_S` | `stale`          | `FAILURE` / `NO_TRADE`   |
+| Redis / Postgres read throws                            | `unavailable`    | `FAILURE` / `NO_TRADE`   |
 
 No default / synthetic price is ever substituted. Missing data
 propagates through the shared `DecisionEngine` /
@@ -127,11 +127,11 @@ no scheduler.
 
 ## HTTP surface
 
-| Method | Path | Purpose |
-| ------ | ---- | ------- |
-| `GET`  | `/runtime/health`   | Liveness (200 while process alive) |
-| `GET`  | `/runtime/ready`    | Readiness — Redis `PING` + Postgres `SELECT 1` (200 or 503). Postgres is required for symbol → conid resolution. |
-| `POST` | `/runtime/dry-run`  | Registry lookup + snapshot + pipeline; returns raw result |
+| Method | Path               | Purpose                                                                                                          |
+| ------ | ------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/runtime/health`  | Liveness (200 while process alive)                                                                               |
+| `GET`  | `/runtime/ready`   | Readiness — Redis `PING` + Postgres `SELECT 1` (200 or 503). Postgres is required for symbol → conid resolution. |
+| `POST` | `/runtime/dry-run` | Registry lookup + snapshot + pipeline; returns raw result                                                        |
 
 Broker / IBKR / execution-engine liveness is **not** part of
 readiness — PR12 performs no submission and must not be blocked

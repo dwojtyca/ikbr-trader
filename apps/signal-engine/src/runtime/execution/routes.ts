@@ -68,17 +68,12 @@ export interface ExecutionRuntimeRoutesOptions {
 
 export const executionRuntimeRoutesPlugin: FastifyPluginAsync<
   ExecutionRuntimeRoutesOptions
-> = async (
-  app: FastifyInstance,
-  options: ExecutionRuntimeRoutesOptions,
-) => {
+> = async (app: FastifyInstance, options: ExecutionRuntimeRoutesOptions) => {
   if (!options?.runtime) {
     throw new Error("executionRuntimeRoutesPlugin: runtime is required");
   }
   if (!options.readinessDeps) {
-    throw new Error(
-      "executionRuntimeRoutesPlugin: readinessDeps is required",
-    );
+    throw new Error("executionRuntimeRoutesPlugin: readinessDeps is required");
   }
   const auth = createRuntimeBearerAuth({ token: options.bearerToken });
 
@@ -105,51 +100,43 @@ export const executionRuntimeRoutesPlugin: FastifyPluginAsync<
     };
   });
 
-  app.post(
-    "/runtime/execute",
-    { preHandler: auth },
-    async (request, reply) => {
-      const parsed = executeBodySchema.safeParse(request.body ?? {});
-      if (!parsed.success) {
-        reply.status(400);
-        return { error: "invalid_body", issues: parsed.error.issues };
-      }
-      const { instrumentId, policy, idempotencyKey } = parsed.data;
+  app.post("/runtime/execute", { preHandler: auth }, async (request, reply) => {
+    const parsed = executeBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      reply.status(400);
+      return { error: "invalid_body", issues: parsed.error.issues };
+    }
+    const { instrumentId, policy, idempotencyKey } = parsed.data;
 
-      let result;
-      try {
-        result = await options.runtime.execute({
-          instrumentId,
-          policy,
-          idempotencyKey,
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : String(error);
-        if (
-          /instrument/i.test(message) &&
-          /not|unknown/i.test(message)
-        ) {
-          reply.status(404);
-          return { error: "instrument_not_found", message };
-        }
-        // Any other throw at this layer is genuinely unexpected.
-        // Surface as UNKNOWN so the client cannot mistake it for a
-        // deterministic success/failure.
-        reply.status(500);
-        return {
-          outcome: "UNKNOWN",
-          idempotencyKey,
-          reason: "internal_error",
-        };
+    let result;
+    try {
+      result = await options.runtime.execute({
+        instrumentId,
+        policy,
+        idempotencyKey,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/instrument/i.test(message) && /not|unknown/i.test(message)) {
+        reply.status(404);
+        return { error: "instrument_not_found", message };
       }
+      // Any other throw at this layer is genuinely unexpected.
+      // Surface as UNKNOWN so the client cannot mistake it for a
+      // deterministic success/failure.
+      reply.status(500);
+      return {
+        outcome: "UNKNOWN",
+        idempotencyKey,
+        reason: "internal_error",
+      };
+    }
 
-      if (result.outcome === "CONFLICT") {
-        reply.status(409);
-      }
-      return result;
-    },
-  );
+    if (result.outcome === "CONFLICT") {
+      reply.status(409);
+    }
+    return result;
+  });
 };
 
 async function probe(

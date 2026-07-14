@@ -18,10 +18,7 @@ import {
 } from "@ikbr/shared";
 
 import { createRuntimeEngines } from "./engines.js";
-import {
-  MarketDataRuntime,
-  buildRuntimeFreshnessPolicy,
-} from "./runtime.js";
+import { MarketDataRuntime, buildRuntimeFreshnessPolicy } from "./runtime.js";
 import { PriceContextProvider } from "./price-provider.js";
 import type {
   MarketDataRuntimeReader,
@@ -340,13 +337,8 @@ describe("MarketDataRuntime.dryRun — structural side-effect guarantees", () =>
     // write-oriented option to `MarketDataRuntimeOptions`, this
     // block will fail to compile because we exhaustively enumerate
     // the currently-allowed keys.
-    const allowedKeys: readonly (keyof import("./runtime.js").MarketDataRuntimeOptions)[] = [
-      "registry",
-      "providers",
-      "pipeline",
-      "freshnessPolicy",
-      "now",
-    ];
+    const allowedKeys: readonly (keyof import("./runtime.js").MarketDataRuntimeOptions)[] =
+      ["registry", "providers", "pipeline", "freshnessPolicy", "now"];
     // Cast to `unknown` avoids the never-satisfying type inference
     // while still guaranteeing the compile-time assertion above.
     for (const forbidden of [

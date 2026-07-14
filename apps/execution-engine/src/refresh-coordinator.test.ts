@@ -118,7 +118,10 @@ class FakeRepo {
   }
 
   /** Test helper — external invalidation from a fill callback. */
-  async invalidate(accountId: string, sessionId: string): Promise<{ generation: number }> {
+  async invalidate(
+    accountId: string,
+    sessionId: string,
+  ): Promise<{ generation: number }> {
     return this.beginPositionSnapshotRefresh({
       accountId,
       sessionId,
@@ -143,10 +146,12 @@ function makeGate() {
 class FakeBroker {
   readonly callLog: Array<{ accountId: string; startedAt: Date }> = [];
   #queuedGates: Array<Promise<unknown>> = [];
-  #queuedResponses: Array<() => {
-    retrievedAt: string;
-    positions: Array<{ symbol: string; conid?: string; position: number }>;
-  }> = [];
+  #queuedResponses: Array<
+    () => {
+      retrievedAt: string;
+      positions: Array<{ symbol: string; conid?: string; position: number }>;
+    }
+  > = [];
   #queuedErrors: Array<Error | null> = [];
 
   queue(
@@ -173,8 +178,7 @@ class FakeBroker {
   }> {
     this.callLog.push({ accountId, startedAt: new Date() });
     const gate =
-      this.#queuedGates.shift() ??
-      Promise.reject(new Error("no queued gate"));
+      this.#queuedGates.shift() ?? Promise.reject(new Error("no queued gate"));
     const err = this.#queuedErrors.shift() ?? null;
     const respFactory = this.#queuedResponses.shift();
     await gate;
@@ -189,7 +193,11 @@ class FakeBroker {
 // ---------------------------------------------------------------------------
 
 function silentLog() {
-  return { info: () => undefined, warn: () => undefined, error: () => undefined };
+  return {
+    info: () => undefined,
+    warn: () => undefined,
+    error: () => undefined,
+  };
 }
 
 function buildDeps(overrides?: Partial<RefreshCoordinatorDeps>): {
@@ -362,10 +370,7 @@ describe("RefreshCoordinator — invalidate-during-refresh (round-9 critical blo
     assert.equal(status.kind, "present");
     if (status.kind !== "present") return;
     // Verify the winning writer's data actually persisted.
-    assert.equal(
-      repo.snapshots.get("PAPER-1")?.positions[0]?.quantity,
-      99,
-    );
+    assert.equal(repo.snapshots.get("PAPER-1")?.positions[0]?.quantity, 99);
   });
 
   it("rerun fetch failure → health=failed, snapshot complete=false, write path stays blocked", async () => {
@@ -516,10 +521,7 @@ describe("RefreshCoordinator — invalidate-during-refresh (round-9 critical blo
     assert.equal(status.complete, true);
     // The final persisted quantity is from our rerun, not the
     // foreign session's writer.
-    assert.equal(
-      repo.snapshots.get("PAPER-1")?.positions[0]?.quantity,
-      7,
-    );
+    assert.equal(repo.snapshots.get("PAPER-1")?.positions[0]?.quantity, 7);
   });
 
   it("round-10: invalidation between getStatus and healthy-set causes a rerun instead of resolving healthy", async () => {
@@ -564,10 +566,7 @@ describe("RefreshCoordinator — invalidate-during-refresh (round-9 critical blo
     if (status.kind !== "present") return;
     assert.equal(status.sessionId, "sess-r9");
     assert.equal(status.complete, true);
-    assert.equal(
-      repo.snapshots.get("PAPER-1")?.positions[0]?.quantity,
-      5,
-    );
+    assert.equal(repo.snapshots.get("PAPER-1")?.positions[0]?.quantity, 5);
   });
 
   it("round-10: final state carries LATEST generation, our session, complete=true, health=healthy", async () => {
@@ -606,10 +605,7 @@ describe("RefreshCoordinator — invalidate-during-refresh (round-9 critical blo
           // Production-style invalidation: capture the
           // returned generation from the repo call and forward
           // it to the coordinator.
-          const { generation } = await repo.invalidate(
-            accountId,
-            "sess-r9",
-          );
+          const { generation } = await repo.invalidate(accountId, "sess-r9");
           coordRef!.markInvalidated(accountId, generation);
         }
         return s;

@@ -41,7 +41,12 @@ export type TradingLoopSkipReason =
  */
 export type TradingLoopInstrumentOutcome =
   | {
-      readonly kind: "SUBMITTED" | "DUPLICATE" | "PENDING" | "CONFLICT" | "UNKNOWN";
+      readonly kind:
+        | "SUBMITTED"
+        | "DUPLICATE"
+        | "PENDING"
+        | "CONFLICT"
+        | "UNKNOWN";
       readonly instrumentId: string;
       readonly idempotencyKey: string;
       readonly runtime: ExecutionRuntimeOutcome;
@@ -148,7 +153,9 @@ export interface TradingExposureReader {
    * returns a well-formed response; otherwise `{ ok: false,
    * message }`. NEVER throws.
    */
-  probeReady(): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }>;
+  probeReady(): Promise<
+    { readonly ok: true } | { readonly ok: false; readonly message: string }
+  >;
 }
 
 /**
