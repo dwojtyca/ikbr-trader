@@ -22,7 +22,7 @@ observability, and a live-readiness gate that never flips live on.
 | PR13 | Execution Runtime                | PR12, OD-1, OD-2, OD-3, OD-4 |
 | PR14 | Scheduler / trading loop         | PR13, OD-5             |
 | PR15 | Reconciliation loop              | PR14                   |
-| PR16 | Paper E2E                        | PR15                   |
+| PR16 | Position / exit management       | PR15                   |
 | PR17 | Observability                    | PR16                   |
 | PR18 | Live-readiness (docs + gates)    | PR17                   |
 
@@ -102,33 +102,201 @@ observability, and a live-readiness gate that never flips live on.
 
 ## PR14 — Scheduler / trading loop
 
-- **Goal.** A single trigger source drives orchestrator runs per
-  instrument. See OD-5.
-- **Acceptance.** Loop is idempotent per `(instrumentId, candleTs)`
-  tuple — re-firing the same trigger produces one and only one
-  orchestrator run and at most one broker submission.
-- **Excludes.** Multi-timeframe fan-out (deferred to a later PR).
+- **Goal.** Paper-only scheduler inside `apps/signal-engine` that
+  periodically drives the PR13 `ExecutionRuntime` per instrument.
+  ENTRY ONLY.
+- **Placement.** `apps/signal-engine/src/runtime/trading-loop/`.
+  Same process, separate lifecycle, own enable flag
+  (`TRADING_LOOP_ENABLED`, default `false`), graceful drain.
+  See [../../architecture/TRADING_LOOP.md](../../architecture/TRADING_LOOP.md).
+- **Idempotency key (v4, round-5 semantics).**
+  - `clientOrderId` = `loop:v4:<instrumentId>:<strategyId>:<triggerId>`
+    — identifies the trigger only. NOT the payload.
+  - `clientOrderHash` = `computeClientOrderHash(ticket)` —
+    identifies the payload. `ExecutionRuntime` always re-derives
+    it from the ticket, never trusts a caller-supplied value.
+  - `triggerId` = `evaluation.<timeframe>.<bucketStartMs>` —
+    labelled `evaluation` (not `candle`) because
+    `floor(observedAt / timeframe)` is a bucket, not a proven
+    candle close.
+  - Same trigger + changed payload → SAME id, different hash →
+    execution-engine returns `CONFLICT` (round-5 fix — the
+    round-4 format baked payload into id and lost this signal).
+- **Per-instrument execution policy.**
+  `Instrument.executionPolicy` (new shared type) supplies every
+  order-critical parameter — `strategyId`, `timeframe`,
+  `quantity`, `maxQuantity`, `priceTickSize`,
+  `allowedOrderTypes`, TIF, `outsideRth`, `transmit`, bracket
+  distances. No global default; missing / invalid policy →
+  fail-closed `INSTRUMENT_POLICY_UNAVAILABLE`. `priceTickSize`
+  MUST come from validated registry metadata.
+- **Exposure enforcement — two layers.**
+  1. Signal-engine reads exposure + summary from execution-engine
+     BEFORE the pipeline runs (fast fail-closed pre-check with
+     `retrievedAt` freshness validation).
+  2. Execution-engine holds the AUTHORITATIVE atomic guard: under
+     one `pg_advisory_xact_lock(hashtext(instrument))`, refuses:
+     - any non-terminal `PROPOSED` / `SUBMITTED` for the
+       instrument under a DIFFERENT `client_order_id` →
+       `ACTIVE_INTENT_EXISTS`
+     - broker-reported non-zero position (persisted in
+       `broker_position_snapshots`, identity policy per
+       `Instrument.executionPolicy.allowCrossContractExposure`) →
+       `OPEN_POSITION_EXISTS`
+     - missing / stale / incomplete broker snapshot →
+       `POSITION_STATE_UNAVAILABLE`
+     - snapshot written by a different `session_id` than the
+       current process (`reason: "wrong_session"`, round-6
+       blocker fix) → `POSITION_STATE_UNAVAILABLE`
+     - explicit `PositionGuardContext.kind === "unavailable"`
+       (no active broker account) → `POSITION_STATE_UNAVAILABLE`
+       with `reason: "no_active_account"` (round-5 fail-closed)
+- **PositionGuardContext is REQUIRED (round-6).**
+  `insertProposedFromTicket` and the new
+  `tryStartSubmissionWithExposureGuard` both accept a
+  `PositionGuardContext` positional parameter that is NOT
+  optional — a compile-time regression test enforces this at
+  the type boundary so no code path can bypass the check.
+  `PositionGuardContext.available` carries `sessionId` alongside
+  `accountId` / `maxSnapshotAgeMs`.
+- **Unified pre-submission gate on the RESUME path (round-6).**
+  The atomic marker acquisition
+  (`tryStartSubmissionWithExposureGuard`) now runs the SAME
+  exposure guard body inside the SAME transaction and advisory
+  lock as the fresh-INSERT path. This closes the round-5
+  hole where a retry on a clean `PROPOSED` row would bypass
+  the account / session / snapshot / open-position check.
+- **Position identity policy (round-6/7).**
+  `Instrument.executionPolicy.allowCrossContractExposure` is
+  retained on the shared type for a future registry-resolved
+  path, but for PR14 the value is SERVER-SIDE hardcoded
+  (`SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE = false`) at every
+  guard call site. The public
+  `POST /execution/execute-ticket` request body does NOT
+  expose the field — a compile-time regression test proves the
+  parsed body type has no such property. Any strategy that
+  legitimately needs cross-contract exposure in a future PR
+  MUST have it resolved from a trusted server-side
+  instrument-registry policy — never from the request body.
+  Guard semantics under `false`: any non-zero position sharing
+  the broker symbol blocks regardless of conId. Partial unique
+  indexes still enforce split identity at the persistence
+  layer for the retained conId-aware code path.
+- **Broker-driven snapshot refresher (round-7).** The write-
+  path exposure guard is fed by a per-account serialised
+  refresher with a TWO-PHASE contract
+  (`beginPositionSnapshotRefresh` +
+  `completePositionSnapshotRefresh`). During a refresh
+  `broker_snapshot_syncs.complete=false` — the guard
+  fail-closes with `POSITION_STATE_UNAVAILABLE (incomplete)`.
+  Triggers: startup after `ensureBrokerSession`, every FILLED
+  order in `executePersistedOrder`, explicit
+  `POST /execution/refresh-position-snapshot`, and
+  `GET /execution/account/summary` (now awaited, no more
+  fire-and-forget). Refresh health is published to
+  `/ready` — `position_snapshot_never_synced` /
+  `position_snapshot_refresh_in_flight` /
+  `position_snapshot_refresh_failed` distinguish the failure
+  mode.
+- **Separated TTLs (round-7).** New
+  `EXECUTION_POSITION_GUARD_MAX_AGE_S` (default 10 s) —
+  authoritative write-path guard freshness. The old
+  `EXECUTION_POSITION_MAX_AGE_S` (default 60 s) is now
+  DISPLAY-ONLY for the account-summary cache. The write path
+  no longer inherits the display TTL.
+- **Fill-to-position invalidation contract (round-8).** Every
+  broker-side event that MAY change exposure (direct FILLED,
+  async orderStatus=FILLED, partial fill / executionDetails,
+  reconciliation mismatch) awaits
+  `invalidatePositionSnapshot(accountId)` BEFORE the local
+  order-lifecycle transition, and only THEN fires the full
+  broker-driven refresh. If the refresh fails, the write path
+  stays fail-closed until the next successful refresh.
+- **Snapshot lock protocol + generation fence (round-8).** Two
+  advisory-lock keys — `hashtext('snap:' || account_id)` and
+  `hashtext(instrument)`. Submission guard acquires the
+  account lock FIRST, then the instrument lock; refresh only
+  takes the account lock — deadlock-free by construction.
+  `broker_snapshot_syncs` gains a monotonic `generation`
+  column; `beginPositionSnapshotRefresh` bumps it and
+  `completePositionSnapshotRefresh` refuses to overwrite a
+  NEWER generation (`{ kind: "stale_generation" }`), so a
+  slow in-flight refresh cannot clobber a fresh one.
+- **Account-summary failure semantics (round-8).**
+  `GET /execution/account/summary` returns **503** with
+  `error: "position_snapshot_persistence_failed"` when the
+  awaited refresh ends in `SnapshotHealth.failed`. No more
+  silent 200 with a live-but-unpersisted snapshot.
+- **Refresh endpoint auth (round-8).**
+  `POST /execution/refresh-position-snapshot` inherits the
+  standard Bearer + audit middleware. Missing / wrong token →
+  401; healthy → 200; failed → 503. Regression-covered by
+  `refresh-position-snapshot.route.test.ts`.
+- **Generation-aware refresh coordinator (round-9).**
+  `RefreshCoordinator` runs a bounded loop that reacts to
+  invalidations landing during an in-flight broker fetch —
+  fixes the silent-loss race where a naive
+  `if (existing) return existing` coalescer would leave
+  `complete=false` forever after a fill invalidation. Loop
+  exits `healthy` when persisted status is `complete=true` at
+  the current generation, `failed` on any unrecoverable
+  broker/DB error, and `failed / did not converge` after
+  `MAX_REFRESH_LOOP_ITERATIONS`. `getPositionSnapshotStatus`
+  exposes `generation` so the coordinator can recognise
+  "newer refresh already completed on our behalf" without an
+  extra fetch. Regression-covered by
+  `refresh-coordinator.test.ts` (7 deterministic tests
+  including three-invalidations-during-slow-fetch,
+  stale_generation-but-newer-complete, rerun-fetch-failure,
+  and MAX_ITERATIONS bound).
+- **Broker callback account identity (round-9).** Fill callback
+  prefers `fill.accountId` when provided and skips invalidation
+  when it does not match `lastActiveAccountId`. Order-status
+  callback documents the SINGLE-ACTIVE-ACCOUNT invariant.
+- **Acceptance.** Two concurrent requests with different
+  `clientOrderId`s but the SAME instrument produce EXACTLY one
+  `proposed_orders` row and at MOST one broker submission.
+  Historic FILLED with same intent does NOT block a new trigger.
+  Open broker position blocks entry via the atomic guard even
+  when every prior order row is terminal.
+- **PostgreSQL integration test.** New
+  `apps/execution-engine/src/repository.pg-integration.test.ts`
+  covers the advisory lock against a real Postgres (gated on
+  `TEST_POSTGRES_URL`).
+- **Manual controls.** `GET /runtime/trading-loop/status`,
+  `POST /runtime/trading-loop/run-once`,
+  `GET /runtime/trading-loop/ready` (composite: paper guard +
+  exposure reader (both endpoints) + Redis + Postgres).
+- **Excludes.** Multi-timeframe fan-out, position closes,
+  reconciliation of orphan `PROPOSED`, pyramiding, trailing-stop
+  management, live trading.
 
 ## PR15 — Reconciliation loop
 
-- **Goal.** Orchestrator consumes `execution-engine` reconciliation
+- **Goal.** Signal-engine consumes `execution-engine` reconciliation
   reports (poll or push, resolved in PR15 PLAN) and holds
   affected instruments on mismatch. Adds
-  `GET /execution/reconciliation/latest` if missing.
-- **Acceptance.** Restart-recovery test: kill orchestrator after
+  `GET /execution/reconciliation/latest` if missing. Resolves the
+  ambiguous PROPOSED + `executionAttemptedAt` state left after a
+  crash between marker and broker call (see PR13
+  `EXECUTION_RUNTIME.md` §Crash windows).
+- **Acceptance.** Restart-recovery test: kill signal-engine after
   submission, restart, verify no duplicate submission and correct
-  terminal state pulled from broker within `ORCH_MAX_RECON_AGE_S`.
+  terminal state pulled from broker within
+  `SIGNAL_MAX_RECON_AGE_S`.
 - **Excludes.** Automated position closes triggered by
   reconciliation mismatches — alerting only in this PR.
 
-## PR16 — Paper E2E
+## PR16 — Position / exit management
 
-- **Goal.** Green end-to-end paper run across ≥ 3 symbols,
-  ≥ 24 hours, with reconciliation clean and no manual
-  intervention.
-- **Acceptance.** See "paper stability criteria" in
-  [TESTING_AND_ROLLOUT.md](TESTING_AND_ROLLOUT.md).
-- **Excludes.** Perf tuning; go/no-go for live.
+- **Goal.** Automated exit-side flow — close-position triggers,
+  trailing stop management, partial close, and per-strategy exit
+  signals fed back into `ExecutionRuntime`. Removes the PR14
+  restriction to entry-only trading.
+- **Acceptance.** Green end-to-end paper run across ≥ 3 symbols,
+  ≥ 24 hours, with reconciliation clean and both entries and
+  exits driven by the loop.
+- **Excludes.** Go/no-go for live. Perf tuning.
 
 ## PR17 — Observability
 

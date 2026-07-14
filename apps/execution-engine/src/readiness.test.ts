@@ -15,6 +15,10 @@ const baseInputs = {
   auditWriteAvailable: true,
   lastReconciliationAt: new Date(NOW.getTime() - 60_000), // 60s ago
   reconciliationMaxAgeSeconds: 900,
+  // PR14 round-7 blocker — broker-driven snapshot refresher
+  // health. Happy-path baseline treats the account as healthy;
+  // dedicated tests below vary this field.
+  positionSnapshotHealth: { kind: "healthy" as const },
 };
 
 describe("execution-engine readiness", () => {
@@ -159,6 +163,65 @@ describe("execution-engine readiness", () => {
       });
       assert.equal(result.body.reconciliation.ageSeconds, 0);
       assert.equal(result.body.checks.reconciliationFresh, true);
+    });
+  });
+
+  describe("position snapshot health (round-7 blocker)", () => {
+    it("never synced → 503 position_snapshot_never_synced", () => {
+      const result = evaluateReadiness({
+        ...baseInputs,
+        positionSnapshotHealth: { kind: "never" },
+      });
+      assert.equal(result.statusCode, 503);
+      assert.ok(result.body.reasons.includes("position_snapshot_never_synced"));
+      assert.equal(result.body.checks.positionSnapshotHealthy, false);
+    });
+
+    it("undefined input with active account → 503 position_snapshot_never_synced", () => {
+      const result = evaluateReadiness({
+        ...baseInputs,
+        positionSnapshotHealth: undefined,
+      });
+      assert.equal(result.statusCode, 503);
+      assert.ok(result.body.reasons.includes("position_snapshot_never_synced"));
+    });
+
+    it("refresh in flight → 503 position_snapshot_refresh_in_flight", () => {
+      const result = evaluateReadiness({
+        ...baseInputs,
+        positionSnapshotHealth: { kind: "in_flight" },
+      });
+      assert.equal(result.statusCode, 503);
+      assert.ok(
+        result.body.reasons.includes("position_snapshot_refresh_in_flight"),
+      );
+    });
+
+    it("refresh failed → 503 position_snapshot_refresh_failed", () => {
+      const result = evaluateReadiness({
+        ...baseInputs,
+        positionSnapshotHealth: { kind: "failed", error: "boom" },
+      });
+      assert.equal(result.statusCode, 503);
+      assert.ok(
+        result.body.reasons.includes("position_snapshot_refresh_failed"),
+      );
+    });
+
+    it("no active account → snapshot health is not required (already covered by no_active_account)", () => {
+      const result = evaluateReadiness({
+        ...baseInputs,
+        activeAccountId: null,
+        positionSnapshotHealth: undefined,
+      });
+      assert.equal(result.statusCode, 503);
+      // Bootstrap-pending state: only the account reason fires;
+      // snapshot health is trivially healthy in that case.
+      assert.ok(result.body.reasons.includes("no_active_account"));
+      assert.equal(
+        result.body.reasons.includes("position_snapshot_never_synced"),
+        false,
+      );
     });
   });
 });

@@ -13,7 +13,22 @@ export interface ReadinessInputs {
   auditWriteAvailable: boolean;
   lastReconciliationAt: Date | null;
   reconciliationMaxAgeSeconds: number;
+  /**
+   * PR14 round-7 blocker — health of the broker-driven
+   * position-snapshot refresher for the active account. When
+   * missing / in-flight / failed the write path is fail-closed
+   * (guard returns `POSITION_STATE_UNAVAILABLE`); `/ready` must
+   * surface that so operators can distinguish it from a broker
+   * socket outage.
+   */
+  positionSnapshotHealth?: PositionSnapshotHealthInput;
 }
+
+export type PositionSnapshotHealthInput =
+  | { readonly kind: "never" }
+  | { readonly kind: "healthy" }
+  | { readonly kind: "in_flight" }
+  | { readonly kind: "failed"; readonly error: string };
 
 export interface ReadinessCheckReport {
   brokerSocket: boolean;
@@ -21,6 +36,7 @@ export interface ReadinessCheckReport {
   accountMatchesEnvironment: boolean;
   auditWriteAvailable: boolean;
   reconciliationFresh: boolean;
+  positionSnapshotHealthy: boolean;
 }
 
 export interface ReadinessResponse {
@@ -63,6 +79,14 @@ export function evaluateReadiness(input: ReadinessInputs): ReadinessResult {
       activeAccountKnown && input.accountAllowedByEnvironment,
     auditWriteAvailable: input.auditWriteAvailable,
     reconciliationFresh,
+    // Round-7 blocker: absent input is treated as HEALTHY only
+    // when there is no active account (bootstrap pending — the
+    // `no_active_account` reason already covers it). Otherwise
+    // the refresher MUST have run at least once with success.
+    positionSnapshotHealthy:
+      !activeAccountKnown ||
+      (input.positionSnapshotHealth !== undefined &&
+        input.positionSnapshotHealth.kind === "healthy"),
   };
 
   const reasons: string[] = [];
@@ -81,6 +105,16 @@ export function evaluateReadiness(input: ReadinessInputs): ReadinessResult {
       input.lastReconciliationAt === null
         ? "no_reconciliation_yet"
         : "reconciliation_stale",
+    );
+  }
+  if (activeAccountKnown && !checks.positionSnapshotHealthy) {
+    const h = input.positionSnapshotHealth;
+    reasons.push(
+      h === undefined || h.kind === "never"
+        ? "position_snapshot_never_synced"
+        : h.kind === "in_flight"
+          ? "position_snapshot_refresh_in_flight"
+          : "position_snapshot_refresh_failed",
     );
   }
 

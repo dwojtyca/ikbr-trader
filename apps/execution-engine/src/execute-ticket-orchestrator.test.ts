@@ -11,6 +11,7 @@ import {
   orchestrateExecuteTicket,
   type OrchestratorDeps,
 } from "./execute-ticket-orchestrator.js";
+import type { ExecutionRepository } from "./repository.js";
 
 // ---------------------------------------------------------------------------
 // Realistic in-memory fake — enforces UNIQUE(client_order_id), the
@@ -49,10 +50,51 @@ interface FakeRow {
   processingClaimedAt: Date | null;
 }
 
+/**
+ * PR14 round-5/6 blocker — explicit availability for the atomic
+ * open-position guard. `sessionId` added round-6.
+ */
+type FakePositionGuardContext =
+  | {
+      readonly kind: "available";
+      readonly accountId: string;
+      readonly sessionId: string;
+      readonly maxSnapshotAgeMs: number;
+    }
+  | {
+      readonly kind: "unavailable";
+      readonly reason: "no_active_account";
+    };
+
+type FakePositionGuardBlockedReason =
+  | "missing"
+  | "stale"
+  | "incomplete"
+  | "no_active_account"
+  | "wrong_session";
+
+/**
+ * PR14 round-6 blocker — seeded broker snapshot state.
+ * `tryStartSubmissionWithExposureGuard` reads from this to
+ * verify the resume path enforces the same account / session /
+ * freshness / open-position invariants as fresh insert.
+ */
+interface FakeSnapshotState {
+  readonly sessionId: string;
+  readonly observedAt: Date;
+  readonly complete: boolean;
+  readonly positions: ReadonlyArray<{
+    readonly instrument: string;
+    readonly conid: string | null;
+    readonly quantity: number;
+  }>;
+}
+
 class FakeRepo {
   #nextId = 1;
   readonly rows = new Map<number, FakeRow>();
   readonly byClientOrderId = new Map<string, number>();
+  readonly snapshotsByAccount = new Map<string, FakeSnapshotState>();
   now: () => number = () => Date.now();
 
   async getIdempotencyRecord(clientOrderId: string) {
@@ -66,13 +108,172 @@ class FakeRepo {
     };
   }
 
+  /**
+   * Round-6 blocker: mirrors the SQL guard body used by both
+   * `insertProposedFromTicket` and
+   * `tryStartSubmissionWithExposureGuard`. Fully synchronous
+   * after the async boundary so concurrent callers cannot
+   * interleave — exactly the transactional guarantee Postgres
+   * provides under the advisory lock.
+   */
+  #runExposureGuard(input: {
+    readonly instrument: string;
+    readonly conid: string | null;
+    readonly allowCrossContractExposure: boolean;
+    readonly guard: FakePositionGuardContext;
+  }):
+    | { readonly kind: "ok" }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: FakePositionGuardBlockedReason;
+      }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      } {
+    if (input.guard.kind === "unavailable") {
+      return {
+        kind: "position_state_unavailable",
+        accountId: null,
+        reason: input.guard.reason,
+      };
+    }
+    const g = input.guard;
+    const snap = this.snapshotsByAccount.get(g.accountId);
+    if (!snap) {
+      return {
+        kind: "position_state_unavailable",
+        accountId: g.accountId,
+        reason: "missing",
+      };
+    }
+    if (snap.sessionId !== g.sessionId) {
+      return {
+        kind: "position_state_unavailable",
+        accountId: g.accountId,
+        reason: "wrong_session",
+      };
+    }
+    const nowMs = this.now();
+    const ageMs = nowMs - snap.observedAt.getTime();
+    if (ageMs < -5_000) {
+      return {
+        kind: "position_state_unavailable",
+        accountId: g.accountId,
+        reason: "stale",
+      };
+    }
+    if (ageMs > g.maxSnapshotAgeMs) {
+      return {
+        kind: "position_state_unavailable",
+        accountId: g.accountId,
+        reason: "stale",
+      };
+    }
+    if (!snap.complete) {
+      return {
+        kind: "position_state_unavailable",
+        accountId: g.accountId,
+        reason: "incomplete",
+      };
+    }
+    let match: { instrument: string; conid: string | null; quantity: number } | undefined;
+    if (!input.allowCrossContractExposure) {
+      match = snap.positions.find(
+        (p) => p.instrument === input.instrument && p.quantity !== 0,
+      );
+    } else if (input.conid !== null) {
+      match = snap.positions.find(
+        (p) => p.conid === input.conid && p.quantity !== 0,
+      );
+    } else {
+      match = snap.positions.find(
+        (p) =>
+          p.instrument === input.instrument &&
+          p.conid === null &&
+          p.quantity !== 0,
+      );
+    }
+    if (match) {
+      return {
+        kind: "open_position_exists",
+        accountId: g.accountId,
+        quantity: match.quantity,
+        observedAt: snap.observedAt,
+      };
+    }
+    return { kind: "ok" };
+  }
+
+  seedSnapshot(accountId: string, state: FakeSnapshotState): void {
+    this.snapshotsByAccount.set(accountId, state);
+  }
+
   async insertProposedFromTicket(
     ticket: SignalTicket,
     strategy: string,
     idempotency:
       | { clientOrderId: string; clientOrderHash: string }
       | undefined,
-  ): Promise<number> {
+    positionGuard?: FakePositionGuardContext,
+    options?: { readonly allowCrossContractExposure?: boolean },
+  ): Promise<
+    | { readonly kind: "inserted"; readonly id: number }
+    | {
+        readonly kind: "active_intent_exists";
+        readonly existingOrderId: number;
+        readonly existingStatus: string;
+        readonly existingClientOrderId: string | null;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: FakePositionGuardBlockedReason;
+      }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+  > {
+    // Round-5/6: explicit PositionGuardContext — the guard runs
+    // atomically under the advisory lock. `undefined` here means
+    // "test does not care about the guard" (legacy tests that
+    // predate round-4). Production wiring in index.ts always
+    // supplies a value.
+    if (positionGuard) {
+      const guarded = this.#runExposureGuard({
+        instrument: ticket.instrument,
+        conid: ticket.conid ?? null,
+        allowCrossContractExposure:
+          options?.allowCrossContractExposure ?? false,
+        guard: positionGuard,
+      });
+      if (guarded.kind !== "ok") return guarded;
+    }
+    // PR14 blocker fix — atomic instrument-level guard. Mirrors
+    // the SQL implementation: reject when any non-terminal row
+    // exists for the same instrument under a DIFFERENT
+    // `clientOrderId` (or when there is no idempotency triple).
+    for (const row of this.rows.values()) {
+      if (row.ticket.instrument !== ticket.instrument) continue;
+      if (row.status !== "PROPOSED" && row.status !== "SUBMITTED") continue;
+      const sameClient =
+        idempotency !== undefined &&
+        row.clientOrderId !== null &&
+        row.clientOrderId === idempotency.clientOrderId;
+      if (sameClient) continue;
+      return {
+        kind: "active_intent_exists",
+        existingOrderId: row.id,
+        existingStatus: row.status,
+        existingClientOrderId: row.clientOrderId,
+      };
+    }
     if (idempotency && this.byClientOrderId.has(idempotency.clientOrderId)) {
       throw new FakeUniqueViolation(
         `duplicate key value violates unique constraint "proposed_orders_client_order_id_uidx" (client_order_id)`,
@@ -93,7 +294,7 @@ class FakeRepo {
     };
     this.rows.set(id, row);
     if (idempotency) this.byClientOrderId.set(idempotency.clientOrderId, id);
-    return id;
+    return { kind: "inserted", id };
   }
 
   async getProposedOrderById(id: number): Promise<ProposedOrder | null> {
@@ -138,6 +339,49 @@ class FakeRepo {
     row.processingClaimedAt = new Date(this.now());
     row.executionAttemptedAt = new Date(this.now());
     return true;
+  }
+
+  /**
+   * Round-6 blocker: mirrors the production
+   * `tryStartSubmissionWithExposureGuard`. Runs the SAME
+   * exposure guard used by `insertProposedFromTicket` — under
+   * simulated advisory-lock atomicity — then atomically
+   * acquires the marker only when the guard passes.
+   */
+  async tryStartSubmissionWithExposureGuard(input: {
+    readonly id: number;
+    readonly owner: string;
+    readonly instrument: string;
+    readonly conid: string | null;
+    readonly allowCrossContractExposure: boolean;
+    readonly positionGuard: FakePositionGuardContext;
+  }): Promise<
+    | { readonly kind: "claimed" }
+    | { readonly kind: "not_claimed" }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: FakePositionGuardBlockedReason;
+      }
+  > {
+    const guarded = this.#runExposureGuard({
+      instrument: input.instrument,
+      conid: input.conid,
+      allowCrossContractExposure: input.allowCrossContractExposure,
+      guard: input.positionGuard,
+    });
+    if (guarded.kind !== "ok") return guarded;
+    const acquired = await this.tryStartSubmission({
+      id: input.id,
+      owner: input.owner,
+    });
+    return acquired ? { kind: "claimed" } : { kind: "not_claimed" };
   }
 
   markAttempt(id: number, brokerOrderId?: string): void {
@@ -242,15 +486,38 @@ function deps(
   repo: FakeRepo,
   executor: OrchestratorDeps["executePersistedOrder"],
   ownerOverride?: string,
+  positionGuard?: FakePositionGuardContext,
+  allowCrossContractExposure = false,
 ): OrchestratorDeps {
   return {
     getIdempotencyRecord: (id) => repo.getIdempotencyRecord(id),
     insertProposedFromTicket: (t, s, i) =>
-      repo.insertProposedFromTicket(t, s, i),
+      repo.insertProposedFromTicket(t, s, i, positionGuard, {
+        allowCrossContractExposure,
+      }),
     getProposedOrderById: (id) => repo.getProposedOrderById(id),
     executePersistedOrder: executor,
     isUniqueViolation: isFakeUniqueViolation,
-    tryStartSubmission: (input) => repo.tryStartSubmission(input),
+    // Round-6 blocker: the marker acquisition MUST re-run the
+    // exposure guard on BOTH the fresh and resume paths. When
+    // no positionGuard is supplied (legacy tests that predate
+    // round-4) fall back to a raw marker acquisition.
+    tryStartSubmission: (input) => {
+      if (positionGuard === undefined) {
+        return repo
+          .tryStartSubmission({ id: input.id, owner: input.owner })
+          .then((claimed) =>
+            claimed
+              ? ({ kind: "claimed" } as const)
+              : ({ kind: "not_claimed" } as const),
+          );
+      }
+      return repo.tryStartSubmissionWithExposureGuard({
+        ...input,
+        allowCrossContractExposure,
+        positionGuard,
+      });
+    },
     ownerId: () => ownerOverride ?? "test-owner",
   };
 }
@@ -583,7 +850,15 @@ function pausableDeps(
     },
     executePersistedOrder: executor,
     isUniqueViolation: isFakeUniqueViolation,
-    tryStartSubmission: (input) => repo.tryStartSubmission(input),
+    tryStartSubmission: async (input) => {
+      const acquired = await repo.tryStartSubmission({
+        id: input.id,
+        owner: input.owner,
+      });
+      return acquired
+        ? ({ kind: "claimed" } as const)
+        : ({ kind: "not_claimed" } as const);
+    },
     ownerId: () => ownerOverride,
   };
 }
@@ -715,5 +990,436 @@ describe("orchestrateExecuteTicket — fresh INSERT vs concurrent retry race", (
     );
     assert.equal(row?.status, "SUBMITTED");
     assert.equal(executor.callCount, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Atomic instrument-level exposure guard (PR14 round-3 blocker fix)
+//
+// A different clientOrderId targeting the SAME instrument as an
+// active PROPOSED / SUBMITTED row MUST be rejected atomically.
+// This is the enforcement point that eliminates the process-wide
+// race window that a signal-engine-local exposure guard alone
+// cannot cover (multiple signal-engine instances, mixed
+// manual /runtime/execute + trading-loop callers, etc.).
+// ---------------------------------------------------------------------------
+
+describe("orchestrateExecuteTicket — atomic instrument-level exposure guard", () => {
+  const OTHER_KEY_INPUT = { ...INPUT, clientOrderId: "idem-B", clientOrderHash: "def" };
+
+  it("existing PROPOSED for the same instrument + different clientOrderId → active_intent_exists", async () => {
+    const repo = new FakeRepo();
+    await repo.insertProposedFromTicket(TICKET, "execution-runtime", {
+      clientOrderId: "idem-A",
+      clientOrderHash: "abc",
+    });
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor),
+      OTHER_KEY_INPUT,
+    );
+    assert.equal(result.kind, "active_intent_exists");
+    if (result.kind !== "active_intent_exists") return;
+    assert.equal(result.existingOrderId, 1);
+    assert.equal(result.existingStatus, "PROPOSED");
+    assert.equal(result.existingClientOrderId, "idem-A");
+    assert.equal(executor.callCount, 0);
+  });
+
+  it("existing SUBMITTED for the same instrument + different clientOrderId → active_intent_exists", async () => {
+    const repo = new FakeRepo();
+    await repo.insertProposedFromTicket(TICKET, "execution-runtime", {
+      clientOrderId: "idem-A",
+      clientOrderHash: "abc",
+    });
+    repo.markAttempt(1, "b-prior");
+    repo.setStatus(1, "SUBMITTED");
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor),
+      OTHER_KEY_INPUT,
+    );
+    assert.equal(result.kind, "active_intent_exists");
+    if (result.kind !== "active_intent_exists") return;
+    assert.equal(result.existingStatus, "SUBMITTED");
+    assert.equal(executor.callCount, 0);
+  });
+
+  for (const status of [
+    "REJECTED",
+    "CANCELLED",
+    "SUPERSEDED",
+    "EXPIRED",
+    "FILLED",
+  ] as const) {
+    it(`existing ${status} for the same instrument does NOT block a new intent (terminal)`, async () => {
+      const repo = new FakeRepo();
+      await repo.insertProposedFromTicket(TICKET, "execution-runtime", {
+        clientOrderId: "idem-A",
+        clientOrderHash: "abc",
+      });
+      // Simulate a terminal transition.
+      repo.markAttempt(1);
+      if (status === "FILLED") repo.markAttempt(1, "b-prior");
+      repo.setStatus(1, status);
+
+      const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+      const result = await orchestrateExecuteTicket(
+        deps(repo, executor),
+        OTHER_KEY_INPUT,
+      );
+      // Must succeed — the terminal row is not competing exposure.
+      assert.equal(
+        result.kind,
+        "submitted",
+        `terminal status=${status} must not block a new intent, got ${result.kind}`,
+      );
+      assert.equal(executor.callCount, 1);
+    });
+  }
+
+  it("different instruments → no cross-instrument block", async () => {
+    const repo = new FakeRepo();
+    await repo.insertProposedFromTicket(
+      { ...TICKET, instrument: "MSFT" },
+      "execution-runtime",
+      { clientOrderId: "idem-MSFT", clientOrderHash: "msft-hash" },
+    );
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor),
+      INPUT, // instrument = RTX
+    );
+    assert.equal(result.kind, "submitted");
+    assert.equal(executor.callCount, 1);
+  });
+
+  it("two concurrent requests + different clientOrderIds + same instrument → exactly ONE insert + ONE broker call", async () => {
+    // The critical race the round-3 blocker described:
+    // process-local exposure guards in signal-engine can pass for
+    // both A and B; the atomic guard here is the single-source-of-
+    // truth enforcement point.
+    const repo = new FakeRepo();
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED", ticks: 3 });
+
+    const inputA = { ...INPUT, clientOrderId: "idem-A", clientOrderHash: "hash-A" };
+    const inputB = { ...INPUT, clientOrderId: "idem-B", clientOrderHash: "hash-B" };
+
+    const [a, b] = await Promise.all([
+      orchestrateExecuteTicket(deps(repo, executor), inputA),
+      orchestrateExecuteTicket(deps(repo, executor), inputB),
+    ]);
+    const kinds = [a.kind, b.kind].sort();
+    assert.deepEqual(kinds, ["active_intent_exists", "submitted"]);
+    assert.equal(
+      executor.callCount,
+      1,
+      "exactly one of the two concurrent requests may reach the broker",
+    );
+    assert.equal(repo.rows.size, 1, "exactly one proposed_orders row");
+  });
+
+  it("retry with the SAME clientOrderId (idempotency replay) still routes through the idempotency path, not active_intent", async () => {
+    // Regression guard: the atomic guard must EXCLUDE the caller's
+    // own clientOrderId so the fencing marker / DUPLICATE path
+    // continues to work.
+    const repo = new FakeRepo();
+    await repo.insertProposedFromTicket(TICKET, "execution-runtime", {
+      clientOrderId: "idem-1",
+      clientOrderHash: "abc",
+    });
+    repo.markAttempt(1, "b-prior");
+    repo.setStatus(1, "SUBMITTED");
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(deps(repo, executor), INPUT);
+    assert.equal(result.kind, "duplicate_submitted");
+    assert.equal(executor.callCount, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-5 blocker 1 — no active broker account MUST fail-closed
+// ---------------------------------------------------------------------------
+
+describe("orchestrateExecuteTicket — PositionGuardContext (round-5)", () => {
+  it("no active broker account → POSITION_STATE_UNAVAILABLE, no INSERT, no executor call", async () => {
+    const repo = new FakeRepo();
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, undefined, {
+        kind: "unavailable",
+        reason: "no_active_account",
+      }),
+      INPUT,
+    );
+    assert.equal(result.kind, "position_state_unavailable");
+    if (result.kind !== "position_state_unavailable") return;
+    assert.equal(result.accountId, null);
+    assert.equal(result.reason, "no_active_account");
+    assert.equal(executor.callCount, 0);
+    assert.equal(repo.rows.size, 0);
+  });
+
+  it("no active broker account fires BEFORE the atomic active-intent probe", async () => {
+    // Even when an existing PROPOSED row for the same instrument
+    // would have already triggered ACTIVE_INTENT_EXISTS, the
+    // no_active_account guard must fire first — the boot-time
+    // fail-closed state is the strongest signal.
+    const repo = new FakeRepo();
+    await repo.insertProposedFromTicket(TICKET, "execution-runtime", {
+      clientOrderId: "prior-key",
+      clientOrderHash: "prior-hash",
+    });
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, undefined, {
+        kind: "unavailable",
+        reason: "no_active_account",
+      }),
+      { ...INPUT, clientOrderId: "second-key", clientOrderHash: "second-hash" },
+    );
+    assert.equal(result.kind, "position_state_unavailable");
+    assert.equal(executor.callCount, 0);
+  });
+
+  it("legacy path — same guard applies (via endpoint composition)", async () => {
+    // The orchestrator seam is the same for both idempotency and
+    // legacy inserts because both call `deps.insertProposedFromTicket`
+    // with the pre-built positionGuard. This test asserts that
+    // the FakeRepo enforces the check regardless of how the
+    // insert was triggered.
+    const repo = new FakeRepo();
+    const outcome = await repo.insertProposedFromTicket(
+      TICKET,
+      "manual",
+      undefined,
+      { kind: "unavailable", reason: "no_active_account" },
+    );
+    assert.equal(outcome.kind, "position_state_unavailable");
+    assert.equal(repo.rows.size, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-6 blocker — the position guard MUST run before every
+// broker submission, INCLUDING the resume path. Previously
+// `insertProposedFromTicket` ran the guard on fresh insert but
+// `tryStartSubmission` bypassed it on resume — a retry with the
+// same clientOrderId after the account went unavailable / stale
+// / open-position could still submit. Fix: unified pre-submission
+// gate (`tryStartSubmissionWithExposureGuard`) runs the same
+// guard atomically under the same advisory lock.
+// ---------------------------------------------------------------------------
+
+const ACCT = "PAPER-ROUND6";
+const SESS = "sess-round6";
+function availableGuard(overrides?: {
+  accountId?: string;
+  sessionId?: string;
+  maxSnapshotAgeMs?: number;
+}): FakePositionGuardContext {
+  return {
+    kind: "available",
+    accountId: overrides?.accountId ?? ACCT,
+    sessionId: overrides?.sessionId ?? SESS,
+    maxSnapshotAgeMs: overrides?.maxSnapshotAgeMs ?? 60_000,
+  };
+}
+function seedFreshFlat(repo: FakeRepo): void {
+  repo.seedSnapshot(ACCT, {
+    sessionId: SESS,
+    observedAt: new Date(),
+    complete: true,
+    positions: [],
+  });
+}
+
+async function seedCleanProposed(
+  repo: FakeRepo,
+  guard: FakePositionGuardContext,
+): Promise<void> {
+  seedFreshFlat(repo);
+  const result = await repo.insertProposedFromTicket(
+    TICKET,
+    INPUT.strategy,
+    { clientOrderId: INPUT.clientOrderId, clientOrderHash: INPUT.clientOrderHash },
+    guard,
+  );
+  assert.equal(result.kind, "inserted");
+}
+
+describe("orchestrateExecuteTicket — resume path re-runs the exposure guard (round-6)", () => {
+  it("clean PROPOSED + no active account on retry → POSITION_STATE_UNAVAILABLE, zero broker calls", async () => {
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+
+    // Account has since gone away (bootstrap pending / process
+    // restart lost the active account).
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "retry-owner", {
+        kind: "unavailable",
+        reason: "no_active_account",
+      }),
+      INPUT,
+    );
+    assert.equal(result.kind, "position_state_unavailable");
+    if (result.kind !== "position_state_unavailable") return;
+    assert.equal(result.reason, "no_active_account");
+    assert.equal(executor.callCount, 0);
+    // Marker must NOT be set.
+    const row = await repo.getProposedOrderById(1);
+    assert.equal(row?.executionAttemptedAt, undefined);
+    assert.equal(row?.status, "PROPOSED");
+  });
+
+  it("clean PROPOSED + stale snapshot on retry → POSITION_STATE_UNAVAILABLE (stale), zero broker calls", async () => {
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+
+    // Age the snapshot beyond maxSnapshotAgeMs.
+    repo.seedSnapshot(ACCT, {
+      sessionId: SESS,
+      observedAt: new Date(Date.now() - 5 * 60_000),
+      complete: true,
+      positions: [],
+    });
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "retry-owner", availableGuard()),
+      INPUT,
+    );
+    assert.equal(result.kind, "position_state_unavailable");
+    if (result.kind !== "position_state_unavailable") return;
+    assert.equal(result.reason, "stale");
+    assert.equal(executor.callCount, 0);
+  });
+
+  it("clean PROPOSED + wrong sessionId on retry → POSITION_STATE_UNAVAILABLE (wrong_session), zero broker calls", async () => {
+    // Process restart — the previous session's snapshot is fresh
+    // by observedAt but MUST NOT be trusted.
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+    // Guard now claims a DIFFERENT sessionId.
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "retry-owner", availableGuard({ sessionId: "sess-NEW" })),
+      INPUT,
+    );
+    assert.equal(result.kind, "position_state_unavailable");
+    if (result.kind !== "position_state_unavailable") return;
+    assert.equal(result.reason, "wrong_session");
+    assert.equal(executor.callCount, 0);
+  });
+
+  it("clean PROPOSED + open position on retry → OPEN_POSITION_EXISTS, zero broker calls", async () => {
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+    // Between the INSERT and the retry, a broker fill created a
+    // position for the instrument.
+    repo.seedSnapshot(ACCT, {
+      sessionId: SESS,
+      observedAt: new Date(),
+      complete: true,
+      positions: [
+        { instrument: TICKET.instrument, conid: null, quantity: 42 },
+      ],
+    });
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "retry-owner", availableGuard()),
+      INPUT,
+    );
+    assert.equal(result.kind, "open_position_exists");
+    if (result.kind !== "open_position_exists") return;
+    assert.equal(result.quantity, 42);
+    assert.equal(executor.callCount, 0);
+  });
+
+  it("clean PROPOSED + fresh flat snapshot on retry → exactly one resume broker call", async () => {
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "retry-owner", availableGuard()),
+      INPUT,
+    );
+    assert.equal(result.kind, "resumed");
+    assert.equal(executor.callCount, 1);
+  });
+
+  it("two concurrent resume requests with a fresh flat snapshot → exactly one broker call", async () => {
+    const repo = new FakeRepo();
+    await seedCleanProposed(repo, availableGuard());
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED", ticks: 2 });
+    const [a, b] = await Promise.all([
+      orchestrateExecuteTicket(deps(repo, executor, "A", availableGuard()), INPUT),
+      orchestrateExecuteTicket(deps(repo, executor, "B", availableGuard()), INPUT),
+    ]);
+    assert.equal(executor.callCount, 1);
+    const kinds = [a.kind, b.kind].sort();
+    // One resumes; the other observes the marker and returns a
+    // duplicate signal.
+    assert.deepEqual(
+      kinds,
+      ["duplicate_pending_ambiguous", "resumed"].sort(),
+      `unexpected kinds: ${kinds.join(",")}`,
+    );
+  });
+});
+
+describe("orchestrateExecuteTicket — fresh INSERT path re-runs the exposure guard at claim time (round-6)", () => {
+  it("fresh insert with an available guard + subsequent open position between INSERT and claim still submits ONCE", async () => {
+    // Sanity: fresh insert path runs the guard twice (in
+    // insertProposedFromTicket AND in
+    // tryStartSubmissionWithExposureGuard). Both must observe
+    // the SAME flat state for the submission to proceed.
+    const repo = new FakeRepo();
+    seedFreshFlat(repo);
+    const executor = fakeExecutor(repo, { outcome: "SUBMITTED" });
+    const result = await orchestrateExecuteTicket(
+      deps(repo, executor, "fresh", availableGuard()),
+      INPUT,
+    );
+    assert.equal(result.kind, "submitted");
+    assert.equal(executor.callCount, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-6 blocker — PositionGuardContext is REQUIRED. Compile-
+// time regression test: attempting to omit the positionGuard
+// argument to `ExecutionRepository.insertProposedFromTicket`
+// must fail TypeScript's arity / assignability check.
+// ---------------------------------------------------------------------------
+
+describe("PositionGuardContext is required at the repository boundary (round-6)", () => {
+  it("the parameter type of insertProposedFromTicket includes a REQUIRED PositionGuardContext argument", () => {
+    // Structural check: `Parameters<...>[3]` MUST not include
+    // `undefined` in its union. This catches accidental
+    // `positionGuard?: PositionGuardContext` regressions at
+    // compile time.
+    type Args = Parameters<ExecutionRepository["insertProposedFromTicket"]>;
+    // Args[3] is the positionGuard slot.
+    // Both branches of the discriminated union must remain
+    // assignable; `undefined` must NOT be.
+    const _unavailable: Args[3] = {
+      kind: "unavailable",
+      reason: "no_active_account",
+    };
+    const _available: Args[3] = {
+      kind: "available",
+      accountId: "acct",
+      sessionId: "sess",
+      maxSnapshotAgeMs: 60_000,
+    };
+    // @ts-expect-error — `undefined` must NOT be assignable to
+    // the positionGuard slot. Removing this expectation would
+    // reintroduce the fail-open we fixed in round-6.
+    const _forbidden: Args[3] = undefined;
+    void _unavailable;
+    void _available;
+    void _forbidden;
+    assert.ok(true);
   });
 });

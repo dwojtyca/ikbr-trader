@@ -25,11 +25,21 @@ import { HttpExecutionTicketSubmitter } from "./runtime/execution/submitter.js";
 import { HttpReadyProbe } from "./runtime/execution/ready-probe.js";
 import { PaperGuard } from "./runtime/execution/paper-guard.js";
 import { executionRuntimeRoutesPlugin } from "./runtime/execution/routes.js";
+import { HttpTradingExposureReader } from "./runtime/trading-loop/exposure-reader.js";
+import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
+import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
+/**
+ * Populated when EXECUTION_RUNTIME_ENABLED=true. Kept module-scoped so
+ * both `main()` (start the scheduler after startup) and the SIGINT /
+ * SIGTERM handler (graceful shutdown) can reach it without re-plumbing
+ * DI everywhere.
+ */
+let tradingLoopService: TradingLoopService | null = null;
 const strategyToggleSchema = z.object({ enabled: z.boolean() });
 const strategies = createStrategies();
 const engine = new SignalEngine(repo, {
@@ -313,6 +323,40 @@ if (config.runtimeEnabled) {
     app.log.info(
       "execution-runtime: /runtime/execute registered (paper-only, bearer-protected)",
     );
+
+    // -------------------------------------------------------------------
+    // PR14 — Trading Loop scheduler. Uses the same ExecutionRuntime and
+    // PaperGuard as the write endpoint; contained in this branch so the
+    // loop can never run without ExecutionRuntime being wired.
+    // -------------------------------------------------------------------
+    const exposureReader = new HttpTradingExposureReader({
+      engineUrl,
+      bearerToken,
+      requestTimeoutMs: config.tradingLoop.exposureTimeoutMs,
+    });
+    tradingLoopService = new TradingLoopService({
+      config: config.tradingLoop,
+      registry: defaultInstrumentRegistry,
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: app.log,
+    });
+    await app.register(tradingLoopRoutesPlugin, {
+      service: tradingLoopService,
+      bearerToken,
+      paperGuard,
+      readinessDeps: { redis, postgres: pool, exposureReader },
+    });
+    app.log.info(
+      {
+        component: "trading-loop",
+        enabled: config.tradingLoop.enabled,
+        intervalMs: config.tradingLoop.intervalMs,
+        maxConcurrentInstruments: config.tradingLoop.maxConcurrentInstruments,
+      },
+      "trading-loop: routes registered (paper-only, bearer-protected)",
+    );
   } else {
     app.log.warn(
       "execution-runtime: EXECUTION_RUNTIME_ENABLED=false — /runtime/execute NOT registered",
@@ -359,6 +403,14 @@ async function main(): Promise<void> {
   });
   app.log.info(`signal-engine listening on ${address}`);
 
+  // Start the trading-loop scheduler AFTER the server accepts
+  // connections so the status endpoint can respond to health
+  // probes during the startup-delay window. `start()` is a no-op
+  // when TRADING_LOOP_ENABLED=false.
+  if (tradingLoopService !== null) {
+    tradingLoopService.start();
+  }
+
   if (config.signalEventDriven) {
     app.log.info(
       "event-driven signal generation enabled; waiting for ingestion candle callbacks",
@@ -378,6 +430,12 @@ main().catch((err) => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     try {
+      // Stop the loop FIRST so no new instrument runs start while
+      // the HTTP server is closing. `stop()` is idempotent and
+      // bounded by TRADING_LOOP_SHUTDOWN_TIMEOUT_MS.
+      if (tradingLoopService !== null) {
+        await tradingLoopService.stop();
+      }
       await app.close();
       await redis.quit();
       await pool.end();

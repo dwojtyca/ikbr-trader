@@ -606,3 +606,61 @@ describe("ExecutionRuntime.execute — one-submit invariant under concurrency", 
     assert.deepEqual(outcomes, ["DUPLICATE", "SUBMITTED"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Round-5 blocker 2 — ExecutionRuntime.executePrepared never trusts a
+// caller-supplied clientOrderHash. It always recomputes from the ticket.
+// The API surface for the loop is intentionally `(dryRunResult,
+// idempotencyKey)` only — there is no seam through which a stale /
+// swapped hash could reach the submitter.
+// ---------------------------------------------------------------------------
+
+describe("ExecutionRuntime.executePrepared — hash is always re-derived from the ticket", () => {
+  it("submitter receives clientOrderHash = computeClientOrderHash(ticket), independent of any caller input", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        execution: {
+          orderId: 1,
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    // Drive the same dryRun result through executePrepared —
+    // then verify the submitter saw a hash that matches
+    // computeClientOrderHash(ticket). If the runtime were
+    // trusting a caller-supplied precomputedHash the test could
+    // pass a bogus value and observe it on the submitter; since
+    // the signature no longer accepts one, misuse is prevented
+    // at the type level.
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY);
+    if (dryRunResult.pipeline.outcome !== "SUCCESS") {
+      throw new Error("expected pipeline to succeed");
+    }
+    const expectedHash = (await import("./client-order-hash.js"))
+      .computeClientOrderHash(dryRunResult.pipeline.ticket);
+    await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-precomputed-hash-1",
+    });
+    assert.equal(submitter.calls.length, 1);
+    assert.equal(submitter.calls[0].clientOrderHash, expectedHash);
+  });
+
+  it("executePrepared signature has NO clientOrderHash field (round-5 API surface check)", () => {
+    // Structural / compile-time check: the type of executePrepared
+    // is `(input: { dryRunResult; idempotencyKey }) => ...`.
+    // Adding a `clientOrderHash` field would fail this cast.
+    type Input = Parameters<ExecutionRuntime["executePrepared"]>[0];
+    const forbidden: "clientOrderHash" extends keyof Input ? true : false = false;
+    assert.equal(forbidden, false);
+  });
+});

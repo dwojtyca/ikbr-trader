@@ -179,4 +179,74 @@ export interface Instrument {
   readonly session: InstrumentSession;
   readonly roll?: InstrumentRoll;
   readonly metadata: InstrumentMetadata;
+  /**
+   * PR14 — per-instrument execution policy. Consumed by the
+   * trading-loop scheduler; required when the loop is enabled
+   * for this instrument. Absent by default so PR11-13 callers
+   * (dry-run, direct /runtime/execute with a caller-supplied
+   * policy) are unaffected.
+   *
+   * `priceTickSize` MUST come from validated broker/registry
+   * metadata — the loop refuses to fall back to a global
+   * default. `strategyId` + `timeframe` provide the stable
+   * trigger-identity components for the v4 idempotency key.
+   */
+  readonly executionPolicy?: InstrumentExecutionPolicy;
+}
+
+/**
+ * Loop-facing per-instrument execution policy. PR14 introduces
+ * this alongside `Instrument.executionPolicy`; the shared
+ * `ExecutionTicketPolicy` (in `packages/shared/src/execution-ticket/types.ts`)
+ * remains the wire type carried through the pipeline / builder.
+ *
+ * Every field is order-critical for the loop:
+ *   - `quantity` seeds `ExecutionTicketPolicy.quantity`
+ *     (capped by `maxQuantity` and `risk.maxQuantity`).
+ *   - `priceTickSize` / `priceRoundingMode` seed the
+ *     corresponding fields on `ExecutionTicketPolicy`.
+ *   - `allowedOrderTypes` filters out policies whose
+ *     `orderType` the instrument does not support.
+ *   - `strategyId` + `timeframe` are consumed by the trigger
+ *     identity builder (`v4` idempotency key).
+ */
+export interface InstrumentExecutionPolicy {
+  readonly strategyId: string;
+  readonly timeframe: string;
+  readonly quantity: number;
+  readonly maxQuantity: number;
+  readonly quantityUnit: QuantityUnit;
+  readonly allowedOrderTypes: readonly ("LMT" | "STP")[];
+  readonly defaultOrderType: "LMT" | "STP";
+  readonly timeInForce: "DAY" | "GTC";
+  readonly outsideRth: boolean;
+  readonly transmit: boolean;
+  readonly priceTickSize: number;
+  readonly priceRoundingMode: "nearest" | "up" | "down";
+  readonly stopLossDistance?: number;
+  readonly takeProfitDistance?: number;
+  readonly bracketDisabled?: boolean;
+  /**
+   * PR14 round-6 blocker — controls how the execution-engine
+   * position guard treats a broker-reported position on a
+   * DIFFERENT conId that shares this instrument's broker symbol
+   * (e.g. futures rollover, warrant expirations, share class
+   * migrations).
+   *
+   *   - `undefined` / `false` (the safe default) — ANY non-zero
+   *     position for the same logical instrument (broker symbol),
+   *     regardless of `conid`, blocks a new intent with
+   *     `open_position_exists`. Prevents pyramiding across
+   *     rolled contracts when the strategy did not opt in.
+   *   - `true` — only a position on the EXACT same `conid` (or on
+   *     a symbol-only row when the ticket has no `conid`) blocks.
+   *     Reserved for strategies that explicitly manage parallel
+   *     exposure between contracts (rollover ladders, calendar
+   *     spreads).
+   *
+   * PR14 forbids pyramiding — the loop's default codepath opts
+   * for the safe interpretation, and the field is `readonly`
+   * per-instrument so the choice is auditable.
+   */
+  readonly allowCrossContractExposure?: boolean;
 }

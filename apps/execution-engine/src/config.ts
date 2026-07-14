@@ -104,6 +104,32 @@ const rawSchema = z.object({
     .int()
     .min(0)
     .default(900),
+  // PR14 round-4 blocker — freshness threshold for the persisted
+  // broker-position snapshot returned by the
+  // `/execution/account/summary` DISPLAY endpoint (UI cache TTL).
+  // NOT used by the write-path exposure guard; see
+  // `EXECUTION_POSITION_GUARD_MAX_AGE_S`.
+  EXECUTION_POSITION_MAX_AGE_S: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(60),
+  // PR14 round-7 blocker — SEPARATE freshness threshold for the
+  // authoritative write-path exposure guard
+  // (`tryStartSubmissionWithExposureGuard` +
+  // `insertProposedFromTicket`). Must be significantly shorter
+  // than the display cache TTL because the guard controls
+  // exposure-increasing writes — a 60 s window is wide enough
+  // for many broker fills to land undetected between the snapshot
+  // and the write. Default 10 s; production deployments should
+  // tighten further and rely on the broker-driven refresh path
+  // (fill events / reconnect / position callback) to keep the
+  // snapshot within the window.
+  EXECUTION_POSITION_GUARD_MAX_AGE_S: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(10),
 });
 
 const parseBoolFlag = (raw: "true" | "false"): boolean => raw === "true";

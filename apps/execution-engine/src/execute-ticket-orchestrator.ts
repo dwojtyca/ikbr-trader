@@ -123,29 +123,88 @@ export interface OrchestratorDeps {
     ticket: SignalTicket,
     strategy: string,
     idempotency: { clientOrderId: string; clientOrderHash: string } | undefined,
-  ) => Promise<number>;
+  ) => Promise<
+    | { readonly kind: "inserted"; readonly id: number }
+    | {
+        readonly kind: "active_intent_exists";
+        readonly existingOrderId: number;
+        readonly existingStatus: string;
+        readonly existingClientOrderId: string | null;
+      }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason:
+          | "missing"
+          | "stale"
+          | "incomplete"
+          | "no_active_account"
+          | "wrong_session";
+      }
+  >;
   readonly getProposedOrderById: (id: number) => Promise<ProposedOrder | null>;
   readonly executePersistedOrder: (
     order: ProposedOrder,
   ) => Promise<ExecutionExecutionResult>;
   readonly isUniqueViolation: (error: unknown) => boolean;
   /**
-   * Atomic UPDATE ... WHERE ... RETURNING that acquires the
-   * exclusive right to submit this order to the broker AND sets
-   * the `execution_attempted_at` fencing marker in the same
-   * statement. Called on BOTH the fresh-INSERT path and the
-   * resume path — INSERT success alone does NOT grant the right
-   * to submit.
+   * PR14 round-6 blocker — unified pre-submission gate. Both the
+   * fresh-INSERT path AND the resume path go through this
+   * function; the endpoint captures the caller's
+   * `PositionGuardContext` and `allowCrossContractExposure`
+   * policy inside the closure so the orchestrator itself does
+   * not carry any account / session state.
    *
-   * Returns `true` iff this caller now holds the claim AND the
-   * marker; `false` means another caller holds the claim, or the
-   * row is no longer in the safe-to-submit shape (marker or
-   * broker id already set, or status no longer PROPOSED).
+   * Atomically under a single Postgres transaction + advisory
+   * lock on `hashtext(instrument)`:
+   *
+   *   1. Runs the shared exposure guard (session identity,
+   *      snapshot freshness / completeness, open position).
+   *   2. On block, ROLLBACK + returns a `position_state_unavailable`
+   *      / `open_position_exists` outcome unchanged. NO marker,
+   *      NO broker call.
+   *   3. Otherwise atomically flips `execution_attempted_at`
+   *      (fencing marker) via `UPDATE ... RETURNING`. Two
+   *      concurrent claim attempts serialise — exactly one
+   *      receives `claimed`; the other receives `not_claimed`.
+   *
+   * The orchestrator surfaces `open_position_exists` /
+   * `position_state_unavailable` blocks to the caller and
+   * routes `not_claimed` through the freshest-state
+   * classifier (same code path as a losing marker race in
+   * PR13).
    */
   readonly tryStartSubmission: (input: {
     readonly id: number;
     readonly owner: string;
-  }) => Promise<boolean>;
+    readonly instrument: string;
+    readonly conid: string | null;
+  }) => Promise<
+    | { readonly kind: "claimed" }
+    | { readonly kind: "not_claimed" }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason:
+          | "missing"
+          | "stale"
+          | "incomplete"
+          | "no_active_account"
+          | "wrong_session";
+      }
+  >;
   /**
    * Owner identity persisted on the claim. Injectable so the
    * production process can use its host id / process id and tests
@@ -193,6 +252,47 @@ export type OrchestratorOutcome =
       readonly order: ProposedOrder | null;
     }
   | {
+      /**
+       * PR14 blocker fix — a non-terminal order (PROPOSED or
+       * SUBMITTED) already exists for this instrument under a
+       * DIFFERENT `client_order_id`. The atomic advisory-lock
+       * guard in `insertProposedFromTicket` refused the INSERT.
+       * The caller MUST NOT retry with a new key — reconciliation
+       * or the pre-existing intent has to complete first.
+       */
+      readonly kind: "active_intent_exists";
+      readonly existingOrderId: number;
+      readonly existingStatus: string;
+      readonly existingClientOrderId: string | null;
+    }
+  | {
+      /**
+       * PR14 round-4 blocker — broker reports a non-zero position
+       * for this instrument. Refuses even when every prior
+       * `proposed_order` is terminal.
+       */
+      readonly kind: "open_position_exists";
+      readonly accountId: string;
+      readonly quantity: number;
+      readonly observedAt: Date;
+    }
+  | {
+      /**
+       * PR14 round-4/5/6 blocker — the persisted broker position
+       * snapshot is missing, stale, incomplete, from a different
+       * session, OR the caller has no active broker account
+       * (`positionGuard.kind === "unavailable"`). Fail-closed.
+       */
+      readonly kind: "position_state_unavailable";
+      readonly accountId: string | null;
+      readonly reason:
+        | "missing"
+        | "stale"
+        | "incomplete"
+        | "no_active_account"
+        | "wrong_session";
+    }
+  | {
       readonly kind: "execution_error";
       readonly order: ProposedOrder | null;
       readonly message: string;
@@ -234,9 +334,9 @@ export async function orchestrateExecuteTicket(
   }
 
   // --- Fresh INSERT with UNIQUE-violation race handling --------------------
-  let insertedId: number;
+  let insertOutcome;
   try {
-    insertedId = await deps.insertProposedFromTicket(
+    insertOutcome = await deps.insertProposedFromTicket(
       input.ticket,
       input.strategy,
       {
@@ -275,7 +375,25 @@ export async function orchestrateExecuteTicket(
     throw error;
   }
 
-  const inserted = await deps.getProposedOrderById(insertedId);
+  if (insertOutcome.kind === "active_intent_exists") {
+    // A non-terminal order for this instrument under a DIFFERENT
+    // clientOrderId already exists — the atomic guard refused
+    // the INSERT. Surface unmodified to the caller.
+    return {
+      kind: "active_intent_exists",
+      existingOrderId: insertOutcome.existingOrderId,
+      existingStatus: insertOutcome.existingStatus,
+      existingClientOrderId: insertOutcome.existingClientOrderId,
+    };
+  }
+  if (insertOutcome.kind === "open_position_exists") {
+    return insertOutcome;
+  }
+  if (insertOutcome.kind === "position_state_unavailable") {
+    return insertOutcome;
+  }
+
+  const inserted = await deps.getProposedOrderById(insertOutcome.id);
   if (!inserted) {
     return {
       kind: "execution_error",
@@ -321,8 +439,29 @@ async function claimAndExecute(
   const claimed = await deps.tryStartSubmission({
     id: order.id,
     owner: deps.ownerId(),
+    instrument: order.instrument,
+    conid: typeof order.conid === "string" ? order.conid : null,
   });
-  if (!claimed) {
+  // Round-6 blocker: the unified pre-submission gate runs the
+  // exposure guard atomically with the marker acquisition. A
+  // blocked outcome MUST propagate up — the broker call never
+  // happened and the row was left in its pre-claim state.
+  if (claimed.kind === "open_position_exists") {
+    return {
+      kind: "open_position_exists",
+      accountId: claimed.accountId,
+      quantity: claimed.quantity,
+      observedAt: claimed.observedAt,
+    };
+  }
+  if (claimed.kind === "position_state_unavailable") {
+    return {
+      kind: "position_state_unavailable",
+      accountId: claimed.accountId,
+      reason: claimed.reason,
+    };
+  }
+  if (claimed.kind === "not_claimed") {
     // Losing the atomic UPDATE means the row is no longer safe to
     // submit. Re-read for the freshest visible state and
     // classify. The row can be in any of:

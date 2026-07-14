@@ -5,6 +5,10 @@ import {
   buildExecutionRuntimeConfig,
   executionRuntimeSchema,
 } from "./runtime/execution/config.js";
+import {
+  buildTradingLoopConfig,
+  tradingLoopSchema,
+} from "./runtime/trading-loop/config.js";
 
 dotenv.config();
 
@@ -92,7 +96,9 @@ const schema = z.object({
     .default(60),
 })
   // Phase 2 / PR13 — Execution Runtime (paper-only write endpoint).
-  .merge(executionRuntimeSchema);
+  .merge(executionRuntimeSchema)
+  // Phase 2 / PR14 — Trading Loop scheduler (paper-only, disabled by default).
+  .merge(tradingLoopSchema);
 
 const env = schema.parse(process.env);
 
@@ -163,6 +169,7 @@ export const config = {
     env,
     fallbackEngineUrl: env.SIGNAL_EXECUTION_BASE_URL,
   }),
+  tradingLoop: buildTradingLoopConfig({ env }),
   volumeFilterMode:
     env.IB_MARKET_DATA_TYPE === 1 ? ("strict" as const) : ("off" as const),
   currencyBySymbol: parseContractCurrencies(

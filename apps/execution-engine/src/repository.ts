@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   AiDecision,
   DecisionSource,
@@ -89,6 +89,52 @@ export interface OrderListFilters {
   decisionSource?: DecisionSource;
   aiDecision?: AiDecision;
 }
+
+/**
+ * PR14 round-5/6 blocker — explicit availability for the atomic
+ * open-position guard. Callers MUST hand this in on every write
+ * path (fresh INSERT via `insertProposedFromTicket` AND resume
+ * via `tryStartSubmissionWithExposureGuard`). The type is
+ * REQUIRED — never optional — so no code path can bypass the
+ * check.
+ *
+ *   - `"available"` — supply the active broker `accountId`, the
+ *     current process' `sessionId` (must match the sessionId
+ *     that wrote the snapshot — after a restart the old
+ *     snapshot is rejected even if `observedAt` is still fresh)
+ *     and `maxSnapshotAgeMs`. The guard verifies session,
+ *     freshness, completeness, and open position under the SAME
+ *     advisory lock that gates the write.
+ *   - `"unavailable"` — the caller has no active broker account
+ *     yet (bootstrap pending). Fail-closed: no INSERT, no
+ *     marker, no broker call. Returns
+ *     `POSITION_STATE_UNAVAILABLE` with `reason:
+ *     "no_active_account"` and NO DB read at all.
+ */
+export type PositionGuardContext =
+  | {
+      readonly kind: "available";
+      readonly accountId: string;
+      readonly sessionId: string;
+      readonly maxSnapshotAgeMs: number;
+    }
+  | {
+      readonly kind: "unavailable";
+      readonly reason: "no_active_account";
+    };
+
+/**
+ * Reasons the atomic exposure guard refuses a write. Mirrored
+ * across `insertProposedFromTicket` (fresh) and
+ * `tryStartSubmissionWithExposureGuard` (resume) so callers
+ * classify identically regardless of path.
+ */
+export type PositionGuardBlockedReason =
+  | "missing"
+  | "stale"
+  | "incomplete"
+  | "no_active_account"
+  | "wrong_session";
 
 export interface OrderDecisionMetadata {
   decisionSource?: DecisionSource;
@@ -843,66 +889,580 @@ export class ExecutionRepository {
       CREATE INDEX IF NOT EXISTS execution_audit_log_outcome_idx
       ON execution_audit_log (outcome, ts DESC);
     `);
+
+    // PR14 round-4 blocker — persisted broker-position snapshot.
+    // The atomic exposure guard consults these rows under the
+    // advisory lock to refuse a new intent when a real broker
+    // position is open even though every proposed_order for the
+    // instrument is terminal.
+    //
+    // Round-5 blocker fix: the guard prefers `conid` identity to
+    // handle futures rollover correctly — two contracts with the
+    // same broker symbol but different conIds MUST NOT be scaled
+    // into a single row. Two partial unique indexes enforce this
+    // (`(account_id, conid)` when conid is present,
+    // `(account_id, instrument)` when it isn't) instead of a
+    // single natural primary key.
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS broker_position_snapshots (
+        account_id TEXT NOT NULL,
+        instrument TEXT NOT NULL,
+        conid TEXT,
+        quantity NUMERIC NOT NULL,
+        session_id TEXT NOT NULL,
+        observed_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+    // Drop the older PRIMARY KEY (account_id, instrument) if a
+    // dev database still has it — round-5 introduces the split
+    // conid / symbol identity below.
+    await this.pool.query(`
+      ALTER TABLE broker_position_snapshots
+      DROP CONSTRAINT IF EXISTS broker_position_snapshots_pkey;
+    `);
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS broker_position_snapshots_conid_uidx
+      ON broker_position_snapshots (account_id, conid)
+      WHERE conid IS NOT NULL;
+    `);
+    await this.pool.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS broker_position_snapshots_symbol_uidx
+      ON broker_position_snapshots (account_id, instrument)
+      WHERE conid IS NULL;
+    `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS broker_snapshot_syncs (
+        account_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        observed_at TIMESTAMPTZ NOT NULL,
+        complete BOOLEAN NOT NULL DEFAULT TRUE
+      );
+    `);
+    // PR14 round-8 blocker — monotonic generation column for
+    // refresh fencing. Every `beginPositionSnapshotRefresh`
+    // increments it; `completePositionSnapshotRefresh` refuses
+    // to overwrite a NEWER generation with an older, in-flight
+    // fetch's result. Prevents a slow refresh started at T0
+    // from clobbering a fresh refresh started at T1 > T0.
+    await this.pool.query(`
+      ALTER TABLE broker_snapshot_syncs
+      ADD COLUMN IF NOT EXISTS generation BIGINT NOT NULL DEFAULT 0;
+    `);
   }
 
+  /**
+   * PR14 round-4 — persist a broker position snapshot for the
+   * given account. Legacy single-shot writer kept for callers
+   * that already have a complete snapshot in hand and do not
+   * need the two-phase begin/complete semantics.
+   *
+   * The write-path (`insertProposedFromTicket` /
+   * `tryStartSubmissionWithExposureGuard`) MUST use the two-phase
+   * pair (`beginPositionSnapshotRefresh` +
+   * `completePositionSnapshotRefresh`) so that during an
+   * in-flight refresh the guard sees `complete=false` and
+   * fail-closes with `POSITION_STATE_UNAVAILABLE (incomplete)`.
+   * A single-shot upsert cannot express that window.
+   */
+  async upsertPositionSnapshot(input: {
+    readonly accountId: string;
+    readonly sessionId: string;
+    readonly observedAt: Date;
+    readonly complete: boolean;
+    readonly positions: ReadonlyArray<{
+      readonly instrument: string;
+      readonly conid?: string;
+      readonly quantity: number;
+    }>;
+  }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "DELETE FROM broker_position_snapshots WHERE account_id = $1",
+        [input.accountId],
+      );
+      for (const pos of input.positions) {
+        await client.query(
+          `
+          INSERT INTO broker_position_snapshots
+            (account_id, instrument, conid, quantity, session_id, observed_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+            input.accountId,
+            pos.instrument,
+            pos.conid ?? null,
+            pos.quantity,
+            input.sessionId,
+            input.observedAt,
+          ],
+        );
+      }
+      await client.query(
+        `
+        INSERT INTO broker_snapshot_syncs (account_id, session_id, observed_at, complete)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (account_id) DO UPDATE
+        SET session_id = EXCLUDED.session_id,
+            observed_at = EXCLUDED.observed_at,
+            complete = EXCLUDED.complete
+        `,
+        [input.accountId, input.sessionId, input.observedAt, input.complete],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * PR14 round-7/8 blocker — mark the snapshot for `accountId`
+   * as `complete=false`, atomically bump the monotonic
+   * `generation` counter, and return the new generation. Every
+   * write-path exposure guard consulted between this call and
+   * the matching `completePositionSnapshotRefresh` fail-closes
+   * with `POSITION_STATE_UNAVAILABLE (incomplete)`.
+   *
+   * Round-8 lock protocol: acquires the account-level advisory
+   * lock (`hashtext('snap:' || account_id)`) so refresh cannot
+   * interleave with a submission guard that already holds the
+   * same lock. Submission always acquires the account lock
+   * BEFORE the instrument lock — refresh only takes the
+   * account lock — deadlock-free.
+   *
+   * Rationale: the account-summary endpoint (and any broker-
+   * driven refresh — fill event, reconnect, startup) MUST close
+   * the window during which a stale flat snapshot could be
+   * consulted while the broker has already reported a fill.
+   * Two-phase begin/complete with a generation fence makes that
+   * window explicit AND resistant to slow-refresh clobbering
+   * (see `completePositionSnapshotRefresh`).
+   */
+  async beginPositionSnapshotRefresh(input: {
+    readonly accountId: string;
+    readonly sessionId: string;
+    readonly observedAt: Date;
+  }): Promise<{ readonly generation: number }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        [`snap:${input.accountId}`],
+      );
+      const result = await client.query(
+        `
+        INSERT INTO broker_snapshot_syncs
+          (account_id, session_id, observed_at, complete, generation)
+        VALUES ($1, $2, $3, FALSE, 1)
+        ON CONFLICT (account_id) DO UPDATE
+        SET session_id = EXCLUDED.session_id,
+            observed_at = EXCLUDED.observed_at,
+            complete = FALSE,
+            generation = broker_snapshot_syncs.generation + 1
+        RETURNING generation
+        `,
+        [input.accountId, input.sessionId, input.observedAt],
+      );
+      await client.query("COMMIT");
+      return { generation: Number(result.rows[0].generation) };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * PR14 round-7/8 blocker — complete a snapshot refresh
+   * started by `beginPositionSnapshotRefresh`. Atomically:
+   *
+   *   1. Acquires the account-level advisory lock (same key as
+   *      begin) — serialises with concurrent submissions and
+   *      refresh starts.
+   *   2. Reads the CURRENT generation. If it does not match the
+   *      caller-supplied `generation` (a newer refresh started
+   *      after this one), skips the write and returns
+   *      `{ kind: "stale_generation" }`. The newer refresh
+   *      remains in-flight; the write path stays fail-closed
+   *      until IT completes.
+   *   3. Otherwise replaces every position row for the account
+   *      AND flips `complete=true` in the same transaction.
+   *      Returns `{ kind: "completed" }`. The write path can
+   *      immediately proceed.
+   */
+  async completePositionSnapshotRefresh(input: {
+    readonly accountId: string;
+    readonly sessionId: string;
+    readonly observedAt: Date;
+    readonly generation: number;
+    readonly positions: ReadonlyArray<{
+      readonly instrument: string;
+      readonly conid?: string;
+      readonly quantity: number;
+    }>;
+  }): Promise<
+    | { readonly kind: "completed" }
+    | { readonly kind: "stale_generation"; readonly currentGeneration: number }
+  > {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        [`snap:${input.accountId}`],
+      );
+      const genRow = await client.query(
+        "SELECT generation FROM broker_snapshot_syncs WHERE account_id = $1",
+        [input.accountId],
+      );
+      const currentGeneration = genRow.rows[0]
+        ? Number(genRow.rows[0].generation)
+        : 0;
+      if (currentGeneration !== input.generation) {
+        // A newer `beginPositionSnapshotRefresh` ran AFTER our
+        // begin but BEFORE our complete. Our data is stale
+        // relative to the newer refresh's begin timestamp;
+        // committing it would clobber the newer in-flight
+        // window. Skip.
+        await client.query("ROLLBACK");
+        return { kind: "stale_generation", currentGeneration };
+      }
+      await client.query(
+        "DELETE FROM broker_position_snapshots WHERE account_id = $1",
+        [input.accountId],
+      );
+      for (const pos of input.positions) {
+        await client.query(
+          `
+          INSERT INTO broker_position_snapshots
+            (account_id, instrument, conid, quantity, session_id, observed_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          `,
+          [
+            input.accountId,
+            pos.instrument,
+            pos.conid ?? null,
+            pos.quantity,
+            input.sessionId,
+            input.observedAt,
+          ],
+        );
+      }
+      await client.query(
+        `
+        UPDATE broker_snapshot_syncs
+        SET session_id = $2,
+            observed_at = $3,
+            complete = TRUE
+        WHERE account_id = $1
+        `,
+        [input.accountId, input.sessionId, input.observedAt],
+      );
+      await client.query("COMMIT");
+      return { kind: "completed" };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * PR14 round-8 blocker — cheap invalidation without a full
+   * refresh cycle. Acquires the account lock, bumps generation,
+   * sets `complete=false`. Every write-path guard fail-closes
+   * with `POSITION_STATE_UNAVAILABLE (incomplete)` until a
+   * subsequent `completePositionSnapshotRefresh` succeeds.
+   *
+   * Callers use this to enforce the invariant "any broker-side
+   * event that MAY have changed exposure invalidates the
+   * snapshot BEFORE the local order-lifecycle transition
+   * unblocks a new intent". Awaited by the fill / status-update
+   * / partial-fill / reconciliation code paths.
+   *
+   * Returns the new generation so a follow-up
+   * `refreshBrokerPositionSnapshot` can use it as its begin
+   * generation (avoiding a redundant bump).
+   */
+  async invalidatePositionSnapshot(input: {
+    readonly accountId: string;
+    readonly sessionId: string;
+    readonly observedAt: Date;
+  }): Promise<{ readonly generation: number }> {
+    return this.beginPositionSnapshotRefresh(input);
+  }
+
+  /**
+   * PR14 round-7/9 blocker — readiness probe: returns the
+   * health of the broker-position snapshot for the given
+   * account. Round-9 exposes `generation` alongside `complete`
+   * so the refresh coordinator can distinguish:
+   *   - `complete=true` at OUR generation → we are healthy.
+   *   - `complete=false` at a NEWER generation → someone
+   *     invalidated after us; rerun needed.
+   *   - `complete=true` at a NEWER generation → a newer refresh
+   *     already completed on our behalf; we can exit healthy
+   *     without another broker fetch.
+   */
+  async getPositionSnapshotStatus(
+    accountId: string,
+  ): Promise<
+    | { readonly kind: "missing" }
+    | {
+        readonly kind: "present";
+        readonly sessionId: string;
+        readonly observedAt: Date;
+        readonly complete: boolean;
+        readonly generation: number;
+      }
+  > {
+    const result = await this.pool.query(
+      `
+      SELECT session_id, observed_at, complete, generation
+      FROM broker_snapshot_syncs
+      WHERE account_id = $1
+      `,
+      [accountId],
+    );
+    const row = result.rows[0];
+    if (!row) return { kind: "missing" };
+    return {
+      kind: "present",
+      sessionId: String(row.session_id),
+      observedAt: new Date(row.observed_at as string),
+      complete: row.complete === true,
+      generation: Number(row.generation),
+    };
+  }
+
+  /**
+   * PR14 blocker fix — atomic instrument-level exposure guard.
+   *
+   * The `execute-ticket` fresh-INSERT path is the ONLY place the
+   * PR13/PR14 write flow creates a new `proposed_orders` row.
+   * Before the INSERT commits, the same transaction:
+   *
+   *   1. Takes a Postgres transaction-scoped advisory lock keyed
+   *      on `hashtext(instrument)`. Concurrent inserts for the
+   *      SAME instrument serialise; inserts for different
+   *      instruments proceed in parallel.
+   *   2. Checks whether any NON-terminal row already exists for
+   *      this instrument (`status IN ('PROPOSED', 'SUBMITTED')`).
+   *   3. If found — and it's NOT the same `client_order_id`
+   *      currently trying to insert (which is handled by the
+   *      idempotency layer / UNIQUE constraint) — returns
+   *      `{ kind: "active_intent_exists" }`. NO INSERT. The
+   *      orchestrator surfaces this as HTTP 409
+   *      `ACTIVE_INTENT_EXISTS`.
+   *
+   * This closes the race that PR13's UNIQUE(client_order_id)
+   * alone does NOT cover: two requests with DIFFERENT
+   * `clientOrderId`s but the SAME instrument, evaluated concurrently
+   * by the process-local exposure guard in signal-engine, would
+   * previously both pass the guard and both create a
+   * `proposed_orders` row. The advisory lock + status probe here
+   * is the AUTHORITATIVE enforcement point (single-writer per
+   * instrument), independent of caller count.
+   *
+   * Bracket protection is preserved — bracket legs are encoded on
+   * the parent row's `stop` / `take_profit` fields (see PR13
+   * ticket mapper). Only one PROPOSED / SUBMITTED row exists per
+   * instrument's active intent.
+   *
+   * Excluded from the block: rows with the SAME `client_order_id`
+   * as the incoming insert. Those rows are the RESUME target that
+   * the idempotency path already routes through
+   * `tryStartSubmission`; the caller is not creating a competing
+   * intent. If the incoming request has no idempotency triple
+   * (legacy path), every non-terminal row for the instrument
+   * blocks — the caller must supply an explicit new intent.
+   */
   async insertProposedFromTicket(
     ticket: SignalTicket,
     strategy = "manual_ticket",
-    idempotency?: {
-      readonly clientOrderId: string;
-      readonly clientOrderHash: string;
-    },
-  ): Promise<number> {
-    const result = await this.pool.query(
-      `
-      INSERT INTO proposed_orders (
-        instrument,
-        conid,
-        side,
-        position_effect,
-        order_type,
-        quantity,
-        entry,
-        stop,
-        take_profit,
-        reason,
-        confidence,
-        risk_check_status,
-        status,
-        strategy,
-        decision_source,
-        client_order_id,
-        client_order_hash,
-        created_at
-      )
-      VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10,
-        $11, $12, 'PROPOSED', $13, 'user',
-        $14, $15, NOW()
-      )
-      RETURNING id
-      `,
-      [
-        ticket.instrument,
-        ticket.conid ?? null,
-        ticket.side,
-        ticket.positionEffect ?? null,
-        ticket.orderType,
-        ticket.quantity,
-        ticket.entry ?? null,
-        ticket.stop ?? null,
-        ticket.takeProfit ?? null,
-        ticket.reason,
-        ticket.confidence,
-        ticket.riskCheckStatus,
-        strategy,
-        idempotency?.clientOrderId ?? null,
-        idempotency?.clientOrderHash ?? null,
-      ],
-    );
+    idempotency:
+      | {
+          readonly clientOrderId: string;
+          readonly clientOrderHash: string;
+        }
+      | undefined,
+    positionGuard: PositionGuardContext,
+    options?: { readonly allowCrossContractExposure?: boolean },
+  ): Promise<
+    | { readonly kind: "inserted"; readonly id: number }
+    | {
+        readonly kind: "active_intent_exists";
+        readonly existingOrderId: number;
+        readonly existingStatus: ProposedOrderStatus;
+        readonly existingClientOrderId: string | null;
+      }
+    | {
+        /**
+         * PR14 round-4 blocker — broker reports a non-zero
+         * position for this instrument. Refuses even when every
+         * proposed_order for the instrument is terminal.
+         */
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        /**
+         * PR14 round-4/5/6 blocker — the persisted broker snapshot
+         * is missing, stale, incomplete, from a different session,
+         * OR there is no active broker account at all
+         * (`positionGuard.kind === "unavailable"`). Fail-closed:
+         * no INSERT.
+         */
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: PositionGuardBlockedReason;
+      }
+  > {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // PR14 round-8 lock protocol: account lock FIRST, then
+      // instrument lock. Submissions and refreshes both take
+      // the account lock (submission also takes the instrument
+      // lock) — refresh never takes the instrument lock —
+      // deadlock-free. Order is stable so two concurrent
+      // submissions for different instruments on the same
+      // account still serialise on the account lock.
+      if (positionGuard.kind === "available") {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+          [`snap:${positionGuard.accountId}`],
+        );
+      }
+      // Transaction-scoped advisory lock on hashtext(instrument).
+      // Serialises concurrent inserts for the same instrument
+      // without any table-level locking. Released automatically at
+      // COMMIT / ROLLBACK.
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        [ticket.instrument],
+      );
 
-    return Number(result.rows[0].id);
+      // Look for any non-terminal row that is NOT the resume
+      // target of the current caller (same client_order_id).
+      const existing = await client.query(
+        `
+        SELECT id, status, client_order_id
+        FROM proposed_orders
+        WHERE instrument = $1
+          AND status IN ('PROPOSED', 'SUBMITTED')
+          AND (
+            $2::text IS NULL
+            OR client_order_id IS NULL
+            OR client_order_id <> $2
+          )
+        LIMIT 1
+        `,
+        [ticket.instrument, idempotency?.clientOrderId ?? null],
+      );
+
+      const conflictRow = existing.rows[0];
+      if (conflictRow) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "active_intent_exists",
+          existingOrderId: Number(conflictRow.id),
+          existingStatus: conflictRow.status as ProposedOrderStatus,
+          existingClientOrderId:
+            typeof conflictRow.client_order_id === "string"
+              ? conflictRow.client_order_id
+              : null,
+        };
+      }
+
+      // PR14 round-4/5/6 blocker — authoritative exposure guard.
+      // Under the SAME advisory lock, verify the active account,
+      // snapshot session identity, freshness, completeness, and
+      // open-position status. Refuses the write when any layer
+      // trips.
+      const guarded = await this.#runExposureGuard(client, {
+        instrument: ticket.instrument,
+        conid: ticket.conid ?? null,
+        allowCrossContractExposure:
+          options?.allowCrossContractExposure ?? false,
+        guard: positionGuard,
+      });
+      if (guarded.kind !== "ok") {
+        await client.query("ROLLBACK");
+        return guarded.outcome;
+      }
+
+      const result = await client.query(
+        `
+        INSERT INTO proposed_orders (
+          instrument,
+          conid,
+          side,
+          position_effect,
+          order_type,
+          quantity,
+          entry,
+          stop,
+          take_profit,
+          reason,
+          confidence,
+          risk_check_status,
+          status,
+          strategy,
+          decision_source,
+          client_order_id,
+          client_order_hash,
+          created_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8, $9, $10,
+          $11, $12, 'PROPOSED', $13, 'user',
+          $14, $15, NOW()
+        )
+        RETURNING id
+        `,
+        [
+          ticket.instrument,
+          ticket.conid ?? null,
+          ticket.side,
+          ticket.positionEffect ?? null,
+          ticket.orderType,
+          ticket.quantity,
+          ticket.entry ?? null,
+          ticket.stop ?? null,
+          ticket.takeProfit ?? null,
+          ticket.reason,
+          ticket.confidence,
+          ticket.riskCheckStatus,
+          strategy,
+          idempotency?.clientOrderId ?? null,
+          idempotency?.clientOrderHash ?? null,
+        ],
+      );
+
+      await client.query("COMMIT");
+      return { kind: "inserted", id: Number(result.rows[0].id) };
+    } catch (error) {
+      // Any error — including UNIQUE(client_order_id) violation
+      // when a concurrent process just inserted the same key —
+      // rolls back and re-throws so the orchestrator's existing
+      // isUniqueViolation classifier can route through the racy
+      // re-consult path.
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /**
@@ -1226,6 +1786,306 @@ export class ExecutionRepository {
       [input.id, input.owner],
     );
     return (result.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * PR14 round-6 blocker — unified pre-submission gate for the
+   * RESUME path. `insertProposedFromTicket` already runs the
+   * atomic exposure guard on fresh inserts, but the resume path
+   * (existing clean `PROPOSED` row) previously only acquired the
+   * fencing marker via the raw `tryStartSubmission` primitive,
+   * bypassing the account / session / snapshot / open-position
+   * check. This leaves a hole: a retry with the same
+   * `clientOrderId` after the account went inactive (or a fresh
+   * broker fill landed for the instrument) could submit anyway.
+   *
+   * The atomic sequence under a single Postgres transaction and
+   * a single `pg_advisory_xact_lock(hashtext(instrument))`:
+   *
+   *   1. Take the advisory lock — serialises with any concurrent
+   *      fresh INSERT / resume claim for the same instrument.
+   *   2. Run the SAME exposure guard used by
+   *      `insertProposedFromTicket` (`#runExposureGuard`).
+   *   3. On a blocking outcome — ROLLBACK, return the outcome
+   *      unchanged. NO marker, NO broker call.
+   *   4. Otherwise atomically UPDATE ... WHERE ... RETURNING to
+   *      acquire the fencing marker exactly the same way
+   *      `tryStartSubmission` does.
+   *   5. COMMIT. Only after this returns `{ kind: "claimed" }` is
+   *      the caller permitted to invoke `executePersistedOrder`.
+   *
+   * Two concurrent resume requests for the same `id` serialise
+   * through the advisory lock: one wins the marker, the other
+   * observes the guard result of the winner (or its own guard if
+   * state changed) and returns `not_claimed`.
+   */
+  async tryStartSubmissionWithExposureGuard(input: {
+    readonly id: number;
+    readonly owner: string;
+    readonly instrument: string;
+    readonly conid: string | null;
+    readonly allowCrossContractExposure: boolean;
+    readonly positionGuard: PositionGuardContext;
+  }): Promise<
+    | { readonly kind: "claimed" }
+    | { readonly kind: "not_claimed" }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: PositionGuardBlockedReason;
+      }
+  > {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // Round-8 lock protocol: account lock FIRST (same as
+      // insertProposedFromTicket) so a concurrent snapshot
+      // refresh cannot flip `complete` between our guard read
+      // and our marker acquisition.
+      if (input.positionGuard.kind === "available") {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+          [`snap:${input.positionGuard.accountId}`],
+        );
+      }
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        [input.instrument],
+      );
+
+      const guarded = await this.#runExposureGuard(client, {
+        instrument: input.instrument,
+        conid: input.conid,
+        allowCrossContractExposure: input.allowCrossContractExposure,
+        guard: input.positionGuard,
+      });
+      if (guarded.kind !== "ok") {
+        await client.query("ROLLBACK");
+        return guarded.outcome;
+      }
+
+      const result = await client.query(
+        `
+        UPDATE proposed_orders
+        SET processing_owner = $2,
+            processing_claimed_at = NOW(),
+            execution_attempted_at = NOW()
+        WHERE id = $1
+          AND status = 'PROPOSED'
+          AND execution_attempted_at IS NULL
+          AND broker_order_id IS NULL
+        RETURNING id
+        `,
+        [input.id, input.owner],
+      );
+      if ((result.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return { kind: "not_claimed" };
+      }
+      await client.query("COMMIT");
+      return { kind: "claimed" };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * PR14 round-6 blocker — shared exposure-guard body. Runs
+   * inside an OPEN transaction that already holds
+   * `pg_advisory_xact_lock(hashtext(instrument))`. Caller is
+   * responsible for BEGIN, the lock, COMMIT / ROLLBACK, and for
+   * mapping the returned outcome to its wire shape.
+   *
+   * Ordering:
+   *   1. `guard.kind === "unavailable"` — fail-closed, no DB read.
+   *   2. `broker_snapshot_syncs` — missing → `missing`.
+   *   3. session identity mismatch (`sync.session_id !==
+   *      guard.sessionId`) — `wrong_session`. Prevents the
+   *      previous process' snapshot from being trusted after a
+   *      restart, even if `observedAt` is still within
+   *      `maxSnapshotAgeMs`.
+   *   4. `observedAt` in the future by more than a small
+   *      tolerance (clock skew) — treated as `stale` (defensive).
+   *   5. `observedAt` older than `maxSnapshotAgeMs` — `stale`.
+   *   6. `complete === false` — `incomplete`.
+   *   7. `broker_position_snapshots` — non-zero position on the
+   *      logical instrument (respecting
+   *      `allowCrossContractExposure` semantics) →
+   *      `open_position_exists`.
+   */
+  async #runExposureGuard(
+    client: PoolClient,
+    input: {
+      readonly instrument: string;
+      readonly conid: string | null;
+      readonly allowCrossContractExposure: boolean;
+      readonly guard: PositionGuardContext;
+    },
+  ): Promise<
+    | { readonly kind: "ok" }
+    | {
+        readonly kind: "blocked";
+        readonly outcome:
+          | {
+              readonly kind: "open_position_exists";
+              readonly accountId: string;
+              readonly quantity: number;
+              readonly observedAt: Date;
+            }
+          | {
+              readonly kind: "position_state_unavailable";
+              readonly accountId: string | null;
+              readonly reason: PositionGuardBlockedReason;
+            };
+      }
+  > {
+    if (input.guard.kind === "unavailable") {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: null,
+          reason: input.guard.reason,
+        },
+      };
+    }
+    const g = input.guard;
+    const sync = await client.query(
+      `
+      SELECT session_id, observed_at, complete
+      FROM broker_snapshot_syncs
+      WHERE account_id = $1
+      `,
+      [g.accountId],
+    );
+    const syncRow = sync.rows[0];
+    if (!syncRow) {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: g.accountId,
+          reason: "missing",
+        },
+      };
+    }
+    // Round-6 blocker: after a process restart the previous
+    // session's snapshot MUST be rejected even if it's still
+    // within maxSnapshotAgeMs. Only the sessionId that wrote the
+    // snapshot may be trusted to reason about the account state.
+    if (typeof syncRow.session_id !== "string" || syncRow.session_id !== g.sessionId) {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: g.accountId,
+          reason: "wrong_session",
+        },
+      };
+    }
+    const syncObservedAt = new Date(syncRow.observed_at as string);
+    const nowMs = Date.now();
+    const ageMs = nowMs - syncObservedAt.getTime();
+    // Defensive: reject snapshots dated non-trivially in the
+    // future (clock skew / bad clock). 5 s tolerance.
+    if (ageMs < -5_000) {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: g.accountId,
+          reason: "stale",
+        },
+      };
+    }
+    if (ageMs > g.maxSnapshotAgeMs) {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: g.accountId,
+          reason: "stale",
+        },
+      };
+    }
+    if (syncRow.complete !== true) {
+      return {
+        kind: "blocked",
+        outcome: {
+          kind: "position_state_unavailable",
+          accountId: g.accountId,
+          reason: "incomplete",
+        },
+      };
+    }
+    // Round-6 blocker: position identity policy. When the
+    // strategy does NOT opt into cross-contract exposure any
+    // non-zero position on the LOGICAL instrument (broker
+    // symbol) blocks — regardless of conId. This prevents
+    // pyramiding across futures rollover / share class
+    // migrations when the strategy did not explicitly authorise
+    // parallel exposure. When the strategy opts in, the guard
+    // narrows to the exact conId (or symbol-only when the
+    // ticket has no conId).
+    let posRes;
+    if (!input.allowCrossContractExposure) {
+      posRes = await client.query(
+        `
+        SELECT quantity, observed_at, conid
+        FROM broker_position_snapshots
+        WHERE account_id = $1
+          AND instrument = $2
+        ORDER BY (CASE WHEN quantity <> 0 THEN 0 ELSE 1 END)
+        LIMIT 1
+        `,
+        [g.accountId, input.instrument],
+      );
+    } else if (input.conid !== null) {
+      posRes = await client.query(
+        `
+        SELECT quantity, observed_at, conid
+        FROM broker_position_snapshots
+        WHERE account_id = $1 AND conid = $2
+        `,
+        [g.accountId, input.conid],
+      );
+    } else {
+      posRes = await client.query(
+        `
+        SELECT quantity, observed_at, conid
+        FROM broker_position_snapshots
+        WHERE account_id = $1
+          AND instrument = $2
+          AND conid IS NULL
+        `,
+        [g.accountId, input.instrument],
+      );
+    }
+    const posRow = posRes.rows[0];
+    if (posRow) {
+      const quantity = Number(posRow.quantity);
+      if (Number.isFinite(quantity) && quantity !== 0) {
+        return {
+          kind: "blocked",
+          outcome: {
+            kind: "open_position_exists",
+            accountId: g.accountId,
+            quantity,
+            observedAt: new Date(posRow.observed_at as string),
+          },
+        };
+      }
+    }
+    return { kind: "ok" };
   }
 
   async markSubmitted(

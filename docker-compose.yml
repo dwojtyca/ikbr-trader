@@ -66,6 +66,20 @@ services:
       SIGNAL_EXECUTION_BASE_URL: http://execution-engine:3103
       # Phase 1 / PR1 (schema-only). Runtime attach in PR2.
       EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
+      # Phase 2 / PR13 — Execution Runtime (paper-only write endpoint).
+      # OFF by default. Setting to "true" only enables paper submission;
+      # live is impossible via env (see execution-runtime/config.ts).
+      EXECUTION_RUNTIME_ENABLED: ${EXECUTION_RUNTIME_ENABLED:-false}
+      # Phase 2 / PR14 — Trading Loop scheduler (paper-only).
+      # OFF by default. Also requires EXECUTION_RUNTIME_ENABLED=true —
+      # the loop is wired only inside that branch.
+      TRADING_LOOP_ENABLED: ${TRADING_LOOP_ENABLED:-false}
+      TRADING_LOOP_INTERVAL_MS: ${TRADING_LOOP_INTERVAL_MS:-30000}
+      TRADING_LOOP_STARTUP_DELAY_MS: ${TRADING_LOOP_STARTUP_DELAY_MS:-1000}
+      TRADING_LOOP_MAX_CONCURRENT_INSTRUMENTS: ${TRADING_LOOP_MAX_CONCURRENT_INSTRUMENTS:-2}
+      TRADING_LOOP_INSTRUMENT_IDS: ${TRADING_LOOP_INSTRUMENT_IDS:-}
+      TRADING_LOOP_SHUTDOWN_TIMEOUT_MS: ${TRADING_LOOP_SHUTDOWN_TIMEOUT_MS:-10000}
+      TRADING_LOOP_EXPOSURE_TIMEOUT_MS: ${TRADING_LOOP_EXPOSURE_TIMEOUT_MS:-3000}
     depends_on:
       postgres:
         condition: service_healthy

@@ -68,6 +68,44 @@ export type SubmitResult =
   | { readonly kind: "duplicate_pending_ambiguous"; readonly response: DuplicateResponseBody }
   | { readonly kind: "pending_claimed"; readonly response: DuplicateResponseBody }
   | { readonly kind: "conflict"; readonly message: string }
+  | {
+      /**
+       * PR14 blocker fix — execution-engine's atomic instrument-level
+       * guard refused the INSERT because another non-terminal order
+       * already exists for the same instrument under a DIFFERENT
+       * clientOrderId. HTTP 409 with `outcome: "ACTIVE_INTENT_EXISTS"`.
+       */
+      readonly kind: "active_intent_exists";
+      readonly message: string;
+      readonly existingOrderId?: number;
+      readonly existingStatus?: string;
+    }
+  | {
+      /**
+       * PR14 round-4 blocker — execution-engine's atomic open-
+       * position guard refused because the broker reports a
+       * non-zero position for the instrument. HTTP 409 with
+       * `outcome: "OPEN_POSITION_EXISTS"`.
+       */
+      readonly kind: "open_position_exists";
+      readonly message: string;
+      readonly quantity?: number;
+    }
+  | {
+      /**
+       * PR14 round-4 blocker — execution-engine has no fresh /
+       * complete broker position snapshot for the active account.
+       * HTTP 503 with `outcome: "POSITION_STATE_UNAVAILABLE"`.
+       */
+      readonly kind: "position_state_unavailable";
+      readonly message: string;
+      readonly reason?:
+        | "missing"
+        | "stale"
+        | "incomplete"
+        | "no_active_account"
+        | "wrong_session";
+    }
   | { readonly kind: "not_submitted"; readonly message: string; readonly statusCode: number }
   | { readonly kind: "unknown"; readonly reason: string };
 
@@ -192,10 +230,86 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
       }
 
       if (response.status === 409) {
+        // The 409 body distinguishes three cases:
+        //   - outcome=CONFLICT — same clientOrderId, different hash
+        //   - outcome=ACTIVE_INTENT_EXISTS — another non-terminal
+        //     order exists for the same instrument (PR14 atomic
+        //     guard). Callers must NOT retry with a new key.
+        //   - outcome=OPEN_POSITION_EXISTS — broker reports a
+        //     non-zero position for the instrument (PR14 round-4
+        //     open-position guard). Callers must NOT retry until
+        //     the position is closed.
+        const bodyOutcome =
+          parsed && typeof parsed === "object"
+            ? (parsed as { outcome?: unknown }).outcome
+            : undefined;
+        if (bodyOutcome === "ACTIVE_INTENT_EXISTS") {
+          const body = parsed as {
+            message?: unknown;
+            existingOrderId?: unknown;
+            existingStatus?: unknown;
+          };
+          return {
+            kind: "active_intent_exists",
+            message:
+              typeof body.message === "string"
+                ? body.message
+                : extractErrorMessage(parsed) ?? "active_intent_exists",
+            ...(typeof body.existingOrderId === "number"
+              ? { existingOrderId: body.existingOrderId }
+              : {}),
+            ...(typeof body.existingStatus === "string"
+              ? { existingStatus: body.existingStatus }
+              : {}),
+          };
+        }
+        if (bodyOutcome === "OPEN_POSITION_EXISTS") {
+          const body = parsed as { message?: unknown; quantity?: unknown };
+          return {
+            kind: "open_position_exists",
+            message:
+              typeof body.message === "string"
+                ? body.message
+                : extractErrorMessage(parsed) ?? "open_position_exists",
+            ...(typeof body.quantity === "number"
+              ? { quantity: body.quantity }
+              : {}),
+          };
+        }
         return {
           kind: "conflict",
           message: extractErrorMessage(parsed) ?? "conflict",
         };
+      }
+
+      if (response.status === 503) {
+        // POSITION_STATE_UNAVAILABLE — a fail-closed signal from
+        // execution-engine's open-position guard when the
+        // broker snapshot is missing / stale / incomplete. The
+        // loop must skip the instrument, NOT retry immediately.
+        const bodyOutcome =
+          parsed && typeof parsed === "object"
+            ? (parsed as { outcome?: unknown }).outcome
+            : undefined;
+        if (bodyOutcome === "POSITION_STATE_UNAVAILABLE") {
+          const body = parsed as { message?: unknown; reason?: unknown };
+          return {
+            kind: "position_state_unavailable",
+            message:
+              typeof body.message === "string"
+                ? body.message
+                : extractErrorMessage(parsed) ?? "position_state_unavailable",
+            ...(body.reason === "missing" ||
+            body.reason === "stale" ||
+            body.reason === "incomplete" ||
+            body.reason === "no_active_account" ||
+            body.reason === "wrong_session"
+              ? { reason: body.reason }
+              : {}),
+          };
+        }
+        // 503 without the specific outcome — treat as UNKNOWN
+        // (ambiguous, as before).
       }
 
       // Every other 4xx is a deterministic rejection. We report the

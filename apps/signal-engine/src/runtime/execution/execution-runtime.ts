@@ -47,7 +47,7 @@ import type {
   TradingPipelineResult,
 } from "@ikbr/shared";
 
-import type { MarketDataRuntime } from "../runtime.js";
+import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
 import type { PaperGuard } from "./paper-guard.js";
 import type {
   DuplicateResponseBody,
@@ -61,7 +61,10 @@ export type NotSubmittedReason =
   | "NO_TRADE"
   | "PIPELINE_FAILURE"
   | "PAPER_GUARD_FAILED"
-  | "UNSUPPORTED_TICKET_SHAPE";
+  | "UNSUPPORTED_TICKET_SHAPE"
+  | "ACTIVE_INTENT_EXISTS"
+  | "OPEN_POSITION_EXISTS"
+  | "POSITION_STATE_UNAVAILABLE";
 
 export type PendingReason = "ambiguous_attempt" | "claim_held_by_other";
 
@@ -146,6 +149,33 @@ export class ExecutionRuntime {
       input.instrumentId,
       input.policy,
     );
+    return this.#submitFromDryRun(dryRunResult, input.idempotencyKey);
+  }
+
+  /**
+   * PR14 seam — submit against a PRE-COMPUTED `DryRunResult` so the
+   * caller (e.g. the trading loop) can derive a stable trigger
+   * identity from `dryRunResult.snapshot` and pass it back as
+   * `idempotencyKey` WITHOUT running the pipeline twice.
+   *
+   * The `clientOrderHash` is ALWAYS re-derived from the ticket
+   * inside the submission path — this method intentionally does
+   * NOT accept a pre-computed hash. Trusting a caller-supplied
+   * hash would allow a swapped ticket to slip past the
+   * conflict-detection layer while the caller's stale hash
+   * matches the previously-submitted intent. Round-5 blocker fix.
+   */
+  async executePrepared(input: {
+    readonly dryRunResult: DryRunResult;
+    readonly idempotencyKey: string;
+  }): Promise<ExecutionRuntimeOutcome> {
+    return this.#submitFromDryRun(input.dryRunResult, input.idempotencyKey);
+  }
+
+  async #submitFromDryRun(
+    dryRunResult: DryRunResult,
+    idempotencyKey: string,
+  ): Promise<ExecutionRuntimeOutcome> {
     const pipeline = dryRunResult.pipeline;
 
     if (pipeline.outcome === "NO_TRADE") {
@@ -195,7 +225,7 @@ export class ExecutionRuntime {
     const submission = await this.#submitter.submit({
       ticket: legacyTicket,
       strategy: this.#strategy,
-      clientOrderId: input.idempotencyKey,
+      clientOrderId: idempotencyKey,
       clientOrderHash,
     });
 
@@ -205,14 +235,14 @@ export class ExecutionRuntime {
           outcome: "SUBMITTED",
           pipeline,
           execution: submission.response.execution,
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
         };
       case "resumed":
         return {
           outcome: "SUBMITTED",
           pipeline,
           execution: submission.response.execution,
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
           resumed: true,
         };
       case "duplicate_submitted":
@@ -225,26 +255,55 @@ export class ExecutionRuntime {
         return {
           outcome: "DUPLICATE",
           previousExecution: submission.response.order,
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
         };
       case "duplicate_pending_ambiguous":
         return {
           outcome: "PENDING",
           previousOrder: submission.response.order,
           reason: "ambiguous_attempt",
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
         };
       case "pending_claimed":
         return {
           outcome: "PENDING",
           previousOrder: submission.response.order,
           reason: "claim_held_by_other",
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
         };
       case "conflict":
         return {
           outcome: "CONFLICT",
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
+          message: submission.message,
+        };
+      case "active_intent_exists":
+        // Execution-engine's atomic instrument-level guard refused
+        // the INSERT. Retrying with a fresh key will produce the
+        // same outcome until the pre-existing intent finishes.
+        return {
+          outcome: "NOT_SUBMITTED",
+          pipeline,
+          reason: "ACTIVE_INTENT_EXISTS",
+          message: submission.message,
+        };
+      case "open_position_exists":
+        // Broker reports a non-zero position for the instrument —
+        // PR14 round-4 authoritative open-position guard. Retrying
+        // will fail until the position is closed.
+        return {
+          outcome: "NOT_SUBMITTED",
+          pipeline,
+          reason: "OPEN_POSITION_EXISTS",
+          message: submission.message,
+        };
+      case "position_state_unavailable":
+        // Execution-engine has no fresh / complete broker snapshot.
+        // Fail-closed — the loop must skip, NOT auto-retry.
+        return {
+          outcome: "NOT_SUBMITTED",
+          pipeline,
+          reason: "POSITION_STATE_UNAVAILABLE",
           message: submission.message,
         };
       case "not_submitted":
@@ -257,7 +316,7 @@ export class ExecutionRuntime {
       case "unknown":
         return {
           outcome: "UNKNOWN",
-          idempotencyKey: input.idempotencyKey,
+          idempotencyKey,
           reason: submission.reason,
         };
     }

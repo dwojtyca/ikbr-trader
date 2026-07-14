@@ -10,6 +10,7 @@ import {
   ExecutionRepository,
   OrderDecisionMetadata,
   OrderListFilters,
+  type PositionGuardContext,
 } from "./repository.js";
 import { AccountSnapshot, TwsExecutionClient } from "./tws-execution-client.js";
 import { AlertService } from "./alerts.js";
@@ -24,7 +25,11 @@ import {
   assertEnvironmentAllowsWrite,
   whitelistForEnvironment,
 } from "./env-guard.js";
-import { evaluateReadiness } from "./readiness.js";
+import {
+  evaluateReadiness,
+  type PositionSnapshotHealthInput,
+} from "./readiness.js";
+import { RefreshCoordinator } from "./refresh-coordinator.js";
 import { planDirectTicketDispatch } from "./direct-ticket-guard.js";
 import { orchestrateExecuteTicket } from "./execute-ticket-orchestrator.js";
 
@@ -62,13 +67,66 @@ const tws = new TwsExecutionClient(
   },
   (line) => app.log.info(line),
   (update) => {
-    void repo.applyBrokerStatusUpdate(update).catch((err) => {
-      app.log.warn(
-        { update, err },
-        "failed to apply broker order status update",
-      );
-    });
+    // Round-8 invariant: any broker-side event that COULD change
+    // exposure MUST invalidate the position snapshot BEFORE the
+    // local `applyBrokerStatusUpdate` transitions the row to
+    // FILLED. Otherwise a concurrent write path could observe
+    //   1. our old flat snapshot (complete=true, quantity=0),
+    //   2. no active-intent block (row already FILLED),
+    // and submit a duplicate entry.
+    //
+    // Ordering (async but sequential):
+    //   a. `invalidatePositionSnapshot(accountId)` — awaited;
+    //      sets `broker_snapshot_syncs.complete=false` under the
+    //      account lock. Write path fail-closes as `incomplete`
+    //      from THIS moment.
+    //   b. `applyBrokerStatusUpdate(update)` — awaited; flips
+    //      the local row to FILLED (releases active-intent).
+    //   c. `refreshBrokerPositionSnapshot(accountId)` — fire-
+    //      and-forget; fetches broker state and (via generation
+    //      fence) marks `complete=true` if it's still the
+    //      newest refresh. Failure leaves `complete=false` and
+    //      readiness at 503.
+    //
+    // For non-FILLED updates the invalidation is skipped (they
+    // do not release exposure).
+    //
+    // Round-9 account identity: `BrokerOrderStatusUpdate` does
+    // NOT carry `accountId` (TWS `orderStatus` events are per-
+    // orderId, not per-account). We use `lastActiveAccountId`
+    // which enforces the SINGLE-ACTIVE-ACCOUNT invariant:
+    // execution-engine has exactly one active account at any
+    // time (see `ensureBrokerSession` + env-guard whitelist).
+    // A reconnect that changes the active account resets this
+    // state before any callback can fire, so a stale event from
+    // a previous account CANNOT invalidate a different account's
+    // snapshot.
     const status = String(update.status ?? "").toUpperCase();
+    void (async () => {
+      try {
+        if (status === "FILLED" && lastActiveAccountId !== null) {
+          const { generation } = await repo.invalidatePositionSnapshot({
+            accountId: lastActiveAccountId,
+            sessionId: EXECUTION_PROCESS_OWNER_ID,
+            observedAt: new Date(),
+          });
+          markSnapshotInvalidated(lastActiveAccountId, generation);
+        }
+        await repo.applyBrokerStatusUpdate(update);
+        if (status === "FILLED" && lastActiveAccountId !== null) {
+          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(
+            () => {
+              /* logged inside refreshBrokerPositionSnapshot */
+            },
+          );
+        }
+      } catch (err) {
+        app.log.warn(
+          { update, err },
+          "failed to apply broker order status update",
+        );
+      }
+    })();
     if (
       status === "REJECTED" ||
       status === "INACTIVE" ||
@@ -128,9 +186,53 @@ const tws = new TwsExecutionClient(
     }
   },
   (fill) => {
-    void repo.upsertBrokerExecutionFill(fill).catch((err) => {
-      app.log.warn({ fill, err }, "failed to persist broker execution fill");
-    });
+    // Round-8: partial fills / executionDetails events also
+    // change broker-side exposure. Invalidate BEFORE persisting
+    // the fill record (so a write path racing this callback can
+    // never observe a stale flat snapshot).
+    //
+    // Round-9 account identity: `fill.accountId` (when provided
+    // by executionDetails) is the authoritative source. Fall
+    // back to `lastActiveAccountId` only when the fill does NOT
+    // carry an account. If the fill DOES carry an account and
+    // it does NOT match `lastActiveAccountId`, log and SKIP —
+    // an event from a different (or previous) account MUST NOT
+    // invalidate the current active account's snapshot.
+    void (async () => {
+      try {
+        const eventAccount = fill.accountId ?? lastActiveAccountId;
+        const shouldApply =
+          eventAccount !== null &&
+          eventAccount === lastActiveAccountId;
+        if (!shouldApply && eventAccount !== null) {
+          app.log.warn(
+            {
+              fillAccount: fill.accountId,
+              currentActive: lastActiveAccountId,
+            },
+            "fill callback: account mismatch — skipping snapshot invalidation for the current active account",
+          );
+        }
+        if (shouldApply && lastActiveAccountId !== null) {
+          const { generation } = await repo.invalidatePositionSnapshot({
+            accountId: lastActiveAccountId,
+            sessionId: EXECUTION_PROCESS_OWNER_ID,
+            observedAt: new Date(),
+          });
+          markSnapshotInvalidated(lastActiveAccountId, generation);
+        }
+        await repo.upsertBrokerExecutionFill(fill);
+        if (shouldApply && lastActiveAccountId !== null) {
+          void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(
+            () => {
+              /* logged inside refreshBrokerPositionSnapshot */
+            },
+          );
+        }
+      } catch (err) {
+        app.log.warn({ fill, err }, "failed to persist broker execution fill");
+      }
+    })();
   },
   (report) => {
     void repo.applyBrokerCommissionReport(report).catch((err) => {
@@ -170,23 +272,13 @@ const decisionMetadataSchema = z.object({
   sourceError: z.string().optional(),
 });
 
-const executeTicketBodySchema = z.object({
-  ticket: ticketSchema,
-  persist: z.boolean().default(true),
-  strategy: z.string().default("manual_ticket"),
-  decisionSource: z
-    .enum(["signal", "llm", "user", "user_override"])
-    .optional(),
-  // Phase 2 / PR13 — end-to-end idempotency.
-  // Callers (execution-runtime) supply a stable `clientOrderId` and
-  // a `clientOrderHash` fingerprinting the order-critical fields.
-  // - Same key + same hash → duplicate-replay (200, no broker call).
-  // - Same key + different hash → idempotency conflict (409).
-  // - Missing keys → legacy behaviour (no dedup); kept for backwards
-  //   compatibility with existing callers.
-  clientOrderId: z.string().min(1).optional(),
-  clientOrderHash: z.string().min(1).optional(),
-});
+// Round-7 blocker — the wire schema + server-side default for
+// `allowCrossContractExposure` live in a separate module so
+// schema-only tests can exercise them without booting Fastify.
+import {
+  executeTicketBodySchema,
+  SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE,
+} from "./execute-ticket-schema.js";
 
 const executeProposedBodySchema = decisionMetadataSchema.extend({
   overrideRejected: z.boolean().optional(),
@@ -213,6 +305,111 @@ let executionSyncInFlight: Promise<void> | null = null;
 // mutable in-process state.
 let lastActiveAccountId: string | null = null;
 let lastReconciliationAt: Date | null = null;
+
+// -----------------------------------------------------------------------
+// PR14 round-7 blocker — broker-driven position snapshot refresher.
+//
+// The write-path exposure guard reads `broker_position_snapshots` +
+// `broker_snapshot_syncs`. A stale flat snapshot could otherwise be
+// consulted by an exposure-increasing write AFTER the broker has
+// already reported a fill. The refresher:
+//
+//   1. Serialises per-account so concurrent triggers do not race.
+//   2. Uses the two-phase begin/complete pair on the repository —
+//      readers see `complete=false` during the refresh window and
+//      the guard fail-closes with `POSITION_STATE_UNAVAILABLE
+//      (incomplete)`.
+//   3. Publishes health to `snapshotHealthByAccount` so `/ready` can
+//      surface an in-flight / failed refresh distinctly from
+//      "broker socket up but write path fail-closed".
+//
+// Trigger points wired below:
+//   - startup: on first `ensureBrokerSession` success
+//   - fill event: after `executePersistedOrder` observes FILLED
+//   - `/execution/account/summary`: awaits refresh before responding
+//   - dedicated `POST /execution/refresh-position-snapshot`
+//
+// Reconnect / TWS position-callback push is out of scope for this
+// PR (needs additional TWS wiring) — the fill + summary triggers
+// provide sufficient coverage for PR14.
+// -----------------------------------------------------------------------
+
+type SnapshotHealth =
+  | { readonly kind: "never" }
+  | { readonly kind: "healthy"; readonly at: Date }
+  | { readonly kind: "in_flight"; readonly startedAt: Date }
+  | {
+      readonly kind: "failed";
+      readonly at: Date;
+      readonly error: string;
+    };
+const snapshotHealthByAccount = new Map<string, SnapshotHealth>();
+
+/**
+ * PR14 round-9 blocker — generation-aware refresh coordinator.
+ * See `refresh-coordinator.ts` for the full contract; the
+ * inline coordinator was replaced with the extracted class so
+ * `refresh-coordinator.test.ts` can exercise the
+ * invalidate-during-refresh race deterministically.
+ */
+const refreshCoordinator = new RefreshCoordinator({
+  sessionId: EXECUTION_PROCESS_OWNER_ID,
+  now: () => new Date(),
+  log: {
+    info: (obj, msg) => app.log.info(obj, msg),
+    warn: (obj, msg) => app.log.warn(obj, msg),
+    error: (obj, msg) => app.log.error(obj, msg),
+  },
+  beginRefresh: (input) => repo.beginPositionSnapshotRefresh(input),
+  fetchBrokerSnapshot: (accountId) => tws.getAccountSnapshot(accountId),
+  completeRefresh: (input) => repo.completePositionSnapshotRefresh(input),
+  getStatus: (accountId) => repo.getPositionSnapshotStatus(accountId),
+});
+
+/**
+ * Round-8 helper — mark the local health tracker as
+ * `in_flight` immediately after `invalidatePositionSnapshot`
+ * committed. Ensures `/ready` observes the fail-closed window
+ * even if the follow-up refresh has not yet started (or the
+ * process crashes between).
+ */
+function markSnapshotInvalidated(accountId: string, generation: number): void {
+  refreshCoordinator.markInvalidated(accountId, generation);
+  const current = snapshotHealthByAccount.get(accountId);
+  if (current?.kind === "in_flight") return;
+  snapshotHealthByAccount.set(accountId, {
+    kind: "in_flight",
+    startedAt: new Date(),
+  });
+}
+
+async function refreshBrokerPositionSnapshot(
+  accountId: string,
+): Promise<void> {
+  await refreshCoordinator.refresh(accountId);
+  // Reflect the coordinator's final health into the local map
+  // consumed by `/ready` and by `/execution/account/summary`.
+  snapshotHealthByAccount.set(
+    accountId,
+    refreshCoordinator.health(accountId),
+  );
+}
+
+function toReadinessSnapshotHealth(
+  h: SnapshotHealth | undefined,
+): PositionSnapshotHealthInput | undefined {
+  if (h === undefined) return { kind: "never" };
+  switch (h.kind) {
+    case "never":
+      return { kind: "never" };
+    case "healthy":
+      return { kind: "healthy" };
+    case "in_flight":
+      return { kind: "in_flight" };
+    case "failed":
+      return { kind: "failed", error: h.error };
+  }
+}
 
 function envGuardConfig(): EnvironmentGuardConfig {
   return {
@@ -581,6 +778,27 @@ async function runReconciliation(): Promise<ReconciliationReport> {
         brokerPositionsCount: brokerBySymbol.size,
       },
     });
+    // Round-8: reconciliation just observed broker-side state
+    // that DIFFERS from our local expectation. Invalidate the
+    // snapshot so any pending write path fail-closes until the
+    // next refresh reflects the truth. The refresh call below
+    // will pick up the fresh state.
+    try {
+      const { generation } = await repo.invalidatePositionSnapshot({
+        accountId,
+        sessionId: EXECUTION_PROCESS_OWNER_ID,
+        observedAt: new Date(),
+      });
+      markSnapshotInvalidated(accountId, generation);
+      void refreshBrokerPositionSnapshot(accountId).catch(() => {
+        /* logged inside refreshBrokerPositionSnapshot */
+      });
+    } catch (err) {
+      app.log.warn(
+        { err, accountId },
+        "reconciliation: failed to invalidate position snapshot",
+      );
+    }
   } else {
     app.log.info({ report }, "position reconciliation clean");
   }
@@ -640,6 +858,15 @@ async function ensureBrokerSession(): Promise<{
   }
 
   lastActiveAccountId = accountId;
+  // Round-7 blocker: kick off (or coalesce onto) a broker-driven
+  // snapshot refresh whenever we (re-)confirm the active account.
+  // Ensures the write-path guard has a fresh snapshot at startup
+  // AND after any reconnect that goes through ensureBrokerSession.
+  // Fire-and-forget — the refresher is serialised per-account and
+  // publishes health for `/ready`.
+  void refreshBrokerPositionSnapshot(accountId).catch(() => {
+    /* logged inside refreshBrokerPositionSnapshot */
+  });
   return { accountId, accounts };
 }
 
@@ -690,6 +917,16 @@ async function executePersistedOrder(
       { proposedOrderId: order.id },
     );
     if (result.status === "FILLED") {
+      // Round-8 invariant: invalidate the snapshot BEFORE the
+      // local FILLED transition so the write-path guard cannot
+      // observe (stale flat snapshot + no active-intent block)
+      // between the two writes.
+      const { generation } = await repo.invalidatePositionSnapshot({
+        accountId,
+        sessionId: EXECUTION_PROCESS_OWNER_ID,
+        observedAt: new Date(),
+      });
+      markSnapshotInvalidated(accountId, generation);
       await repo.markFilled(
         order.id,
         accountId,
@@ -697,6 +934,14 @@ async function executePersistedOrder(
         `Broker accepted order, status=${result.status}`,
         metadata,
       );
+      // Fire-and-forget the full refresh — completePositionSnapshotRefresh
+      // will land the fresh snapshot and flip complete=true when the
+      // broker responds. Failure keeps complete=false → readiness 503 and
+      // the write path stays fail-closed until the next successful
+      // refresh.
+      void refreshBrokerPositionSnapshot(accountId).catch(() => {
+        /* logged inside refreshBrokerPositionSnapshot */
+      });
     } else {
       await repo.markSubmitted(
         order.id,
@@ -749,6 +994,17 @@ app.get("/ready", async (request, reply) => {
     lastReconciliationAt,
     reconciliationMaxAgeSeconds:
       config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
+    // Round-7 blocker: surface broker-driven snapshot refresher
+    // health so a stale / in-flight / failed refresh flips
+    // `/ready` to 503. The write path is fail-closed either way,
+    // but operators must see the difference between "broker
+    // socket up but write path fail-closed" and "everything OK".
+    positionSnapshotHealth:
+      lastActiveAccountId !== null
+        ? toReadinessSnapshotHealth(
+            snapshotHealthByAccount.get(lastActiveAccountId),
+          )
+        : undefined,
   });
 
   return reply.code(result.statusCode).send(result.body);
@@ -813,7 +1069,27 @@ app.post("/execution/bootstrap", async () => {
   };
 });
 
-app.get("/execution/account/summary", async (request) => {
+// Round-7 blocker: explicit trigger for the broker-driven
+// position snapshot refresh. Used by operators (post-manual-
+// trade / after external reconciliation) and by internal
+// callers that observed a broker-side change outside the fill
+// event path. Coalesced per-account; response reflects the
+// outcome of the (possibly in-flight) refresh.
+app.post("/execution/refresh-position-snapshot", async (_request, reply) => {
+  const { accountId } = await ensureBrokerSession();
+  await refreshBrokerPositionSnapshot(accountId);
+  const health = snapshotHealthByAccount.get(accountId);
+  if (!health || health.kind === "healthy") {
+    return { accountId, status: health?.kind ?? "never" };
+  }
+  return reply.code(503).send({
+    accountId,
+    status: health.kind,
+    ...(health.kind === "failed" ? { error: health.error } : {}),
+  });
+});
+
+app.get("/execution/account/summary", async (request, reply) => {
   const query = z
     .object({
       force: z.coerce.boolean().default(false),
@@ -867,6 +1143,43 @@ app.get("/execution/account/summary", async (request) => {
     fetchedAtMs: Date.now(),
     snapshot,
   };
+
+  // PR14 round-7 blocker — snapshot persistence is NO LONGER
+  // fire-and-forget. Await the broker-driven refresher so:
+  //   - the write-path guard consulted immediately after this
+  //     HTTP response is guaranteed to see either the freshly
+  //     persisted snapshot (success) or `complete=false`
+  //     (in-flight / failed) — never a stale flat snapshot;
+  //   - `/ready` observes the failure state via
+  //     `snapshotHealthByAccount` and reports the write path
+  //     as not ready.
+  // The refresher itself performs a second `getAccountSnapshot`
+  // — the small extra cost is acceptable given this endpoint is
+  // low-frequency (UI cache TTL 10 s). Coalesced when concurrent
+  // requests arrive.
+  await refreshBrokerPositionSnapshot(accountId);
+  const snapshotHealth = snapshotHealthByAccount.get(accountId);
+  if (snapshotHealth && snapshotHealth.kind === "failed") {
+    // Round-8 blocker fix: snapshot persistence failed. The
+    // display response is NOT returned as 200 with a live
+    // snapshot — that would tempt callers to trust it. Return
+    // 503 with the failure reason. The write path is
+    // fail-closed and readiness is 503; the endpoint MUST NOT
+    // paper over the failure with a happy 200.
+    app.log.warn(
+      { accountId, error: snapshotHealth.error },
+      "account-summary: snapshot persistence failed — returning 503",
+    );
+    return reply.code(503).send({
+      error: "position_snapshot_persistence_failed",
+      accountId,
+      reason: snapshotHealth.error,
+      positionSnapshotPersistence: {
+        status: "failed",
+        error: snapshotHealth.error,
+      },
+    });
+  }
 
   return {
     source: "live",
@@ -1180,11 +1493,37 @@ app.post("/execution/execute-ticket", async (request, reply) => {
   // persist=true + PR13 idempotency
   // -----------------------------------------------------------------
   if (hasClientOrderId) {
+    // PR14 round-5 blocker — always pass an EXPLICIT
+    // PositionGuardContext. `undefined` would bypass the guard
+    // entirely, which is fail-open. When there is no active
+    // broker account yet the discriminated `"unavailable"`
+    // variant flows through the repo to `POSITION_STATE_UNAVAILABLE`.
+    const positionGuard: PositionGuardContext =
+      lastActiveAccountId !== null
+        ? {
+            kind: "available",
+            accountId: lastActiveAccountId,
+            sessionId: EXECUTION_PROCESS_OWNER_ID,
+            // Round-7 blocker: use the SHORT write-path TTL, not
+            // the display cache TTL. Exposure-increasing writes
+            // require a fresh broker snapshot; a 60 s window is
+            // wide enough for many fills to land undetected.
+            maxSnapshotAgeMs:
+              config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
+          }
+        : { kind: "unavailable", reason: "no_active_account" };
+    // Round-7 blocker: `allowCrossContractExposure` is NOT
+    // caller-controlled. Hardcoded to the safe server-side
+    // default (`false`) for PR14.
+    const allowCrossContractExposure =
+      SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE;
     const outcome = await orchestrateExecuteTicket(
       {
         getIdempotencyRecord: (id) => repo.getIdempotencyRecord(id),
         insertProposedFromTicket: (t, s, i) =>
-          repo.insertProposedFromTicket(t, s, i),
+          repo.insertProposedFromTicket(t, s, i, positionGuard, {
+            allowCrossContractExposure,
+          }),
         getProposedOrderById: (id) => repo.getProposedOrderById(id),
         executePersistedOrder: (order) =>
           executePersistedOrder(order, {
@@ -1192,7 +1531,17 @@ app.post("/execution/execute-ticket", async (request, reply) => {
             decisionActor: "user",
           }),
         isUniqueViolation,
-        tryStartSubmission: (input) => repo.tryStartSubmission(input),
+        // Round-6 blocker: the marker acquisition MUST also run
+        // the exposure guard under the same advisory lock, on
+        // BOTH the fresh-INSERT and resume paths. The endpoint
+        // captures the guard + allowCrossContractExposure via
+        // closure so the orchestrator itself stays stateless.
+        tryStartSubmission: (input) =>
+          repo.tryStartSubmissionWithExposureGuard({
+            ...input,
+            allowCrossContractExposure,
+            positionGuard,
+          }),
         ownerId: () => EXECUTION_PROCESS_OWNER_ID,
       },
       {
@@ -1213,6 +1562,32 @@ app.post("/execution/execute-ticket", async (request, reply) => {
               ? "clientOrderId conflict"
               : "clientOrderId already exists with a different clientOrderHash",
           ...(outcome.order ? { order: outcome.order } : {}),
+        });
+      case "active_intent_exists":
+        return reply.code(409).send({
+          outcome: "ACTIVE_INTENT_EXISTS",
+          error: "active_intent_exists",
+          message: `instrument ${ticket.instrument} already has a non-terminal proposed order (id=${outcome.existingOrderId}, status=${outcome.existingStatus})`,
+          existingOrderId: outcome.existingOrderId,
+          existingStatus: outcome.existingStatus,
+          existingClientOrderId: outcome.existingClientOrderId,
+        });
+      case "open_position_exists":
+        return reply.code(409).send({
+          outcome: "OPEN_POSITION_EXISTS",
+          error: "open_position_exists",
+          message: `instrument ${ticket.instrument} has an open broker position (accountId=${outcome.accountId}, quantity=${outcome.quantity})`,
+          accountId: outcome.accountId,
+          quantity: outcome.quantity,
+          observedAt: outcome.observedAt.toISOString(),
+        });
+      case "position_state_unavailable":
+        return reply.code(503).send({
+          outcome: "POSITION_STATE_UNAVAILABLE",
+          error: "position_state_unavailable",
+          message: `broker position snapshot ${outcome.reason} for ${outcome.accountId}`,
+          accountId: outcome.accountId,
+          reason: outcome.reason,
         });
       case "duplicate_submitted":
         return reply.code(200).send({
@@ -1281,10 +1656,55 @@ app.post("/execution/execute-ticket", async (request, reply) => {
     return reply.code(423).send({ error: (error as Error).message });
   }
 
-  const insertedId = await repo.insertProposedFromTicket(
+  const legacyPositionGuard: PositionGuardContext =
+    lastActiveAccountId !== null
+      ? {
+          kind: "available",
+          accountId: lastActiveAccountId,
+          sessionId: EXECUTION_PROCESS_OWNER_ID,
+          maxSnapshotAgeMs:
+            config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
+        }
+      : { kind: "unavailable", reason: "no_active_account" };
+  const insertOutcome = await repo.insertProposedFromTicket(
     ticket,
     body.strategy,
+    undefined,
+    legacyPositionGuard,
+    // Round-7 blocker: server-side hardcoded, NOT caller-controlled.
+    { allowCrossContractExposure: SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE },
   );
+  if (insertOutcome.kind === "active_intent_exists") {
+    // Same atomic guard as the idempotency path — an existing
+    // non-terminal order for this instrument blocks a fresh insert.
+    return reply.code(409).send({
+      outcome: "ACTIVE_INTENT_EXISTS",
+      error: "active_intent_exists",
+      message: `instrument ${ticket.instrument} already has a non-terminal proposed order (id=${insertOutcome.existingOrderId}, status=${insertOutcome.existingStatus})`,
+      existingOrderId: insertOutcome.existingOrderId,
+      existingStatus: insertOutcome.existingStatus,
+    });
+  }
+  if (insertOutcome.kind === "open_position_exists") {
+    return reply.code(409).send({
+      outcome: "OPEN_POSITION_EXISTS",
+      error: "open_position_exists",
+      message: `instrument ${ticket.instrument} has an open broker position (accountId=${insertOutcome.accountId}, quantity=${insertOutcome.quantity})`,
+      accountId: insertOutcome.accountId,
+      quantity: insertOutcome.quantity,
+      observedAt: insertOutcome.observedAt.toISOString(),
+    });
+  }
+  if (insertOutcome.kind === "position_state_unavailable") {
+    return reply.code(503).send({
+      outcome: "POSITION_STATE_UNAVAILABLE",
+      error: "position_state_unavailable",
+      message: `broker position snapshot ${insertOutcome.reason} for ${insertOutcome.accountId}`,
+      accountId: insertOutcome.accountId,
+      reason: insertOutcome.reason,
+    });
+  }
+  const insertedId = insertOutcome.id;
   const inserted = await repo.getProposedOrderById(insertedId);
   if (!inserted) {
     return reply
