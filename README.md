@@ -163,12 +163,29 @@ curl http://localhost:3104/backtest/dataset
 ## Running tests / typecheck
 
 ```bash
+pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test
 pnpm build
+
+# Real-Postgres integration tests (execution-engine only).
+# Requires a running Postgres — either the compose service or a local install.
+TEST_POSTGRES_URL=postgresql://postgres@localhost:5432/postgres pnpm test:integration
 ```
 
 Tests use the Node.js native test runner (`node --test`). No Jest.
+
+Note on the paper trading loop (PR14):
+
+- `TRADING_LOOP_ENABLED` defaults to `false`. The loop is OFF unless
+  the operator explicitly sets `TRADING_LOOP_ENABLED=true` AND
+  `EXECUTION_RUNTIME_ENABLED=true` AND provides `EXECUTION_API_TOKEN`.
+- Even with those flags, the current instrument registry does NOT
+  ship any instrument with `executionPolicy` populated — the loop
+  will resolve `INSTRUMENT_POLICY_UNAVAILABLE` for every instrument
+  and refuse to submit. Automatic trading is opt-in per-instrument
+  and requires an explicit `Instrument.executionPolicy` (see
+  [docs/architecture/TRADING_LOOP.md](docs/architecture/TRADING_LOOP.md)).
 
 ---
 

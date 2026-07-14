@@ -9,6 +9,9 @@
   ],
   "scripts": {
     "build": "pnpm -r build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "pnpm -r --if-present test",
+    "test:integration": "pnpm --filter @ikbr/execution-engine test",
     "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",

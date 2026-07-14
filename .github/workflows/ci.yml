@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ikbr_trader_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d ikbr_trader_ci"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          # `packageManager` from package.json is the source of truth.
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          # `engines.node` from package.json is the source of truth.
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - name: Integration tests (Postgres)
+        env:
+          TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/ikbr_trader_ci
+        run: pnpm test:integration
+      - run: pnpm build
