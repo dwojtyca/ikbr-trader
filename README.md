@@ -211,6 +211,7 @@ docker-compose.yml
 
 - [STRATEGIES.md](STRATEGIES.md) — per-strategy specs (entries, stops, TPs, scoring, market-context filters).
 - [AGENTS.md](AGENTS.md) — conventions for AI coding agents working on this repo.
+- [docs/architecture/DATABASE_MIGRATIONS.md](docs/architecture/DATABASE_MIGRATIONS.md) — versioned SQL migration workflow (PR14.2). Migrations run automatically on execution-engine startup; the process refuses to serve traffic if any migration fails.
 
 ---
 

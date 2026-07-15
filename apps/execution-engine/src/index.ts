@@ -1719,7 +1719,21 @@ app.post("/execution/execute-ticket", async (request, reply) => {
 });
 
 async function main(): Promise<void> {
-  await repo.init();
+  // PR14.2 — versioned database migrations. MUST complete before
+  // any HTTP route is registered and before the broker connection is
+  // opened. A migration failure blocks startup: throw propagates out
+  // of `main()`, the top-level handler logs and exits non-zero, so
+  // the scheduler / broker never come online against a partial schema.
+  try {
+    await repo.init();
+    app.log.info("database migrations up to date");
+  } catch (err) {
+    app.log.error(
+      { err: (err as Error).message },
+      "database migrations failed — refusing to start",
+    );
+    throw err;
+  }
 
   // Phase 1 / PR2: enforce Bearer auth on every non-public route,
   // stamp x-correlation-id on every response, and write one audit row
