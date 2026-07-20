@@ -13,7 +13,7 @@ import type {
 } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
-import { computeClientOrderHash } from "../execution/client-order-hash.js";
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { PaperGuard } from "../execution/paper-guard.js";
 import type { ReadyProbe } from "../execution/paper-guard.js";
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";

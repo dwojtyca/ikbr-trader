@@ -32,7 +32,10 @@ export type TradingLoopSkipReason =
   | "RUN_IN_PROGRESS"
   | "CONCURRENCY_CAP"
   | "EXPOSURE_BLOCKED"
-  | "EXPOSURE_READ_FAILED";
+  | "EXPOSURE_READ_FAILED"
+  | "RECONCILIATION_UNAVAILABLE"
+  | "RECONCILIATION_STALE"
+  | "RECONCILIATION_HOLD";
 
 /**
  * Outcome union for a single instrument tick. Kept small on

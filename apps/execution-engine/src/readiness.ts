@@ -22,7 +22,24 @@ export interface ReadinessInputs {
    * socket outage.
    */
   positionSnapshotHealth?: PositionSnapshotHealthInput;
+  /**
+   * PR15 — status of the latest reconciliation run for the active
+   * account. When missing / RUNNING / FAILED / ABANDONED /
+   * exposure-incomplete / wrong-session the write path is
+   * fail-closed globally.
+   */
+  reconciliationRunHealth?: ReconciliationRunHealthInput;
 }
+
+export type ReconciliationRunHealthInput =
+  | { readonly kind: "none_in_session" }
+  | { readonly kind: "running" }
+  | { readonly kind: "wrong_session" }
+  | { readonly kind: "failed" }
+  | { readonly kind: "abandoned" }
+  | { readonly kind: "incomplete_exposure" }
+  | { readonly kind: "incomplete_recovery" }
+  | { readonly kind: "healthy" };
 
 export type PositionSnapshotHealthInput =
   | { readonly kind: "never" }
@@ -113,6 +130,37 @@ export function evaluateReadiness(input: ReadinessInputs): ReadinessResult {
           ? "position_snapshot_refresh_in_flight"
           : "position_snapshot_refresh_failed",
     );
+  }
+
+  // PR15 — reconciliation run health. `incomplete_recovery` is
+  // per-instrument only and does NOT block the process
+  // globally (see PR15_PLAN §8 Readiness).
+  if (activeAccountKnown && input.reconciliationRunHealth !== undefined) {
+    const r = input.reconciliationRunHealth;
+    switch (r.kind) {
+      case "none_in_session":
+        reasons.push("reconciliation_never_ran_in_session");
+        break;
+      case "running":
+        reasons.push("reconciliation_running");
+        break;
+      case "wrong_session":
+        reasons.push("reconciliation_wrong_session");
+        break;
+      case "failed":
+        reasons.push("reconciliation_failed");
+        break;
+      case "abandoned":
+        reasons.push("reconciliation_abandoned");
+        break;
+      case "incomplete_exposure":
+        reasons.push("reconciliation_incomplete_exposure");
+        break;
+      case "incomplete_recovery":
+      case "healthy":
+      default:
+        break;
+    }
   }
 
   // Decision D7: tradingEnabled=false does NOT block readiness.

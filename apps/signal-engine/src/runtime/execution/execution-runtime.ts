@@ -54,7 +54,7 @@ import type {
   ExecutionTicketSubmitter,
   SubmittedResponseBody,
 } from "./submitter.js";
-import { computeClientOrderHash } from "./client-order-hash.js";
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { toLegacySignalTicket } from "./ticket-mapper.js";
 
 export type NotSubmittedReason =
@@ -220,7 +220,7 @@ export class ExecutionRuntime {
         message: err instanceof Error ? err.message : String(err),
       };
     }
-    const clientOrderHash = computeClientOrderHash(ticket);
+    const clientOrderHash = computeClientOrderHash(legacyTicket);
 
     const submission = await this.#submitter.submit({
       ticket: legacyTicket,

@@ -61,6 +61,7 @@ import type {
   TradingLoopStatus,
   TriggerIdentity,
 } from "./types.js";
+import type { ReconciliationReader } from "./reconciliation-reader.js";
 
 export interface TradingLoopServiceOptions {
   readonly config: TradingLoopConfig;
@@ -68,6 +69,14 @@ export interface TradingLoopServiceOptions {
   readonly marketDataRuntime: MarketDataRuntime;
   readonly executionRuntime: ExecutionRuntime;
   readonly exposureReader: TradingExposureReader;
+  /**
+   * PR15 — optional fail-closed reconciliation pre-check. When
+   * provided, runs BEFORE the exposure guard for every instrument
+   * tick; any non-`pass` outcome skips the instrument with a
+   * `RECONCILIATION_*` reason. Left `undefined` in unit tests
+   * that pre-date PR15.
+   */
+  readonly reconciliationReader?: ReconciliationReader;
   readonly logger: Pick<FastifyBaseLogger, "info" | "warn" | "error" | "debug">;
   /** Test hook. Defaults to `new Date()`. */
   readonly clock?: () => Date;
@@ -79,12 +88,43 @@ export interface TradingLoopServiceOptions {
 
 const HISTORY_LIMIT = 100;
 
+/**
+ * PR15 §4 — trusted mapping from the shared `AssetClass` union
+ * to IBKR `secType`. Signal-engine never guesses / infers this
+ * from string prefixes; the reconciliation identity fallback
+ * requires a mapped value AND the full symbol/exchange/currency
+ * tuple. Unknown classes return `null` — the reader then skips
+ * with `identity_incomplete`.
+ */
+function mapAssetClassToSecType(
+  assetClass: Instrument["assetClass"],
+): string | null {
+  switch (assetClass) {
+    case "future":
+      return "FUT";
+    case "stock":
+    case "etf":
+      return "STK";
+    case "index":
+      return "IND";
+    case "forex":
+      return "CASH";
+    case "option":
+      return "OPT";
+    case "crypto":
+      return "CRYPTO";
+    default:
+      return null;
+  }
+}
+
 export class TradingLoopService {
   readonly #config: TradingLoopConfig;
   readonly #registry: InstrumentRegistry;
   readonly #marketDataRuntime: MarketDataRuntime;
   readonly #executionRuntime: ExecutionRuntime;
   readonly #exposureReader: TradingExposureReader;
+  readonly #reconciliationReader: ReconciliationReader | null;
   readonly #logger: TradingLoopServiceOptions["logger"];
   readonly #clock: () => Date;
   readonly #setTimeoutFn: typeof setTimeout;
@@ -124,6 +164,7 @@ export class TradingLoopService {
     this.#marketDataRuntime = options.marketDataRuntime;
     this.#executionRuntime = options.executionRuntime;
     this.#exposureReader = options.exposureReader;
+    this.#reconciliationReader = options.reconciliationReader ?? null;
     this.#logger = options.logger;
     this.#clock = options.clock ?? (() => new Date());
     this.#setTimeoutFn = options.setTimeoutFn ?? setTimeout;
@@ -353,6 +394,51 @@ export class TradingLoopService {
     instrument: Instrument,
   ): Promise<TradingLoopInstrumentReport> {
     const startedAt = this.#clock();
+
+    // ---- PR15 reconciliation pre-check (fail-closed) ----------------
+    // Fast skip BEFORE market-data / pipeline work. Execution-engine
+    // remains the authoritative gate — this reader is an optimisation.
+    if (this.#reconciliationReader) {
+      let reconciliation:
+        | Awaited<ReturnType<ReconciliationReader["checkInstrument"]>>
+        | null = null;
+      try {
+        reconciliation = await this.#reconciliationReader.checkInstrument({
+          instrument: instrument.brokerSymbol,
+          conId:
+            instrument.conId != null ? String(instrument.conId) : null,
+          secType: mapAssetClassToSecType(instrument.assetClass),
+          exchange: instrument.exchange,
+          currency: instrument.currency,
+        });
+      } catch (err) {
+        return this.#finalize(cycleId, instrument.id, startedAt, {
+          kind: "SKIPPED",
+          instrumentId: instrument.id,
+          reason: "RECONCILIATION_UNAVAILABLE",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (reconciliation.kind !== "pass") {
+        const reason =
+          reconciliation.kind === "hold"
+            ? "RECONCILIATION_HOLD"
+            : reconciliation.kind === "stale"
+              ? "RECONCILIATION_STALE"
+              : "RECONCILIATION_UNAVAILABLE";
+        return this.#finalize(cycleId, instrument.id, startedAt, {
+          kind: "SKIPPED",
+          instrumentId: instrument.id,
+          reason,
+          message:
+            reconciliation.kind === "unavailable"
+              ? reconciliation.reason
+              : reconciliation.kind === "hold"
+                ? reconciliation.reason
+                : undefined,
+        });
+      }
+    }
 
     // ---- Exposure guard (fail-closed) -------------------------------
     let exposure: TradingExposure;

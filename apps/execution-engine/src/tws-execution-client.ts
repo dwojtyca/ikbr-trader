@@ -1,6 +1,10 @@
 import IB from "ib";
 import { SignalTicket } from "@ikbr/shared";
 import { assertClientDirectTicketAllowed } from "./direct-ticket-guard.js";
+import {
+  deriveChildOrderRef,
+  deriveParentOrderRef,
+} from "./reconciliation/order-ref.js";
 
 interface TwsExecutionConfig {
   host: string;
@@ -99,6 +103,27 @@ interface PlaceOrderPlan {
    * back-compat with verification/logging that knows about a single bracket.
    */
   bracketLegs?: PlannedBracketLeg[];
+}
+
+/**
+ * PR15 §4 — immutable prepared plan returned by
+ * `prepareBrokerOrderPlan`. The caller persists `legs` via
+ * `ReconciliationRepository.insertPlanLegsAndRefs` BEFORE
+ * calling `dispatchPreparedOrder(prepared)`. Broker IDs and
+ * refs are allocated exactly once in the prepare step and are
+ * NOT reallocated on dispatch.
+ */
+export interface PreparedBrokerOrderLeg {
+  readonly role: "PARENT" | "TP" | "SL";
+  readonly roleOrdinal: number;
+  readonly brokerOrderId: string;
+  readonly orderRef: string;
+}
+export interface PreparedBrokerOrder {
+  readonly contract: ContractShape;
+  readonly normalizedTicket: SignalTicket;
+  readonly plan: PlaceOrderPlan;
+  readonly legs: readonly PreparedBrokerOrderLeg[];
 }
 
 interface OpenOrderContext {
@@ -360,7 +385,18 @@ export class TwsExecutionClient {
     ticket: SignalTicket,
     accountId: string,
     tif: string,
-    context?: { proposedOrderId?: number | string | null },
+    context?: {
+      proposedOrderId?: number | string | null;
+      /**
+       * PR15 §4 — when provided, each IB `Order` object gets an
+       * `orderRef` derived deterministically from this
+       * `clientOrderId`. The bracket parent's ref uses
+       * `deriveParentOrderRef`; each child (TP / SL / ladder rung)
+       * uses `deriveChildOrderRef` so the runner can walk broker
+       * rows back to `broker_order_ref_map` by exact match.
+       */
+      clientOrderId?: string | null;
+    },
   ): Promise<PlaceOrderResult> {
     assertClientDirectTicketAllowed({
       proposedOrderId: context?.proposedOrderId ?? null,
@@ -409,6 +445,7 @@ export class TwsExecutionClient {
         normalizedTicket,
         accountId,
         tif,
+        context?.clientOrderId ?? null,
       );
     } catch (error) {
       const message = (error as Error).message;
@@ -436,6 +473,7 @@ export class TwsExecutionClient {
         retryTicket,
         accountId,
         tif,
+        context?.clientOrderId ?? null,
       );
     }
   }
@@ -445,8 +483,129 @@ export class TwsExecutionClient {
     ticket: SignalTicket,
     accountId: string,
     tif: string,
+    clientOrderId: string | null,
   ): Promise<PlaceOrderResult> {
-    const plan = this.buildOrderPlan(ticket, accountId, tif);
+    const plan = this.buildOrderPlan(ticket, accountId, tif, clientOrderId);
+    return this.dispatchPlan(plan, contract, ticket);
+  }
+
+  /**
+   * PR15 §4 (three-phase, Phase A) — pure plan builder. Runs
+   * every pre-broker step of `placeSignalOrder` (contract
+   * resolution, RTH guard, tick normalisation, `buildOrderPlan`)
+   * and returns an immutable `PreparedBrokerOrder` DTO. NO DB
+   * writes, NO broker calls. The caller persists the plan first
+   * (`ReconciliationRepository.insertPlanLegsAndRefs`) and only
+   * then invokes `dispatchPreparedOrder`.
+   */
+  async prepareBrokerOrderPlan(
+    ticket: SignalTicket,
+    accountId: string,
+    tif: string,
+    context?: {
+      readonly proposedOrderId?: number | string | null;
+      readonly clientOrderId?: string | null;
+    },
+  ): Promise<PreparedBrokerOrder> {
+    assertClientDirectTicketAllowed({
+      proposedOrderId: context?.proposedOrderId ?? null,
+      environment: this.config.environment ?? "paper",
+      allowDirectTicket: this.config.allowDirectTicket === true,
+    });
+    await this.connect();
+    const resolvedContract = await this.resolveContract(ticket);
+    const contract = resolvedContract.contract;
+    const guardedTicket = this.enforceIntegerQuantityIfNeeded(ticket);
+    this.assertUsRthAllows(contract, guardedTicket);
+    const effectiveTick = this.determineEffectiveTick(
+      contract,
+      guardedTicket,
+      resolvedContract.minTick,
+    );
+    const normalizedTicket = this.normalizeTicketPrices(
+      guardedTicket,
+      effectiveTick.tick,
+    );
+    if (
+      effectiveTick.tick &&
+      this.wasTicketNormalized(guardedTicket, normalizedTicket)
+    ) {
+      this.onLog(
+        `execution price normalization conid=${guardedTicket.conid ?? "n/a"} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? "n/a"} effectiveTick=${effectiveTick.tick} entry=${guardedTicket.entry ?? "n/a"}->${normalizedTicket.entry ?? "n/a"} stop=${guardedTicket.stop ?? "n/a"}->${normalizedTicket.stop ?? "n/a"} tp=${guardedTicket.takeProfit ?? "n/a"}->${normalizedTicket.takeProfit ?? "n/a"}`,
+      );
+    }
+    const plan = this.buildOrderPlan(
+      normalizedTicket,
+      accountId,
+      tif,
+      context?.clientOrderId ?? null,
+    );
+    // Build the leg descriptor list — the caller persists these
+    // rows + the ref map BEFORE the broker call. Parent first,
+    // then children in emission order.
+    const legs: PreparedBrokerOrderLeg[] = [];
+    const parentLeg = plan.orders[0];
+    legs.push({
+      role: "PARENT",
+      roleOrdinal: 0,
+      brokerOrderId: String(parentLeg.orderId),
+      orderRef: String(
+        (parentLeg.order as { orderRef?: string }).orderRef ?? "",
+      ),
+    });
+    if (plan.bracketLegs && plan.bracketLegs.length > 0) {
+      plan.bracketLegs.forEach((leg, idx) => {
+        const ord = idx + 1;
+        const tpOrder = plan.orders.find(
+          (o) => o.orderId === leg.takeProfitOrderId,
+        );
+        const slOrder = plan.orders.find(
+          (o) => o.orderId === leg.stopLossOrderId,
+        );
+        legs.push({
+          role: "TP",
+          roleOrdinal: ord,
+          brokerOrderId: String(leg.takeProfitOrderId),
+          orderRef: String(
+            (tpOrder?.order as { orderRef?: string })?.orderRef ?? "",
+          ),
+        });
+        legs.push({
+          role: "SL",
+          roleOrdinal: ord,
+          brokerOrderId: String(leg.stopLossOrderId),
+          orderRef: String(
+            (slOrder?.order as { orderRef?: string })?.orderRef ?? "",
+          ),
+        });
+      });
+    }
+    return { contract, normalizedTicket, plan, legs };
+  }
+
+  /**
+   * PR15 §4 (Phase C) — dispatch a pre-built plan to IBKR.
+   * MUST only be called AFTER the plan has been persisted
+   * (`ReconciliationRepository.insertPlanLegsAndRefs`). No new
+   * `orderId` allocation, no bracket rebuild — every `orderId`
+   * and `orderRef` is exactly what was persisted.
+   */
+  async dispatchPreparedOrder(
+    prepared: PreparedBrokerOrder,
+  ): Promise<PlaceOrderResult> {
+    await this.connect();
+    return this.dispatchPlan(
+      prepared.plan,
+      prepared.contract,
+      prepared.normalizedTicket,
+    );
+  }
+
+  private dispatchPlan(
+    plan: PlaceOrderPlan,
+    contract: ContractShape,
+    ticket: SignalTicket,
+  ): Promise<PlaceOrderResult> {
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
 
@@ -895,6 +1054,7 @@ export class TwsExecutionClient {
     ticket: SignalTicket,
     accountId: string,
     tif: string,
+    clientOrderId: string | null,
   ): PlaceOrderPlan {
     const parentOrderId = this.allocOrderId();
     const attachBracket = this.shouldAttachBracket(ticket);
@@ -904,6 +1064,14 @@ export class TwsExecutionClient {
       tif,
       !attachBracket,
     );
+    // PR15 §4 — stamp deterministic parent orderRef so
+    // reconciliation can match this order back to
+    // `broker_order_ref_map`. `orderRef` is a CORRELATION
+    // identifier only; broker-side idempotency remains the
+    // `client_order_id UNIQUE` + advisory lock.
+    if (clientOrderId) {
+      parentOrder.orderRef = deriveParentOrderRef(clientOrderId);
+    }
 
     if (!attachBracket) {
       return {
@@ -925,6 +1093,13 @@ export class TwsExecutionClient {
 
     legs.forEach((leg, idx) => {
       const isLastLeg = idx === legs.length - 1;
+      const ordinal = idx + 1;
+      const tpRef = clientOrderId
+        ? deriveChildOrderRef(clientOrderId, { role: "TP", ordinal })
+        : undefined;
+      const slRef = clientOrderId
+        ? deriveChildOrderRef(clientOrderId, { role: "SL", ordinal })
+        : undefined;
       const takeProfitOrder: Record<string, unknown> = {
         action: oppositeAction,
         totalQuantity: leg.quantity,
@@ -936,6 +1111,7 @@ export class TwsExecutionClient {
         ocaGroup: leg.ocaGroup,
         ocaType: 2,
         transmit: false,
+        ...(tpRef ? { orderRef: tpRef } : {}),
       };
       const useTrail =
         ticket.trailingStopPct !== undefined &&
@@ -958,6 +1134,7 @@ export class TwsExecutionClient {
             ocaGroup: leg.ocaGroup,
             ocaType: 2,
             transmit: isLastLeg,
+            ...(slRef ? { orderRef: slRef } : {}),
           }
         : {
             action: oppositeAction,
@@ -972,6 +1149,7 @@ export class TwsExecutionClient {
             // Only the very last child of the very last leg transmits the entire
             // staged batch atomically.
             transmit: isLastLeg,
+            ...(slRef ? { orderRef: slRef } : {}),
           };
       ordersList.push({
         orderId: leg.takeProfitOrderId,
@@ -2392,4 +2570,437 @@ export class TwsExecutionClient {
     this.nextOrderId += 1;
     return id;
   }
+
+  // -----------------------------------------------------------------
+  // PR15 — reconciliation snapshot helpers.
+  //
+  // These wrap the raw ib.js event streams (`position` +
+  // `positionEnd`, `openOrder` + `openOrderEnd`, `execDetails` +
+  // `execDetailsEnd`) with:
+  //   * bounded per-call timeout,
+  //   * `AbortSignal` cancellation,
+  //   * strict listener cleanup on success / error / timeout / abort,
+  //   * subscription tear-down (`cancelPositions`) where applicable.
+  // -----------------------------------------------------------------
+
+  async reqPositionsSnapshot(opts: {
+    timeoutMs: number;
+    abortSignal: AbortSignal;
+  }): Promise<{
+    ok: boolean;
+    endObserved: boolean;
+    rows: Array<{
+      accountId: string;
+      symbol: string;
+      conId?: string;
+      secType?: string;
+      exchange?: string;
+      currency?: string;
+      position: number;
+      averageCost?: number;
+    }>;
+    error?: string;
+  }> {
+    await this.connect();
+    return new Promise((resolve) => {
+      const rows: Array<{
+        accountId: string;
+        symbol: string;
+        conId?: string;
+        secType?: string;
+        exchange?: string;
+        currency?: string;
+        position: number;
+        averageCost?: number;
+      }> = [];
+      let endObserved = false;
+      let settled = false;
+      const timer = setTimeout(() => finish("timeout"), opts.timeoutMs);
+      const onAbort = () => finish("aborted");
+      opts.abortSignal.addEventListener("abort", onAbort, { once: true });
+
+      const onPosition = (
+        account: string,
+        contract: ContractShape,
+        position: number,
+        avgCost: number,
+      ) => {
+        const conid = toNum(contract.conId);
+        rows.push({
+          accountId: String(account ?? ""),
+          symbol: String(
+            contract.symbol ?? (conid ? `CONID:${conid}` : "UNKNOWN"),
+          ),
+          conId: conid ? String(conid) : undefined,
+          secType:
+            typeof contract.secType === "string" ? contract.secType : undefined,
+          exchange:
+            typeof contract.exchange === "string" ? contract.exchange : undefined,
+          currency:
+            typeof contract.currency === "string" ? contract.currency : undefined,
+          position: Number(position),
+          averageCost: toNum(avgCost),
+        });
+      };
+      const onEnd = () => {
+        endObserved = true;
+        finish("ok");
+      };
+      const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+        const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+        const code = Number(parsed.code);
+        // Only surface *fatal* errors.
+        if (!Number.isFinite(code)) return;
+        if ([200, 321, 322, 323, 502, 503, 504].includes(code)) {
+          finish(`ib_error:${code}:${parsed.message}`);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        opts.abortSignal.removeEventListener("abort", onAbort);
+        this.ib.off("position", onPosition);
+        this.ib.off("positionEnd", onEnd);
+        this.ib.off("error", onError);
+        try {
+          this.ib.cancelPositions();
+        } catch {
+          /* no-op */
+        }
+      };
+      const finish = (reason: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (reason === "ok") {
+          resolve({ ok: true, endObserved: true, rows });
+        } else if (reason === "timeout" || reason === "aborted") {
+          resolve({ ok: false, endObserved, rows, error: reason });
+        } else {
+          resolve({ ok: false, endObserved, rows, error: reason });
+        }
+      };
+      this.ib.on("position", onPosition);
+      this.ib.on("positionEnd", onEnd);
+      this.ib.on("error", onError);
+      try {
+        this.ib.reqPositions();
+      } catch (err) {
+        finish(`req_failed:${(err as Error).message}`);
+      }
+    });
+  }
+
+  async reqAllOpenOrdersSnapshot(opts: {
+    timeoutMs: number;
+    abortSignal: AbortSignal;
+  }): Promise<{
+    ok: boolean;
+    endObserved: boolean;
+    rows: Array<{
+      brokerOrderId: string;
+      permId?: string;
+      clientId?: number;
+      orderRef?: string;
+      status: string;
+      symbol?: string;
+      conId?: string;
+      secType?: string;
+      exchange?: string;
+      currency?: string;
+      filled?: number;
+      remaining?: number;
+      action?: string;
+    }>;
+    error?: string;
+  }> {
+    await this.connect();
+    return new Promise((resolve) => {
+      const byOrderId = new Map<
+        number,
+        {
+          brokerOrderId: string;
+          permId?: string;
+          clientId?: number;
+          orderRef?: string;
+          status: string;
+          symbol?: string;
+          conId?: string;
+          secType?: string;
+          exchange?: string;
+          currency?: string;
+          filled?: number;
+          remaining?: number;
+          action?: string;
+        }
+      >();
+      let endObserved = false;
+      let settled = false;
+      const timer = setTimeout(() => finish("timeout"), opts.timeoutMs);
+      const onAbort = () => finish("aborted");
+      opts.abortSignal.addEventListener("abort", onAbort, { once: true });
+
+      const onOpenOrder = (
+        orderId: number,
+        contract: ContractShape,
+        order: Record<string, unknown>,
+        orderState: Record<string, unknown>,
+      ) => {
+        const conid = toNum(contract.conId);
+        const existing = byOrderId.get(orderId) ?? {
+          brokerOrderId: String(orderId),
+          status: String(orderState?.status ?? "Unknown"),
+        };
+        byOrderId.set(orderId, {
+          ...existing,
+          permId: order?.permId != null ? String(order.permId) : existing.permId,
+          clientId:
+            order?.clientId != null ? Number(order.clientId) : existing.clientId,
+          orderRef:
+            typeof order?.orderRef === "string" && order.orderRef.length > 0
+              ? order.orderRef
+              : existing.orderRef,
+          symbol: contract.symbol ?? existing.symbol,
+          conId: conid ? String(conid) : existing.conId,
+          secType:
+            typeof contract.secType === "string" ? contract.secType : existing.secType,
+          exchange:
+            typeof contract.exchange === "string"
+              ? contract.exchange
+              : existing.exchange,
+          currency:
+            typeof contract.currency === "string"
+              ? contract.currency
+              : existing.currency,
+          action:
+            typeof order?.action === "string" ? order.action : existing.action,
+          status: String(orderState?.status ?? existing.status),
+        });
+      };
+      const onOrderStatus = (
+        orderId: number,
+        status: string,
+        filled: number,
+        remaining: number,
+        _avgFillPrice: number,
+        permId: number,
+      ) => {
+        const existing = byOrderId.get(orderId) ?? {
+          brokerOrderId: String(orderId),
+          status,
+        };
+        byOrderId.set(orderId, {
+          ...existing,
+          brokerOrderId: String(orderId),
+          status: String(status ?? existing.status),
+          filled: Number.isFinite(filled) ? Number(filled) : existing.filled,
+          remaining: Number.isFinite(remaining)
+            ? Number(remaining)
+            : existing.remaining,
+          permId: permId != null ? String(permId) : existing.permId,
+        });
+      };
+      const onEnd = () => {
+        endObserved = true;
+        finish("ok");
+      };
+      const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+        const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+        const code = Number(parsed.code);
+        if (!Number.isFinite(code)) return;
+        if ([321, 322, 502, 503, 504].includes(code)) {
+          finish(`ib_error:${code}:${parsed.message}`);
+        }
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        opts.abortSignal.removeEventListener("abort", onAbort);
+        this.ib.off("openOrder", onOpenOrder);
+        this.ib.off("orderStatus", onOrderStatus);
+        this.ib.off("openOrderEnd", onEnd);
+        this.ib.off("error", onError);
+      };
+      const finish = (reason: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        const rows = Array.from(byOrderId.values());
+        resolve(
+          reason === "ok"
+            ? { ok: true, endObserved: true, rows }
+            : { ok: false, endObserved, rows, error: reason },
+        );
+      };
+      this.ib.on("openOrder", onOpenOrder);
+      this.ib.on("orderStatus", onOrderStatus);
+      this.ib.on("openOrderEnd", onEnd);
+      this.ib.on("error", onError);
+      try {
+        this.ib.reqAllOpenOrders();
+      } catch (err) {
+        finish(`req_failed:${(err as Error).message}`);
+      }
+    });
+  }
+
+  async reqExecutionsSnapshot(opts: {
+    accountId: string;
+    since: Date;
+    timeoutMs: number;
+    abortSignal: AbortSignal;
+  }): Promise<{
+    ok: boolean;
+    endObserved: boolean;
+    rows: Array<{
+      execId: string;
+      brokerOrderId: string;
+      permId?: string;
+      orderRef?: string;
+      accountId: string;
+      symbol?: string;
+      conId?: string;
+      secType?: string;
+      exchange?: string;
+      currency?: string;
+      side?: string;
+      shares: number;
+      price?: number;
+      executedAt: Date;
+    }>;
+    error?: string;
+  }> {
+    await this.connect();
+    const reqId = this.allocRequestId();
+    return new Promise((resolve) => {
+      const rows: Array<{
+        execId: string;
+        brokerOrderId: string;
+        permId?: string;
+        orderRef?: string;
+        accountId: string;
+        symbol?: string;
+        conId?: string;
+        secType?: string;
+        exchange?: string;
+        currency?: string;
+        side?: string;
+        shares: number;
+        price?: number;
+        executedAt: Date;
+      }> = [];
+      let endObserved = false;
+      let settled = false;
+      const timer = setTimeout(() => finish("timeout"), opts.timeoutMs);
+      const onAbort = () => finish("aborted");
+      opts.abortSignal.addEventListener("abort", onAbort, { once: true });
+
+      const onExecDetails = (
+        incomingReqId: number,
+        contract: ContractShape,
+        execution: Record<string, unknown>,
+      ) => {
+        if (incomingReqId !== reqId) return;
+        const conid = toNum(contract.conId);
+        const timeStr =
+          typeof execution?.time === "string" ? execution.time : "";
+        const executedAt = parseIbExecutionTime(timeStr) ?? new Date();
+        rows.push({
+          execId: String(execution?.execId ?? ""),
+          brokerOrderId: String(execution?.orderId ?? ""),
+          permId:
+            execution?.permId != null ? String(execution.permId) : undefined,
+          orderRef:
+            typeof execution?.orderRef === "string" && execution.orderRef.length > 0
+              ? execution.orderRef
+              : undefined,
+          accountId: String(execution?.acctNumber ?? opts.accountId),
+          symbol:
+            typeof contract.symbol === "string" ? contract.symbol : undefined,
+          conId: conid ? String(conid) : undefined,
+          secType:
+            typeof contract.secType === "string" ? contract.secType : undefined,
+          exchange:
+            typeof contract.exchange === "string" ? contract.exchange : undefined,
+          currency:
+            typeof contract.currency === "string" ? contract.currency : undefined,
+          side: typeof execution?.side === "string" ? execution.side : undefined,
+          shares:
+            execution?.shares != null ? Number(execution.shares) : 0,
+          price:
+            execution?.price != null ? Number(execution.price) : undefined,
+          executedAt,
+        });
+      };
+      const onEnd = (incomingReqId: number) => {
+        if (incomingReqId !== reqId) return;
+        endObserved = true;
+        finish("ok");
+      };
+      const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+        const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== reqId)
+          return;
+        const code = Number(parsed.code);
+        if (
+          Number.isFinite(code) &&
+          [162, 200, 321, 322, 323].includes(code) === false
+        ) {
+          return;
+        }
+        finish(`ib_error:${parsed.code ?? "n/a"}:${parsed.message}`);
+      };
+      const cleanup = () => {
+        clearTimeout(timer);
+        opts.abortSignal.removeEventListener("abort", onAbort);
+        this.ib.off("execDetails", onExecDetails);
+        this.ib.off("execDetailsEnd", onEnd);
+        this.ib.off("error", onError);
+      };
+      const finish = (reason: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(
+          reason === "ok"
+            ? { ok: true, endObserved: true, rows }
+            : { ok: false, endObserved, rows, error: reason },
+        );
+      };
+      this.ib.on("execDetails", onExecDetails);
+      this.ib.on("execDetailsEnd", onEnd);
+      this.ib.on("error", onError);
+      try {
+        const filter = {
+          clientId: 0,
+          acctCode: opts.accountId,
+          time: this.formatExecutionFilterTime(opts.since),
+          symbol: "",
+          secType: "",
+          exchange: "",
+          side: "",
+        };
+        this.ib.reqExecutions(reqId, filter);
+      } catch (err) {
+        finish(`req_failed:${(err as Error).message}`);
+      }
+    });
+  }
+}
+
+function parseIbExecutionTime(raw: string): Date | null {
+  // IB format: "yyyyMMdd  HH:mm:ss" (double space between date and
+  // time). Fall back to now() when unparseable.
+  if (!raw) return null;
+  const m = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d, hh, mm, ss] = m;
+  return new Date(
+    Date.UTC(
+      Number(y),
+      Number(mo) - 1,
+      Number(d),
+      Number(hh),
+      Number(mm),
+      Number(ss),
+    ),
+  );
 }

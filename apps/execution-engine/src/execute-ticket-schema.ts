@@ -18,7 +18,10 @@ const ticketSchema = z.object({
   conid: z.string().optional(),
   side: z.enum(["BUY", "SELL", "HOLD"]),
   positionEffect: z.enum(["OPEN_OR_ADD", "CLOSE_OR_REDUCE"]).optional(),
-  orderType: z.enum(["MKT", "LMT", "STP"]).default("MKT"),
+  // PR15 r6 §6 — no default. `MKT` must be explicitly requested
+  // AND authorised by trusted server-side policy
+  // (`SERVER_ALLOW_MARKET_ORDER`) before dispatch.
+  orderType: z.enum(["MKT", "LMT", "STP"]),
   quantity: z.coerce.number().positive(),
   entry: z.coerce.number().optional(),
   stop: z.coerce.number().optional(),
@@ -34,6 +37,11 @@ export const executeTicketBodySchema = z.object({
   persist: z.boolean().default(true),
   strategy: z.string().default("manual_ticket"),
   decisionSource: z.enum(["signal", "llm", "user", "user_override"]).optional(),
+  // PR15 r6 §1 — `clientOrderId` + `clientOrderHash` are MANDATORY
+  // when a request can reach broker dispatch. The route handler
+  // enforces "both-or-neither" AND rejects any submission-capable
+  // request that omits either. Zod keeps them optional so preview /
+  // dry-run callers still parse; the handler is the enforcement.
   clientOrderId: z.string().min(1).optional(),
   clientOrderHash: z.string().min(1).optional(),
 });
@@ -46,3 +54,13 @@ export const executeTicketBodySchema = z.object({
  * policy — never from the request body.
  */
 export const SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE = false;
+
+/**
+ * PR15 r6 §6 — hardcoded server-side policy: MKT orders are NOT
+ * accepted in the current phase. Callers must specify `LMT` or
+ * `STP` and provide the corresponding price fields. A future PR
+ * that legitimately needs `MKT` must gate it on a trusted policy
+ * source (instrument registry / kill-switch / operator token) —
+ * never on the request body.
+ */
+export const SERVER_ALLOW_MARKET_ORDER: boolean = false;

@@ -126,6 +126,47 @@ const rawSchema = z.object({
     .int()
     .min(1)
     .default(10),
+
+  // --- PR15: Durable reconciliation + recovery ---
+  // Master switch for the reconciliation scheduler. Default on for
+  // paper. Even when off the routes stay available so operators
+  // can trigger a run manually. When on, the scheduler ticks at
+  // RECONCILIATION_INTERVAL_MS (with a floor of MIN_INTERVAL_MS).
+  RECONCILIATION_LOOP_ENABLED: z.enum(["true", "false"]).default("true"),
+  RECONCILIATION_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .default(60_000),
+  RECONCILIATION_STARTUP_DELAY_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(2_000),
+  RECONCILIATION_MIN_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .default(15_000),
+  RECONCILIATION_SOURCE_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(500)
+    .default(8_000),
+  RECONCILIATION_RUN_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .default(45_000),
+  RECONCILIATION_EXECUTION_SAFETY_MARGIN_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .default(300_000),
+  // Secondary token for POST /execution/reconciliation/holds/:id/resolve.
+  // MUST differ from EXECUTION_API_TOKEN. If empty, the resolve
+  // endpoint is 403 by design.
+  EXECUTION_RECONCILIATION_RESOLVE_TOKEN: optionalTrimmedString,
 });
 
 const parseBoolFlag = (raw: "true" | "false"): boolean => raw === "true";

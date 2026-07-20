@@ -9,6 +9,7 @@ import {
   Side,
   deriveOrderDiagnostics,
 } from "@ikbr/shared";
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import {
   BrokerCommissionReport,
   BrokerExecutionFill,
@@ -17,6 +18,131 @@ import {
 import { runMigrations } from "./migrations.js";
 
 export type DecisionActor = "llm-agent" | "user" | "user_override";
+
+/**
+ * PR15 r8 §1 — parse a persisted `partial_take_profits` JSONB
+ * column back into the canonical `PartialTakeProfit[]` shape.
+ * Fail-closed: any deviation from the expected shape / value
+ * ranges throws so a corrupted or hostile row cannot silently
+ * degrade the recomputed clientOrderHash.
+ */
+function parsePartialTakeProfits(
+  raw: unknown,
+): SignalTicket["partialTakeProfits"] {
+  if (raw === null || raw === undefined) return undefined;
+  const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+  if (!Array.isArray(arr)) {
+    throw new Error(
+      "partial_take_profits: expected JSON array of {price, fraction}",
+    );
+  }
+  if (arr.length === 0) return undefined;
+  return arr.map((entry, idx) => {
+    if (typeof entry !== "object" || entry === null) {
+      throw new Error(`partial_take_profits[${idx}]: expected object`);
+    }
+    const e = entry as { price?: unknown; fraction?: unknown };
+    const price = Number(e.price);
+    const fraction = Number(e.fraction);
+    if (!Number.isFinite(price)) {
+      throw new Error(`partial_take_profits[${idx}].price must be finite`);
+    }
+    if (!Number.isFinite(fraction) || fraction <= 0) {
+      throw new Error(
+        `partial_take_profits[${idx}].fraction must be finite and > 0`,
+      );
+    }
+    return { price, fraction };
+  });
+}
+
+/**
+ * PR15 r8 §1 — pre-INSERT validation of the order-critical
+ * fields participating in the canonical clientOrderHash. Return
+ * `null` for OK; a string reason for a fail-closed rejection.
+ */
+function validateOrderCriticalShape(ticket: SignalTicket): string | null {
+  if (ticket.partialTakeProfits !== undefined) {
+    if (!Array.isArray(ticket.partialTakeProfits)) {
+      return "partialTakeProfits_not_array";
+    }
+    for (let i = 0; i < ticket.partialTakeProfits.length; i++) {
+      const p = ticket.partialTakeProfits[i];
+      if (typeof p !== "object" || p === null) return `partialTakeProfits[${i}]_not_object`;
+      if (!Number.isFinite(p.price)) return `partialTakeProfits[${i}].price_not_finite`;
+      if (!Number.isFinite(p.fraction) || p.fraction <= 0) {
+        return `partialTakeProfits[${i}].fraction_invalid`;
+      }
+    }
+  }
+  if (
+    ticket.trailingStopPct !== undefined &&
+    !Number.isFinite(ticket.trailingStopPct)
+  ) {
+    return "trailingStopPct_not_finite";
+  }
+  if (
+    ticket.trailingStopActivationR !== undefined &&
+    !Number.isFinite(ticket.trailingStopActivationR)
+  ) {
+    return "trailingStopActivationR_not_finite";
+  }
+  return null;
+}
+
+/**
+ * PR15 r8 §2 — reconstruct a `SignalTicket` from the persisted
+ * `ProposedOrder` and check that its canonical clientOrderHash
+ * matches the stored hash. MUST be called before any prepare /
+ * claim / broker dispatch involving that row.
+ */
+export function validatePersistedOrderIdentity(
+  order: ProposedOrder,
+  storedHash: string | null | undefined,
+): { readonly ok: true; readonly ticket: SignalTicket }
+  | { readonly ok: false; readonly reason: "hash_missing" | "hash_mismatch" | "shape_invalid"; readonly detail?: string } {
+  if (typeof storedHash !== "string" || storedHash.length === 0) {
+    return { ok: false, reason: "hash_missing" };
+  }
+  let partialTakeProfits: SignalTicket["partialTakeProfits"];
+  try {
+    partialTakeProfits = order.partialTakeProfits;
+  } catch (err) {
+    return { ok: false, reason: "shape_invalid", detail: (err as Error).message };
+  }
+  const ticket: SignalTicket = {
+    instrument: order.instrument,
+    conid: typeof order.conid === "string" ? order.conid : undefined,
+    side: order.side,
+    positionEffect: order.positionEffect ?? undefined,
+    orderType: order.orderType,
+    quantity: order.quantity,
+    entry: order.entry ?? undefined,
+    stop: order.stop ?? undefined,
+    takeProfit: order.takeProfit ?? undefined,
+    partialTakeProfits,
+    trailingStopPct: order.trailingStopPct ?? undefined,
+    trailingStopActivationR: order.trailingStopActivationR ?? undefined,
+    reason: order.reason,
+    confidence: order.confidence,
+    timestamp:
+      (order as { timestamp?: string }).timestamp ??
+      (order.createdAt instanceof Date
+        ? order.createdAt.toISOString()
+        : String(order.createdAt ?? "")),
+    riskCheckStatus: order.riskCheckStatus,
+  };
+  let computed: string;
+  try {
+    computed = computeClientOrderHash(ticket);
+  } catch (err) {
+    return { ok: false, reason: "shape_invalid", detail: (err as Error).message };
+  }
+  if (computed !== storedHash) {
+    return { ok: false, reason: "hash_mismatch" };
+  }
+  return { ok: true, ticket };
+}
 
 interface ProposedOrderRow {
   id: number;
@@ -29,6 +155,9 @@ interface ProposedOrderRow {
   entry: number | null;
   stop: number | null;
   take_profit: number | null;
+  partial_take_profits: unknown | null;
+  trailing_stop_pct: number | string | null;
+  trailing_stop_activation_r: number | string | null;
   reason: string;
   confidence: number;
   risk_check_status: "PASS" | "REJECT";
@@ -63,6 +192,28 @@ export interface CumulativeRealizedPnlSummary {
 
 export interface ExpectedNetPosition {
   symbol: string;
+  netShares: number;
+  longShares: number;
+  shortShares: number;
+  fillsCount: number;
+  lastFillAt: Date | null;
+}
+
+/**
+ * PR15 — identity-aware expected net positions. Includes the
+ * fields required to build a canonical `identity_key` (§2 of
+ * PR15_PLAN). `accountId`/`conId` are nullable because historical
+ * fills may lack them; the reconciliation runner classifies such
+ * rows as `identity_ambiguous` and refuses to aggregate them
+ * across accounts.
+ */
+export interface ExpectedNetPositionIdentity {
+  accountId: string | null;
+  symbol: string;
+  conId: string | null;
+  secType: string | null;
+  exchange: string | null;
+  currency: string | null;
   netShares: number;
   longShares: number;
   shortShares: number;
@@ -136,6 +287,60 @@ export type PositionGuardBlockedReason =
   | "incomplete"
   | "no_active_account"
   | "wrong_session";
+
+/**
+ * PR15 — authoritative reconciliation gate hook. Injected by the
+ * caller (execution-engine `index.ts`) so the repository can
+ * consult reconciliation runs / holds under the SAME advisory
+ * lock + transaction as the exposure guard, without importing
+ * the reconciliation module (avoids circular dependency).
+ *
+ * Callback receives an open `PoolClient` (already holding the
+ * PR14 `snap:<account>` and `hashtext(instrument)` xact locks)
+ * and the write-path identity (accountId + instrument + conId).
+ * Return `null` to pass through, or an outcome that the caller
+ * bubbles up to the HTTP layer as 503 with the corresponding
+ * reason.
+ */
+export type ReconciliationSubmissionGateOutcome =
+  | { readonly kind: "unavailable"; readonly reason: string }
+  | { readonly kind: "stale"; readonly ageSeconds: number }
+  | {
+      readonly kind: "hold";
+      readonly holdId: number;
+      readonly reason: string;
+      readonly severity: string;
+    };
+
+export type ReconciliationSubmissionGate = (
+  client: PoolClient,
+  ctx: {
+    readonly accountId: string;
+    readonly sessionId: string;
+    readonly instrument: string;
+    readonly conId: string | null;
+    readonly nowMs: number;
+  },
+) => Promise<ReconciliationSubmissionGateOutcome | null>;
+
+/**
+ * PR15 §4 (three-phase, Phase B) — narrow shape of the prepared
+ * plan the atomic claim needs to persist. Defined here (not
+ * imported from tws-execution-client) to avoid dragging broker
+ * types into the repository layer.
+ */
+export interface PlanPersistenceInput {
+  readonly clientOrderId: string;
+  readonly clientOrderHash: string;
+  readonly instrument: string;
+  readonly conid: string | null;
+  readonly legs: readonly {
+    readonly role: "PARENT" | "TP" | "SL";
+    readonly roleOrdinal: number;
+    readonly brokerOrderId: string;
+    readonly orderRef: string;
+  }[];
+}
 
 export interface OrderDecisionMetadata {
   decisionSource?: DecisionSource;
@@ -932,7 +1137,10 @@ export class ExecutionRepository {
         }
       | undefined,
     positionGuard: PositionGuardContext,
-    options?: { readonly allowCrossContractExposure?: boolean },
+    options?: {
+      readonly allowCrossContractExposure?: boolean;
+      readonly reconciliationGate?: ReconciliationSubmissionGate;
+    },
   ): Promise<
     | { readonly kind: "inserted"; readonly id: number }
     | {
@@ -964,7 +1172,46 @@ export class ExecutionRepository {
         readonly accountId: string | null;
         readonly reason: PositionGuardBlockedReason;
       }
+    | {
+        /**
+         * PR15 — authoritative reconciliation gate refused the
+         * submission inside the same tx as the exposure guard.
+         * `reason` mirrors the write-path decision matrix (see
+         * PR15_PLAN §6): `reconciliation_running`,
+         * `reconciliation_failed`, `reconciliation_wrong_session`,
+         * `reconciliation_incomplete_exposure`, etc.
+         */
+        readonly kind: "reconciliation_unavailable";
+        readonly reason: string;
+      }
+    | {
+        readonly kind: "reconciliation_stale";
+        readonly ageSeconds: number;
+      }
+    | {
+        readonly kind: "reconciliation_hold";
+        readonly holdId: number;
+        readonly reason: string;
+        readonly severity: string;
+      }
+    | {
+        /**
+         * PR15 r8 §1 — malformed order-critical shape
+         * (e.g. `partialTakeProfits` not a proper array of
+         * `{price, fraction}` with finite positive numbers).
+         * Fail-closed: no INSERT, no marker, no broker call.
+         */
+        readonly kind: "invalid_ticket_shape";
+        readonly reason: string;
+      }
   > {
+    // PR15 r8 §1 — validate order-critical fields fail-closed
+    // BEFORE any DB tx. `partialTakeProfits` in particular must
+    // be a well-shaped array; malformed input never persists.
+    const validationError = validateOrderCriticalShape(ticket);
+    if (validationError) {
+      return { kind: "invalid_ticket_shape", reason: validationError };
+    }
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -988,6 +1235,45 @@ export class ExecutionRepository {
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
         ticket.instrument,
       ]);
+
+      // PR15 — authoritative reconciliation gate under the SAME
+      // locks + transaction as the PR14 exposure guard. Runs
+      // BEFORE the active-intent check and the exposure guard so
+      // a reconciliation hold / unavailable-reconciliation short-
+      // circuits the write path with a distinct outcome.
+      if (
+        options?.reconciliationGate &&
+        positionGuard.kind === "available"
+      ) {
+        const reconOutcome = await options.reconciliationGate(client, {
+          accountId: positionGuard.accountId,
+          sessionId: positionGuard.sessionId,
+          instrument: ticket.instrument,
+          conId: ticket.conid ?? null,
+          nowMs: Date.now(),
+        });
+        if (reconOutcome) {
+          await client.query("ROLLBACK");
+          if (reconOutcome.kind === "hold") {
+            return {
+              kind: "reconciliation_hold",
+              holdId: reconOutcome.holdId,
+              reason: reconOutcome.reason,
+              severity: reconOutcome.severity,
+            };
+          }
+          if (reconOutcome.kind === "stale") {
+            return {
+              kind: "reconciliation_stale",
+              ageSeconds: reconOutcome.ageSeconds,
+            };
+          }
+          return {
+            kind: "reconciliation_unavailable",
+            reason: reconOutcome.reason,
+          };
+        }
+      }
 
       // Look for any non-terminal row that is NOT the resume
       // target of the current caller (same client_order_id).
@@ -1050,6 +1336,9 @@ export class ExecutionRepository {
           entry,
           stop,
           take_profit,
+          partial_take_profits,
+          trailing_stop_pct,
+          trailing_stop_activation_r,
           reason,
           confidence,
           risk_check_status,
@@ -1062,9 +1351,10 @@ export class ExecutionRepository {
         )
         VALUES (
           $1, $2, $3, $4, $5,
-          $6, $7, $8, $9, $10,
-          $11, $12, 'PROPOSED', $13, 'user',
-          $14, $15, NOW()
+          $6, $7, $8, $9,
+          $10::jsonb, $11, $12,
+          $13, $14, $15, 'PROPOSED', $16, 'user',
+          $17, $18, NOW()
         )
         RETURNING id
         `,
@@ -1078,6 +1368,11 @@ export class ExecutionRepository {
           ticket.entry ?? null,
           ticket.stop ?? null,
           ticket.takeProfit ?? null,
+          ticket.partialTakeProfits && ticket.partialTakeProfits.length > 0
+            ? JSON.stringify(ticket.partialTakeProfits)
+            : null,
+          ticket.trailingStopPct ?? null,
+          ticket.trailingStopActivationR ?? null,
           ticket.reason,
           ticket.confidence,
           ticket.riskCheckStatus,
@@ -1118,6 +1413,7 @@ export class ExecutionRepository {
     const result = await this.pool.query(
       `
       SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
              llm_decision_id, source_error, processing_owner, processing_claimed_at,
@@ -1146,6 +1442,7 @@ export class ExecutionRepository {
     const result = await this.pool.query(
       `
       SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
              llm_decision_id, source_error, processing_owner, processing_claimed_at,
@@ -1161,12 +1458,60 @@ export class ExecutionRepository {
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
+  /**
+   * PR15 r7 §3 — one-shot fetch of everything the submission
+   * service needs to decide on an `execute-proposed/:id`
+   * request: the mapped `ProposedOrder`, plus the raw
+   * `client_order_id` / `client_order_hash` columns that
+   * `ProposedOrder` does not carry.
+   */
+  async getExecutableProposedById(
+    id: number,
+  ): Promise<{
+    readonly order: ProposedOrder;
+    readonly clientOrderId: string | null;
+    readonly clientOrderHash: string | null;
+  } | null> {
+    const result = await this.pool.query(
+      `
+      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
+             reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
+             decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
+             llm_decision_id, source_error, processing_owner, processing_claimed_at,
+             broker_order_id, execution_account_id, execution_message, last_error,
+             execution_attempted_at, executed_at, created_at,
+             client_order_id, client_order_hash
+      FROM proposed_orders
+      WHERE id = $1
+      `,
+      [id],
+    );
+    const row = result.rows[0] as
+      | (ProposedOrderRow & {
+          client_order_id: string | null;
+          client_order_hash: string | null;
+        })
+      | undefined;
+    if (!row) return null;
+    return {
+      order: this.mapRow(row),
+      clientOrderId:
+        typeof row.client_order_id === "string" ? row.client_order_id : null,
+      clientOrderHash:
+        typeof row.client_order_hash === "string"
+          ? row.client_order_hash
+          : null,
+    };
+  }
+
   async getProposedOrderByBrokerOrderId(
     brokerOrderId: string,
   ): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
       SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
              llm_decision_id, source_error, processing_owner, processing_claimed_at,
@@ -1288,6 +1633,7 @@ export class ExecutionRepository {
     const result = await this.pool.query(
       `
       SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+             partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
              llm_decision_id, source_error, processing_owner, processing_claimed_at,
@@ -1465,6 +1811,7 @@ export class ExecutionRepository {
     readonly conid: string | null;
     readonly allowCrossContractExposure: boolean;
     readonly positionGuard: PositionGuardContext;
+    readonly reconciliationGate?: ReconciliationSubmissionGate;
   }): Promise<
     | { readonly kind: "claimed" }
     | { readonly kind: "not_claimed" }
@@ -1478,6 +1825,20 @@ export class ExecutionRepository {
         readonly kind: "position_state_unavailable";
         readonly accountId: string | null;
         readonly reason: PositionGuardBlockedReason;
+      }
+    | {
+        readonly kind: "reconciliation_unavailable";
+        readonly reason: string;
+      }
+    | {
+        readonly kind: "reconciliation_stale";
+        readonly ageSeconds: number;
+      }
+    | {
+        readonly kind: "reconciliation_hold";
+        readonly holdId: number;
+        readonly reason: string;
+        readonly severity: string;
       }
   > {
     const client = await this.pool.connect();
@@ -1496,6 +1857,42 @@ export class ExecutionRepository {
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
         input.instrument,
       ]);
+
+      // PR15 — authoritative reconciliation gate under the SAME
+      // locks + transaction as the resume-path exposure guard.
+      if (
+        input.reconciliationGate &&
+        input.positionGuard.kind === "available"
+      ) {
+        const reconOutcome = await input.reconciliationGate(client, {
+          accountId: input.positionGuard.accountId,
+          sessionId: input.positionGuard.sessionId,
+          instrument: input.instrument,
+          conId: input.conid,
+          nowMs: Date.now(),
+        });
+        if (reconOutcome) {
+          await client.query("ROLLBACK");
+          if (reconOutcome.kind === "hold") {
+            return {
+              kind: "reconciliation_hold",
+              holdId: reconOutcome.holdId,
+              reason: reconOutcome.reason,
+              severity: reconOutcome.severity,
+            };
+          }
+          if (reconOutcome.kind === "stale") {
+            return {
+              kind: "reconciliation_stale",
+              ageSeconds: reconOutcome.ageSeconds,
+            };
+          }
+          return {
+            kind: "reconciliation_unavailable",
+            reason: reconOutcome.reason,
+          };
+        }
+      }
 
       const guarded = await this.#runExposureGuard(client, {
         instrument: input.instrument,
@@ -1528,6 +1925,500 @@ export class ExecutionRepository {
       }
       await client.query("COMMIT");
       return { kind: "claimed" };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * PR15 §4 (three-phase, atomic) — combined claim + plan
+   * persistence in ONE transaction under the same advisory locks
+   * as `tryStartSubmissionWithExposureGuard`. Every broker
+   * submission — fresh + resume — MUST use this method.
+   *
+   * Order (all under `snap:<accountId>` + `hashtext(instrument)`):
+   *   1. reconciliation gate,
+   *   2. exposure guard,
+   *   3. atomic claim (`execution_attempted_at IS NULL` UPDATE),
+   *   4. optional metadata write,
+   *   5. INSERT every `broker_order_links` row (PLANNED),
+   *   6. UNNEST INSERT every `broker_order_ref_map` row
+   *      (`ON CONFLICT (broker_order_ref) DO NOTHING RETURNING`).
+   *      Row-count mismatch → collided → throw + ROLLBACK.
+   * A single COMMIT publishes claim + full plan atomically. On
+   * ANY error the marker is NOT set and no leg / ref row leaks.
+   * Only `{ kind: "claimed_with_persisted_plan" }` permits the
+   * caller to invoke `dispatchPreparedOrder`.
+   */
+  async tryStartSubmissionWithPlan(input: {
+    readonly id: number;
+    readonly owner: string;
+    readonly instrument: string;
+    readonly conid: string | null;
+    readonly allowCrossContractExposure: boolean;
+    readonly positionGuard: PositionGuardContext;
+    readonly reconciliationGate?: ReconciliationSubmissionGate;
+    readonly prepared: PlanPersistenceInput;
+    readonly accountId: string;
+    readonly metadata?: OrderDecisionMetadata;
+  }): Promise<
+    | { readonly kind: "claimed_with_persisted_plan" }
+    | { readonly kind: "not_claimed" }
+    | { readonly kind: "plan_collision"; readonly collidedRefs: readonly string[] }
+    | {
+        readonly kind: "invalid_plan";
+        readonly reason: string;
+      }
+    | {
+        /**
+         * PR15 r7 §4 — the plan carries identity that does not
+         * match the persisted proposed_order row (id mismatch,
+         * different client_order_id, different client_order_hash,
+         * different instrument/conid). Deterministic 409 upstream;
+         * marker NEVER set, no leg/ref rows leaked.
+         */
+        readonly kind: "submission_identity_mismatch";
+        readonly reason: string;
+      }
+    | {
+        readonly kind: "open_position_exists";
+        readonly accountId: string;
+        readonly quantity: number;
+        readonly observedAt: Date;
+      }
+    | {
+        readonly kind: "position_state_unavailable";
+        readonly accountId: string | null;
+        readonly reason: PositionGuardBlockedReason;
+      }
+    | {
+        readonly kind: "reconciliation_unavailable";
+        readonly reason: string;
+      }
+    | {
+        readonly kind: "reconciliation_stale";
+        readonly ageSeconds: number;
+      }
+    | {
+        readonly kind: "reconciliation_hold";
+        readonly holdId: number;
+        readonly reason: string;
+        readonly severity: string;
+      }
+  > {
+    // PR15 r6 §3 — fail-closed plan shape checks BEFORE any DB tx.
+    // Every rejection here means: no BEGIN, no marker, no legs, no
+    // broker call. `invalid_plan` covers every plan-shape error;
+    // detailed reason string is used by the caller to emit the
+    // corresponding HTTP error.
+    if (
+      typeof input.prepared.clientOrderId !== "string" ||
+      input.prepared.clientOrderId.length === 0
+    ) {
+      return { kind: "invalid_plan", reason: "clientOrderId_missing" };
+    }
+    if (
+      typeof input.prepared.clientOrderHash !== "string" ||
+      input.prepared.clientOrderHash.length === 0
+    ) {
+      return { kind: "invalid_plan", reason: "clientOrderHash_missing" };
+    }
+    if (
+      typeof input.prepared.instrument !== "string" ||
+      input.prepared.instrument.length === 0
+    ) {
+      return { kind: "invalid_plan", reason: "instrument_missing" };
+    }
+    if (!Array.isArray(input.prepared.legs) || input.prepared.legs.length === 0) {
+      return { kind: "invalid_plan", reason: "legs_empty" };
+    }
+    const seenRefs = new Set<string>();
+    const seenBids = new Set<string>();
+    for (const leg of input.prepared.legs) {
+      if (
+        typeof leg.brokerOrderId !== "string" ||
+        leg.brokerOrderId.length === 0
+      ) {
+        return { kind: "invalid_plan", reason: "brokerOrderId_missing" };
+      }
+      if (typeof leg.orderRef !== "string" || leg.orderRef.length === 0) {
+        return { kind: "invalid_plan", reason: "orderRef_missing" };
+      }
+      if (seenRefs.has(leg.orderRef)) {
+        return { kind: "invalid_plan", reason: "orderRef_duplicate" };
+      }
+      seenRefs.add(leg.orderRef);
+      if (seenBids.has(leg.brokerOrderId)) {
+        return { kind: "invalid_plan", reason: "brokerOrderId_duplicate" };
+      }
+      seenBids.add(leg.brokerOrderId);
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (input.positionGuard.kind === "available") {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+          [`snap:${input.positionGuard.accountId}`],
+        );
+      }
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        [input.instrument],
+      );
+
+      if (
+        input.reconciliationGate &&
+        input.positionGuard.kind === "available"
+      ) {
+        const reconOutcome = await input.reconciliationGate(client, {
+          accountId: input.positionGuard.accountId,
+          sessionId: input.positionGuard.sessionId,
+          instrument: input.instrument,
+          conId: input.conid,
+          nowMs: Date.now(),
+        });
+        if (reconOutcome) {
+          await client.query("ROLLBACK");
+          if (reconOutcome.kind === "hold") {
+            return {
+              kind: "reconciliation_hold",
+              holdId: reconOutcome.holdId,
+              reason: reconOutcome.reason,
+              severity: reconOutcome.severity,
+            };
+          }
+          if (reconOutcome.kind === "stale") {
+            return {
+              kind: "reconciliation_stale",
+              ageSeconds: reconOutcome.ageSeconds,
+            };
+          }
+          return {
+            kind: "reconciliation_unavailable",
+            reason: reconOutcome.reason,
+          };
+        }
+      }
+
+      const guarded = await this.#runExposureGuard(client, {
+        instrument: input.instrument,
+        conid: input.conid,
+        allowCrossContractExposure: input.allowCrossContractExposure,
+        guard: input.positionGuard,
+      });
+      if (guarded.kind !== "ok") {
+        await client.query("ROLLBACK");
+        return guarded.outcome;
+      }
+
+      // PR15 r7 §4 — atomically bind the plan to the persisted
+      // proposed_order identity. SELECT ... FOR UPDATE inside the
+      // tx pins the row against concurrent writers; then compare
+      // client_order_id, client_order_hash, instrument, conid.
+      // Any mismatch → `submission_identity_mismatch` and full
+      // ROLLBACK. Marker is NEVER set on a mismatched row.
+      const identity = await client.query<{
+        id: string;
+        client_order_id: string | null;
+        client_order_hash: string | null;
+        instrument: string;
+        conid: string | null;
+        status: string;
+        execution_attempted_at: Date | null;
+        broker_order_id: string | null;
+      }>(
+        `SELECT id::text AS id, client_order_id, client_order_hash,
+                instrument, conid, status,
+                execution_attempted_at, broker_order_id
+           FROM proposed_orders
+          WHERE id = $1
+          FOR UPDATE`,
+        [input.id],
+      );
+      if ((identity.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "row_not_found",
+        };
+      }
+      const row = identity.rows[0];
+      if (String(row.id) !== String(input.id)) {
+        await client.query("ROLLBACK");
+        return { kind: "submission_identity_mismatch", reason: "id_mismatch" };
+      }
+      if (row.client_order_id !== input.prepared.clientOrderId) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "client_order_id_mismatch",
+        };
+      }
+      if (row.client_order_hash !== input.prepared.clientOrderHash) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "client_order_hash_mismatch",
+        };
+      }
+      if (row.instrument !== input.prepared.instrument) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "instrument_mismatch",
+        };
+      }
+      // conid: both sides may be null; enforce IS NOT DISTINCT FROM
+      // semantics via explicit null-aware comparison.
+      const rowConid = row.conid === null ? null : String(row.conid);
+      const wantConid = input.prepared.conid;
+      if (rowConid !== wantConid) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "conid_mismatch",
+        };
+      }
+      if (row.status !== "PROPOSED") {
+        // The row is no longer claimable (a concurrent submitter
+        // already flipped it to SUBMITTED / FILLED / etc.).
+        // Surface as `not_claimed` so the caller reclassifies
+        // via freshest-state semantics.
+        await client.query("ROLLBACK");
+        return { kind: "not_claimed" };
+      }
+      if (row.execution_attempted_at !== null) {
+        // A concurrent submitter already claimed this row.
+        await client.query("ROLLBACK");
+        return { kind: "not_claimed" };
+      }
+      if (row.broker_order_id !== null) {
+        await client.query("ROLLBACK");
+        return { kind: "not_claimed" };
+      }
+
+      // Atomic claim + metadata + account write. Same fencing as
+      // `tryStartSubmission`; also stamps `execution_account_id`
+      // and decision metadata so a crash after this point leaves
+      // a fully-attributed ambiguous PROPOSED row for the runner.
+      const claim = await client.query(
+        `
+        UPDATE proposed_orders
+        SET processing_owner = $2,
+            processing_claimed_at = NOW(),
+            execution_attempted_at = NOW(),
+            execution_account_id = $3,
+            decision_source = COALESCE($4, decision_source),
+            decision_actor = COALESCE($5, decision_actor),
+            ai_decision = COALESCE($6, ai_decision),
+            ai_reason = COALESCE($7, ai_reason),
+            ai_model = COALESCE($8, ai_model),
+            ai_decision_confidence = COALESCE($9, ai_decision_confidence),
+            llm_decision_id = COALESCE($10, llm_decision_id),
+            source_error = COALESCE($11, source_error)
+        WHERE id = $1
+          AND status = 'PROPOSED'
+          AND execution_attempted_at IS NULL
+          AND broker_order_id IS NULL
+        RETURNING id
+        `,
+        [
+          input.id,
+          input.owner,
+          input.accountId,
+          input.metadata?.decisionSource ?? null,
+          input.metadata?.decisionActor ?? null,
+          input.metadata?.aiDecision ?? null,
+          input.metadata?.aiReason ?? null,
+          input.metadata?.aiModel ?? null,
+          input.metadata?.aiDecisionConfidence ?? null,
+          input.metadata?.llmDecisionId ?? null,
+          input.metadata?.sourceError ?? null,
+        ],
+      );
+      if ((claim.rowCount ?? 0) === 0) {
+        await client.query("ROLLBACK");
+        return { kind: "not_claimed" };
+      }
+
+      // Persist EVERY leg + ref BEFORE COMMIT so no dispatch can
+      // start unless every persistence write survived.
+      //
+      // PR15 r5 §3 — every INSERT uses RETURNING; missing row →
+      // a pre-existing row exists. Fetch it and verify EXACT
+      // match on every field (role, roleOrdinal, brokerOrderId,
+      // orderRef, accountId, proposedOrderId). ANY difference →
+      // plan_collision → full ROLLBACK; marker never persists.
+      // PR15 r7 §4 — persistence is UNCONDITIONAL: the pre-tx
+      // shape checks + tx identity binding guarantee a non-empty
+      // legs array and a non-null clientOrderId, so no runtime
+      // guard around this loop is required.
+      for (const leg of input.prepared.legs) {
+          const insertedLeg = await client.query<{
+            role: string;
+            role_ordinal: number;
+            broker_order_id: string | null;
+            order_ref: string;
+            account_id: string;
+            proposed_order_id: string;
+          }>(
+            `INSERT INTO broker_order_links (
+               proposed_order_id, account_id, role, role_ordinal,
+               broker_order_id, order_ref, status
+             ) VALUES ($1,$2,$3,$4,$5,$6,'PLANNED')
+             ON CONFLICT (proposed_order_id, order_ref) DO NOTHING
+             RETURNING role, role_ordinal, broker_order_id, order_ref,
+                       account_id, proposed_order_id::text AS proposed_order_id`,
+            [
+              input.id,
+              input.accountId,
+              leg.role,
+              leg.roleOrdinal,
+              leg.brokerOrderId,
+              leg.orderRef,
+            ],
+          );
+          if ((insertedLeg.rowCount ?? 0) === 0) {
+            // A row with the same (proposed_order_id, order_ref)
+            // already existed. Accept ONLY if every field is
+            // identical to the prepared plan; otherwise reject.
+            const existing = await client.query<{
+              role: string;
+              role_ordinal: number;
+              broker_order_id: string | null;
+              order_ref: string;
+              account_id: string;
+              proposed_order_id: string;
+            }>(
+              `SELECT role, role_ordinal, broker_order_id, order_ref,
+                      account_id, proposed_order_id::text AS proposed_order_id
+                 FROM broker_order_links
+                WHERE proposed_order_id = $1 AND order_ref = $2`,
+              [input.id, leg.orderRef],
+            );
+            const row = existing.rows[0];
+            if (
+              !row ||
+              row.role !== leg.role ||
+              Number(row.role_ordinal) !== leg.roleOrdinal ||
+              String(row.broker_order_id ?? "") !== leg.brokerOrderId ||
+              row.order_ref !== leg.orderRef ||
+              row.account_id !== input.accountId ||
+              String(row.proposed_order_id) !== String(input.id)
+            ) {
+              await client.query("ROLLBACK");
+              return {
+                kind: "plan_collision",
+                collidedRefs: [leg.orderRef],
+              };
+            }
+            // Exact match — safe to treat as already-persisted.
+            continue;
+          }
+          // Fresh insert path — RETURNING gave us the row; verify
+          // Postgres wrote exactly what we asked for (defence in
+          // depth against unexpected column defaults / triggers).
+          const wrote = insertedLeg.rows[0];
+          if (
+            wrote.role !== leg.role ||
+            Number(wrote.role_ordinal) !== leg.roleOrdinal ||
+            String(wrote.broker_order_id ?? "") !== leg.brokerOrderId ||
+            wrote.order_ref !== leg.orderRef ||
+            wrote.account_id !== input.accountId ||
+            String(wrote.proposed_order_id) !== String(input.id)
+          ) {
+            await client.query("ROLLBACK");
+            return {
+              kind: "plan_collision",
+              collidedRefs: [leg.orderRef],
+            };
+          }
+        }
+        // Confirm total legs persisted for this proposed_order
+        // equals the prepared plan leg count. Guards against
+        // stale leftover rows from a partial prior attempt (e.g.
+        // legs from a previous plan with different order_refs
+        // that no longer belong).
+        const linkCount = await client.query<{ n: string }>(
+          `SELECT COUNT(*)::text AS n
+             FROM broker_order_links
+            WHERE proposed_order_id = $1`,
+          [input.id],
+        );
+        if (Number(linkCount.rows[0].n) !== input.prepared.legs.length) {
+          await client.query("ROLLBACK");
+          return {
+            kind: "plan_collision",
+            collidedRefs: input.prepared.legs.map((l) => l.orderRef),
+          };
+        }
+        // Ref-map: same rule — exact leg count must land / match.
+        const refs = input.prepared.legs.map((l) => l.orderRef);
+        const cids = refs.map(() => input.prepared.clientOrderId);
+        const pids = refs.map(() => input.id);
+        const roles = input.prepared.legs.map((l) => l.role);
+        const insertedRefs = await client.query<{
+          broker_order_ref: string;
+        }>(
+          `INSERT INTO broker_order_ref_map (
+             broker_order_ref, client_order_id, proposed_order_id, role
+           )
+           SELECT * FROM UNNEST(
+             $1::text[], $2::text[], $3::bigint[], $4::text[]
+           )
+           ON CONFLICT (broker_order_ref) DO NOTHING
+           RETURNING broker_order_ref`,
+          [refs, cids, pids, roles],
+        );
+        // Every ref that didn't insert must exist AND belong to
+        // THIS proposed_order (with matching client_order_id +
+        // role). Any deviation → collision.
+        if ((insertedRefs.rowCount ?? 0) !== refs.length) {
+          const inserted = new Set(
+            insertedRefs.rows.map((r) => String(r.broker_order_ref)),
+          );
+          const missing = refs.filter((r) => !inserted.has(r));
+          const existing = await client.query<{
+            broker_order_ref: string;
+            client_order_id: string;
+            proposed_order_id: string;
+            role: string;
+          }>(
+            `SELECT broker_order_ref, client_order_id,
+                    proposed_order_id::text AS proposed_order_id, role
+               FROM broker_order_ref_map
+              WHERE broker_order_ref = ANY($1::text[])`,
+            [missing],
+          );
+          const byRef = new Map(
+            existing.rows.map((r) => [r.broker_order_ref, r]),
+          );
+          const collided: string[] = [];
+          for (const ref of missing) {
+            const leg = input.prepared.legs.find((l) => l.orderRef === ref);
+            const row = byRef.get(ref);
+            if (
+              !row ||
+              !leg ||
+              row.client_order_id !== input.prepared.clientOrderId ||
+              String(row.proposed_order_id) !== String(input.id) ||
+              row.role !== leg.role
+            ) {
+              collided.push(ref);
+            }
+          }
+          if (collided.length > 0) {
+            await client.query("ROLLBACK");
+            return { kind: "plan_collision", collidedRefs: collided };
+          }
+        }
+
+      await client.query("COMMIT");
+      return { kind: "claimed_with_persisted_plan" };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -2012,6 +2903,16 @@ export class ExecutionRepository {
       entry: row.entry ?? undefined,
       stop: row.stop ?? undefined,
       takeProfit: row.take_profit ?? undefined,
+      partialTakeProfits: parsePartialTakeProfits(row.partial_take_profits),
+      trailingStopPct:
+        row.trailing_stop_pct === null || row.trailing_stop_pct === undefined
+          ? undefined
+          : Number(row.trailing_stop_pct),
+      trailingStopActivationR:
+        row.trailing_stop_activation_r === null ||
+        row.trailing_stop_activation_r === undefined
+          ? undefined
+          : Number(row.trailing_stop_activation_r),
       reason: row.reason,
       confidence: row.confidence,
       timestamp: createdAt.toISOString(),
@@ -2601,6 +3502,84 @@ export class ExecutionRepository {
     );
     return result.rows.map((row) => ({
       symbol: String(row.symbol),
+      netShares: Number(row.net_shares ?? 0),
+      longShares: Number(row.long_shares ?? 0),
+      shortShares: Number(row.short_shares ?? 0),
+      fillsCount: Number(row.fills_count ?? 0),
+      lastFillAt: row.last_fill_at
+        ? row.last_fill_at instanceof Date
+          ? row.last_fill_at
+          : new Date(row.last_fill_at)
+        : null,
+    }));
+  }
+
+  /**
+   * PR15 — identity-aware expected net positions. Groups by the
+   * full identity tuple (`accountId, conid, symbol, secType,
+   * exchange, currency`) so the reconciliation runner can build a
+   * canonical `identity_key` per row. Historic fills lacking
+   * `accountId` are still returned (with `accountId=null`) — the
+   * caller MUST classify them as `identity_ambiguous` and NEVER
+   * aggregate them across accounts.
+   */
+  async computeExpectedNetPositionsWithIdentity(
+    accountId?: string,
+  ): Promise<ExpectedNetPositionIdentity[]> {
+    const params: unknown[] = [];
+    const where: string[] = ["symbol IS NOT NULL", "symbol <> ''"];
+    if (accountId != null && accountId.length > 0) {
+      params.push(accountId);
+      where.push(`(account_id = $${params.length} OR account_id IS NULL)`);
+    }
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const result = await this.pool.query(
+      `
+      SELECT
+        account_id AS account_id,
+        upper(symbol) AS symbol,
+        conid AS conid,
+        NULLIF(upper(commission_currency), '') AS currency,
+        NULLIF(upper(exchange), '') AS exchange,
+        NULL::text AS sec_type,
+        SUM(
+          CASE
+            WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0)
+            WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN -COALESCE(shares, 0)
+            ELSE 0
+          END
+        ) AS net_shares,
+        SUM(
+          CASE WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0) ELSE 0 END
+        ) AS long_shares,
+        SUM(
+          CASE WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN COALESCE(shares, 0) ELSE 0 END
+        ) AS short_shares,
+        COUNT(*) AS fills_count,
+        MAX(COALESCE(executed_at, created_at)) AS last_fill_at
+      FROM broker_execution_fills
+      ${whereClause}
+      GROUP BY account_id, upper(symbol), conid,
+               NULLIF(upper(commission_currency), ''),
+               NULLIF(upper(exchange), '')
+      HAVING ABS(SUM(
+        CASE
+          WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0)
+          WHEN upper(side) IN ('SELL', 'SLD', 'SSHORT') THEN -COALESCE(shares, 0)
+          ELSE 0
+        END
+      )) > 0.000001
+      ORDER BY upper(symbol) ASC
+      `,
+      params,
+    );
+    return result.rows.map((row) => ({
+      accountId: row.account_id == null ? null : String(row.account_id),
+      symbol: String(row.symbol),
+      conId: row.conid == null ? null : String(row.conid),
+      secType: row.sec_type == null ? null : String(row.sec_type),
+      exchange: row.exchange == null ? null : String(row.exchange),
+      currency: row.currency == null ? null : String(row.currency),
       netShares: Number(row.net_shares ?? 0),
       longShares: Number(row.long_shares ?? 0),
       shortShares: Number(row.short_shares ?? 0),

@@ -642,9 +642,13 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     if (dryRunResult.pipeline.outcome !== "SUCCESS") {
       throw new Error("expected pipeline to succeed");
     }
-    const expectedHash = (
-      await import("./client-order-hash.js")
-    ).computeClientOrderHash(dryRunResult.pipeline.ticket);
+    // PR15 r6 §5 — hash now computed on the WIRE `SignalTicket`
+    // (post `toLegacySignalTicket`) via the shared helper so
+    // server-side verification can recompute an identical digest.
+    const shared = await import("@ikbr/shared/client-order-hash");
+    const { toLegacySignalTicket } = await import("./ticket-mapper.js");
+    const legacy = toLegacySignalTicket(dryRunResult.pipeline.ticket);
+    const expectedHash = shared.computeClientOrderHash(legacy);
     await runtime.executePrepared({
       dryRunResult,
       idempotencyKey: "idem-precomputed-hash-1",

@@ -12,7 +12,7 @@ import type {
 } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
-import { computeClientOrderHash } from "../execution/client-order-hash.js";
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
 import type {
   ExecuteInput,

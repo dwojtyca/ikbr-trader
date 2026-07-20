@@ -42,6 +42,8 @@ export type AlertKind =
   | "system"
   | "auth_failure_burst"
   | "direct_ticket_used"
+  | "direct_ticket_migrated"
+  | "dispatch_unknown"
   | "safety_account_environment_mismatch";
 
 export interface AlertInput {

@@ -1,9 +1,10 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply } from "fastify";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ProposedOrder, ProposedOrderStatus, SignalTicket } from "@ikbr/shared";
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { config } from "./config.js";
 import {
   DecisionActor,
@@ -28,15 +29,24 @@ import {
 import {
   evaluateReadiness,
   type PositionSnapshotHealthInput,
+  type ReconciliationRunHealthInput,
 } from "./readiness.js";
 import { RefreshCoordinator } from "./refresh-coordinator.js";
 import { planDirectTicketDispatch } from "./direct-ticket-guard.js";
-import { orchestrateExecuteTicket } from "./execute-ticket-orchestrator.js";
+import { ReconciliationRepository } from "./reconciliation/repository.js";
+import { ReconciliationRunner, type RunnerContext } from "./reconciliation/runner.js";
+import { ReconciliationScheduler } from "./reconciliation/scheduler.js";
+import { registerReconciliationRoutes } from "./reconciliation/routes.js";
+import { buildReconciliationSubmissionGate } from "./reconciliation/submission-gate.js";
+import { buildSubmissionApplicationService, type SubmissionOutcome } from "./reconciliation/submission-service.js";
+import { classifyReadiness as classifyReconciliationReadiness } from "./reconciliation/gate.js";
+import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapter.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const repo = new ExecutionRepository(pool);
 const alerts = new AlertService(repo, app.log);
+const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
 // the host name (helps operators correlate the claim with a
 // machine) with a boot-time random suffix. This is observability
@@ -45,6 +55,10 @@ const alerts = new AlertService(repo, app.log);
 // which permanently prevents a second broker submission for the
 // same row regardless of any owner state or wall-clock time.
 const EXECUTION_PROCESS_OWNER_ID = `execution-engine:${hostname()}:${randomUUID().slice(0, 8)}`;
+// PR15 — sessionStartedAt drives the reconciliation executions
+// windowStart baseline. Wall-clock capture at boot; safe to reuse
+// for the entire process lifetime.
+const EXECUTION_SESSION_STARTED_AT = new Date();
 const tws = new TwsExecutionClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -239,6 +253,41 @@ const tws = new TwsExecutionClient(
   },
 );
 
+// PR15 — production reconciliation wiring. Uses the REAL
+// `IbBrokerReconciliationAdapter` backed by the same `tws`
+// client the write path uses. Fake adapter is test-only.
+const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws);
+const reconRunner = new ReconciliationRunner(
+  pool,
+  repo,
+  reconRepo,
+  reconBrokerAdapter,
+  app.log,
+);
+const reconScheduler = new ReconciliationScheduler(
+  reconRunner,
+  {
+    currentContext(): RunnerContext | null {
+      if (!lastActiveAccountId) return null;
+      return {
+        accountId: lastActiveAccountId,
+        sessionId: EXECUTION_PROCESS_OWNER_ID,
+        sessionStartedAt: EXECUTION_SESSION_STARTED_AT,
+      };
+    },
+  },
+  {
+    enabled: config.RECONCILIATION_LOOP_ENABLED === "true",
+    intervalMs: config.RECONCILIATION_INTERVAL_MS,
+    startupDelayMs: config.RECONCILIATION_STARTUP_DELAY_MS,
+    minIntervalMs: config.RECONCILIATION_MIN_INTERVAL_MS,
+    sourceTimeoutMs: config.RECONCILIATION_SOURCE_TIMEOUT_MS,
+    runTimeoutMs: config.RECONCILIATION_RUN_TIMEOUT_MS,
+    executionSafetyMarginMs: config.RECONCILIATION_EXECUTION_SAFETY_MARGIN_MS,
+  },
+  app.log,
+);
+
 const ticketSchema = z.object({
   instrument: z.string().min(1),
   conid: z.string().optional(),
@@ -273,6 +322,7 @@ const decisionMetadataSchema = z.object({
 import {
   executeTicketBodySchema,
   SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE,
+  SERVER_ALLOW_MARKET_ORDER,
 } from "./execute-ticket-schema.js";
 
 const executeProposedBodySchema = decisionMetadataSchema.extend({
@@ -696,107 +746,38 @@ export interface ReconciliationReport {
  * logged, recorded in system_alerts, and returned in the report. We do
  * not auto-resolve mismatches: those require operator review (the local
  * DB could be stale after a crash, or manual orders in TWS could exist).
+ *
+ * PR15 — the in-memory implementation was replaced by the
+ * authoritative durable runner (`./reconciliation/runner.ts` +
+ * scheduler). This function is a compatibility shim that
+ * delegates to `reconScheduler.triggerNow()` and rebuilds the
+ * legacy `ReconciliationReport` shape for the two remaining
+ * call sites (`POST /execution/reconciliation` and the startup
+ * fire-and-forget). New callers should use the scheduler / new
+ * routes directly.
  */
 async function runReconciliation(): Promise<ReconciliationReport> {
-  const { accountId } = await ensureBrokerSession();
-  const snapshot = await tws.getAccountSnapshot(accountId);
-  const expected = await repo.computeExpectedNetPositions();
-
-  const expectedBySymbol = new Map<string, number>();
-  for (const row of expected) {
-    expectedBySymbol.set(row.symbol.toUpperCase(), row.netShares);
-  }
-
-  const brokerBySymbol = new Map<
-    string,
-    { netShares: number; averageCost?: number; marketValue?: number }
-  >();
-  for (const pos of snapshot.positions) {
-    if (!pos.symbol) continue;
-    const key = pos.symbol.toUpperCase();
-    const prev = brokerBySymbol.get(key);
-    brokerBySymbol.set(key, {
-      netShares: (prev?.netShares ?? 0) + (pos.position ?? 0),
-      averageCost: pos.averageCost ?? prev?.averageCost,
-      marketValue: pos.marketValue ?? prev?.marketValue,
-    });
-  }
-
-  const allSymbols = new Set<string>([
-    ...expectedBySymbol.keys(),
-    ...brokerBySymbol.keys(),
-  ]);
-
-  const mismatches: ReconciliationMismatch[] = [];
-  let matches = 0;
-  for (const symbol of allSymbols) {
-    const expectedShares = expectedBySymbol.get(symbol) ?? 0;
-    const broker = brokerBySymbol.get(symbol);
-    const brokerShares = broker?.netShares ?? 0;
-    if (Math.abs(expectedShares - brokerShares) <= 0.000001) {
-      matches += 1;
-      continue;
-    }
-    mismatches.push({
-      symbol,
-      expectedNetShares: expectedShares,
-      brokerNetShares: brokerShares,
-      difference: brokerShares - expectedShares,
-      brokerAveragePrice: broker?.averageCost,
-      brokerMarketValue: broker?.marketValue,
-    });
-  }
-
-  const report: ReconciliationReport = {
-    ranAt: new Date().toISOString(),
-    accountId,
-    expectedPositionsCount: expectedBySymbol.size,
-    brokerPositionsCount: brokerBySymbol.size,
-    matches,
-    mismatches,
-  };
-
-  if (mismatches.length > 0) {
-    app.log.warn({ report }, "position reconciliation found mismatches");
-    void alerts.record({
-      severity: "error",
-      kind: "reconciliation_mismatch",
-      message: `Position reconciliation found ${mismatches.length} mismatch(es) for account ${accountId}`,
-      payload: {
-        mismatches,
-        expectedPositionsCount: expectedBySymbol.size,
-        brokerPositionsCount: brokerBySymbol.size,
-      },
-    });
-    // Round-8: reconciliation just observed broker-side state
-    // that DIFFERS from our local expectation. Invalidate the
-    // snapshot so any pending write path fail-closes until the
-    // next refresh reflects the truth. The refresh call below
-    // will pick up the fresh state.
+  const accountIdBefore = lastActiveAccountId;
+  if (!accountIdBefore) {
+    // Attempt to hydrate an active account so the scheduler has a
+    // context to run under. Mirrors the pre-PR15 behaviour of
+    // the legacy runner.
     try {
-      const { generation } = await repo.invalidatePositionSnapshot({
-        accountId,
-        sessionId: EXECUTION_PROCESS_OWNER_ID,
-        observedAt: new Date(),
-      });
-      markSnapshotInvalidated(accountId, generation);
-      void refreshBrokerPositionSnapshot(accountId).catch(() => {
-        /* logged inside refreshBrokerPositionSnapshot */
-      });
-    } catch (err) {
-      app.log.warn(
-        { err, accountId },
-        "reconciliation: failed to invalidate position snapshot",
-      );
+      await ensureBrokerSession();
+    } catch {
+      /* leave lastActiveAccountId null — scheduler will skip */
     }
-  } else {
-    app.log.info({ report }, "position reconciliation clean");
   }
-
-  // Update on both matches and mismatches — the check ran end-to-end.
+  const report = await reconScheduler.triggerNow();
   lastReconciliationAt = new Date();
-
-  return report;
+  return {
+    ranAt: lastReconciliationAt.toISOString(),
+    accountId: lastActiveAccountId ?? "",
+    expectedPositionsCount: 0,
+    brokerPositionsCount: 0,
+    matches: report?.matches ?? 0,
+    mismatches: [],
+  };
 }
 
 async function ensureBrokerSession(): Promise<{
@@ -860,110 +841,229 @@ async function ensureBrokerSession(): Promise<{
   return { accountId, accounts };
 }
 
-async function executePersistedOrder(
-  order: ProposedOrder,
-  metadata?: OrderDecisionMetadata,
-): Promise<{
-  execution: {
-    orderId: number;
-    accountId: string;
-    brokerOrderId: string;
-    status: string;
-  };
-}> {
-  if (!order.id) {
-    throw new Error("persisted order id is missing");
-  }
-
-  const validationError = validateExecutableTicket(order);
-  if (validationError) {
-    await repo.markRejected(order.id, validationError, {
-      ...metadata,
-      aiDecision: metadata?.aiDecision ?? "REJECT",
+/**
+ * PR15 r7 §1 — single production submission service instance.
+ * BOTH `/execution/execute-ticket` and
+ * `/execution/execute-proposed/:id` delegate to this instance.
+ * Tests use the SAME module by construction; only the injected
+ * `BrokerOrderDispatcher` is fake in tests.
+ */
+const submissionService = buildSubmissionApplicationService({
+  repo,
+  ensureBrokerSession: async () => {
+    const { accountId } = await ensureBrokerSession();
+    return { accountId };
+  },
+  buildPositionGuard: () =>
+    lastActiveAccountId !== null
+      ? {
+          kind: "available",
+          accountId: lastActiveAccountId,
+          sessionId: EXECUTION_PROCESS_OWNER_ID,
+          maxSnapshotAgeMs:
+            config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
+        }
+      : { kind: "unavailable", reason: "no_active_account" },
+  reconciliationGate: () =>
+    buildReconciliationSubmissionGate({
+      maxAgeSeconds: config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
+    }),
+  prepareBrokerPlan: async ({ order, accountId, clientOrderId }) =>
+    tws.prepareBrokerOrderPlan(order, accountId, config.EXECUTION_DEFAULT_TIF, {
+      proposedOrderId: order.id ?? null,
+      clientOrderId,
+    }),
+  dispatcher: {
+    dispatch: async ({ prepared }) => tws.dispatchPreparedOrder(prepared),
+  },
+  assertKillSwitchOk: async (input) => {
+    await assertKillSwitchOk({
+      instrument: input.instrument,
+      positionEffect:
+        (input.positionEffect ?? undefined) as
+          | "OPEN_OR_ADD"
+          | "CLOSE_OR_REDUCE"
+          | undefined,
     });
-    throw new Error(validationError);
-  }
-
-  const activeSubmitted = await repo.findActiveSubmittedByInstrument(
-    order.instrument,
-    order.id,
-  );
-  if (activeSubmitted) {
-    throw new Error(
-      buildSubmittedConflictMessage(order.instrument, activeSubmitted),
-    );
-  }
-
-  await assertKillSwitchOk(order);
-
-  const { accountId } = await ensureBrokerSession();
-  await repo.markExecutionAttempt(order.id, accountId, metadata);
-
-  try {
-    const result = await tws.placeSignalOrder(
-      order,
-      accountId,
-      config.EXECUTION_DEFAULT_TIF,
-      { proposedOrderId: order.id },
-    );
-    if (result.status === "FILLED") {
-      // Round-8 invariant: invalidate the snapshot BEFORE the
-      // local FILLED transition so the write-path guard cannot
-      // observe (stale flat snapshot + no active-intent block)
-      // between the two writes.
-      const { generation } = await repo.invalidatePositionSnapshot({
-        accountId,
-        sessionId: EXECUTION_PROCESS_OWNER_ID,
-        observedAt: new Date(),
-      });
-      markSnapshotInvalidated(accountId, generation);
-      await repo.markFilled(
-        order.id,
-        accountId,
-        result.brokerOrderId,
-        `Broker accepted order, status=${result.status}`,
-        metadata,
-      );
-      // Fire-and-forget the full refresh — completePositionSnapshotRefresh
-      // will land the fresh snapshot and flip complete=true when the
-      // broker responds. Failure keeps complete=false → readiness 503 and
-      // the write path stays fail-closed until the next successful
-      // refresh.
-      void refreshBrokerPositionSnapshot(accountId).catch(() => {
-        /* logged inside refreshBrokerPositionSnapshot */
-      });
-    } else {
-      await repo.markSubmitted(
-        order.id,
-        accountId,
-        result.brokerOrderId,
-        `Broker accepted order, status=${result.status}`,
-        metadata,
-      );
-    }
-
-    return {
-      execution: {
-        orderId: order.id,
-        accountId,
-        brokerOrderId: result.brokerOrderId,
-        status: result.status,
-      },
-    };
-  } catch (error) {
-    const message = (error as Error).message;
-    await repo.markCancelled(order.id, message);
-    if (metadata) {
-      await repo.setDecisionMetadata(order.id, {
-        ...metadata,
-        sourceError: message,
-      });
-    }
-    throw error;
-  }
-}
+  },
+  recordAlert: async (input) => {
+    await alerts.record(input);
+  },
+  triggerReconciliation: () => reconScheduler.triggerNow(),
+  ownerId: EXECUTION_PROCESS_OWNER_ID,
+  allowMarketOrder: SERVER_ALLOW_MARKET_ORDER,
+  allowCrossContractExposure: SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE,
+  defaultTif: config.EXECUTION_DEFAULT_TIF,
+  onSnapshotInvalidated: markSnapshotInvalidated,
+  refreshBrokerSnapshot: refreshBrokerPositionSnapshot,
+});
 
 app.get("/health", async () => ({ ok: true, twsConnected: tws.isConnected() }));
+
+/**
+ * PR15 r7 §6 — SubmissionOutcome → HTTP mapper. The ONLY place
+ * transport concerns live. Every route that dispatches through
+ * `submissionService` funnels its outcome here.
+ */
+function sendSubmissionOutcome(
+  reply: FastifyReply,
+  outcome: SubmissionOutcome,
+  instrument: string,
+): FastifyReply | Record<string, unknown> {
+  switch (outcome.kind) {
+    case "submitted":
+      return reply.code(200).send({
+        outcome: "SUBMITTED",
+        order: outcome.order,
+        execution: outcome.execution,
+      });
+    case "resumed":
+      return reply.code(200).send({
+        outcome: "RESUMED",
+        order: outcome.order,
+        execution: outcome.execution,
+        resumed: true,
+      });
+    case "duplicate_submitted":
+      return reply.code(200).send({
+        outcome: "DUPLICATE_SUBMITTED",
+        duplicate: true,
+        order: outcome.order,
+      });
+    case "duplicate_terminal":
+      return reply.code(200).send({
+        outcome: "DUPLICATE_TERMINAL",
+        duplicate: true,
+        order: outcome.order,
+      });
+    case "duplicate_pending_ambiguous":
+      return reply.code(200).send({
+        outcome: "DUPLICATE_PENDING_AMBIGUOUS",
+        duplicate: true,
+        order: outcome.order,
+      });
+    case "pending_claimed":
+      return reply.code(200).send({
+        outcome: "PENDING_CLAIMED",
+        duplicate: true,
+        order: outcome.order,
+      });
+    case "conflict":
+      return reply.code(409).send({
+        outcome: "CONFLICT",
+        error: "idempotency_conflict",
+        message:
+          outcome.order === null
+            ? "clientOrderId conflict"
+            : "clientOrderId already exists with a different clientOrderHash",
+        ...(outcome.order ? { order: outcome.order } : {}),
+      });
+    case "active_intent_exists":
+      return reply.code(409).send({
+        outcome: "ACTIVE_INTENT_EXISTS",
+        error: "active_intent_exists",
+        message: `instrument ${instrument} already has a non-terminal proposed order (id=${outcome.existingOrderId}, status=${outcome.existingStatus})`,
+        existingOrderId: outcome.existingOrderId,
+        existingStatus: outcome.existingStatus,
+        existingClientOrderId: outcome.existingClientOrderId,
+      });
+    case "open_position_exists":
+      return reply.code(409).send({
+        outcome: "OPEN_POSITION_EXISTS",
+        error: "open_position_exists",
+        message: `instrument ${instrument} has an open broker position (accountId=${outcome.accountId}, quantity=${outcome.quantity})`,
+        accountId: outcome.accountId,
+        quantity: outcome.quantity,
+        observedAt: outcome.observedAt.toISOString(),
+      });
+    case "position_state_unavailable":
+      return reply.code(503).send({
+        outcome: "POSITION_STATE_UNAVAILABLE",
+        error: "position_state_unavailable",
+        message: `broker position snapshot ${outcome.reason} for ${outcome.accountId}`,
+        accountId: outcome.accountId,
+        reason: outcome.reason,
+      });
+    case "reconciliation_unavailable":
+      return reply.code(503).send({
+        outcome: "RECONCILIATION_UNAVAILABLE",
+        error: "reconciliation_unavailable",
+        reason: outcome.reason,
+      });
+    case "reconciliation_stale":
+      return reply.code(503).send({
+        outcome: "RECONCILIATION_STALE",
+        error: "reconciliation_stale",
+        ageSeconds: outcome.ageSeconds,
+      });
+    case "reconciliation_hold":
+      return reply.code(503).send({
+        outcome: "RECONCILIATION_HOLD",
+        error: "reconciliation_hold",
+        hold: {
+          id: outcome.holdId,
+          reason: outcome.reason,
+          severity: outcome.severity,
+        },
+      });
+    case "submission_identity_mismatch":
+      return reply.code(409).send({
+        outcome: "SUBMISSION_IDENTITY_MISMATCH",
+        error: "submission_identity_mismatch",
+        reason: outcome.reason,
+      });
+    case "invalid_plan":
+      return reply.code(500).send({
+        outcome: "INVALID_PLAN",
+        error: "invalid_plan",
+        reason: outcome.reason,
+      });
+    case "plan_collision":
+      return reply.code(500).send({
+        outcome: "PLAN_COLLISION",
+        error: "plan_collision",
+        collidedRefs: outcome.collidedRefs,
+      });
+    case "client_order_hash_mismatch":
+      return reply.code(409).send({
+        outcome: "CLIENT_ORDER_HASH_MISMATCH",
+        error: "CLIENT_ORDER_HASH_MISMATCH",
+      });
+    case "market_order_not_allowed":
+      return reply.code(400).send({
+        outcome: "MARKET_ORDER_NOT_ALLOWED",
+        error: "market_order_not_allowed",
+      });
+    case "idempotency_identity_missing":
+      return reply.code(400).send({
+        outcome: "IDEMPOTENCY_IDENTITY_MISSING",
+        error: "idempotency_identity_missing",
+      });
+    case "legacy_idempotency_identity_missing":
+      return reply.code(409).send({
+        outcome: "LEGACY_IDEMPOTENCY_IDENTITY_MISSING",
+        error: "LEGACY_IDEMPOTENCY_IDENTITY_MISSING",
+        proposedOrderId: outcome.proposedOrderId,
+      });
+    case "rejected_order_immutable":
+      return reply.code(409).send({
+        outcome: "REJECTED_ORDER_IMMUTABLE",
+        error: "REJECTED_ORDER_IMMUTABLE",
+        proposedOrderId: outcome.proposedOrderId,
+      });
+    case "kill_switch_triggered":
+      return reply.code(423).send({ error: outcome.message });
+    case "not_found":
+      return reply.code(404).send({ error: "not_found" });
+    case "execution_error":
+      return reply.code(400).send({
+        outcome: "EXECUTION_ERROR",
+        error: outcome.message,
+        order: outcome.order,
+        ...(outcome.resumed ? { resumed: true } : {}),
+      });
+  }
+}
 
 app.get("/ready", async (request, reply) => {
   const auditWriteAvailable = await probeAuditWriteAvailable();
@@ -972,6 +1072,22 @@ app.get("/ready", async (request, reply) => {
   const whitelist = whitelistForEnvironment(guardCfg);
   const accountAllowed =
     lastActiveAccountId !== null && whitelist.includes(lastActiveAccountId);
+
+  // PR15 — reconciliation run health for the active account.
+  let reconciliationRunHealth: ReconciliationRunHealthInput | undefined;
+  if (lastActiveAccountId !== null) {
+    const runningInSession = await reconRepo
+      .getRunningRow(lastActiveAccountId, EXECUTION_PROCESS_OWNER_ID)
+      .catch(() => null);
+    const latestOverall = await reconRepo
+      .getLatestRunOverall(lastActiveAccountId)
+      .catch(() => null);
+    reconciliationRunHealth = classifyReconciliationReadiness(
+      runningInSession !== null,
+      latestOverall,
+      EXECUTION_PROCESS_OWNER_ID,
+    );
+  }
 
   const result = evaluateReadiness({
     now: new Date(),
@@ -995,6 +1111,7 @@ app.get("/ready", async (request, reply) => {
             snapshotHealthByAccount.get(lastActiveAccountId),
           )
         : undefined,
+    reconciliationRunHealth,
   });
 
   return reply.code(result.statusCode).send(result.body);
@@ -1014,12 +1131,13 @@ app.get("/execution/kill-switch", async () => {
   return evaluateKillSwitch();
 });
 
-app.post("/execution/reconciliation", async (request, reply) => {
-  try {
-    return await runReconciliation();
-  } catch (error) {
-    return reply.code(500).send({ error: (error as Error).message });
-  }
+app.post("/execution/reconciliation", async (_request, _reply) => {
+  // PR15 — legacy compat alias. Delegates to the new
+  // authoritative runner via the scheduler. Retained ONLY so
+  // pre-PR15 operator scripts keep working; new callers should
+  // use `POST /execution/reconciliation/run`.
+  const report = await reconScheduler.triggerNow();
+  return { report };
 });
 
 app.get("/execution/alerts", async (request) => {
@@ -1255,52 +1373,20 @@ app.post("/execution/execute-proposed/:id", async (request, reply) => {
     .parse(request.params ?? {});
   const body = executeProposedBodySchema.parse(request.body ?? {});
 
-  const order = await repo.getProposedOrderById(params.id);
-  if (!order) {
-    return reply
-      .code(404)
-      .send({ error: `proposed order id=${params.id} not found` });
-  }
-
-  const canExecute =
-    order.status === "PROPOSED" ||
-    (order.status === "REJECTED" && body.overrideRejected === true);
-  if (!canExecute) {
-    return reply.code(409).send({
-      error: `order id=${params.id} cannot be executed (current=${order.status})`,
-    });
-  }
-
+  // Pre-lookup the order ONLY to read `.instrument` for the HTTP
+  // mapper's message strings + to derive the actor. Every state
+  // decision is made inside the service.
+  const preview = await repo.getProposedOrderById(params.id);
   const fallbackActor: DecisionActor = body.overrideRejected
     ? "user_override"
     : ((body.actor as DecisionActor | undefined) ?? "user");
   const metadata = normalizeDecisionMetadata(body, fallbackActor);
-  const activeSubmitted = await repo.findActiveSubmittedByInstrument(
-    order.instrument,
-    order.id,
-  );
-  if (activeSubmitted) {
-    return reply.code(409).send({
-      error: buildSubmittedConflictMessage(order.instrument, activeSubmitted),
-    });
-  }
-
-  try {
-    await assertKillSwitchOk(order);
-  } catch (error) {
-    return reply.code(423).send({ error: (error as Error).message });
-  }
-
-  try {
-    const result = await executePersistedOrder(order, metadata);
-    const fresh = await repo.getProposedOrderById(params.id);
-    return {
-      order: fresh,
-      ...result,
-    };
-  } catch (error) {
-    return reply.code(400).send({ error: (error as Error).message });
-  }
+  const outcome = await submissionService.executeProposed({
+    proposedOrderId: params.id,
+    overrideRejected: body.overrideRejected === true,
+    decisionMetadata: metadata,
+  });
+  return sendSubmissionOutcome(reply, outcome, preview?.instrument ?? "");
 });
 
 app.post("/execution/reject-proposed/:id", async (request, reply) => {
@@ -1388,334 +1474,42 @@ app.post("/execution/cancel-proposed/:id", async (request, reply) => {
 app.post("/execution/execute-ticket", async (request, reply) => {
   const body = executeTicketBodySchema.parse(request.body ?? {});
   const ticket = body.ticket as SignalTicket;
-
-  // Both idempotency fields must be provided together — enforcing
-  // this at the schema level would break legacy callers that supply
-  // neither, so it is enforced here.
-  const hasClientOrderId = typeof body.clientOrderId === "string";
-  const hasClientOrderHash = typeof body.clientOrderHash === "string";
-  if (hasClientOrderId !== hasClientOrderHash) {
-    return reply.code(400).send({
-      error:
-        "clientOrderId and clientOrderHash must be provided together (or both omitted)",
-    });
-  }
-
-  // Duplicate-replay / resume / conflict handling is delegated to
-  // `orchestrateExecuteTicket` for the persist=true + idempotent
-  // path (see the top of that module for the full state-aware
-  // decision table). The activeSubmitted + kill-switch pre-checks
-  // that used to run here would incorrectly reject a legitimate
-  // idempotent replay on an already-SUBMITTED row, so those checks
-  // now live inside the paths that actually need them (persist=false
-  // direct dispatch below, and `executePersistedOrder` on the
-  // persist=true path).
-
+  // PR15 r7 §1 — all routing decisions are made INSIDE the
+  // single production `submissionService`. This handler only:
+  //   (a) parses HTTP,
+  //   (b) refuses persist=false with a distinct 400 (direct-
+  //       ticket path is out of scope for PR15),
+  //   (c) delegates to `submissionService.submitTicket(...)`,
+  //   (d) maps the discriminated outcome to HTTP.
   if (!body.persist) {
-    const activeSubmitted = await repo.findActiveSubmittedByInstrument(
-      ticket.instrument,
-    );
-    if (activeSubmitted) {
-      return reply.code(409).send({
-        error: buildSubmittedConflictMessage(
-          ticket.instrument,
-          activeSubmitted,
-        ),
-      });
-    }
-    try {
-      await assertKillSwitchOk({
-        instrument: ticket.instrument,
-        positionEffect: ticket.positionEffect,
-      });
-    } catch (error) {
-      return reply.code(423).send({ error: (error as Error).message });
-    }
-
-    const dispatch = planDirectTicketDispatch({
-      persist: body.persist,
-      allowDirectTicket: config.allowDirectTicket,
-      decisionSource: body.decisionSource,
-      auth: getExecutionAuthContext(request),
-      symbol: ticket.instrument,
-      side: ticket.side,
-      quantity: ticket.quantity,
-    });
-    if (dispatch.kind === "deny") {
-      return reply.code(dispatch.statusCode).send(dispatch.body);
-    }
-
-    const validationError = validateExecutableTicket(ticket);
-    if (validationError) {
-      return reply.code(400).send({ error: validationError });
-    }
-
-    if (dispatch.kind === "allow") {
-      await alerts.record({
-        severity: dispatch.alert.severity,
-        kind: dispatch.alert.kind,
-        message: dispatch.alert.message,
-        payload: { ...dispatch.alert.payload },
-      });
-    }
-
-    try {
-      const { accountId } = await ensureBrokerSession();
-
-      const result = await tws.placeSignalOrder(
-        ticket,
-        accountId,
-        config.EXECUTION_DEFAULT_TIF,
-      );
-      return {
-        execution: {
-          accountId,
-          brokerOrderId: result.brokerOrderId,
-          status: result.status,
+    void alerts
+      .record({
+        severity: "warn",
+        kind: "direct_ticket_migrated",
+        message:
+          `direct-ticket path refused (persist=false) — reconciliation ` +
+          `requires durable intent. Instrument=${ticket.instrument}`,
+        payload: {
+          instrument: ticket.instrument,
+          side: ticket.side,
+          quantity: ticket.quantity,
         },
-      };
-    } catch (error) {
-      return reply.code(400).send({ error: (error as Error).message });
-    }
-  }
-
-  // -----------------------------------------------------------------
-  // persist=true + PR13 idempotency
-  // -----------------------------------------------------------------
-  if (hasClientOrderId) {
-    // PR14 round-5 blocker — always pass an EXPLICIT
-    // PositionGuardContext. `undefined` would bypass the guard
-    // entirely, which is fail-open. When there is no active
-    // broker account yet the discriminated `"unavailable"`
-    // variant flows through the repo to `POSITION_STATE_UNAVAILABLE`.
-    const positionGuard: PositionGuardContext =
-      lastActiveAccountId !== null
-        ? {
-            kind: "available",
-            accountId: lastActiveAccountId,
-            sessionId: EXECUTION_PROCESS_OWNER_ID,
-            // Round-7 blocker: use the SHORT write-path TTL, not
-            // the display cache TTL. Exposure-increasing writes
-            // require a fresh broker snapshot; a 60 s window is
-            // wide enough for many fills to land undetected.
-            maxSnapshotAgeMs: config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
-          }
-        : { kind: "unavailable", reason: "no_active_account" };
-    // Round-7 blocker: `allowCrossContractExposure` is NOT
-    // caller-controlled. Hardcoded to the safe server-side
-    // default (`false`) for PR14.
-    const allowCrossContractExposure = SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE;
-    const outcome = await orchestrateExecuteTicket(
-      {
-        getIdempotencyRecord: (id) => repo.getIdempotencyRecord(id),
-        insertProposedFromTicket: (t, s, i) =>
-          repo.insertProposedFromTicket(t, s, i, positionGuard, {
-            allowCrossContractExposure,
-          }),
-        getProposedOrderById: (id) => repo.getProposedOrderById(id),
-        executePersistedOrder: (order) =>
-          executePersistedOrder(order, {
-            decisionSource: "user",
-            decisionActor: "user",
-          }),
-        isUniqueViolation,
-        // Round-6 blocker: the marker acquisition MUST also run
-        // the exposure guard under the same advisory lock, on
-        // BOTH the fresh-INSERT and resume paths. The endpoint
-        // captures the guard + allowCrossContractExposure via
-        // closure so the orchestrator itself stays stateless.
-        tryStartSubmission: (input) =>
-          repo.tryStartSubmissionWithExposureGuard({
-            ...input,
-            allowCrossContractExposure,
-            positionGuard,
-          }),
-        ownerId: () => EXECUTION_PROCESS_OWNER_ID,
-      },
-      {
-        ticket,
-        strategy: body.strategy,
-        clientOrderId: body.clientOrderId!,
-        clientOrderHash: body.clientOrderHash!,
-      },
-    );
-
-    switch (outcome.kind) {
-      case "conflict":
-        return reply.code(409).send({
-          outcome: "CONFLICT",
-          error: "idempotency_conflict",
-          message:
-            outcome.order === null
-              ? "clientOrderId conflict"
-              : "clientOrderId already exists with a different clientOrderHash",
-          ...(outcome.order ? { order: outcome.order } : {}),
-        });
-      case "active_intent_exists":
-        return reply.code(409).send({
-          outcome: "ACTIVE_INTENT_EXISTS",
-          error: "active_intent_exists",
-          message: `instrument ${ticket.instrument} already has a non-terminal proposed order (id=${outcome.existingOrderId}, status=${outcome.existingStatus})`,
-          existingOrderId: outcome.existingOrderId,
-          existingStatus: outcome.existingStatus,
-          existingClientOrderId: outcome.existingClientOrderId,
-        });
-      case "open_position_exists":
-        return reply.code(409).send({
-          outcome: "OPEN_POSITION_EXISTS",
-          error: "open_position_exists",
-          message: `instrument ${ticket.instrument} has an open broker position (accountId=${outcome.accountId}, quantity=${outcome.quantity})`,
-          accountId: outcome.accountId,
-          quantity: outcome.quantity,
-          observedAt: outcome.observedAt.toISOString(),
-        });
-      case "position_state_unavailable":
-        return reply.code(503).send({
-          outcome: "POSITION_STATE_UNAVAILABLE",
-          error: "position_state_unavailable",
-          message: `broker position snapshot ${outcome.reason} for ${outcome.accountId}`,
-          accountId: outcome.accountId,
-          reason: outcome.reason,
-        });
-      case "duplicate_submitted":
-        return reply.code(200).send({
-          outcome: "DUPLICATE_SUBMITTED",
-          duplicate: true,
-          order: outcome.order,
-        });
-      case "duplicate_terminal":
-        return reply.code(200).send({
-          outcome: "DUPLICATE_TERMINAL",
-          duplicate: true,
-          order: outcome.order,
-        });
-      case "duplicate_pending_ambiguous":
-        return reply.code(200).send({
-          outcome: "DUPLICATE_PENDING_AMBIGUOUS",
-          duplicate: true,
-          order: outcome.order,
-        });
-      case "pending_claimed":
-        return reply.code(200).send({
-          outcome: "PENDING_CLAIMED",
-          duplicate: true,
-          order: outcome.order,
-        });
-      case "submitted":
-        return {
-          outcome: "SUBMITTED",
-          order: outcome.order,
-          execution: outcome.execution,
-        };
-      case "resumed":
-        return {
-          outcome: "RESUMED",
-          order: outcome.order,
-          execution: outcome.execution,
-          resumed: true,
-        };
-      case "execution_error":
-        return reply.code(400).send({
-          outcome: "EXECUTION_ERROR",
-          error: outcome.message,
-          order: outcome.order,
-          ...(outcome.resumed ? { resumed: true } : {}),
-        });
-    }
-  }
-
-  // -----------------------------------------------------------------
-  // persist=true + no idempotency key (legacy callers)
-  // -----------------------------------------------------------------
-  const activeSubmitted = await repo.findActiveSubmittedByInstrument(
-    ticket.instrument,
-  );
-  if (activeSubmitted) {
-    return reply.code(409).send({
-      error: buildSubmittedConflictMessage(ticket.instrument, activeSubmitted),
+      })
+      .catch(() => undefined);
+    return reply.code(400).send({
+      error: "direct_ticket_disallowed_in_pr15",
+      detail:
+        "POST /execution/execute-ticket requires persist=true so PR15 " +
+        "reconciliation can identify the resulting broker order.",
     });
   }
-  try {
-    await assertKillSwitchOk({
-      instrument: ticket.instrument,
-      positionEffect: ticket.positionEffect,
-    });
-  } catch (error) {
-    return reply.code(423).send({ error: (error as Error).message });
-  }
-
-  const legacyPositionGuard: PositionGuardContext =
-    lastActiveAccountId !== null
-      ? {
-          kind: "available",
-          accountId: lastActiveAccountId,
-          sessionId: EXECUTION_PROCESS_OWNER_ID,
-          maxSnapshotAgeMs: config.EXECUTION_POSITION_GUARD_MAX_AGE_S * 1000,
-        }
-      : { kind: "unavailable", reason: "no_active_account" };
-  const insertOutcome = await repo.insertProposedFromTicket(
+  const outcome = await submissionService.submitTicket({
     ticket,
-    body.strategy,
-    undefined,
-    legacyPositionGuard,
-    // Round-7 blocker: server-side hardcoded, NOT caller-controlled.
-    { allowCrossContractExposure: SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE },
-  );
-  if (insertOutcome.kind === "active_intent_exists") {
-    // Same atomic guard as the idempotency path — an existing
-    // non-terminal order for this instrument blocks a fresh insert.
-    return reply.code(409).send({
-      outcome: "ACTIVE_INTENT_EXISTS",
-      error: "active_intent_exists",
-      message: `instrument ${ticket.instrument} already has a non-terminal proposed order (id=${insertOutcome.existingOrderId}, status=${insertOutcome.existingStatus})`,
-      existingOrderId: insertOutcome.existingOrderId,
-      existingStatus: insertOutcome.existingStatus,
-    });
-  }
-  if (insertOutcome.kind === "open_position_exists") {
-    return reply.code(409).send({
-      outcome: "OPEN_POSITION_EXISTS",
-      error: "open_position_exists",
-      message: `instrument ${ticket.instrument} has an open broker position (accountId=${insertOutcome.accountId}, quantity=${insertOutcome.quantity})`,
-      accountId: insertOutcome.accountId,
-      quantity: insertOutcome.quantity,
-      observedAt: insertOutcome.observedAt.toISOString(),
-    });
-  }
-  if (insertOutcome.kind === "position_state_unavailable") {
-    return reply.code(503).send({
-      outcome: "POSITION_STATE_UNAVAILABLE",
-      error: "position_state_unavailable",
-      message: `broker position snapshot ${insertOutcome.reason} for ${insertOutcome.accountId}`,
-      accountId: insertOutcome.accountId,
-      reason: insertOutcome.reason,
-    });
-  }
-  const insertedId = insertOutcome.id;
-  const inserted = await repo.getProposedOrderById(insertedId);
-  if (!inserted) {
-    return reply
-      .code(500)
-      .send({ error: "failed to read inserted proposed order" });
-  }
-
-  try {
-    const result = await executePersistedOrder(inserted, {
-      decisionSource: "user",
-      decisionActor: "user",
-    });
-    const fresh = await repo.getProposedOrderById(insertedId);
-
-    return {
-      order: fresh,
-      ...result,
-    };
-  } catch (error) {
-    const fresh = await repo.getProposedOrderById(insertedId);
-    return reply
-      .code(400)
-      .send({ error: (error as Error).message, order: fresh });
-  }
+    strategy: body.strategy,
+    clientOrderId: body.clientOrderId,
+    clientOrderHash: body.clientOrderHash,
+  });
+  return sendSubmissionOutcome(reply, outcome, ticket.instrument);
 });
 
 async function main(): Promise<void> {
@@ -1780,7 +1574,27 @@ async function main(): Promise<void> {
       return;
     }
     if (!request.url.startsWith("/execution/")) return;
+    // PR15 §8 — reconciliation operator endpoints are EXEMPT from
+    // the trading environment write guard: operators must be able
+    // to trigger a run / resolve a hold even on a hold-blocked
+    // cluster to diagnose. Bearer + audit still apply.
+    if (request.url.startsWith("/execution/reconciliation/")) return;
     assertEnvironmentAllowsWrite(envGuardConfig(), lastActiveAccountId);
+  });
+
+  // PR15 — register reconciliation routes.
+  registerReconciliationRoutes(app, {
+    reconRepo,
+    scheduler: reconScheduler,
+    resolveTokenProvider: () =>
+      config.EXECUTION_RECONCILIATION_RESOLVE_TOKEN?.length
+        ? config.EXECUTION_RECONCILIATION_RESOLVE_TOKEN
+        : null,
+    currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
+    currentAccountId: () => lastActiveAccountId,
+    maxAgeSeconds: config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
+    snapshotMaxAgeSeconds: () =>
+      config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
   });
 
   const address = await app.listen({
@@ -1788,6 +1602,13 @@ async function main(): Promise<void> {
     host: config.EXECUTION_BIND_HOST,
   });
   app.log.info(`execution-engine listening on ${address}`);
+
+  // PR15 — start the reconciliation scheduler. It ticks based on
+  // config.RECONCILIATION_* env vars; the runner acquires a
+  // session-scoped `recon:<account>` advisory lock and publishes
+  // RUNNING → final status via two short `snap:<account>` xact
+  // locks around Phase B broker reads.
+  reconScheduler.start();
 
   // Fire-and-forget: try to reconcile positions with the broker on
   // startup. If TWS is not yet reachable we just emit a startup alert
@@ -1823,6 +1644,7 @@ main().catch((err) => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     try {
+      await reconScheduler.stop();
       tws.disconnect();
       await app.close();
       await pool.end();

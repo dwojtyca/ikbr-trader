@@ -12,6 +12,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "test:integration": "pnpm --filter @ikbr/execution-engine test",
+    "lint": "eslint .",
     "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",
@@ -22,5 +23,10 @@
   "packageManager": "pnpm@9.5.0",
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9",
+    "eslint": "^9",
+    "typescript-eslint": "^8"
   }
 }

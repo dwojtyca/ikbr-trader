@@ -26,6 +26,7 @@ import { HttpReadyProbe } from "./runtime/execution/ready-probe.js";
 import { PaperGuard } from "./runtime/execution/paper-guard.js";
 import { executionRuntimeRoutesPlugin } from "./runtime/execution/routes.js";
 import { HttpTradingExposureReader } from "./runtime/trading-loop/exposure-reader.js";
+import { ReconciliationReader } from "./runtime/trading-loop/reconciliation-reader.js";
 import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
@@ -334,12 +335,19 @@ if (config.runtimeEnabled) {
       bearerToken,
       requestTimeoutMs: config.tradingLoop.exposureTimeoutMs,
     });
+    // PR15 — fail-closed reconciliation pre-check.
+    const reconciliationReader = new ReconciliationReader({
+      baseUrl: engineUrl,
+      bearerToken,
+      timeoutMs: config.tradingLoop.exposureTimeoutMs,
+    });
     tradingLoopService = new TradingLoopService({
       config: config.tradingLoop,
       registry: defaultInstrumentRegistry,
       marketDataRuntime,
       executionRuntime,
       exposureReader,
+      reconciliationReader,
       logger: app.log,
     });
     await app.register(tradingLoopRoutesPlugin, {
