@@ -1,9 +1,9 @@
 # Phase 2 — Runtime Integration (Documentation Kit)
 
-> Status: **planning only**. No production code changes. This kit
-> establishes the minimum architectural decisions required to wire
-> the PR6–PR10 shared engines into a paper-trading runtime backed
-> by `apps/execution-engine` and IBKR Paper.
+> Status: **PR11–PR15 shipped as commit `87eff1c`**. PR15.1
+> reconciles this doc kit with the shipped code. This kit
+> continues to guide PR15.2, PR15.3, PR16–PR18. No production
+> code changes land in a doc PR.
 
 ## Purpose
 
@@ -72,42 +72,33 @@ IBKR Paper — **without** rewriting `apps/execution-engine`,
    `execution_audit_log` requires a numbered migration and a
    backfill note.
 
-## OPEN DECISIONS (tracked across the kit)
+## OPEN DECISIONS (all resolved as of PR15)
 
-The following are recorded as `OPEN DECISION:` inline in the
-documents where they arise:
-
-- OD-1 Orchestrator process placement — new dedicated app,
-  host inside `apps/signal-engine`, or a third option. Nothing
-  in this kit assumes `apps/orchestrator` exists yet.
+- OD-1 Orchestrator process placement.
   **Resolved (PR12 + PR13)**: hosted inside `apps/signal-engine`
   under `src/runtime/` (dry-run) and `src/runtime/execution/`
   (write). See MARKET_DATA_RUNTIME.md, EXECUTION_RUNTIME.md.
-- OD-2 Ticket persistence: dedicated `execution_tickets` table vs.
-  inlined JSONB column on `proposed_orders`.
-  **Resolved (PR13)**: reuse `proposed_orders`; PR13 added
-  `client_order_id` + `client_order_hash` columns.
-- OD-3 Idempotency key surface: `client_order_id UNIQUE` column on
-  `proposed_orders` vs. dedicated `order_idempotency` table.
-  **Resolved (PR13)**: partial unique index on
-  `proposed_orders.client_order_id`.
-- OD-4 Ticket submission API: new `POST /execution/tickets` vs.
-  reuse `POST /execution/execute-ticket` with mandatory
-  `proposedOrderId`.
+- OD-2 Ticket persistence: separate table vs. inline.
+  **Resolved (PR13, verified PR15)**: no separate table;
+  `proposed_orders` carries every order-critical field
+  (migration 000005: `partial_take_profits`,
+  `trailing_stop_pct`, `trailing_stop_activation_r`).
+- OD-3 Idempotency surface.
+  **Resolved (PR13)**: `client_order_id` + `client_order_hash`
+  on `proposed_orders`, mandatory and server-recomputed via
+  `@ikbr/shared/client-order-hash`.
+- OD-4 Ticket submission API.
   **Resolved (PR13)**: reuse `POST /execution/execute-ticket`
-  with `persist=true` extended by `clientOrderId` +
-  `clientOrderHash`.
-- OD-5 Scheduler owner: cron inside Orchestrator vs. external
-  trigger from `apps/ingestion` candle-close events.
-  Still open; PR14.
-- OD-6 Retry ownership: Orchestrator only vs. shared retry helper
-  in `packages/shared`.
-  **Resolved (PR13)**: PR13 has no runtime-level retries. A
-  shared-retry helper is deferred to a later PR if a second
-  caller needs one.
-
-Every open decision is resolved _before_ the PR that depends on it
-starts. See [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md) for gating.
+  with `clientOrderId` + `clientOrderHash` in the JSON body.
+  There is no `Idempotency-Key` header.
+- OD-5 Scheduler owner.
+  **Resolved (PR14)**: internal loop in signal-engine
+  (`TRADING_LOOP_INTERVAL_MS`).
+- OD-6 Retry ownership.
+  **Resolved (PR13/PR15)**: inline in
+  `apps/signal-engine/src/runtime/execution/` submitter and
+  in `apps/execution-engine/src/reconciliation/submission-service.ts`.
+  No new shared retry helper.
 
 ## Out of scope for Phase 2
 

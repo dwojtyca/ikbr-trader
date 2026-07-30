@@ -78,4 +78,21 @@ export default [
       "no-var": "error",
     },
   },
+  // PR15.1 — paper-verify-stack transport isolation:
+  // the tool must not import global `fetch` outside its
+  // dedicated transport module.
+  {
+    files: ["tools/paper-verify-stack/src/**/*.ts"],
+    ignores: ["tools/paper-verify-stack/src/http.ts"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        {
+          name: "fetch",
+          message:
+            "paper-verify-stack: import fetch only from src/http.ts",
+        },
+      ],
+    },
+  },
 ];

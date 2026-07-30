@@ -1,38 +1,66 @@
 # Configuration — Phase 2
 
-> New env vars introduced across Phase 2 (PR11–PR18). Existing
-> security / broker vars (`IBKR_ENVIRONMENT`, `TRADING_ENABLED`,
-> `EXECUTION_API_TOKEN`, `ALLOWED_PAPER_ACCOUNTS`,
-> `ALLOWED_LIVE_ACCOUNTS`, `EXECUTION_READY_RECONCILIATION_MAX_AGE_S`)
-> are owned by [ADR-001](../../adr/ADR-001-execution-security.md)
-> and are **not** duplicated here.
+> Status (r2, PR15 shipped as commit `87eff1c`): the earlier
+> `ORCH_*` table described a hypothetical orchestrator that
+> never landed. PR11–PR15 shipped as an in-process
+> `signal-engine` runtime (`apps/signal-engine/src/runtime/`)
+> with its own env family. The original `ORCH_*` narrative is
+> **superseded** by the tables below and by
+> [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md).
+>
+> Existing security / broker vars (`IBKR_ENVIRONMENT`,
+> `TRADING_ENABLED`, `EXECUTION_API_TOKEN`,
+> `ALLOWED_PAPER_ACCOUNTS`, `ALLOWED_LIVE_ACCOUNTS`,
+> `EXECUTION_READY_RECONCILIATION_MAX_AGE_S`) are owned by
+> [ADR-001](../../adr/ADR-001-execution-security.md) and are
+> **not** duplicated here.
 
-| Name | Owner | Default | Description |
-| --- | --- | --- | --- |
-| `ORCH_LOOP_ENABLED` | Orchestrator | `true` | Kill switch for the trading loop. `false` pauses new ticket submissions. Requires restart. |
-| `ORCH_MAX_RECON_AGE_S` | Orchestrator | `900` | Max age of the last reconciliation report before the loop pauses. Must be ≤ `EXECUTION_READY_RECONCILIATION_MAX_AGE_S`. |
-| `ORCH_TICKET_HTTP_TIMEOUT_MS` | Orchestrator | `5000` | Total timeout for `POST` to the execution-engine ticket endpoint (OD-4). Ambiguous timeout triggers GET-before-retry. |
-| `ORCH_TICKET_CONNECT_TIMEOUT_MS` | Orchestrator | `2000` | Connect-only timeout for the same call. |
-| `ORCH_RETRY_MAX_ATTEMPTS` | Orchestrator | `3` | Max attempts for transient failure class (see FAILURE_AND_RECOVERY). |
-| `ORCH_RETRY_BASE_MS` | Orchestrator | `250` | Base delay for jittered exponential backoff. Cap: 4000 ms. |
-| `ORCH_INSTRUMENT_IDS` | Orchestrator | (unset → refuse boot) | CSV of instrument IDs the loop runs for. No default, to prevent accidental fan-out. |
-| `ORCH_SNAPSHOT_MAX_PRICE_AGE_MS` | Orchestrator | pending PR12 | Freshness bound for the Redis last-tick used in `MarketContextSnapshot`. Above it → `PRICE_NOT_FRESH`. |
-| `ORCH_DRY_RUN_ONLY` | Orchestrator | `true` in PR12, `false` from PR13 | If `true`, the real `TicketSubmitter` is replaced by a noop. Guards PR12 against accidental submission. |
-| `EXECUTION_TICKET_ENDPOINT_PATH` | execution-engine | pending OD-4 | Path exposed by `execution-engine` for ticket submission. |
-| `EXECUTION_IDEMPOTENCY_HEADER` | execution-engine | `Idempotency-Key` | Header name carrying `ExecutionTicket.correlationId`. |
-| `LIVE_STARTUP_DRY_READ` | Orchestrator | `true` | With `IBKR_ENVIRONMENT=live`, boot must log `LIVE_STARTUP_DRY_READ_OK` before any submission. Cannot be disabled — env exists only for test overrides. |
+## Signal-engine runtime (`apps/signal-engine/src/runtime/`)
 
-Owner semantics:
+Verified defaults from
+`apps/signal-engine/src/runtime/execution/config.ts`,
+`apps/signal-engine/src/runtime/trading-loop/config.ts`, and
+`apps/signal-engine/src/config.ts`.
 
-- **Orchestrator** — the new runtime process introduced in
-  PR11+. Its home process is OD-1; the env prefix `ORCH_` is
-  stable regardless of where it lands.
-- **execution-engine** — additive env only; no existing var is
-  repurposed or renamed.
+| Name | Default | Description |
+| --- | --- | --- |
+| `RUNTIME_ENABLED` | `true` | Master switch for `/runtime/*` endpoints. When `false`, `/runtime/health`, `/runtime/ready`, `POST /runtime/dry-run` are NOT registered (return HTTP 404). |
+| `EXECUTION_RUNTIME_ENABLED` | `false` | Registers `POST /runtime/execute`, `GET /runtime/execute/ready`, AND the trading-loop routes (`GET /runtime/trading-loop/status`, `/ready`, `POST /run-once`). Trading-loop endpoints exist **only** when this flag is `true`; when `true` they always exist regardless of `TRADING_LOOP_ENABLED`. |
+| `TRADING_LOOP_ENABLED` | `false` | Starts the internal trading-loop scheduler. Requires `EXECUTION_RUNTIME_ENABLED=true`. When `false`, `GET /runtime/trading-loop/status` still responds and reports `enabled: false`. |
+| `TRADING_LOOP_INTERVAL_MS` | see `.env.example:229–235` | Loop tick interval used by the scheduler. |
 
-OPEN DECISION (OD-4): `EXECUTION_TICKET_ENDPOINT_PATH` stays
-unresolved until PR13 decides between the new endpoint and
-reusing `POST /execution/execute-ticket`.
+## Reconciliation (`apps/execution-engine/src/reconciliation/`)
+
+| Name | Default | Description |
+| --- | --- | --- |
+| `RECONCILIATION_*` | see `.env.example:115–128` | Reconciliation cadence, max age, and hold policy. `GET /execution/reconciliation/latest` returns `stale`, `maxAgeSeconds`, `run.snapshotComplete`, `run.status`. |
+
+## Ticket submission
+
+- Endpoint: `POST /execution/execute-ticket`
+  (`apps/execution-engine/src/index.ts:1474`).
+- Idempotency: JSON body carries `clientOrderId +
+  clientOrderHash`. There is **no** `Idempotency-Key` header
+  and no separate `execution_tickets` table; all fields live
+  on `proposed_orders` (migration 000005:
+  `partial_take_profits`, `trailing_stop_pct`,
+  `trailing_stop_activation_r`).
+- Server-recomputes `clientOrderHash` via
+  `@ikbr/shared/client-order-hash`; mismatch rejects the
+  submission.
+
+## Retired / never-implemented vars
+
+The following env vars appear only in earlier drafts and do
+NOT exist in any `config.ts`:
+
+- `ORCH_*` (10 vars) — replaced by `TRADING_LOOP_*`,
+  `EXECUTION_RUNTIME_*`, `RECONCILIATION_*`, `RUNTIME_ENABLED`.
+- `EXECUTION_TICKET_ENDPOINT_PATH` — path is fixed as
+  `/execution/execute-ticket`.
+- `EXECUTION_IDEMPOTENCY_HEADER` — idempotency is in body,
+  not a header.
+- `LIVE_STARTUP_DRY_READ` — never implemented.
 
 OUT OF SCOPE: per-strategy overrides, dynamic config reload,
 secrets management (already covered in ADR-001).

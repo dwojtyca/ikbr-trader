@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "tools/*"
   ],
   "scripts": {
     "build": "pnpm -r build",
@@ -13,6 +14,7 @@
     "test": "pnpm -r --if-present test",
     "test:integration": "pnpm --filter @ikbr/execution-engine test",
     "lint": "eslint .",
+    "paper:verify-stack": "pnpm --filter @ikbr/paper-verify-stack start",
     "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",

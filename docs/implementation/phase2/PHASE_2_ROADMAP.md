@@ -1,9 +1,29 @@
 # Phase 2 — Roadmap (PR11 → PR18)
 
+> **Status (r2):** PR11–PR15 shipped as commit `87eff1c`.
+> PR15.1 (doc reconciliation + read-only paper-verify tool),
+> PR15.2 (authoritative instrument binding), and PR15.3
+> (entry-only Paper E2E) are follow-up sub-tracks under PR15.
+> The pipeline is still **entry-only**; exit management lands
+> in PR16. The legacy `apps/llm-agent` EXECUTE/REJECT gate
+> continues to run outside the new pipeline against `PROPOSED`
+> orders (unchanged) — this is intentional and independent of
+> the trading-loop.
+>
 > One-line summary per PR; full plans land as
 > `docs/implementation/phase2/PR<n>_PLAN.md` when the PR is picked up.
 > Each PR must satisfy AGENTS.md workflow: PLAN → approval → implement →
 > typecheck / test / build → hostile review → REPORT → stop.
+
+## PR15 sub-tracks
+
+| Sub-track | Scope | Status |
+| --- | --- | --- |
+| PR15   | Three-phase submission + reconciliation + `client_order_id/hash` | **shipped `87eff1c`** |
+| PR15.1 | Doc reconciliation, CI `pnpm lint`, `paper:verify-stack` tool (read-only, GET-only, allowlist-bound), runbook | **shipped** (see [PR15_1_REPORT.md](PR15_1_REPORT.md)) |
+| PR15.2 | Authoritative instrument binding (still no `executionEnabled=true` flip) | pending |
+| PR15.3 | Entry-only Paper E2E window against IB Gateway paper | pending |
+
 
 ## Ordering rationale
 

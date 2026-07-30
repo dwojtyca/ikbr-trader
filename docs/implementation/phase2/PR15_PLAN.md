@@ -1,5 +1,9 @@
 # PR15 — Durable Reconciliation & Recovery — PLAN (revision 6)
 
+> Status: **shipped as commit `87eff1c`**. Kept as historical
+> reference; PR15.1 reconciles the doc kit with the shipped
+> code.
+>
 > Revision 6 (PR15_REPORT r6) closes the last submission
 > hardening gaps:
 >

@@ -1,5 +1,7 @@
 # PR15 — Durable Reconciliation & Recovery — REPORT (r7)
 
+> Status: **shipped as commit `87eff1c`**.
+
 Seventh revision unifies the production submission pipeline
 behind a single `SubmissionApplicationService`. Both
 `/execution/execute-ticket` and `/execution/execute-proposed/:id`
