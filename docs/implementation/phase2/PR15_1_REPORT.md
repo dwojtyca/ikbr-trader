@@ -636,3 +636,166 @@ The paper-verify-stack package will fall back to the r6 state
 without the dynamic-port fixture. The original
 `scripts/fixture-stack.ts` will be restored by the revert.
 No schema, service, or trading-code change to undo.
+
+---
+
+## 12. Post-follow-up correction (2026-07-30) — shutdown & routing hardening
+
+> **Historical evidence in §1–§11 above is preserved verbatim.**
+> The first dynamic-port follow-up (commit `f7fbe6a`) shipped
+> three concrete defects flagged by a subsequent hostile
+> review. This §12 correction addresses them without
+> reopening PR15.1 (which stays **shipped**) and without
+> starting PR15.2 or PR15.3.
+
+### 12.1 Findings addressed
+
+- **F-1 Signal handler bypassed shutdown.** The follow-up
+  CLI called `process.exit(<signal-code>)` inside
+  `SIGINT` / `SIGTERM` handlers, so `FixtureHandle.shutdown()`
+  never ran on the signal path — the OS was left to reap
+  the sockets. The runbook's shutdown guarantee was
+  therefore not structurally enforced.
+- **F-2 Pathname-only route matching.** The fixture built
+  its route map by stripping the query string
+  (`d.path.split("?")[0]`) and matched requests only on
+  pathname. Requests such as
+  `GET /execution/reconciliation/holds` or
+  `GET /execution/reconciliation/holds?wrong=1` were
+  therefore accepted as `RECON_HOLDS_ACTIVE`, even though
+  the allowlist declares exactly
+  `/execution/reconciliation/holds?active=true`.
+- **F-3 False-positive failure test.** The harness test
+  named *"shutdown always runs after a CLI-level throw
+  during runAgainstFixture"* did not actually force a
+  throw. It exercised the happy path and asserted
+  `exitCode === 0`.
+
+### 12.2 Fix summary
+
+- Rewrote `tools/paper-verify-stack/src/fixture/cli.ts` around
+  an injectable `CliDeps` seam (`startStack`, `verify`,
+  `stdout`, `stderr`, `setExitCode`, `registerSignal`) plus
+  an exported `runCli(deps)` core. The CLI now:
+  - explicitly owns the `FixtureHandle`;
+  - never calls `process.exit()`;
+  - registers `SIGINT` (exit 130) and `SIGTERM` (exit 143)
+    handlers that set `process.exitCode`, mark the process
+    `terminated`, kick off `stack.shutdown()`, and rely on
+    the `finally` block to await shutdown before returning;
+  - guards against emitting the PASS line after
+    `terminated === true`;
+  - handles a signal received during startup by shutting
+    the just-resolved stack down explicitly after
+    `startStack` returns;
+  - is safe against multiple signals (`terminated` flag →
+    subsequent handlers are no-ops).
+- Refactored `harness.ts` to add
+  `verifyFixtureWithHandle(stack)` — a non-owning verifier
+  the CLI consumes so its signal handler can retain
+  ownership of the handle. `verifyFixtureFlow()` remains an
+  owning convenience for tests / callers that do not need
+  signal coordination.
+- Rewrote the fixture route map in
+  `tools/paper-verify-stack/src/fixture/fixture-stack.ts` to
+  key on the **full canonical path** from `ENDPOINTS[key].path`
+  (query string included). Matching is exact — a missing,
+  changed, additional, or reordered query returns `404`
+  and is logged with `key: null`. `ENDPOINTS` remains the
+  single source of truth; no second allowlist exists.
+- Strengthened `assertFixtureRun` in `harness.ts` to check
+  all four of: `method === "GET"`, `key ∈ allowlist`,
+  `service === ENDPOINTS[key].service`,
+  `req.url === ENDPOINTS[key].path` (exact string match).
+
+### 12.3 Tests added / corrected
+
+- **`src/fixture/fixture-stack.test.ts`** — 6 new tests for
+  the exact-query contract:
+  - canonical `GET /execution/reconciliation/holds?active=true`
+    → 200 + `key=RECON_HOLDS_ACTIVE` + exact URL match;
+  - missing query → 404 + `key=null`;
+  - wrong query value → 404 + `key=null`;
+  - additional query parameters (query-bearing endpoint)
+    → 404 + `key=null`;
+  - additional query parameters on a query-less endpoint
+    (`/execution/kill-switch?force=1`) → 404 + `key=null`;
+  - `POST` to the canonical URL remains rejected.
+- **`src/fixture/harness.test.ts`** — replaced the
+  false-positive failure test with a deterministic
+  injected-throw test that:
+  - starts a real fixture (captures the three dynamic
+    ports);
+  - throws a real error from inside the owning `try`;
+  - asserts the `finally` closed the stack;
+  - asserts `isShutdown()===true`;
+  - asserts each of the three captured ports is closed.
+- **New `src/fixture/cli.test.ts`** — 8 tests:
+  1. Happy path: PASS line, `exit=0`, `shutdownCompleted`,
+     ports closed.
+  2. SIGINT → exit 130, shutdown resolved BEFORE the run
+     completes, no PASS emitted, ports closed.
+  3. SIGTERM → exit 143, same guarantees.
+  4. Two consecutive signals → exactly one `setExitCode`
+     call (first signal wins); SIGTERM after SIGINT is a
+     no-op.
+  5. Signal during startup: shutdown runs once
+     `startStack` resolves; ports closed; no PASS.
+  6. `verify()` throws with a message deliberately
+     containing `FAKE_TOKEN` + `FIXTURE_ACCOUNT_ID` →
+     stderr is `formatFatalError`-redacted (contains
+     `[REDACTED]` and `DU-***567`; does NOT contain the
+     raw token or account ID); exit 1; ports closed.
+  7. `startStack()` throws → no PASS, exit 1, stderr
+     contains the bind failure message; no server was
+     created, no signal-handler leak.
+
+Signal tests use promise barriers (`releaseVerify`,
+`releaseStartup`) and a spy-based `registerSignal`
+capture. No timer-based race is used.
+
+### 12.4 Validation results
+
+- `docker compose ps --services --filter status=running`
+  before AND after fixture verification listed the exact
+  same seven services (`backtest-engine`,
+  `execution-engine`, `ingestion`, `llm-agent`, `postgres`,
+  `signal-engine`, `ui`). No service was stopped or
+  restarted.
+- `CI=true pnpm install --frozen-lockfile` → clean.
+- `pnpm lint` → 0 errors, 3 pre-existing warnings
+  (unchanged since PR15.1).
+- `pnpm typecheck` → all 8 workspaces green (including
+  new `src/fixture/cli.test.ts`).
+- `pnpm test` → **887 pass / 0 fail** (packages/shared 276,
+  apps/signal-engine 286, apps/execution-engine 187,
+  tools/paper-verify-stack 152).
+- `pnpm build` → all packages/apps built clean.
+- `pnpm --filter @ikbr/paper-verify-stack test` → 152/152
+  pass.
+- `pnpm paper:verify-stack:fixture` →
+  `paper-verify-stack fixture: PASS (opt-out=13 requests,
+   exit=0; opt-in=14 requests, exit=0)`.
+- `git diff --check` → exit 0.
+
+paper-verify-stack test count trajectory:
+125 (PR15.1 completion) → 139 (first follow-up
+`f7fbe6a`) → **152** (this correction: +6 query-string
+tests, +8 CLI signal/failure tests, -2 replaced tests).
+
+### 12.5 Safety confirmations
+
+- No file under `apps/` or `packages/shared/` changed.
+- All six production instruments still
+  `executionEnabled: false`.
+- `TRADING_LOOP_ENABLED` still `false`; `IBKR_ENVIRONMENT`
+  handling unchanged.
+- No real broker or service request occurred. The fixture
+  binds to `127.0.0.1:0` (dynamic ports) — never
+  `3101–3103`.
+- Only synthetic credentials used
+  (`fixture-harness-fake-token-...`); `EXECUTION_API_TOKEN`
+  neither read nor referenced.
+- `.vscode/settings.json` was not staged, edited, or
+  committed by this correction.
+- PR15.2 and PR15.3 remain pending; PR16 unchanged.

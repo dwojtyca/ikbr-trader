@@ -127,7 +127,12 @@ export function assertFixtureRun(result: FixtureRunResult): void {
     `${result.mode}: output is not a JSON object with 'overall'`,
   );
 
-  // Every request GET + allowlisted.
+  // Each request must satisfy the full allowlist contract:
+  //   1. method === GET
+  //   2. key is one of the closed 14 allowlist keys
+  //   3. service matches ENDPOINTS[key].service
+  //   4. raw URL exactly equals ENDPOINTS[key].path (query
+  //      string included).
   for (const req of result.requests) {
     assert.equal(
       req.method,
@@ -137,6 +142,17 @@ export function assertFixtureRun(result: FixtureRunResult): void {
     assert.ok(
       req.key !== null && ALL_ALLOWLISTED_KEYS.has(req.key),
       `${result.mode}: request not in allowlist: ${req.url}`,
+    );
+    const descriptor = ENDPOINTS[req.key];
+    assert.equal(
+      req.service,
+      descriptor.service,
+      `${result.mode}: ${req.key} hit wrong service (${req.service} vs ${descriptor.service})`,
+    );
+    assert.equal(
+      req.url,
+      descriptor.path,
+      `${result.mode}: ${req.key} raw URL differs from allowlist (${req.url} vs ${descriptor.path})`,
     );
   }
 
@@ -205,18 +221,34 @@ export interface VerifyFixtureFlowResult {
 }
 
 /**
+ * Verify against an already-created `FixtureHandle`. This
+ * function does **not** own the handle — the caller is
+ * responsible for `shutdown()`. Suitable for the CLI, which
+ * owns the handle so its signal handlers can await shutdown.
+ */
+export async function verifyFixtureWithHandle(
+  stack: FixtureHandle,
+): Promise<VerifyFixtureFlowResult> {
+  const optOut = await runAgainstFixture(stack, "opt-out");
+  assertFixtureRun(optOut);
+  const optIn = await runAgainstFixture(stack, "opt-in");
+  assertFixtureRun(optIn);
+  return { optOut, optIn };
+}
+
+/**
  * End-to-end flow: start dynamic-port fixture, run opt-out
  * then opt-in against it, assert both, and always shut the
  * fixture down (including on assertion failure or CLI throw).
+ *
+ * Convenience wrapper for callers (e.g. unit tests) that do
+ * not need signal-shutdown coordination. The CLI does its
+ * own explicit handle ownership; see `cli.ts`.
  */
 export async function verifyFixtureFlow(): Promise<VerifyFixtureFlowResult> {
   const stack = await startFixtureStack();
   try {
-    const optOut = await runAgainstFixture(stack, "opt-out");
-    assertFixtureRun(optOut);
-    const optIn = await runAgainstFixture(stack, "opt-in");
-    assertFixtureRun(optIn);
-    return { optOut, optIn };
+    return await verifyFixtureWithHandle(stack);
   } finally {
     await stack.shutdown();
   }

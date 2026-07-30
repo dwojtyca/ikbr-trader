@@ -236,13 +236,18 @@ export async function startFixtureStack(
   const payloads = buildPayloads(now);
   const requestLog: FixtureRequest[] = [];
 
+  // Route map is keyed on the FULL canonical path from
+  // `ENDPOINTS` — including any query string. A request
+  // whose `url` does not match verbatim (missing / changed /
+  // reordered / additional query) MUST 404. This prevents
+  // silent drift between the tool's allowlist and what the
+  // fixture accepts.
   const routesByService = new Map<EndpointService, Map<string, EndpointKey>>();
   for (const svc of SERVICES) routesByService.set(svc, new Map());
   for (const key of Object.keys(ENDPOINTS) as EndpointKey[]) {
     const d = ENDPOINTS[key];
-    const pathname = d.path.split("?")[0];
     const map = routesByService.get(d.service);
-    if (map) map.set(pathname, key);
+    if (map) map.set(d.path, key);
   }
 
   const serversByService = new Map<EndpointService, Server>();
@@ -253,9 +258,10 @@ export async function startFixtureStack(
       const port =
         addr && typeof addr === "object" ? addr.port : 0;
       const rawUrl = req.url ?? "";
-      const pathname = rawUrl.split("?")[0];
       const method = req.method ?? "?";
-      const key = routes?.get(pathname) ?? null;
+      // Exact-match against the full canonical URL (path +
+      // query). No pathname-only fallback.
+      const key = routes?.get(rawUrl) ?? null;
       requestLog.push({
         service: svc,
         port,

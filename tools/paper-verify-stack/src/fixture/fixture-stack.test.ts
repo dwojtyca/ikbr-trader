@@ -233,3 +233,126 @@ describe("startFixtureStack — request log lifecycle", () => {
     }
   });
 });
+
+describe("startFixtureStack — exact query-string matching", () => {
+  it("canonical GET /execution/reconciliation/holds?active=true → 200 + key=RECON_HOLDS_ACTIVE", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/reconciliation/holds?active=true`,
+      );
+      assert.equal(res.status, 200);
+      const body: unknown = await res.json();
+      assert.ok(
+        body && typeof body === "object" && "holds" in body,
+        "expected {holds: []} shape",
+      );
+      const log = stack.requestLog();
+      const entry = log.find((r) =>
+        r.url.startsWith("/execution/reconciliation/holds"),
+      );
+      assert.ok(entry, "canonical URL must be logged");
+      assert.equal(entry.method, "GET");
+      assert.equal(entry.key, "RECON_HOLDS_ACTIVE");
+      assert.equal(entry.service, "execution");
+      assert.equal(
+        entry.url,
+        "/execution/reconciliation/holds?active=true",
+        "raw URL must equal ENDPOINTS[key].path exactly",
+      );
+    } finally {
+      await stack.shutdown();
+    }
+  });
+
+  it("missing query on a query-bearing endpoint → 404, key=null", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/reconciliation/holds`,
+      );
+      assert.equal(res.status, 404);
+      const log = stack.requestLog();
+      const entry = log[log.length - 1];
+      assert.equal(entry.method, "GET");
+      assert.equal(entry.key, null);
+      assert.equal(entry.url, "/execution/reconciliation/holds");
+    } finally {
+      await stack.shutdown();
+    }
+  });
+
+  it("wrong query value on a query-bearing endpoint → 404, key=null", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/reconciliation/holds?active=false`,
+      );
+      assert.equal(res.status, 404);
+      const log = stack.requestLog();
+      const entry = log[log.length - 1];
+      assert.equal(entry.key, null);
+      assert.equal(
+        entry.url,
+        "/execution/reconciliation/holds?active=false",
+      );
+    } finally {
+      await stack.shutdown();
+    }
+  });
+
+  it("additional query parameters on a query-bearing endpoint → 404, key=null", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/reconciliation/holds?active=true&extra=1`,
+      );
+      assert.equal(res.status, 404);
+      const log = stack.requestLog();
+      const entry = log[log.length - 1];
+      assert.equal(entry.key, null);
+      assert.equal(
+        entry.url,
+        "/execution/reconciliation/holds?active=true&extra=1",
+      );
+    } finally {
+      await stack.shutdown();
+    }
+  });
+
+  it("additional query parameters on a query-less endpoint → 404, key=null", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/kill-switch?force=1`,
+      );
+      assert.equal(res.status, 404);
+      const log = stack.requestLog();
+      const entry = log[log.length - 1];
+      assert.equal(entry.key, null);
+      assert.equal(entry.url, "/execution/kill-switch?force=1");
+    } finally {
+      await stack.shutdown();
+    }
+  });
+
+  it("POST to the canonical URL is still rejected", async () => {
+    const stack = await startFixtureStack();
+    try {
+      const res = await globalThis.fetch(
+        `${stack.executionUrl}/execution/reconciliation/holds?active=true`,
+        { method: "POST" },
+      );
+      assert.equal(res.status, 404);
+      const log = stack.requestLog();
+      const entry = log[log.length - 1];
+      // Path resolves to the endpoint key (fixture logs it),
+      // but the method is POST → response is 404, and the
+      // harness's method-gate keeps this out of any HEALTHY
+      // path.
+      assert.equal(entry.method, "POST");
+    } finally {
+      await stack.shutdown();
+    }
+  });
+});

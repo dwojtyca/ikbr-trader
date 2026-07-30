@@ -80,12 +80,24 @@ paper-verify-stack fixture: PASS (opt-out=13 requests, exit=0; opt-in=14 request
 
 The command starts the fixture on three loopback ports, runs
 the real CLI twice (opt-out then opt-in), asserts every
-request was `GET` on an allowlisted path, asserts the
-account-summary preceded the kill-switch call in the opt-in
-run, and shuts the fixture down in a `finally` block. All
-requests use a synthetic Bearer token — the real
-`EXECUTION_API_TOKEN` from `.env` is never referenced. No
-broker call and no mutating HTTP request occurs.
+request was `GET` on an allowlisted path with **exact
+URL match against `ENDPOINTS[key].path`** (query string
+included — a missing / changed / additional / reordered
+query is rejected as `404`), asserts the account-summary
+preceded the kill-switch call in the opt-in run, and shuts
+the fixture down in a `finally` block. All requests use a
+synthetic Bearer token — the real `EXECUTION_API_TOKEN` from
+`.env` is never referenced. No broker call and no mutating
+HTTP request occurs.
+
+`SIGINT` / `SIGTERM` are handled cooperatively: the CLI
+awaits `FixtureHandle.shutdown()` before finalising the exit
+status. `SIGINT` exits `130`, `SIGTERM` exits `143`. Multiple
+signals do not start multiple shutdown operations, and the
+`PASS` summary line is never emitted after termination.
+`process.exit()` is not used — `process.exitCode` is set and
+the event loop drains naturally once every server socket is
+closed.
 
 ## Exit codes
 

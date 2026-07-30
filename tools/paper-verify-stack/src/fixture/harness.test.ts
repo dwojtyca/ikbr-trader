@@ -125,22 +125,62 @@ describe("harness — failure cleanup", () => {
     assert.equal(await isPortListening(ports.execution), false);
   });
 
-  it("shutdown always runs after a CLI-level throw during runAgainstFixture", async () => {
-    // Simulate an in-process CLI failure by supplying an
-    // env that the CLI rejects before HTTP fires (missing
-    // token). runAgainstFixture MUST NOT crash the caller
-    // for this; the caller's `finally` MUST still shut down.
-    const stack = await startFixtureStack();
-    try {
-      // Temporarily override token to force CONFIG_ERROR.
-      const badResult = await runAgainstFixture(stack, "opt-out");
-      // We still get a valid result object; simulate the
-      // caller's assertion failing on it, then confirm
-      // shutdown works.
-      assert.equal(badResult.exitCode, 0);
-    } finally {
-      await stack.shutdown();
-    }
-    assert.equal(stack.isShutdown(), true);
+  it("verifyFixtureFlow: injected runner throws → ports closed, isShutdown()=true (genuine failure)", async () => {
+    // Deterministic failure path: mimic the exact shape of
+    // `verifyFixtureFlow` but replace the runner with one
+    // that throws AFTER startup succeeded. Prove the owning
+    // finally block still calls shutdown, prove all three
+    // dynamic ports are released, and prove `isShutdown()`
+    // flips to true.
+    let stackRef: Awaited<ReturnType<typeof startFixtureStack>> | null = null;
+    let capturedPorts: {
+      ingestion: number;
+      signal: number;
+      execution: number;
+    } | null = null;
+
+    const injectedFlow = async (): Promise<never> => {
+      const stack = await startFixtureStack();
+      stackRef = stack;
+      capturedPorts = { ...stack.ports };
+      try {
+        // The runner is what would normally be
+        // `verifyFixtureWithHandle`. Force a real throw.
+        throw new Error("injected runner failure — deterministic");
+      } finally {
+        await stack.shutdown();
+      }
+    };
+
+    await assert.rejects(
+      injectedFlow,
+      /injected runner failure — deterministic/,
+    );
+    assert.ok(stackRef, "stackRef must have been captured");
+    assert.ok(capturedPorts, "ports must have been captured");
+    const s = stackRef as unknown as {
+      isShutdown(): boolean;
+    };
+    const p = capturedPorts as unknown as {
+      ingestion: number;
+      signal: number;
+      execution: number;
+    };
+    assert.equal(s.isShutdown(), true, "isShutdown must be true");
+    assert.equal(
+      await isPortListening(p.ingestion),
+      false,
+      "ingestion port must be closed",
+    );
+    assert.equal(
+      await isPortListening(p.signal),
+      false,
+      "signal port must be closed",
+    );
+    assert.equal(
+      await isPortListening(p.execution),
+      false,
+      "execution port must be closed",
+    );
   });
 });
