@@ -53,6 +53,40 @@ allowlist of endpoints on `ingestion` (`3101`), `signal-engine`
 (`3102`), and `execution-engine` (`3103`). Every rendered string
 is passed through an account-ID + Bearer-token redactor.
 
+## Reproducible offline verification (dynamic fixture)
+
+The repository ships a self-contained fixture stack that binds
+to `127.0.0.1:0` — the OS allocates three free ports — and
+replies with canned JSON payloads for every endpoint in the
+closed allowlist. This lets an operator verify the tool without
+touching IBKR or the running Docker Compose services. **The
+fixture can run while `docker compose up` is still holding
+ports `3101–3103`** — the dynamic ports never collide.
+
+Run:
+
+```bash
+pnpm paper:verify-stack:fixture
+# or, equivalently:
+pnpm --filter @ikbr/paper-verify-stack verify:fixture
+```
+
+Expected output (values are stable; ports are deliberately not
+printed to avoid depending on OS allocation):
+
+```
+paper-verify-stack fixture: PASS (opt-out=13 requests, exit=0; opt-in=14 requests, exit=0)
+```
+
+The command starts the fixture on three loopback ports, runs
+the real CLI twice (opt-out then opt-in), asserts every
+request was `GET` on an allowlisted path, asserts the
+account-summary preceded the kill-switch call in the opt-in
+run, and shuts the fixture down in a `finally` block. All
+requests use a synthetic Bearer token — the real
+`EXECUTION_API_TOKEN` from `.env` is never referenced. No
+broker call and no mutating HTTP request occurs.
+
 ## Exit codes
 
 | Verdict | Exit | Meaning |

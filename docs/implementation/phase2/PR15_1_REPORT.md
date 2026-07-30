@@ -474,3 +474,165 @@ placeholder; refer to the resulting `git log` entry titled
 No push is performed as part of PR15.1. PR15.2 and PR15.3
 remain pending and are explicitly not started by this
 change.
+
+---
+
+## 11. Post-close follow-up (2026-07-30) — dynamic-port fixture
+
+> **Historical evidence in §1–§10 above is preserved verbatim.**
+> The original PR15.1 completion commit (`91500ee`) shipped
+> the fixture verification with a fixed-port script at
+> `tools/paper-verify-stack/scripts/fixture-stack.ts`. That
+> file has since been superseded by a dynamic-port harness
+> under `tools/paper-verify-stack/src/fixture/`. PR15.1
+> remains **shipped**; this addendum documents the follow-up
+> only.
+
+### 11.1 Motivation
+
+The original `scripts/fixture-stack.ts` bound to fixed ports
+`3101` / `3102` / `3103` — the same ports Docker Compose
+allocates to the real `ingestion` / `signal-engine` /
+`execution-engine` services. The fixture therefore could not
+run while the paper stack was up, and reproducing §6 required
+either bringing the stack down first or reading the fixture's
+banner before it had actually finished binding.
+
+### 11.2 Design change
+
+- `tools/paper-verify-stack/scripts/fixture-stack.ts` removed.
+- New reusable module `tools/paper-verify-stack/src/fixture/fixture-stack.ts`:
+  - Binds each service to `127.0.0.1:0`; the OS allocates the
+    port.
+  - Uses a `listen(0)` promise that resolves only on the
+    `listening` event and rejects on `error`; startup is
+    reported **after** all three servers have reached
+    `listening`. A partial-startup failure closes any server
+    that already bound before re-throwing.
+  - Derives service ownership and paths from
+    [`endpoints.ts`](../../../tools/paper-verify-stack/src/endpoints.ts)
+    (single source of truth for the closed 14-endpoint
+    allowlist — no second allowlist can drift).
+  - Exposes `ingestionUrl`, `signalUrl`, `executionUrl`,
+    `requestLog()`, `clearRequestLog()`, `shutdown()`,
+    `isShutdown()`.
+  - `shutdown()` is idempotent (single memoised promise) and
+    handles servers that never bound.
+- New harness `tools/paper-verify-stack/src/fixture/harness.ts`:
+  - Runs the CLI via the in-process `run()` entrypoint (no
+    child-process shell parsing) with a synthetic
+    `FAKE_TOKEN` — the real `EXECUTION_API_TOKEN` is never
+    read.
+  - Asserts opt-out=13 GETs and opt-in=14 GETs, all on
+    allowlisted paths, plus account-summary precedes
+    kill-switch, plus stdout is valid JSON, plus
+    token/account-ID never leak.
+- New CLI `tools/paper-verify-stack/src/fixture/cli.ts`:
+  - Runs `verifyFixtureFlow()` and prints a one-line summary;
+    exits `0` on PASS.
+  - `SIGINT` / `SIGTERM` handlers exit non-zero without a
+    pre-`close` `process.exit`.
+  - Any error routed through `formatFatalError` (structural
+    redaction) before hitting stderr.
+- `tools/paper-verify-stack/package.json`: added
+  `"verify:fixture": "node --import tsx src/fixture/cli.ts"`.
+- Root `package.json`: added
+  `"paper:verify-stack:fixture": "pnpm --filter @ikbr/paper-verify-stack verify:fixture"`.
+
+### 11.3 TypeScript coverage
+
+The follow-up chose the "move reusable code into `src/`"
+option: the fixture library, harness, and CLI all live under
+`tools/paper-verify-stack/src/fixture/`, so the existing
+`tsconfig.json` `include: ["src/**/*.ts"]` typechecks them
+automatically. No new tsconfig, no widening of the include
+glob, no change to the package entrypoint or dist layout.
+
+### 11.4 New tests
+
+Added under `tools/paper-verify-stack/src/fixture/`:
+
+- `fixture-stack.test.ts` — 8 tests:
+  1. Three non-zero, distinct, loopback ports assigned.
+  2. All three servers actually listening before startup
+     resolves (isPortListening probe).
+  3. Startup succeeds even when `3101`/`3102`/`3103` are
+     occupied (test occupies them itself before calling
+     `startFixtureStack`).
+  4. Shutdown idempotent and actually closes sockets (called
+     three times, isPortListening=false afterwards).
+  5. Every response path derived from the shared
+     `ENDPOINTS` registry (fires one GET per allowlisted
+     key, expects 2xx JSON).
+  6. Non-GET requests answered with 404 (POST/PUT never
+     mapped to a live handler).
+  7. Endpoint key recorded for every allowlisted GET.
+  8. `clearRequestLog` empties the log without affecting
+     subsequent requests.
+- `harness.test.ts` — 6 tests:
+  1. opt-out: 13 requests, all GET, all allowlisted,
+     exit 0, no account-summary.
+  2. opt-in: 14 requests, account-summary precedes
+     kill-switch.
+  3. `verifyFixtureFlow` runs both modes and returns their
+     results with the expected counts.
+  4. Redaction: FAKE_TOKEN and raw account ID never appear
+     in either run's stdout; masked form present.
+  5. Cleanup after a forced assertion failure inside the
+     flow: shutdown runs in `finally`, `isShutdown()=true`,
+     no port still listening.
+  6. Cleanup after a CLI-level throw during
+     `runAgainstFixture`: shutdown still runs.
+
+Baseline paper-verify-stack suite before this follow-up
+was **125 tests**; the follow-up adds **14 tests** for a
+total of **139 tests** — all pass.
+
+### 11.5 Reproducible verification command
+
+```bash
+pnpm paper:verify-stack:fixture
+```
+
+Expected: exit 0, one-line PASS summary with the two request
+counts (`opt-out=13 requests, exit=0; opt-in=14 requests,
+exit=0`). Docker Compose services on `3101–3103` remain
+running throughout. The fixture never contacts IBKR, never
+calls a real service, and never issues a mutating request.
+
+Verified on 2026-07-30 with the following Docker services
+running: `postgres`, `ingestion`, `signal-engine`,
+`execution-engine`, `backtest-engine`, `llm-agent`, `ui`.
+`docker compose ps` reported all seven as `running` both
+before and after the command; no service was stopped or
+restarted.
+
+### 11.6 Safety confirmations for this follow-up
+
+- No file under `apps/` was touched. No file under
+  `packages/shared/**` was touched. Trading logic, strategy,
+  RiskEngine, submission service, reconciliation, broker
+  adapters, and DB schema are unchanged.
+- All six production instruments still
+  `executionEnabled: false`.
+- `TRADING_LOOP_ENABLED` still `false`.
+- No real broker/service request occurred; the fixture is
+  loopback-only on dynamic ports.
+- Only synthetic credentials
+  (`fixture-harness-fake-token-DO-NOT-LEAK-...`) were used.
+  The real `EXECUTION_API_TOKEN` was neither read nor
+  printed.
+- PR15.2, PR15.3, PR16 remain pending; this follow-up
+  touches only the tooling.
+- `.vscode/settings.json` remains uncommitted (see §11.7).
+
+### 11.7 Rollback
+
+```
+git revert <follow-up commit hash>
+```
+
+The paper-verify-stack package will fall back to the r6 state
+without the dynamic-port fixture. The original
+`scripts/fixture-stack.ts` will be restored by the revert.
+No schema, service, or trading-code change to undo.

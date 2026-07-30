@@ -15,6 +15,7 @@
     "test:integration": "pnpm --filter @ikbr/execution-engine test",
     "lint": "eslint .",
     "paper:verify-stack": "pnpm --filter @ikbr/paper-verify-stack start",
+    "paper:verify-stack:fixture": "pnpm --filter @ikbr/paper-verify-stack verify:fixture",
     "dev:ingestion": "pnpm --filter @ikbr/ingestion dev",
     "dev:signal": "pnpm --filter @ikbr/signal-engine dev",
     "dev:execution": "pnpm --filter @ikbr/execution-engine dev",

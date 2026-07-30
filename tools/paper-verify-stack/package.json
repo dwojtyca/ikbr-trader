@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "verify": "node --import tsx src/index.ts",
+    "verify:fixture": "node --import tsx src/fixture/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
     "build": "tsc -p tsconfig.json"
