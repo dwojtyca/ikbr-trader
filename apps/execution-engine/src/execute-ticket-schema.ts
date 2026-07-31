@@ -16,6 +16,18 @@ import { z } from "zod";
 const ticketSchema = z.object({
   instrument: z.string().min(1),
   conid: z.string().optional(),
+  /**
+   * PR15.2 — logical registry `instrumentId` (e.g. `es_front`).
+   * Optional at the schema level so backward-compatible callers
+   * (llm-agent EXECUTE gate, legacy proposal-flow, back-tests)
+   * still parse. The handler for the Phase 2 write endpoint
+   * REQUIRES it — a missing / unbound / unknown / disabled /
+   * mismatched id is rejected before repository mutation and
+   * broker dispatch. Server-side binding resolution is the ONLY
+   * authoritative identity check; the payload's own `instrument`
+   * / `conid` fields are compared against the resolved binding.
+   */
+  instrumentId: z.string().min(1).optional(),
   side: z.enum(["BUY", "SELL", "HOLD"]),
   positionEffect: z.enum(["OPEN_OR_ADD", "CLOSE_OR_REDUCE"]).optional(),
   // PR15 r6 §6 — no default. `MKT` must be explicitly requested

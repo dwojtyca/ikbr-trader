@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | PR15   | Three-phase submission + reconciliation + `client_order_id/hash` | **shipped `87eff1c`** |
 | PR15.1 | Doc reconciliation, CI `pnpm lint`, `paper:verify-stack` tool (read-only, GET-only, allowlist-bound), runbook | **shipped** (see [PR15_1_REPORT.md](PR15_1_REPORT.md)) |
-| PR15.2 | Authoritative instrument binding (still no `executionEnabled=true` flip) | pending |
+| PR15.2 | Authoritative instrument binding (still no `executionEnabled=true` flip) | **implemented, in review** (see [PR15_2_REPORT.md](PR15_2_REPORT.md)) |
 | PR15.3 | Entry-only Paper E2E window against IB Gateway paper | pending |
 
 

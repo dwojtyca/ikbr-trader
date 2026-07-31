@@ -23,7 +23,13 @@
  */
 
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
-import type { ProposedOrder, SignalTicket } from "@ikbr/shared";
+import type {
+  BoundInstrument,
+  InstrumentBindingAuthority,
+  ProposedOrder,
+  SignalTicket,
+} from "@ikbr/shared";
+import { tickSizesEqual } from "@ikbr/shared";
 
 import type {
   ExecutionRepository,
@@ -93,7 +99,24 @@ export interface SubmissionServiceDeps {
   readonly triggerReconciliation: ReconciliationTrigger;
   readonly ownerId: string;
   readonly allowMarketOrder: boolean;
+  /**
+   * PR15.2 — legacy default for the position guard's cross-
+   * contract exposure policy. Used ONLY when a submission has NO
+   * bound instrument (llm-agent `/execution/execute-proposed/:id`
+   * on a legacy `instrument_id IS NULL` row). Bound Phase 2
+   * tickets resolve the value from
+   * `Instrument.executionPolicy?.allowCrossContractExposure ??
+   * false` via `bindingAuthority` — a caller can never widen it.
+   */
   readonly allowCrossContractExposure: boolean;
+  /**
+   * PR15.2 — server-side authority for logical `instrumentId` →
+   * exact broker contract binding. Injected here so the
+   * submission service can rejects unbound / disabled / mismatched
+   * tickets BEFORE repository mutation and broker dispatch. The
+   * server MUST NOT trust the caller's claim of a binding.
+   */
+  readonly bindingAuthority: InstrumentBindingAuthority;
   readonly defaultTif: string;
   readonly onSnapshotInvalidated?: (
     accountId: string,
@@ -136,6 +159,53 @@ export type SubmissionOutcome =
   | { readonly kind: "client_order_hash_mismatch" }
   | { readonly kind: "market_order_not_allowed" }
   | { readonly kind: "idempotency_identity_missing" }
+  /**
+   * PR15.2 — the `POST /execution/execute-ticket` payload lacked
+   * `instrumentId`, or referenced an id that is not configured
+   * in the server-side `INSTRUMENT_BINDINGS_JSON`, or was
+   * disabled (`trading.executionEnabled=false` on the logical
+   * registry entry).
+   */
+  | { readonly kind: "instrument_binding_unavailable"; readonly reason: string }
+  | { readonly kind: "instrument_execution_disabled"; readonly instrumentId: string }
+  /**
+   * PR15.2 — payload symbol / conId did not match the server-
+   * resolved binding for the claimed `instrumentId`. Rejected
+   * before repository mutation.
+   */
+  | { readonly kind: "binding_identity_mismatch"; readonly reason: string }
+  /**
+   * PR15.2 hostile-review fix — the bound registry instrument
+   * has no `executionPolicy`. Every order-critical parameter
+   * (quantity cap, allowed order types, tick size,
+   * cross-contract policy) MUST come from the trusted server-
+   * side registry — fail-closed rather than fall back to any
+   * caller-supplied value.
+   */
+  | { readonly kind: "instrument_policy_unavailable"; readonly instrumentId: string }
+  /**
+   * PR15.2 hostile-review fix — the payload's `orderType`
+   * is not in the bound instrument's
+   * `executionPolicy.allowedOrderTypes`. Rejected before repo
+   * mutation and broker dispatch.
+   */
+  | {
+      readonly kind: "order_type_not_allowed_by_instrument_policy";
+      readonly instrumentId: string;
+      readonly orderType: string;
+      readonly allowedOrderTypes: readonly string[];
+    }
+  /**
+   * PR15.2 hostile-review fix — the trusted registry policy
+   * `priceTickSize` does not match the operator-configured
+   * `bound.minTick`. Refuses the submission before persistence.
+   */
+  | {
+      readonly kind: "instrument_tick_mismatch";
+      readonly instrumentId: string;
+      readonly policyTick: number;
+      readonly boundTick: number;
+    }
   | { readonly kind: "legacy_idempotency_identity_missing"; readonly proposedOrderId: number }
   | { readonly kind: "rejected_order_immutable"; readonly proposedOrderId: number }
   | { readonly kind: "kill_switch_triggered"; readonly message: string }
@@ -260,8 +330,25 @@ export function buildSubmissionApplicationService(
     readonly clientOrderHash: string;
     readonly metadata: OrderDecisionMetadata;
     readonly resumed: boolean;
+    /**
+     * PR15.2 — server-resolved cross-contract exposure policy
+     * for this specific submission. For bound tickets it comes
+     * from `Instrument.executionPolicy?.allowCrossContractExposure
+     * ?? false`; for legacy (unbound) rows it defaults to
+     * `deps.allowCrossContractExposure` (hardcoded `false`).
+     * A caller cannot influence it — this value is set inside
+     * `submitTicket` / `executeProposed`, never by the HTTP layer.
+     */
+    readonly allowCrossContractExposure: boolean;
   }): Promise<SubmissionOutcome> {
-    const { order, clientOrderId, clientOrderHash, metadata, resumed } = input;
+    const {
+      order,
+      clientOrderId,
+      clientOrderHash,
+      metadata,
+      resumed,
+      allowCrossContractExposure,
+    } = input;
     // PR15 r8 §2 — every prepare/claim/dispatch MUST be preceded
     // by a recompute of computeClientOrderHash from the persisted
     // row and a comparison to the stored hash. We re-fetch inside
@@ -340,7 +427,7 @@ export function buildSubmissionApplicationService(
       owner: deps.ownerId,
       instrument: validatedOrder.instrument,
       conid: typeof validatedOrder.conid === "string" ? validatedOrder.conid : null,
-      allowCrossContractExposure: deps.allowCrossContractExposure,
+      allowCrossContractExposure,
       positionGuard,
       reconciliationGate: deps.reconciliationGate(),
       prepared: {
@@ -348,6 +435,7 @@ export function buildSubmissionApplicationService(
         clientOrderHash,
         instrument: validatedOrder.instrument,
         conid: typeof validatedOrder.conid === "string" ? validatedOrder.conid : null,
+        instrumentId: validatedOrder.instrumentId ?? null,
         legs: prepared.legs,
       },
       accountId,
@@ -459,6 +547,42 @@ export function buildSubmissionApplicationService(
       if (input.clientOrderHash !== serverHash) {
         return { kind: "client_order_hash_mismatch" };
       }
+
+      // PR15.2 — authoritative instrument-binding gate.
+      // BEFORE any persistence / broker contact:
+      //   1. resolve the server-side binding for the ticket's
+      //      claimed `instrumentId` (never trust the caller);
+      //   2. refuse disabled instruments;
+      //   3. compare payload symbol + conId to the resolved
+      //      binding — a mismatch aborts fail-closed;
+      //   4. resolve `allowCrossContractExposure` from the
+      //      registry's own executionPolicy — the caller cannot
+      //      influence it.
+      //
+      // If the payload has NO `instrumentId` the submission is
+      // treated as a legacy (pre-PR15.2) request: the endpoint
+      // layer enforces "instrumentId REQUIRED for
+      // /execution/execute-ticket" (see `index.ts`) so this
+      // fall-through only fires for pre-PR15.2 internal test
+      // paths and the llm-agent proposal flow via
+      // `/execution/execute-proposed/:id`. Legacy allowCross-
+      // ContractExposure default = server-side `false`.
+      let allowCrossContractExposure = deps.allowCrossContractExposure;
+      if (input.ticket.instrumentId !== undefined) {
+        const bindingCheck = resolveBoundIdentity(deps.bindingAuthority, {
+          instrumentId: input.ticket.instrumentId,
+          instrument: input.ticket.instrument,
+          conid: input.ticket.conid ?? null,
+          orderType: input.ticket.orderType,
+        });
+        if (bindingCheck.kind !== "ok") {
+          return bindingCheck.outcome;
+        }
+        allowCrossContractExposure =
+          bindingCheck.bound.instrument.executionPolicy
+            ?.allowCrossContractExposure ?? false;
+      }
+
       const metadata: OrderDecisionMetadata = {
         decisionSource: "user",
         decisionActor: "user",
@@ -471,6 +595,19 @@ export function buildSubmissionApplicationService(
       if (existing) {
         if (existing.clientOrderHash !== input.clientOrderHash) {
           return { kind: "conflict", order: existing.order };
+        }
+        // PR15.2 — resume-time instrumentId guard. The stored row
+        // MUST match the payload's binding: a divergence here
+        // means someone reused the same clientOrderId+hash under
+        // a different logical instrument. Fail-closed.
+        if (
+          (existing.order.instrumentId ?? null) !==
+          (input.ticket.instrumentId ?? null)
+        ) {
+          return {
+            kind: "binding_identity_mismatch",
+            reason: "resume_instrument_id_mismatch",
+          };
         }
         const st = existing.order.status;
         if (st === "SUBMITTED" || st === "FILLED") {
@@ -496,6 +633,7 @@ export function buildSubmissionApplicationService(
           clientOrderHash: input.clientOrderHash,
           metadata,
           resumed: true,
+          allowCrossContractExposure,
         });
       }
       // Fresh INSERT.
@@ -513,7 +651,7 @@ export function buildSubmissionApplicationService(
           },
           positionGuard,
           {
-            allowCrossContractExposure: deps.allowCrossContractExposure,
+            allowCrossContractExposure,
             reconciliationGate: deps.reconciliationGate(),
           },
         );
@@ -533,12 +671,22 @@ export function buildSubmissionApplicationService(
         if (raced.clientOrderHash !== input.clientOrderHash) {
           return { kind: "conflict", order: raced.order };
         }
+        if (
+          (raced.order.instrumentId ?? null) !==
+          (input.ticket.instrumentId ?? null)
+        ) {
+          return {
+            kind: "binding_identity_mismatch",
+            reason: "resume_instrument_id_mismatch",
+          };
+        }
         return runThreePhase({
           order: raced.order,
           clientOrderId: input.clientOrderId,
           clientOrderHash: input.clientOrderHash,
           metadata,
           resumed: true,
+          allowCrossContractExposure,
         });
       }
       if (insertOutcome.kind === "active_intent_exists") {
@@ -597,6 +745,7 @@ export function buildSubmissionApplicationService(
         clientOrderHash: input.clientOrderHash,
         metadata,
         resumed: false,
+        allowCrossContractExposure,
       });
     },
 
@@ -651,6 +800,28 @@ export function buildSubmissionApplicationService(
       if (order.executionAttemptedAt || order.brokerOrderId) {
         return { kind: "duplicate_pending_ambiguous", order };
       }
+      // PR15.2 — cross-contract exposure policy for the legacy
+      // proposal path. If the persisted row carries a logical
+      // `instrumentId` (a PR15.2 execute-ticket row that ended
+      // up in the execute-proposed retry path), resolve the
+      // server-side binding and use its registry policy. Legacy
+      // rows without `instrumentId` fall back to the hardcoded
+      // safe default (`deps.allowCrossContractExposure=false`).
+      // A caller cannot influence either branch — no field of
+      // the URL / body payload feeds this decision.
+      let allowCrossContractExposure = deps.allowCrossContractExposure;
+      if (order.instrumentId !== undefined) {
+        const bindingCheck = resolveBoundIdentity(deps.bindingAuthority, {
+          instrumentId: order.instrumentId,
+          instrument: order.instrument,
+          conid: typeof order.conid === "string" ? order.conid : null,
+          orderType: order.orderType,
+        });
+        if (bindingCheck.kind !== "ok") return bindingCheck.outcome;
+        allowCrossContractExposure =
+          bindingCheck.bound.instrument.executionPolicy
+            ?.allowCrossContractExposure ?? false;
+      }
       const metadata: OrderDecisionMetadata = {
         decisionSource: "user",
         decisionActor: "user",
@@ -662,7 +833,158 @@ export function buildSubmissionApplicationService(
         clientOrderHash: cHash,
         metadata,
         resumed: true,
+        allowCrossContractExposure,
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// PR15.2 — server-side binding resolution helper (pure).
+// ---------------------------------------------------------------------------
+
+interface BoundIdentityInput {
+  readonly instrumentId: string | undefined;
+  readonly instrument: string;
+  readonly conid: string | null;
+  /**
+   * PR15.2 hostile-review fix — the ticket's `orderType`. Used
+   * to enforce `Instrument.executionPolicy.allowedOrderTypes`.
+   * Optional so legacy callers that only need identity checks
+   * (resume paths, execute-proposed) can omit it.
+   */
+  readonly orderType?: string;
+}
+
+type BoundIdentityResult =
+  | {
+      readonly kind: "ok";
+      readonly bound: BoundInstrument;
+    }
+  | { readonly kind: "reject"; readonly outcome: SubmissionOutcome };
+
+/**
+ * Resolve the payload's claimed `instrumentId` through the
+ * server-side `InstrumentBindingAuthority` and verify the
+ * broker-facing identity fields (symbol + conId). Every failure
+ * short-circuits with a specific `SubmissionOutcome` variant —
+ * the caller MUST NOT proceed to persistence or broker dispatch
+ * on a rejection.
+ *
+ * Invariants proven at this boundary:
+ *   - missing `instrumentId` in a Phase 2 request → refused;
+ *   - unknown / unbound id → refused;
+ *   - `trading.executionEnabled=false` → refused;
+ *   - `instrument` symbol mismatch → refused;
+ *   - `conid` mismatch → refused.
+ */
+function resolveBoundIdentity(
+  authority: InstrumentBindingAuthority,
+  input: BoundIdentityInput,
+): BoundIdentityResult {
+  const id = input.instrumentId?.trim();
+  if (!id) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "instrument_binding_unavailable",
+        reason: "instrument_id_missing",
+      },
+    };
+  }
+  const bound = authority.getBoundInstrument(id);
+  if (!bound) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "instrument_binding_unavailable",
+        reason: `instrument_id_not_bound:${id}`,
+      },
+    };
+  }
+  if (!bound.instrument.trading.executionEnabled) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "instrument_execution_disabled",
+        instrumentId: id,
+      },
+    };
+  }
+  if (input.instrument !== bound.brokerSymbol) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "binding_identity_mismatch",
+        reason: `symbol_mismatch:payload=${input.instrument},bound=${bound.brokerSymbol}`,
+      },
+    };
+  }
+  const wantConid = String(bound.conId);
+  if (input.conid === null) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "binding_identity_mismatch",
+        reason: "conid_missing",
+      },
+    };
+  }
+  if (input.conid !== wantConid) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "binding_identity_mismatch",
+        reason: `conid_mismatch:payload=${input.conid},bound=${wantConid}`,
+      },
+    };
+  }
+  // PR15.2 hostile-review fix — the server-side registry MUST
+  // publish an `executionPolicy` for every bound Phase 2 ticket.
+  // Absence means the operator flipped `executionEnabled=true`
+  // without configuring the order-critical parameters — refuse
+  // rather than fall back to any caller-supplied value.
+  const policy = bound.instrument.executionPolicy;
+  if (!policy) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "instrument_policy_unavailable",
+        instrumentId: id,
+      },
+    };
+  }
+  // Order type must be one the registry policy allows for this
+  // instrument. `MKT` is separately forbidden upstream — this
+  // gate ADDS the per-instrument allow-list on top.
+  if (input.orderType !== undefined) {
+    if (!policy.allowedOrderTypes.includes(input.orderType as "LMT" | "STP")) {
+      return {
+        kind: "reject",
+        outcome: {
+          kind: "order_type_not_allowed_by_instrument_policy",
+          instrumentId: id,
+          orderType: input.orderType,
+          allowedOrderTypes: policy.allowedOrderTypes,
+        },
+      };
+    }
+  }
+  // Trusted registry policy's `priceTickSize` MUST match the
+  // operator-configured, broker-verified `bound.minTick`. A
+  // divergence means either the seed is out of date with the
+  // dated contract, or the operator misconfigured the binding
+  // — either way, refuse to build a ticket.
+  if (!tickSizesEqual(policy.priceTickSize, bound.minTick)) {
+    return {
+      kind: "reject",
+      outcome: {
+        kind: "instrument_tick_mismatch",
+        instrumentId: id,
+        policyTick: policy.priceTickSize,
+        boundTick: bound.minTick,
+      },
+    };
+  }
+  return { kind: "ok", bound };
 }

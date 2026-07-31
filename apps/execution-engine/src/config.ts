@@ -167,6 +167,19 @@ const rawSchema = z.object({
   // MUST differ from EXECUTION_API_TOKEN. If empty, the resolve
   // endpoint is 403 by design.
   EXECUTION_RECONCILIATION_RESOLVE_TOKEN: optionalTrimmedString,
+
+  // --- PR15.2: Authoritative instrument binding ---
+  // Optional JSON array pinning logical registry `instrumentId`s to
+  // exact IBKR contract identities (conId + localSymbol +
+  // tradingClass + exchange + currency). Empty / unset means no
+  // registry-bound Phase 2 tickets are accepted; the legacy
+  // `/execution/execute-proposed/:id` path continues to work. See
+  // `docs/architecture/INSTRUMENT_REGISTRY.md` §Bindings.
+  //
+  // NEVER log the raw value — an operator may reasonably paste a
+  // production-facing dated contract mapping and we treat it like
+  // any other secret.
+  INSTRUMENT_BINDINGS_JSON: z.string().default(""),
 });
 
 const parseBoolFlag = (raw: "true" | "false"): boolean => raw === "true";

@@ -18,7 +18,7 @@
  *     ingestion already resolves through IBKR at bootstrap).
  */
 
-import type { Instrument } from "@ikbr/shared";
+import type { BoundInstrument, Instrument } from "@ikbr/shared";
 
 /**
  * Snapshot of the last observed tick for an instrument. `observedAt`
@@ -178,6 +178,47 @@ export class SignalRepositoryContractResolver implements ContractResolver {
       });
     }
     return row.conid;
+  }
+}
+
+/**
+ * PR15.2 — thin resolver wrapper that returns the bound `conId`
+ * for every instrument that has an authoritative binding, and
+ * delegates to an inner resolver otherwise. Used by the trading
+ * loop so market-data lookups follow the exact operator-selected
+ * contract, never a symbol-only match from `instrument_contracts`.
+ *
+ * The cache belongs to the inner resolver — this wrapper is a
+ * pure branch on the frozen binding map.
+ */
+export class BindingAwareContractResolver implements ContractResolver {
+  readonly #resolveBound: (instrumentId: string) => BoundInstrument | undefined;
+  readonly #inner: ContractResolver;
+
+  constructor(options: {
+    readonly resolveBound: (
+      instrumentId: string,
+    ) => BoundInstrument | undefined;
+    readonly inner: ContractResolver;
+  }) {
+    if (typeof options?.resolveBound !== "function") {
+      throw new Error(
+        "BindingAwareContractResolver: resolveBound is required",
+      );
+    }
+    if (!options.inner || typeof options.inner.resolveConid !== "function") {
+      throw new Error(
+        "BindingAwareContractResolver: inner ContractResolver is required",
+      );
+    }
+    this.#resolveBound = options.resolveBound;
+    this.#inner = options.inner;
+  }
+
+  async resolveConid(instrument: Instrument): Promise<string | null> {
+    const bound = this.#resolveBound(instrument.id);
+    if (bound !== undefined) return String(bound.conId);
+    return this.#inner.resolveConid(instrument);
   }
 }
 

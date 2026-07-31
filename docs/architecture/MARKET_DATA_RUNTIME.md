@@ -164,3 +164,19 @@ none today). PR13 or a follow-up may add auth uniformly across
 Not added by PR12 (deferred): `ORCH_LOOP_ENABLED`, retry policy,
 reconciliation, execution-engine URL, idempotency key storage,
 candle-provider settings.
+
+## PR15.2 — Instrument binding integration
+
+The `ContractResolver` port is wrapped by
+`BindingAwareContractResolver` (in
+`apps/signal-engine/src/runtime/market-data-reader.ts`). For any
+instrument that appears in the shared `INSTRUMENT_BINDINGS_JSON`
+authority, the resolver returns the exact operator-selected
+`conId` and NEVER consults `instrument_contracts` by
+symbol. Unbound instruments continue to use the legacy
+symbol → conid lookup.
+
+The identity check inside `SignalRepositoryMarketDataReader`
+remains authoritative: the Redis payload's `conid` and `symbol`
+MUST agree with what the wrapper returned, or the reader returns
+`null` and the price section becomes unavailable.

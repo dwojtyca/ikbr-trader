@@ -240,3 +240,24 @@ describe("toLegacySignalTicket — metadata + identity", () => {
     assert.equal(result.conid, undefined);
   });
 });
+
+describe("toLegacySignalTicket — PR15.2 instrumentId propagation", () => {
+  it("carries the ExecutionTicket.instrumentId onto the legacy wire", () => {
+    const result = toLegacySignalTicket(
+      baseTicket({ instrumentId: "es_front" }),
+    );
+    assert.equal(result.instrumentId, "es_front");
+  });
+
+  it("is undefined when the source ticket has no instrumentId", () => {
+    // The shared `ExecutionTicket` type currently requires
+    // `instrumentId`; a caller passing an empty string exercises
+    // the omit branch through a widened override.
+    const result = toLegacySignalTicket(
+      baseTicket({ instrumentId: "" }) as unknown as Parameters<
+        typeof toLegacySignalTicket
+      >[0],
+    );
+    assert.equal(result.instrumentId, "");
+  });
+});

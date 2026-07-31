@@ -94,6 +94,21 @@ export interface PartialTakeProfit {
 
 export interface SignalTicket {
   instrument: string;
+  /**
+   * PR15.2 — optional logical instrument id from the shared
+   * `InstrumentRegistry`. Required by the Phase 2 write endpoint
+   * `POST /execution/execute-ticket` so execution-engine can
+   * resolve the authoritative binding server-side and verify
+   * `instrument`/`conid` identity. Legacy paths (llm-agent
+   * proposal → `/execution/execute-proposed/:id`, backtest ticket
+   * simulator, older `proposed_orders` rows) omit it and keep
+   * working — `instrument_id IS NULL` is a first-class legacy
+   * state. Deliberately excluded from `computeClientOrderHash`
+   * (v1) so legacy hashes still validate; execution-engine
+   * checks identity by comparing the persisted `instrument_id`
+   * against the payload directly.
+   */
+  instrumentId?: string;
   conid?: string;
   side: Side;
   positionEffect?: PositionEffect;
@@ -369,6 +384,20 @@ export {
   INSTRUMENT_DEFINITIONS,
   defaultInstrumentRegistry,
 } from "./instruments/definitions.js";
+export {
+  InstrumentBindingAuthority,
+  buildInstrumentBindingAuthority,
+  parseInstrumentBindings,
+  MIN_TICK_EPSILON,
+  tickSizesEqual,
+  mapAssetClassToIbkrSecType,
+} from "./instruments/bindings.js";
+export type {
+  BoundInstrument,
+  InstrumentBinding,
+  InstrumentBindingParseError,
+  InstrumentBindingParseResult,
+} from "./instruments/bindings.js";
 export * from "./market-context/index.js";
 export * from "./decision-engine/index.js";
 export * from "./risk-engine/index.js";

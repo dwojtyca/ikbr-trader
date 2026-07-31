@@ -112,6 +112,13 @@ export function validatePersistedOrderIdentity(
   }
   const ticket: SignalTicket = {
     instrument: order.instrument,
+    // PR15.2 — reconstructed for identity comparisons only.
+    // Deliberately excluded from the canonical clientOrderHash
+    // (see `computeClientOrderHash` v1) so legacy rows without
+    // instrument_id still validate.
+    ...(order.instrumentId !== undefined
+      ? { instrumentId: order.instrumentId }
+      : {}),
     conid: typeof order.conid === "string" ? order.conid : undefined,
     side: order.side,
     positionEffect: order.positionEffect ?? undefined,
@@ -147,6 +154,7 @@ export function validatePersistedOrderIdentity(
 interface ProposedOrderRow {
   id: number;
   instrument: string;
+  instrument_id: string | null;
   conid: string | null;
   side: Side;
   position_effect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" | null;
@@ -334,6 +342,16 @@ export interface PlanPersistenceInput {
   readonly clientOrderHash: string;
   readonly instrument: string;
   readonly conid: string | null;
+  /**
+   * PR15.2 — expected `proposed_orders.instrument_id` for the
+   * atomic identity re-check. `null` for legacy rows persisted
+   * before PR15.2 or through the llm-agent proposal path. The
+   * atomic identity check compares the payload value to the
+   * persisted column via `IS NOT DISTINCT FROM` semantics so
+   * legacy nulls remain claimable exactly as before. Optional
+   * on the type — `undefined` is treated as `null`.
+   */
+  readonly instrumentId?: string | null;
   readonly legs: readonly {
     readonly role: "PARENT" | "TP" | "SL";
     readonly roleOrdinal: number;
@@ -1328,6 +1346,7 @@ export class ExecutionRepository {
         `
         INSERT INTO proposed_orders (
           instrument,
+          instrument_id,
           conid,
           side,
           position_effect,
@@ -1351,15 +1370,16 @@ export class ExecutionRepository {
         )
         VALUES (
           $1, $2, $3, $4, $5,
-          $6, $7, $8, $9,
-          $10::jsonb, $11, $12,
-          $13, $14, $15, 'PROPOSED', $16, 'user',
-          $17, $18, NOW()
+          $6, $7, $8, $9, $10,
+          $11::jsonb, $12, $13,
+          $14, $15, $16, 'PROPOSED', $17, 'user',
+          $18, $19, NOW()
         )
         RETURNING id
         `,
         [
           ticket.instrument,
+          ticket.instrumentId ?? null,
           ticket.conid ?? null,
           ticket.side,
           ticket.positionEffect ?? null,
@@ -1412,7 +1432,7 @@ export class ExecutionRepository {
   ): Promise<{ order: ProposedOrder; clientOrderHash: string | null } | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1441,7 +1461,7 @@ export class ExecutionRepository {
   async getProposedOrderById(id: number): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1474,7 +1494,7 @@ export class ExecutionRepository {
   } | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1510,7 +1530,7 @@ export class ExecutionRepository {
   ): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1632,7 +1652,7 @@ export class ExecutionRepository {
 
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -2126,13 +2146,14 @@ export class ExecutionRepository {
         client_order_id: string | null;
         client_order_hash: string | null;
         instrument: string;
+        instrument_id: string | null;
         conid: string | null;
         status: string;
         execution_attempted_at: Date | null;
         broker_order_id: string | null;
       }>(
         `SELECT id::text AS id, client_order_id, client_order_hash,
-                instrument, conid, status,
+                instrument, instrument_id, conid, status,
                 execution_attempted_at, broker_order_id
            FROM proposed_orders
           WHERE id = $1
@@ -2181,6 +2202,20 @@ export class ExecutionRepository {
         return {
           kind: "submission_identity_mismatch",
           reason: "conid_mismatch",
+        };
+      }
+      // PR15.2 — instrument_id identity re-check under the same
+      // IS-NOT-DISTINCT-FROM semantics: legacy rows and legacy
+      // callers pair NULL⇔NULL and remain claimable; any diff
+      // (payload changed instrumentId under the same
+      // clientOrderId+hash) fails closed. This is the durable
+      // proof that the payload's registry id belongs to the
+      // persisted row.
+      if ((row.instrument_id ?? null) !== (input.prepared.instrumentId ?? null)) {
+        await client.query("ROLLBACK");
+        return {
+          kind: "submission_identity_mismatch",
+          reason: "instrument_id_mismatch",
         };
       }
       if (row.status !== "PROPOSED") {
@@ -2895,6 +2930,14 @@ export class ExecutionRepository {
     const out: ProposedOrder = {
       id: row.id,
       instrument: row.instrument,
+      // PR15.2 — logical registry id, optional on the wire and
+      // NULL for legacy rows written before the migration or
+      // through the llm-agent proposal flow. Project only when
+      // non-null so `SignalTicket.instrumentId` stays `undefined`
+      // for legacy consumers that still compare strictly.
+      ...(row.instrument_id !== null && row.instrument_id !== undefined
+        ? { instrumentId: row.instrument_id }
+        : {}),
       conid: row.conid ?? undefined,
       side: row.side,
       positionEffect: row.position_effect ?? undefined,

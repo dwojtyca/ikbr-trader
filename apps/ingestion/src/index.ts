@@ -7,6 +7,7 @@ import { MarketRepository } from "./db.js";
 import { CandleAggregator } from "./candle-aggregator.js";
 import { HigherTimeframeAggregator } from "./higher-timeframe-aggregator.js";
 import { InstrumentSubscription } from "./types.js";
+import { verifyBoundSubscriptions } from "./binding-verification.js";
 
 const TIMEFRAME_INTERVAL_MS: Record<
   import("@ikbr/shared").CandleTimeframe,
@@ -176,7 +177,7 @@ app.get("/watchlist", async () => {
   const latestCandles = await repo.getLatestCandles1mByConids(conids);
 
   const watchlist = await Promise.all(
-    config.watchlistInstruments.map(async ({ symbol }) => {
+    config.watchlistInstruments.map(async ({ symbol, instrumentId }) => {
       const subscription = subscriptionsBySymbol.get(symbol);
       const marketState = subscription
         ? await repo.readMarketState(redis, subscription.conid)
@@ -187,6 +188,10 @@ app.get("/watchlist", async () => {
 
       return {
         symbol,
+        // PR15.2 — surface the logical registry id + subscription
+        // status for bound instruments so `/watchlist` reflects
+        // the authoritative binding read-only.
+        instrumentId: instrumentId ?? subscription?.instrumentId ?? null,
         displayName: subscription?.displayName ?? null,
         conid: subscription?.conid ?? null,
         subscribed: Boolean(subscription),
@@ -202,6 +207,10 @@ app.get("/watchlist", async () => {
     bootstrapping: bootstrapInFlight,
     lastBootstrapAt,
     watchlist,
+    // PR15.2 — safe diagnostics only (bound count + ids).
+    // The raw `INSTRUMENT_BINDINGS_JSON` is NEVER exposed via
+    // this endpoint or logged.
+    bindings: config.instrumentBindingAuthority.toDiagnostics(),
   };
 });
 
@@ -242,9 +251,31 @@ app.post("/bootstrap", async () => {
       );
     }
 
-    const subscriptions = await twsClient.resolveContracts(
+    const rawSubscriptions = await twsClient.resolveContracts(
       config.watchlistInstruments,
     );
+    // PR15.2 — verify every bound subscription's resolved
+    // contract identity against the shared binding authority.
+    // A mismatch drops the subscription — the operator picked
+    // an exact dated contract on purpose; ingestion refuses to
+    // publish market state under a substituted identity. No
+    // raw configuration payload appears in the log.
+    const bindingCheck = verifyBoundSubscriptions({
+      authority: config.instrumentBindingAuthority,
+      watchlist: config.watchlistInstruments,
+      subscriptions: rawSubscriptions,
+    });
+    for (const mismatch of bindingCheck.mismatches) {
+      app.log.error(
+        {
+          component: "instrument-bindings",
+          instrumentId: mismatch.instrumentId,
+          reason: mismatch.reason,
+        },
+        "instrument-bindings: refusing subscription (identity mismatch)",
+      );
+    }
+    const subscriptions = bindingCheck.accepted;
     for (const subscription of subscriptions) {
       if (subscription.instrumentContract) {
         await repo.upsertInstrumentContract(subscription.instrumentContract);

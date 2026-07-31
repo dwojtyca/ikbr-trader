@@ -28,6 +28,7 @@ Verified defaults from
 | `EXECUTION_RUNTIME_ENABLED` | `false` | Registers `POST /runtime/execute`, `GET /runtime/execute/ready`, AND the trading-loop routes (`GET /runtime/trading-loop/status`, `/ready`, `POST /run-once`). Trading-loop endpoints exist **only** when this flag is `true`; when `true` they always exist regardless of `TRADING_LOOP_ENABLED`. |
 | `TRADING_LOOP_ENABLED` | `false` | Starts the internal trading-loop scheduler. Requires `EXECUTION_RUNTIME_ENABLED=true`. When `false`, `GET /runtime/trading-loop/status` still responds and reports `enabled: false`. |
 | `TRADING_LOOP_INTERVAL_MS` | see `.env.example:229–235` | Loop tick interval used by the scheduler. |
+| `INSTRUMENT_BINDINGS_JSON` | `""` (empty) | PR15.2 — shared JSON payload binding logical `instrumentId`s to exact IBKR contract identity. Read verbatim by ingestion, signal-engine, and execution-engine. Empty means no bound instruments. NEVER logged. See [../../architecture/INSTRUMENT_REGISTRY.md](../../architecture/INSTRUMENT_REGISTRY.md#11-instrument-bindings-pr152). |
 
 ## Reconciliation (`apps/execution-engine/src/reconciliation/`)
 

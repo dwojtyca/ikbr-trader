@@ -35,7 +35,12 @@ export type TradingLoopSkipReason =
   | "EXPOSURE_READ_FAILED"
   | "RECONCILIATION_UNAVAILABLE"
   | "RECONCILIATION_STALE"
-  | "RECONCILIATION_HOLD";
+  | "RECONCILIATION_HOLD"
+  // PR15.2 — the instrument does not have a configured
+  // `INSTRUMENT_BINDINGS_JSON` entry, or the entry is stale
+  // relative to the shared registry. Loop refuses to fabricate
+  // symbol / conId identity.
+  | "INSTRUMENT_BINDING_UNAVAILABLE";
 
 /**
  * Outcome union for a single instrument tick. Kept small on
@@ -68,7 +73,12 @@ export type TradingLoopInstrumentOutcome =
         | "OPEN_POSITION_EXISTS"
         | "POSITION_STATE_UNAVAILABLE"
         | "INSTRUMENT_POLICY_UNAVAILABLE"
-        | "TRIGGER_UNAVAILABLE";
+        | "TRIGGER_UNAVAILABLE"
+        // PR15.2 hostile-review fix — bubbled up from
+        // ExecutionRuntime.execute() when the /runtime/execute
+        // endpoint receives an unbound instrumentId.
+        | "INSTRUMENT_BINDING_UNAVAILABLE"
+        | "INSTRUMENT_TICK_MISMATCH";
       readonly message?: string;
     }
   | {

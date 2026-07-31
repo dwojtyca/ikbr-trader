@@ -11,6 +11,31 @@
 - Loop is OFF by default (`TRADING_LOOP_ENABLED=false`) and also
   requires `EXECUTION_RUNTIME_ENABLED=true`.
 
+## PR15.2 — Authoritative instrument binding
+
+The loop refuses to run for any registry instrument that lacks
+a binding in the shared `INSTRUMENT_BINDINGS_JSON` payload.
+
+- The signal-engine builds one process-wide
+  `InstrumentBindingAuthority` at startup and injects it into
+  `TradingLoopService`.
+- Every cycle: `getBoundInstrument(instrument.id)` is the first
+  gate. Absent → `SKIPPED / INSTRUMENT_BINDING_UNAVAILABLE`,
+  zero market-data read, zero dryRun, zero submission.
+- Present → the loop threads the bound view through:
+  - `MarketDataRuntime` reads Redis market state using the
+    exact bound `conId` (via `BindingAwareContractResolver`).
+  - `ReconciliationReader` is asked about the bound `conId`.
+  - `ExecutionRuntime.executePrepared` receives the bound view;
+    the resulting legacy `SignalTicket` carries
+    `{ instrument = bound.brokerSymbol, conid = bound.conId,
+    instrumentId = bound.instrumentId }`.
+- Execution-engine builds its OWN authority from the SAME
+  configuration payload and re-verifies the identity server-side
+  before any DB or broker write.
+- No hot reload of bindings. Rolling a binding = env change +
+  service restart. Never automated (no futures roll adapter yet).
+
 ## Placement
 
 `apps/signal-engine/src/runtime/trading-loop/` — same process as

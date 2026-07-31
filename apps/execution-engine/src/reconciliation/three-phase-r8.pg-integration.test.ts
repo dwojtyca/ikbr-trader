@@ -9,6 +9,10 @@ import assert from "node:assert/strict";
 import { Pool } from "pg";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import type { PartialTakeProfit, SignalTicket } from "@ikbr/shared";
+import {
+  InstrumentBindingAuthority,
+  defaultInstrumentRegistry,
+} from "@ikbr/shared";
 
 import { runMigrations } from "../migrations.js";
 import { ExecutionRepository, validatePersistedOrderIdentity } from "../repository.js";
@@ -134,6 +138,10 @@ function buildTestService(
     ownerId: SESSION,
     allowMarketOrder: false,
     allowCrossContractExposure: false,
+    bindingAuthority: new InstrumentBindingAuthority(
+      defaultInstrumentRegistry,
+      [],
+    ),
     defaultTif: "GTC",
   });
   return { service, dispatchCount: () => count, captured };
@@ -406,6 +414,10 @@ suite("PR15 r8 §6 — executeProposed happy path with rich fields (PG)", () => 
         ownerId: SESSION,
         allowMarketOrder: false,
         allowCrossContractExposure: false,
+        bindingAuthority: new InstrumentBindingAuthority(
+          defaultInstrumentRegistry,
+          [],
+        ),
         defaultTif: "GTC",
       });
       const ticket = richTicket();

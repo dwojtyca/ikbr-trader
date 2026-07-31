@@ -42,9 +42,11 @@ import { randomUUID } from "node:crypto";
 import type {
   ExecutionTicketPolicy,
   Instrument,
+  InstrumentBindingAuthority,
   InstrumentExecutionPolicy,
   InstrumentRegistry,
 } from "@ikbr/shared";
+import { mapAssetClassToIbkrSecType } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
@@ -66,6 +68,16 @@ import type { ReconciliationReader } from "./reconciliation-reader.js";
 export interface TradingLoopServiceOptions {
   readonly config: TradingLoopConfig;
   readonly registry: InstrumentRegistry;
+  /**
+   * PR15.2 — server-side authority mapping logical `instrumentId`
+   * to the exact operator-selected IBKR contract. Optional in
+   * test wiring so pre-PR15.2 fakes keep working; production
+   * MUST supply one via `INSTRUMENT_BINDINGS_JSON`. When
+   * present, the loop refuses to run any instrument that lacks
+   * a binding — no symbol-only fallback for market data,
+   * reconciliation, or ticket assembly.
+   */
+  readonly bindingAuthority?: InstrumentBindingAuthority;
   readonly marketDataRuntime: MarketDataRuntime;
   readonly executionRuntime: ExecutionRuntime;
   readonly exposureReader: TradingExposureReader;
@@ -93,34 +105,27 @@ const HISTORY_LIMIT = 100;
  * to IBKR `secType`. Signal-engine never guesses / infers this
  * from string prefixes; the reconciliation identity fallback
  * requires a mapped value AND the full symbol/exchange/currency
- * tuple. Unknown classes return `null` — the reader then skips
- * with `identity_incomplete`.
+ * tuple.
+ *
+ * PR15.2 hostile-review round-3 — delegated to the shared
+ * `mapAssetClassToIbkrSecType` so ingestion and signal-engine
+ * cannot drift apart. Kept as a thin adapter so existing
+ * call-sites continue to see the `string | null` shape.
  */
 function mapAssetClassToSecType(
   assetClass: Instrument["assetClass"],
 ): string | null {
-  switch (assetClass) {
-    case "future":
-      return "FUT";
-    case "stock":
-    case "etf":
-      return "STK";
-    case "index":
-      return "IND";
-    case "forex":
-      return "CASH";
-    case "option":
-      return "OPT";
-    case "crypto":
-      return "CRYPTO";
-    default:
-      return null;
+  try {
+    return mapAssetClassToIbkrSecType(assetClass);
+  } catch {
+    return null;
   }
 }
 
 export class TradingLoopService {
   readonly #config: TradingLoopConfig;
   readonly #registry: InstrumentRegistry;
+  readonly #bindingAuthority: InstrumentBindingAuthority | null;
   readonly #marketDataRuntime: MarketDataRuntime;
   readonly #executionRuntime: ExecutionRuntime;
   readonly #exposureReader: TradingExposureReader;
@@ -161,6 +166,7 @@ export class TradingLoopService {
       throw new Error("TradingLoopService: logger is required");
     this.#config = options.config;
     this.#registry = options.registry;
+    this.#bindingAuthority = options.bindingAuthority ?? null;
     this.#marketDataRuntime = options.marketDataRuntime;
     this.#executionRuntime = options.executionRuntime;
     this.#exposureReader = options.exposureReader;
@@ -395,6 +401,25 @@ export class TradingLoopService {
   ): Promise<TradingLoopInstrumentReport> {
     const startedAt = this.#clock();
 
+    // ---- PR15.2 binding gate (fail-closed) --------------------------
+    // The loop refuses to publish market-data / reconciliation
+    // / ticket identity for any instrument that lacks an
+    // authoritative binding. `SKIPPED / INSTRUMENT_BINDING_UNAVAILABLE`
+    // surfaces at the status endpoint AND the pino log stream;
+    // NO raw configuration payload is logged.
+    const bound = this.#bindingAuthority
+      ? this.#bindingAuthority.getBoundInstrument(instrument.id)
+      : null;
+    if (this.#bindingAuthority && !bound) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "INSTRUMENT_BINDING_UNAVAILABLE",
+        message: `no binding configured for ${instrument.id}`,
+      });
+    }
+    const boundConId = bound ? String(bound.conId) : null;
+
     // ---- PR15 reconciliation pre-check (fail-closed) ----------------
     // Fast skip BEFORE market-data / pipeline work. Execution-engine
     // remains the authoritative gate — this reader is an optimisation.
@@ -405,8 +430,16 @@ export class TradingLoopService {
       try {
         reconciliation = await this.#reconciliationReader.checkInstrument({
           instrument: instrument.brokerSymbol,
+          // PR15.2 — reconciliation pre-check uses the bound
+          // `conId` when available (never the registry
+          // `Instrument.conId`, which is intentionally left
+          // undefined on the front-month seed entries).
           conId:
-            instrument.conId != null ? String(instrument.conId) : null,
+            boundConId !== null
+              ? boundConId
+              : instrument.conId != null
+                ? String(instrument.conId)
+                : null,
           secType: mapAssetClassToSecType(instrument.assetClass),
           exchange: instrument.exchange,
           currency: instrument.currency,
@@ -591,6 +624,10 @@ export class TradingLoopService {
       runtimeOutcome = await this.#executionRuntime.executePrepared({
         dryRunResult,
         idempotencyKey,
+        // PR15.2 — carry the bound broker identity through so
+        // the ticket sent to execution-engine matches what
+        // its server-side authority will verify.
+        ...(bound ? { bound } : {}),
       });
     } catch (error) {
       return this.#finalize(cycleId, instrument.id, startedAt, {

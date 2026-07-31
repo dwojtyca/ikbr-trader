@@ -77,6 +77,138 @@ function parseRtVolumeTick(
   };
 }
 
+/**
+ * PR15.2 hostile-review round-3 — minimal port over the subset
+ * of `IB` we consume for the strict `contractDetails` path.
+ * Kept structural (not `import IB`) so unit tests can inject an
+ * in-memory `EventEmitter` without pulling in the real network
+ * client.
+ */
+export interface IbEventPort {
+  on(event: string, handler: (...args: unknown[]) => void): unknown;
+  off(event: string, handler: (...args: unknown[]) => void): unknown;
+  reqContractDetails(reqId: number, contract: Record<string, unknown>): unknown;
+}
+
+export interface AwaitExactlyOneContractDetailsInput {
+  readonly ib: IbEventPort;
+  readonly reqId: number;
+  readonly contract: Record<string, unknown>;
+  readonly label: string;
+  readonly timeoutMs: number;
+}
+
+/**
+ * PR15.2 hostile-review round-3 — pure event-wiring helper that
+ * awaits a single `contractDetails` response for `reqId`.
+ *
+ * Semantics (fail-closed):
+ *   - Zero responses before `contractDetailsEnd` → reject.
+ *   - Exactly one response before `contractDetailsEnd` → resolve.
+ *   - More than one response before `contractDetailsEnd` →
+ *     reject (do NOT pick the first).
+ *   - Any error event carrying the same `reqId` → reject.
+ *   - Events for a DIFFERENT `reqId` → ignored (concurrent
+ *     resolutions can share one IB connection).
+ *   - Every listener is removed on both fulfilment and
+ *     rejection so no listener leaks.
+ *   - Timeout after `timeoutMs` ms rejects and cleans up.
+ *
+ * The IB client is invoked exactly once via `reqContractDetails`.
+ */
+export function awaitExactlyOneContractDetails(
+  input: AwaitExactlyOneContractDetailsInput,
+): Promise<Record<string, unknown>> {
+  const { ib, reqId, contract, label, timeoutMs } = input;
+  return new Promise<Record<string, unknown>>((resolve, reject) => {
+    const collected: Record<string, unknown>[] = [];
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(
+        new Error(
+          `Timed out waiting contractDetails for bound instrument ${label}`,
+        ),
+      );
+    }, timeoutMs);
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ib.off("contractDetails", onContractDetails as (...args: unknown[]) => void);
+      ib.off(
+        "contractDetailsEnd",
+        onContractDetailsEnd as (...args: unknown[]) => void,
+      );
+      ib.off("error", onError as (...args: unknown[]) => void);
+    };
+
+    const onContractDetails = (
+      incomingReqId: number,
+      details: Record<string, unknown>,
+    ) => {
+      if (incomingReqId !== reqId) return;
+      collected.push(details);
+    };
+
+    const onContractDetailsEnd = (incomingReqId: number) => {
+      if (incomingReqId !== reqId) return;
+      cleanup();
+      if (collected.length === 0) {
+        reject(
+          new Error(
+            `No contract details for bound instrument ${label} (expected exactly one)`,
+          ),
+        );
+        return;
+      }
+      if (collected.length > 1) {
+        reject(
+          new Error(
+            `Ambiguous contract details for bound instrument ${label}: ` +
+              `IBKR returned ${collected.length} matches, expected exactly one`,
+          ),
+        );
+        return;
+      }
+      resolve(collected[0]);
+    };
+
+    const onError = (err: Error, code?: number, incomingReqId?: number) => {
+      if (incomingReqId !== reqId) return;
+      cleanup();
+      reject(
+        new Error(
+          `contractDetails error ${code ?? "unknown"} for bound instrument ${label}: ${err.message}`,
+        ),
+      );
+    };
+
+    ib.on("contractDetails", onContractDetails as (...args: unknown[]) => void);
+    ib.on(
+      "contractDetailsEnd",
+      onContractDetailsEnd as (...args: unknown[]) => void,
+    );
+    ib.on("error", onError as (...args: unknown[]) => void);
+    // PR15.2 hostile-review round-4 — a synchronous throw from
+    // `reqContractDetails` (e.g. socket-not-connected, marshaling
+    // failure, or a fake IB in tests) would otherwise leave the
+    // three listeners AND the timeout registered until the timeout
+    // fires. Fail-closed: clean up immediately, reject once, and
+    // never retry / fall back to symbol-based resolution.
+    try {
+      ib.reqContractDetails(reqId, contract);
+    } catch (err) {
+      cleanup();
+      const msg = err instanceof Error ? err.message : String(err);
+      reject(
+        new Error(
+          `reqContractDetails threw synchronously for bound instrument ${label}: ${msg}`,
+        ),
+      );
+    }
+  });
+}
+
 export class TwsClient {
   private readonly ib: any;
   private connected = false;
@@ -314,6 +446,35 @@ export class TwsClient {
       instrument,
       directConid,
     );
+    // PR15.2 hostile-review fix — bound instruments (identified
+    // by `instrumentId`) MUST resolve through
+    // `requestContractDetailsExactlyOne`. Zero or >1 result is
+    // a fail-closed error; `firstDetails` fallback is forbidden
+    // because it could publish market state under a substituted
+    // identity. Legacy watchlist entries keep the existing
+    // permissive behavior.
+    if (instrument.instrumentId && directConid) {
+      const details = await this.requestContractDetailsExactlyOne(
+        `${symbol} (${instrument.instrumentId})`,
+        directContract,
+      );
+      const summary = pickContract(details);
+      const conid =
+        toNum(summary.conId) ?? toNum(summary.conid) ?? directConid;
+      return {
+        symbol,
+        conid: String(conid),
+        contract: summary,
+        displayName: this.pickDisplayName(symbol, details),
+        instrumentContract: this.buildInstrumentContract(
+          symbol,
+          String(conid),
+          summary,
+          details,
+          "ibkr",
+        ),
+      };
+    }
     if (directConid) {
       try {
         const details = await this.requestContractDetails(
@@ -476,6 +637,27 @@ export class TwsClient {
     });
   }
 
+  /**
+   * PR15.2 hostile-review fix — strict resolution for bound
+   * instruments. Delegates to the pure, unit-testable
+   * `awaitExactlyOneContractDetails` helper so the event-wiring
+   * logic can be exercised without a real IBKR socket.
+   */
+  private async requestContractDetailsExactlyOne(
+    label: string,
+    contractLike: ContractShape,
+  ): Promise<ContractDetailsShape> {
+    const reqId = this.allocReqId();
+    const contract = this.withDefaults(contractLike);
+    return awaitExactlyOneContractDetails({
+      ib: this.ib as IbEventPort,
+      reqId,
+      contract,
+      label,
+      timeoutMs: 8_000,
+    });
+  }
+
   private pickDisplayName(
     symbol: string,
     details: ContractDetailsShape,
@@ -506,6 +688,14 @@ export class TwsClient {
         ? { primaryExch: instrument.primaryExchange }
         : {}),
       ...(instrument.currency ? { currency: instrument.currency } : {}),
+      // PR15.2 — pass the bound disambiguators so IBKR narrows
+      // to the exact contract. `reqContractDetails` accepts them
+      // as filters on the returned set; combined with a positive
+      // `conId` the response should contain exactly one entry.
+      ...(instrument.localSymbol ? { localSymbol: instrument.localSymbol } : {}),
+      ...(instrument.tradingClass
+        ? { tradingClass: instrument.tradingClass }
+        : {}),
     };
   }
 

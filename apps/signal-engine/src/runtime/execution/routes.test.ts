@@ -656,3 +656,191 @@ describe("GET /runtime/execute/ready", () => {
     assert.equal(res.statusCode, 503);
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR15.2 hostile-review — /runtime/execute binding gate
+// ---------------------------------------------------------------------------
+
+import { InstrumentBindingAuthority } from "@ikbr/shared";
+
+describe("POST /runtime/execute — PR15.2 binding gate", () => {
+  async function buildAppWithBinding(options: {
+    readonly submitter: ExecutionTicketSubmitter;
+    readonly withBinding: boolean;
+    readonly boundConId?: number;
+    readonly boundMinTick?: number;
+  }): Promise<FastifyInstance> {
+    const reader = fakeReader(freshState());
+    const provider = new PriceContextProvider({
+      reader,
+      freshnessTtlMs: 30_000,
+    });
+    const dryRun = new MarketDataRuntime({
+      registry: REGISTRY,
+      providers: [provider],
+      pipeline: buildSuccessPipeline(),
+      freshnessPolicy: buildRuntimeFreshnessPolicy({
+        base: DEFAULT_FRESHNESS_POLICY,
+        maxTickAgeMs: 30_000,
+      }),
+    });
+    const bindingAuthority = options.withBinding
+      ? new InstrumentBindingAuthority(REGISTRY, [
+          {
+            instrumentId: INSTRUMENT.id,
+            conId: options.boundConId ?? 111_222_333,
+            localSymbol: "RTX_LOCAL",
+            tradingClass: "RTX",
+            exchange: "NYSE",
+            currency: "USD",
+            minTick: options.boundMinTick ?? POLICY.priceTickSize,
+          },
+        ])
+      : new InstrumentBindingAuthority(REGISTRY, []);
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter: options.submitter,
+      bindingAuthority,
+    });
+    const app = Fastify({ logger: false });
+    await app.register(executionRuntimeRoutesPlugin, {
+      runtime,
+      bearerToken: TOKEN,
+      readinessDeps: {
+        redis: { ping: async () => "PONG" },
+        postgres: { query: async () => ({}) },
+        paperGuard: paperOkGuard(),
+      },
+    });
+    openApps.push(app);
+    return app;
+  }
+
+  it("no binding for the instrument → NOT_SUBMITTED / INSTRUMENT_BINDING_UNAVAILABLE, zero submitter calls", async () => {
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        outcome: "SUBMITTED",
+        execution: {
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const app = await buildAppWithBinding({ submitter, withBinding: false });
+    const res = await app.inject({
+      method: "POST",
+      url: "/runtime/execute",
+      headers: authHeader,
+      payload: validBody,
+    });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { outcome: string; reason?: string };
+    assert.equal(body.outcome, "NOT_SUBMITTED");
+    assert.equal(body.reason, "INSTRUMENT_BINDING_UNAVAILABLE");
+    assert.equal(
+      submitter.calls.length,
+      0,
+      "submitter must NOT be reached when the binding is unavailable",
+    );
+  });
+
+  it("binding present → submitter receives the bound conId, symbol, and instrumentId", async () => {
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        outcome: "SUBMITTED",
+        execution: {
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const app = await buildAppWithBinding({
+      submitter,
+      withBinding: true,
+      boundConId: 111_222_333,
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/runtime/execute",
+      headers: authHeader,
+      payload: validBody,
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(submitter.calls.length, 1);
+    const wire = submitter.calls[0].ticket;
+    assert.equal(wire.instrumentId, INSTRUMENT.id);
+    assert.equal(wire.conid, "111222333");
+    assert.equal(wire.instrument, "RTX");
+  });
+
+  it("binding tick disagrees with policy → NOT_SUBMITTED / INSTRUMENT_TICK_MISMATCH, zero submitter calls", async () => {
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        outcome: "SUBMITTED",
+        execution: {
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    // POLICY.priceTickSize=0.01 — set binding minTick to a different value.
+    const app = await buildAppWithBinding({
+      submitter,
+      withBinding: true,
+      boundMinTick: 0.05,
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/runtime/execute",
+      headers: authHeader,
+      payload: validBody,
+    });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { outcome: string; reason?: string };
+    assert.equal(body.outcome, "NOT_SUBMITTED");
+    assert.equal(body.reason, "INSTRUMENT_TICK_MISMATCH");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("caller requests an unrelated instrumentId → NOT_SUBMITTED, no cross-binding leak", async () => {
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        outcome: "SUBMITTED",
+        execution: {
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    // Binding present for INSTRUMENT.id; caller asks for a different id.
+    const app = await buildAppWithBinding({ submitter, withBinding: true });
+    const res = await app.inject({
+      method: "POST",
+      url: "/runtime/execute",
+      headers: authHeader,
+      payload: { ...validBody, instrumentId: "not_bound_here" },
+    });
+    // Route handler translates "instrument not found" to 404 today;
+    // we accept either 404 (registry-lookup failure inside pipeline)
+    // OR 200 with NOT_SUBMITTED (binding-gate refusal). Both prove
+    // the binding never leaked from the RTX view.
+    assert.ok(
+      res.statusCode === 200 || res.statusCode === 404,
+      `expected 200 or 404, got ${res.statusCode}`,
+    );
+    assert.equal(
+      submitter.calls.length,
+      0,
+      "submitter must NOT be reached for an id that does not match the binding",
+    );
+  });
+});

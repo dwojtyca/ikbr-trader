@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
 import { ProposedOrder, defaultInstrumentRegistry } from "@ikbr/shared";
+import { buildInstrumentBindingAuthority } from "@ikbr/shared";
 import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
 import { SignalEngine } from "./signal-engine.js";
@@ -16,6 +17,7 @@ import { PriceContextProvider } from "./runtime/price-provider.js";
 import {
   SignalRepositoryContractResolver,
   SignalRepositoryMarketDataReader,
+  BindingAwareContractResolver,
 } from "./runtime/market-data-reader.js";
 import { createRuntimeEngines } from "./runtime/engines.js";
 import { runtimeRoutesPlugin } from "./runtime/routes.js";
@@ -256,9 +258,47 @@ app.post("/signals/strategies/:strategyId", async (request, reply) => {
 // docs/architecture/MARKET_DATA_RUNTIME.md.
 // ---------------------------------------------------------------------------
 if (config.runtimeEnabled) {
-  const resolver = new SignalRepositoryContractResolver({
+  // PR15.2 — build the shared instrument-binding authority
+  // ONCE at startup. The trading loop rejects every instrument
+  // without a binding; the wrapped resolver returns the exact
+  // operator-selected `conId` for market-data reads. The raw
+  // config value is NEVER logged (only counts + ids).
+  const bindingResult = buildInstrumentBindingAuthority(
+    config.INSTRUMENT_BINDINGS_JSON,
+    defaultInstrumentRegistry,
+  );
+  if (!bindingResult.ok) {
+    const summary = bindingResult.errors
+      .slice(0, 5)
+      .map(
+        (e) =>
+          `#${e.index}${e.instrumentId ? ` (${e.instrumentId})` : ""}: ${e.message}`,
+      )
+      .join("; ");
+    throw new Error(
+      `INSTRUMENT_BINDINGS_JSON is invalid — refusing to start. ${summary}` +
+        (bindingResult.errors.length > 5
+          ? ` (+${bindingResult.errors.length - 5} more)`
+          : ""),
+    );
+  }
+  const bindingAuthority = bindingResult.authority;
+  app.log.info(
+    {
+      component: "instrument-bindings",
+      boundCount: bindingAuthority.toDiagnostics().boundCount,
+      ids: bindingAuthority.toDiagnostics().ids,
+    },
+    "instrument bindings loaded",
+  );
+
+  const baseResolver = new SignalRepositoryContractResolver({
     repo,
     cacheTtlMs: config.instrumentContractCacheTtlMs,
+  });
+  const resolver = new BindingAwareContractResolver({
+    resolveBound: (id) => bindingAuthority.getBoundInstrument(id),
+    inner: baseResolver,
   });
   const reader = new SignalRepositoryMarketDataReader({ repo, resolver });
   const priceProvider = new PriceContextProvider({
@@ -315,6 +355,11 @@ if (config.runtimeEnabled) {
       dryRun: marketDataRuntime,
       paperGuard,
       submitter,
+      // PR15.2 hostile-review fix — /runtime/execute goes
+      // through the same authoritative binding gate as the
+      // trading loop. Unbound instruments fail-closed BEFORE
+      // any market-data read or submission.
+      bindingAuthority,
     });
     await app.register(executionRuntimeRoutesPlugin, {
       runtime: executionRuntime,
@@ -344,6 +389,7 @@ if (config.runtimeEnabled) {
     tradingLoopService = new TradingLoopService({
       config: config.tradingLoop,
       registry: defaultInstrumentRegistry,
+      bindingAuthority,
       marketDataRuntime,
       executionRuntime,
       exposureReader,

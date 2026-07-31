@@ -71,3 +71,44 @@ describe("execute-ticket body schema — allowCrossContractExposure is not calle
     assert.ok(true);
   });
 });
+
+describe("execute-ticket body schema — PR15.2 instrumentId propagation", () => {
+  it("accepts a body carrying `instrumentId` on the ticket", () => {
+    const parsed = executeTicketBodySchema.parse({
+      ...validTicket,
+      ticket: { ...validTicket.ticket, instrumentId: "es_front" },
+    });
+    assert.equal(parsed.ticket.instrumentId, "es_front");
+  });
+
+  it("keeps parsing when `instrumentId` is absent (legacy compat)", () => {
+    const parsed = executeTicketBodySchema.parse(validTicket);
+    assert.equal(parsed.ticket.instrumentId, undefined);
+  });
+
+  it("stripping `allowCrossContractExposure` still holds even when instrumentId is set", () => {
+    const parsed = executeTicketBodySchema.parse({
+      ...validTicket,
+      ticket: { ...validTicket.ticket, instrumentId: "es_front" },
+      allowCrossContractExposure: true,
+    } as unknown);
+    assert.equal(
+      (parsed as Record<string, unknown>).allowCrossContractExposure,
+      undefined,
+    );
+    assert.equal(
+      (parsed.ticket as Record<string, unknown>).allowCrossContractExposure,
+      undefined,
+      "ticket-level allowCrossContractExposure must also be stripped",
+    );
+  });
+
+  it("rejects empty `instrumentId` strings", () => {
+    assert.throws(() =>
+      executeTicketBodySchema.parse({
+        ...validTicket,
+        ticket: { ...validTicket.ticket, instrumentId: "" },
+      }),
+    );
+  });
+});

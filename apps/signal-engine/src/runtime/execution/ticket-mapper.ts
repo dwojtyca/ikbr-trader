@@ -41,7 +41,7 @@
  * bracket-plus-STP ticket never reaches `execution-engine`.
  */
 
-import type { ExecutionTicket, SignalTicket } from "@ikbr/shared";
+import type { BoundInstrument, ExecutionTicket, SignalTicket } from "@ikbr/shared";
 
 export class UnsupportedOrderTypeError extends Error {
   readonly orderType: string;
@@ -64,7 +64,10 @@ export class UnsupportedOrderCombinationError extends Error {
   }
 }
 
-export function toLegacySignalTicket(ticket: ExecutionTicket): SignalTicket {
+export function toLegacySignalTicket(
+  ticket: ExecutionTicket,
+  options: { readonly bound?: BoundInstrument } = {},
+): SignalTicket {
   const order = ticket.order;
   if (order.orderType === "STP_LMT") {
     throw new UnsupportedOrderTypeError(order.orderType);
@@ -97,9 +100,40 @@ export function toLegacySignalTicket(ticket: ExecutionTicket): SignalTicket {
   // Assemble the legacy shape. Field routing (post-guards):
   //   LMT  → entry = limitPrice, stop/takeProfit = bracket protection
   //   STP  → stop  = stopPrice   (bracket rejected above)
+  //
+  // PR15.2 — when the loop supplies a `bound` instrument, its
+  // exact broker identity (conId + localSymbol + tradingClass +
+  // brokerSymbol) OVERRIDES whatever the builder derived from
+  // the frozen registry seed. The seed intentionally carries
+  // NO conId for front-month futures — the loop's bound view
+  // is the ONLY authoritative source. A binding assertion here
+  // also fails-closed if the caller misroutes a bound
+  // instrument to a mismatched registry id (defence in depth).
+  const bound = options.bound;
+  if (bound !== undefined && bound.instrumentId !== ticket.instrumentId) {
+    throw new UnsupportedOrderCombinationError(
+      `bound.instrumentId "${bound.instrumentId}" does not match ticket.instrumentId "${ticket.instrumentId}"`,
+    );
+  }
+  const wireInstrument = bound?.brokerSymbol ?? ticket.brokerSymbol;
+  const wireConid = bound !== undefined
+    ? String(bound.conId)
+    : ticket.conId !== undefined
+      ? String(ticket.conId)
+      : undefined;
+
   const legacy: SignalTicket = {
-    instrument: ticket.brokerSymbol,
-    ...(ticket.conId !== undefined ? { conid: String(ticket.conId) } : {}),
+    instrument: wireInstrument,
+    // PR15.2 — carry the logical registry id all the way through
+    // to `POST /execution/execute-ticket`. The execution-engine
+    // resolves its OWN binding for this id (never trusts the
+    // caller) and compares symbol / conid against that binding
+    // before persistence and broker dispatch. Legacy legacy-
+    // wire code paths (llm-agent proposal, backtest simulator)
+    // never populate `ticket.instrumentId`, so their tickets
+    // stay compatible.
+    instrumentId: ticket.instrumentId,
+    ...(wireConid !== undefined ? { conid: wireConid } : {}),
     side: order.side,
     orderType: order.orderType,
     quantity: order.quantity,

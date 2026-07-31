@@ -94,6 +94,17 @@ const schema = z
     // must pick up the new conid without waiting for a restart).
     // Set to `0` to disable caching entirely.
     INSTRUMENT_CONTRACT_CACHE_TTL_S: z.coerce.number().int().min(0).default(60),
+
+    // ---------------------------------------------------------------
+    // PR15.2 — Authoritative instrument binding.
+    // ---------------------------------------------------------------
+    // Same shared JSON payload consumed by ingestion and
+    // execution-engine. Empty / missing means no bound instruments
+    // — the trading loop treats every registry instrument as
+    // unbound and skips with `INSTRUMENT_BINDING_UNAVAILABLE`.
+    // NEVER logged: the raw string may hold operator-configured
+    // dated contract identity for a Paper account.
+    INSTRUMENT_BINDINGS_JSON: z.string().default(""),
   })
   // Phase 2 / PR13 — Execution Runtime (paper-only write endpoint).
   .merge(executionRuntimeSchema)

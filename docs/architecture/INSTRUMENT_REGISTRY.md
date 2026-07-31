@@ -5,6 +5,13 @@
 > ahead of any migration so the surface can be reviewed in isolation.
 > Execution-engine / signal-engine / backtest migration will follow in a
 > separate PR.
+>
+> **PR15.2 update:** the pure registry is unchanged. A separate
+> `InstrumentBindingAuthority` (also under
+> `packages/shared/src/instruments/`) composes each logical
+> instrument with an operator-selected, broker-verified IBKR
+> contract identity from `INSTRUMENT_BINDINGS_JSON`. See
+> [§11 Instrument bindings](#11-instrument-bindings-pr152).
 
 ## 1. Purpose
 
@@ -356,3 +363,85 @@ for (const instrument of defaultInstrumentRegistry.listMonitoringEnabled()) {
   registry; the registry itself remains an immutable defaults source.
 - **Execution-engine migration.** A separate PR replaces the current
   hardcoded contract stubs with registry lookups.
+
+## 11. Instrument bindings (PR15.2)
+
+The registry holds LOGICAL instruments — futures roots (`es_front`)
+without a dated contract, equities without a resolved `conId`. Runtime
+consumers (ingestion, signal-engine, execution-engine) that need to
+place an order MUST resolve the logical instrument to a concrete
+IBKR contract chosen by the operator.
+
+### 11.1 Configuration
+
+Single environment variable, shared verbatim by every service:
+
+```json
+[
+  {
+    "instrumentId": "es_front",
+    "conId": 123456789,
+    "localSymbol": "ESU6",
+    "tradingClass": "ES",
+    "exchange": "CME",
+    "currency": "USD",
+    "minTick": 0.25
+  }
+]
+```
+
+Rules enforced by `parseInstrumentBindings`:
+
+- `instrumentId` must exist in the registry.
+- `conId` must be a positive safe integer.
+- `localSymbol`, `tradingClass`, `exchange`, `currency` must be
+  non-empty canonical strings.
+- `minTick` must be a positive finite number.
+- Exchange, currency, and trading class MUST agree with the
+  logical registry entry.
+- Duplicate `instrumentId` or duplicate `conId` is a startup
+  error.
+- Empty / missing input is valid — it means "no bound instruments".
+- Malformed JSON is a startup error; the parser NEVER echoes the
+  raw payload in an error message.
+
+### 11.2 Consumers
+
+Each service builds its OWN `InstrumentBindingAuthority` from the
+same payload. NO service trusts a claim propagated by another.
+
+- **Ingestion** — appends bound instruments to the legacy
+  watchlist, requests IBKR contract details by exact `conId`,
+  and verifies the returned symbol / exchange / currency /
+  `localSymbol` / `tradingClass` all match the binding. A
+  mismatch drops the subscription; ingestion NEVER publishes
+  market state under a substituted identity.
+- **Signal-engine** — the trading loop skips every registry
+  instrument that lacks a binding with
+  `SKIPPED / INSTRUMENT_BINDING_UNAVAILABLE`. Market-data reads
+  use `BindingAwareContractResolver` — bound instruments return
+  the exact `conId`, unbound instruments fall through to the
+  legacy `instrument_contracts` lookup. The
+  `toLegacySignalTicket` mapper overrides the ticket's
+  `conId`, `localSymbol`, `tradingClass`, and `brokerSymbol`
+  with the bound view before submission.
+- **Execution-engine** — `POST /execution/execute-ticket`
+  REQUIRES `instrumentId`. The endpoint resolves the binding
+  server-side, refuses disabled / unbound / unknown ids,
+  compares payload `symbol` + `conid` to the binding, and
+  resolves `allowCrossContractExposure` from the registry's own
+  `executionPolicy` — the caller cannot influence it.
+
+### 11.3 Rolls & lifecycle
+
+- Bindings are IMMUTABLE at process runtime. Changing a binding
+  requires an environment update AND a service restart.
+- PR15.2 does NOT implement an automated futures roll. A roll is
+  an explicit operator config change.
+
+### 11.4 Non-secret disclosure
+
+`InstrumentBindingAuthority.toDiagnostics()` exposes only bound
+`instrumentId`s + a count. The raw `INSTRUMENT_BINDINGS_JSON`
+value is NEVER logged, NEVER echoed in error messages, NEVER
+returned by an HTTP endpoint.

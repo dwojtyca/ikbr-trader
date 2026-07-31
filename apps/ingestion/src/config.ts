@@ -1,6 +1,12 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 import { WatchlistInstrument } from "./types.js";
+import {
+  buildInstrumentBindingAuthority,
+  defaultInstrumentRegistry,
+  InstrumentBindingAuthority,
+} from "@ikbr/shared";
+import { buildMergedWatchlist } from "./bound-watchlist.js";
 
 dotenv.config();
 
@@ -44,6 +50,10 @@ const schema = z.object({
     .string()
     .default("postgresql://postgres:postgres@localhost:5432/ikbr_trader"),
   REDIS_URL: z.string().default("redis://localhost:6379"),
+  // PR15.2 — same shared JSON payload consumed by signal-engine
+  // and execution-engine. Empty → no bound instruments; the
+  // legacy WATCHLIST_SYMBOLS list is used as-is. NEVER logged.
+  INSTRUMENT_BINDINGS_JSON: z.string().default(""),
 });
 
 const env = schema.parse(process.env);
@@ -136,12 +146,58 @@ function buildWatchlistInstruments(
 const watchlistInstruments = buildWatchlistInstruments(env);
 const ingestionPort = env.INGESTION_PORT ?? 3101;
 
+// PR15.2 — build the ingestion-side `InstrumentBindingAuthority`
+// from the same shared JSON as signal-engine and execution-engine.
+// Failure here throws at module load so the process refuses to
+// start on a bad configuration. Raw payload is never logged.
+const bindingResult = buildInstrumentBindingAuthority(
+  env.INSTRUMENT_BINDINGS_JSON,
+  defaultInstrumentRegistry,
+);
+if (!bindingResult.ok) {
+  const summary = bindingResult.errors
+    .slice(0, 5)
+    .map(
+      (e) =>
+        `#${e.index}${e.instrumentId ? ` (${e.instrumentId})` : ""}: ${e.message}`,
+    )
+    .join("; ");
+  throw new Error(
+    `INSTRUMENT_BINDINGS_JSON is invalid — refusing to start. ${summary}` +
+      (bindingResult.errors.length > 5
+        ? ` (+${bindingResult.errors.length - 5} more)`
+        : ""),
+  );
+}
+const instrumentBindingAuthority: InstrumentBindingAuthority =
+  bindingResult.authority;
+
+// PR15.2 hostile-review round-6 — a single production merge
+// function owns the collision-aware combining of the legacy
+// watchlist and the authoritative bound entries. `config.ts`
+// deliberately does NOT re-implement the merge shape; the
+// regression test in `bound-watchlist.test.ts` exercises this
+// same function so a wiring regression is caught by CI.
+const mergedResult = buildMergedWatchlist({
+  authority: instrumentBindingAuthority,
+  legacyWatchlist: watchlistInstruments,
+});
+const boundWatchlistInstruments = mergedResult.boundWatchlist;
+const mergedWatchlistInstruments: WatchlistInstrument[] = [
+  ...mergedResult.mergedWatchlist,
+];
+
 export const config = {
   ...env,
   ingestionPort,
   defaultSecurityType: DEFAULT_SECURITY_TYPE,
-  watchlistSymbols: watchlistInstruments.map((item) => item.symbol),
-  watchlistInstruments,
+  watchlistSymbols: mergedWatchlistInstruments.map((item) => item.symbol),
+  watchlistInstruments: mergedWatchlistInstruments,
+  // PR15.2 — expose the authority + bound-only view for the
+  // `/watchlist` diagnostic endpoint. Callers MUST NOT log
+  // `INSTRUMENT_BINDINGS_JSON` — use `toDiagnostics()` instead.
+  instrumentBindingAuthority,
+  boundWatchlistInstruments,
   ingestionTriggerSignalsOnCandle:
     env.INGESTION_TRIGGER_SIGNALS_ON_CANDLE.toLowerCase() === "true",
   backfill1mCandles: Math.max(0, env.INGESTION_BACKFILL_1M_CANDLES ?? 220),

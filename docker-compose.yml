@@ -43,6 +43,9 @@ services:
       REDIS_URL: redis://redis:6379
       IB_SOCKET_HOST: host.docker.internal
       INGESTION_SIGNAL_ENGINE_BASE_URL: http://signal-engine:3102
+      # PR15.2 — shared authoritative instrument binding JSON. Forwarded
+      # verbatim from the operator .env; each service parses its OWN copy.
+      INSTRUMENT_BINDINGS_JSON: ${INSTRUMENT_BINDINGS_JSON:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +83,8 @@ services:
       TRADING_LOOP_INSTRUMENT_IDS: ${TRADING_LOOP_INSTRUMENT_IDS:-}
       TRADING_LOOP_SHUTDOWN_TIMEOUT_MS: ${TRADING_LOOP_SHUTDOWN_TIMEOUT_MS:-10000}
       TRADING_LOOP_EXPOSURE_TIMEOUT_MS: ${TRADING_LOOP_EXPOSURE_TIMEOUT_MS:-3000}
+      # PR15.2 — same shared authoritative instrument binding JSON.
+      INSTRUMENT_BINDINGS_JSON: ${INSTRUMENT_BINDINGS_JSON:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,6 +115,8 @@ services:
       EXECUTION_ALLOW_MKT: ${EXECUTION_ALLOW_MKT:-false}
       EXECUTION_ALLOW_DIRECT_TICKET: ${EXECUTION_ALLOW_DIRECT_TICKET:-false}
       EXECUTION_READY_RECONCILIATION_MAX_AGE_S: ${EXECUTION_READY_RECONCILIATION_MAX_AGE_S:-900}
+      # PR15.2 — same shared authoritative instrument binding JSON.
+      INSTRUMENT_BINDINGS_JSON: ${INSTRUMENT_BINDINGS_JSON:-}
     depends_on:
       postgres:
         condition: service_healthy

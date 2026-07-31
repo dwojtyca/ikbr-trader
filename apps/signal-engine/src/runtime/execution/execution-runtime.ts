@@ -43,9 +43,12 @@
  */
 
 import type {
+  BoundInstrument,
   ExecutionTicketPolicy,
+  InstrumentBindingAuthority,
   TradingPipelineResult,
 } from "@ikbr/shared";
+import { tickSizesEqual } from "@ikbr/shared";
 
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
 import type { PaperGuard } from "./paper-guard.js";
@@ -64,7 +67,24 @@ export type NotSubmittedReason =
   | "UNSUPPORTED_TICKET_SHAPE"
   | "ACTIVE_INTENT_EXISTS"
   | "OPEN_POSITION_EXISTS"
-  | "POSITION_STATE_UNAVAILABLE";
+  | "POSITION_STATE_UNAVAILABLE"
+  /**
+   * PR15.2 hostile-review fix — the runtime refused to run
+   * because the requested `instrumentId` has no authoritative
+   * binding in the shared `INSTRUMENT_BINDINGS_JSON`. Same
+   * failure the trading loop surfaces at the pre-check gate;
+   * `/runtime/execute` now emits it instead of proceeding into
+   * a symbol-only pipeline that would eventually be rejected
+   * downstream with `conid_missing`.
+   */
+  | "INSTRUMENT_BINDING_UNAVAILABLE"
+  /**
+   * PR15.2 hostile-review fix — the bound instrument's
+   * `Instrument.executionPolicy.priceTickSize` does not match
+   * the operator-configured `bound.minTick`. Fail-closed so no
+   * ticket is built with an unverified tick size.
+   */
+  | "INSTRUMENT_TICK_MISMATCH";
 
 export type PendingReason = "ambiguous_attempt" | "claim_held_by_other";
 
@@ -114,6 +134,19 @@ export interface ExecutionRuntimeOptions {
    * by PR13 from the legacy `signal-engine` pipeline.
    */
   readonly strategyLabel?: string;
+  /**
+   * PR15.2 hostile-review fix — server-side authority mapping
+   * logical `instrumentId` → exact operator-selected IBKR
+   * contract. When provided (production wiring), the runtime
+   * refuses to run for any unbound instrument, refuses to build
+   * a ticket with a tick size that disagrees with the binding,
+   * and forwards the frozen bound view through to the submitter
+   * so `/runtime/execute` uses the SAME authoritative
+   * mechanism as the trading loop. Optional to preserve
+   * backwards compatibility for pre-existing unit tests that
+   * pre-date the binding layer.
+   */
+  readonly bindingAuthority?: InstrumentBindingAuthority;
 }
 
 export interface ExecuteInput {
@@ -127,6 +160,7 @@ export class ExecutionRuntime {
   readonly #paperGuard: PaperGuard;
   readonly #submitter: ExecutionTicketSubmitter;
   readonly #strategy: string;
+  readonly #bindingAuthority: InstrumentBindingAuthority | null;
 
   constructor(options: ExecutionRuntimeOptions) {
     if (!options?.dryRun) {
@@ -142,14 +176,53 @@ export class ExecutionRuntime {
     this.#paperGuard = options.paperGuard;
     this.#submitter = options.submitter;
     this.#strategy = options.strategyLabel ?? "execution-runtime";
+    this.#bindingAuthority = options.bindingAuthority ?? null;
   }
 
   async execute(input: ExecuteInput): Promise<ExecutionRuntimeOutcome> {
+    // PR15.2 hostile-review fix — bound-identity gate BEFORE the
+    // pipeline runs. `/runtime/execute` MUST use the same
+    // authoritative binding mechanism as the trading loop; a
+    // symbol-only pipeline for a futures instrument is not a
+    // safe production path.
+    let bound: BoundInstrument | undefined;
+    if (this.#bindingAuthority) {
+      const resolved = this.#bindingAuthority.getBoundInstrument(
+        input.instrumentId,
+      );
+      if (!resolved) {
+        return {
+          outcome: "NOT_SUBMITTED",
+          pipeline: bindingUnavailablePipeline(),
+          reason: "INSTRUMENT_BINDING_UNAVAILABLE",
+          message: `no binding configured for ${input.instrumentId}`,
+        };
+      }
+      // Bound-vs-policy tick assertion. The policy came from
+      // trusted source (loop / caller), but we still refuse
+      // divergence so no downstream code path builds a ticket
+      // using a tick size that never was broker-verified.
+      if (!tickSizesEqual(resolved.minTick, input.policy.priceTickSize)) {
+        return {
+          outcome: "NOT_SUBMITTED",
+          pipeline: bindingUnavailablePipeline(),
+          reason: "INSTRUMENT_TICK_MISMATCH",
+          message:
+            `policy.priceTickSize=${input.policy.priceTickSize} does not ` +
+            `match bound.minTick=${resolved.minTick} for ${input.instrumentId}`,
+        };
+      }
+      bound = resolved;
+    }
     const dryRunResult = await this.#dryRun.dryRun(
       input.instrumentId,
       input.policy,
     );
-    return this.#submitFromDryRun(dryRunResult, input.idempotencyKey);
+    return this.#submitFromDryRun(
+      dryRunResult,
+      input.idempotencyKey,
+      bound,
+    );
   }
 
   /**
@@ -168,13 +241,30 @@ export class ExecutionRuntime {
   async executePrepared(input: {
     readonly dryRunResult: DryRunResult;
     readonly idempotencyKey: string;
+    /**
+     * PR15.2 — authoritative operator-selected contract
+     * identity for the instrument. When supplied, the runtime
+     * OVERRIDES the ticket's `conId`, `localSymbol`,
+     * `tradingClass`, and `brokerSymbol` with the bound values
+     * before submission. The registry seed intentionally carries
+     * no `conId` for front-month futures — this bound view is
+     * the only authoritative source. Absence keeps the legacy
+     * (pre-binding) behavior of trusting the ticket-builder's
+     * derivation from the frozen registry.
+     */
+    readonly bound?: BoundInstrument;
   }): Promise<ExecutionRuntimeOutcome> {
-    return this.#submitFromDryRun(input.dryRunResult, input.idempotencyKey);
+    return this.#submitFromDryRun(
+      input.dryRunResult,
+      input.idempotencyKey,
+      input.bound,
+    );
   }
 
   async #submitFromDryRun(
     dryRunResult: DryRunResult,
     idempotencyKey: string,
+    bound?: BoundInstrument,
   ): Promise<ExecutionRuntimeOutcome> {
     const pipeline = dryRunResult.pipeline;
 
@@ -206,7 +296,7 @@ export class ExecutionRuntime {
     const ticket = pipeline.ticket;
     let legacyTicket;
     try {
-      legacyTicket = toLegacySignalTicket(ticket);
+      legacyTicket = toLegacySignalTicket(ticket, { bound });
     } catch (err) {
       // The mapper rejects tickets that cannot be represented on
       // the legacy wire (STP_LMT, STP+bracket). These are deterministic
@@ -321,4 +411,34 @@ export class ExecutionRuntime {
         };
     }
   }
+}
+
+/**
+ * PR15.2 hostile-review fix — synthesize a minimal
+ * `TradingPipelineResult` shell for a binding-gate rejection.
+ * The runtime returns `NOT_SUBMITTED / INSTRUMENT_BINDING_UNAVAILABLE`
+ * BEFORE it has a real pipeline result to attach; downstream
+ * consumers (routes / trading loop) only read `outcome.reason`
+ * and `outcome.message`, so a placeholder is safe.
+ */
+function bindingUnavailablePipeline(): TradingPipelineResult {
+  return {
+    outcome: "FAILURE",
+    signal: null,
+    ticket: null,
+    blockers: [
+      {
+        code: "INSTRUMENT_MISMATCH",
+        message: "instrument binding unavailable",
+        source: "instrument",
+      },
+    ],
+    warnings: [],
+    failedStage: "SIGNAL",
+    durationMs: 0,
+    metadata: {
+      engineVersions: {},
+      ranAt: new Date(0),
+    },
+  } as unknown as TradingPipelineResult;
 }

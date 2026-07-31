@@ -15,6 +15,10 @@ import assert from "node:assert/strict";
 import { Pool } from "pg";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import type { SignalTicket } from "@ikbr/shared";
+import {
+  InstrumentBindingAuthority,
+  defaultInstrumentRegistry,
+} from "@ikbr/shared";
 
 import { runMigrations } from "../migrations.js";
 import { ExecutionRepository } from "../repository.js";
@@ -148,6 +152,13 @@ function buildTestService(
     ownerId: SESSION,
     allowMarketOrder: overrides.allowMarketOrder ?? false,
     allowCrossContractExposure: false,
+    // PR15.2 — legacy pre-binding tests operate on rows without
+    // an `instrumentId` on the wire; an empty authority matches
+    // that path exactly and refuses any accidental bound ticket.
+    bindingAuthority: new InstrumentBindingAuthority(
+      defaultInstrumentRegistry,
+      [],
+    ),
     defaultTif: "GTC",
   });
   return { service, alerts, reconTriggered: () => reconCount };

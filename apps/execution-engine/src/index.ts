@@ -6,6 +6,7 @@ import { z } from "zod";
 import { ProposedOrder, ProposedOrderStatus, SignalTicket } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { config } from "./config.js";
+import { buildExecutionInstrumentBindingAuthority } from "./instrument-bindings-config.js";
 import {
   DecisionActor,
   ExecutionRepository,
@@ -842,6 +843,29 @@ async function ensureBrokerSession(): Promise<{
 }
 
 /**
+ * PR15.2 — server-side authority for logical `instrumentId` →
+ * exact broker contract binding. Built ONCE at module load from
+ * `INSTRUMENT_BINDINGS_JSON`; malformed input throws here so
+ * the process refuses to serve traffic. Execution-engine
+ * deliberately constructs its OWN authority — never trusts one
+ * propagated by signal-engine.
+ *
+ * The raw configuration value is NEVER logged; only bound
+ * counts / ids appear in the boot log.
+ */
+const instrumentBindingAuthority = buildExecutionInstrumentBindingAuthority(
+  config.INSTRUMENT_BINDINGS_JSON,
+);
+app.log.info(
+  {
+    component: "instrument-bindings",
+    boundCount: instrumentBindingAuthority.toDiagnostics().boundCount,
+    ids: instrumentBindingAuthority.toDiagnostics().ids,
+  },
+  "instrument bindings loaded",
+);
+
+/**
  * PR15 r7 §1 — single production submission service instance.
  * BOTH `/execution/execute-ticket` and
  * `/execution/execute-proposed/:id` delegate to this instance.
@@ -893,6 +917,7 @@ const submissionService = buildSubmissionApplicationService({
   ownerId: EXECUTION_PROCESS_OWNER_ID,
   allowMarketOrder: SERVER_ALLOW_MARKET_ORDER,
   allowCrossContractExposure: SERVER_ALLOW_CROSS_CONTRACT_EXPOSURE,
+  bindingAuthority: instrumentBindingAuthority,
   defaultTif: config.EXECUTION_DEFAULT_TIF,
   onSnapshotInvalidated: markSnapshotInvalidated,
   refreshBrokerSnapshot: refreshBrokerPositionSnapshot,
@@ -1044,6 +1069,70 @@ function sendSubmissionOutcome(
         outcome: "LEGACY_IDEMPOTENCY_IDENTITY_MISSING",
         error: "LEGACY_IDEMPOTENCY_IDENTITY_MISSING",
         proposedOrderId: outcome.proposedOrderId,
+      });
+    case "instrument_binding_unavailable":
+      // PR15.2 — payload missing `instrumentId`, or referencing an
+      // id that is not configured in the server-side
+      // `INSTRUMENT_BINDINGS_JSON`. 400 (client fault) because
+      // retrying with the same payload will keep failing.
+      return reply.code(400).send({
+        outcome: "INSTRUMENT_BINDING_UNAVAILABLE",
+        error: "INSTRUMENT_BINDING_UNAVAILABLE",
+        reason: outcome.reason,
+      });
+    case "instrument_execution_disabled":
+      // PR15.2 — server-side registry has
+      // `trading.executionEnabled=false` for the resolved binding.
+      // 423 mirrors the environment-guard semantics: state issue,
+      // not a client shape issue.
+      return reply.code(423).send({
+        outcome: "INSTRUMENT_EXECUTION_DISABLED",
+        error: "INSTRUMENT_EXECUTION_DISABLED",
+        instrumentId: outcome.instrumentId,
+      });
+    case "binding_identity_mismatch":
+      // PR15.2 — payload symbol/conId does not match the server-
+      // resolved binding, OR the resume path finds a stored
+      // `instrument_id` that does not match the payload claim.
+      return reply.code(409).send({
+        outcome: "BINDING_IDENTITY_MISMATCH",
+        error: "BINDING_IDENTITY_MISMATCH",
+        reason: outcome.reason,
+      });
+    case "instrument_policy_unavailable":
+      // PR15.2 hostile-review fix — trusted registry has no
+      // `executionPolicy` for the bound instrument. 423 (locked,
+      // state-shaped) mirrors env-guard / kill-switch semantics:
+      // the operator must fix the registry, not retry the
+      // request.
+      return reply.code(423).send({
+        outcome: "INSTRUMENT_POLICY_UNAVAILABLE",
+        error: "INSTRUMENT_POLICY_UNAVAILABLE",
+        instrumentId: outcome.instrumentId,
+      });
+    case "order_type_not_allowed_by_instrument_policy":
+      // PR15.2 hostile-review fix — payload orderType not in
+      // the trusted policy's allow-list. 400 (client fault) —
+      // retrying with the same payload will keep failing until
+      // the caller aligns with the registry.
+      return reply.code(400).send({
+        outcome: "ORDER_TYPE_NOT_ALLOWED_BY_INSTRUMENT_POLICY",
+        error: "ORDER_TYPE_NOT_ALLOWED_BY_INSTRUMENT_POLICY",
+        instrumentId: outcome.instrumentId,
+        orderType: outcome.orderType,
+        allowedOrderTypes: outcome.allowedOrderTypes,
+      });
+    case "instrument_tick_mismatch":
+      // PR15.2 hostile-review fix — trusted policy tick does
+      // not agree with the operator-verified `bound.minTick`.
+      // 423 (locked, state-shaped) — the operator has to fix
+      // either the seed policy or the binding.
+      return reply.code(423).send({
+        outcome: "INSTRUMENT_TICK_MISMATCH",
+        error: "INSTRUMENT_TICK_MISMATCH",
+        instrumentId: outcome.instrumentId,
+        policyTick: outcome.policyTick,
+        boundTick: outcome.boundTick,
       });
     case "rejected_order_immutable":
       return reply.code(409).send({
@@ -1501,6 +1590,24 @@ app.post("/execution/execute-ticket", async (request, reply) => {
       detail:
         "POST /execution/execute-ticket requires persist=true so PR15 " +
         "reconciliation can identify the resulting broker order.",
+    });
+  }
+  // PR15.2 — the HTTP endpoint REQUIRES `instrumentId`. The
+  // deeper `submissionService` also validates when the field is
+  // present, but here at the wire we deterministically refuse
+  // any request that omits it so no code path can bypass the
+  // authoritative binding gate through this endpoint.
+  if (
+    typeof ticket.instrumentId !== "string" ||
+    ticket.instrumentId.length === 0
+  ) {
+    return reply.code(400).send({
+      outcome: "INSTRUMENT_BINDING_UNAVAILABLE",
+      error: "INSTRUMENT_BINDING_UNAVAILABLE",
+      reason: "instrument_id_missing",
+      detail:
+        "POST /execution/execute-ticket requires ticket.instrumentId (PR15.2). " +
+        "Legacy proposal-based submissions must use /execution/execute-proposed/:id.",
     });
   }
   const outcome = await submissionService.submitTicket({

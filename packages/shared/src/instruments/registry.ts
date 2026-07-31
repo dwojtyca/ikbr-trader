@@ -229,6 +229,19 @@ export class InstrumentRegistry {
         sector: source.metadata.sector,
         description: source.metadata.description,
       },
+      // PR14 / PR15.2 hostile-review fix — carry the optional
+      // per-instrument execution policy through the registry
+      // clone so consumers see the SAME policy the seed defined.
+      // Prior versions dropped this field, which silently
+      // downgraded the server-side binding gate.
+      ...(source.executionPolicy !== undefined
+        ? {
+            executionPolicy: {
+              ...source.executionPolicy,
+              allowedOrderTypes: [...source.executionPolicy.allowedOrderTypes],
+            },
+          }
+        : {}),
     };
   }
 

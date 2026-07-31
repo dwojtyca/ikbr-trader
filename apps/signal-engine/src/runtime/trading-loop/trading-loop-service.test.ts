@@ -305,12 +305,14 @@ function makeExecutionRuntime(
     dryRunResult: DryRunResult;
     idempotencyKey: string;
     clientOrderHash?: string;
+    bound?: unknown;
   }>;
 } {
   const preparedCalls: Array<{
     dryRunResult: DryRunResult;
     idempotencyKey: string;
     clientOrderHash?: string;
+    bound?: unknown;
   }> = [];
   return {
     preparedCalls,
@@ -321,6 +323,7 @@ function makeExecutionRuntime(
       dryRunResult: DryRunResult;
       idempotencyKey: string;
       clientOrderHash?: string;
+      bound?: unknown;
     }) {
       preparedCalls.push(input);
       return typeof behaviour === "function"
@@ -332,6 +335,7 @@ function makeExecutionRuntime(
       dryRunResult: DryRunResult;
       idempotencyKey: string;
       clientOrderHash?: string;
+      bound?: unknown;
     }>;
   };
 }
@@ -754,5 +758,120 @@ describe("TradingLoopService — lifecycle", () => {
     const report = await svc.runOnce();
     assert.equal(report.reports.length, 0);
     assert.equal(executionRuntime.preparedCalls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR15.2 — Instrument binding gate
+// ---------------------------------------------------------------------------
+
+describe("TradingLoopService — PR15.2 binding gate", () => {
+  it("no binding for a registry instrument → SKIPPED / INSTRUMENT_BINDING_UNAVAILABLE", async () => {
+    const instruments = [makeInstrument("aapl")];
+    const marketDataRuntime = makeMarketDataRuntime({});
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    // Empty authority — the loop refuses every registry instrument.
+    const {
+      InstrumentBindingAuthority,
+      defaultInstrumentRegistry,
+    } = await import("@ikbr/shared");
+    const authority = new InstrumentBindingAuthority(
+      defaultInstrumentRegistry,
+      [],
+    );
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      bindingAuthority: authority,
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    assert.equal(report.reports.length, 1);
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "SKIPPED");
+    if (outcome.kind === "SKIPPED") {
+      assert.equal(outcome.reason, "INSTRUMENT_BINDING_UNAVAILABLE");
+    }
+    assert.equal(
+      executionRuntime.preparedCalls.length,
+      0,
+      "runtime.executePrepared must NOT be called when the binding is unavailable",
+    );
+    assert.equal(
+      marketDataRuntime.calls.length,
+      0,
+      "market-data dryRun must NOT be called when the binding is unavailable",
+    );
+  });
+
+  it("configured binding → runtime receives the bound instrument with the exact conId", async () => {
+    // Use a registry-registered id so the authority accepts it.
+    const {
+      InstrumentBindingAuthority,
+      defaultInstrumentRegistry,
+    } = await import("@ikbr/shared");
+    // Take `es_front` from the shared seed catalogue and enable
+    // execution + signalGen + monitoring for the trading loop.
+    const seed = defaultInstrumentRegistry.getInstrumentOrThrow("es_front");
+    const esInstrument: Instrument = {
+      ...seed,
+      trading: {
+        executionEnabled: true,
+        signalGenerationEnabled: true,
+        monitoringEnabled: true,
+        aiAnalysisEnabled: false,
+      },
+      executionPolicy: AAPL_POLICY,
+    };
+    const marketDataRuntime = makeMarketDataRuntime({
+      ticket: {
+        ...makeTicket(),
+        instrumentId: "es_front",
+        brokerSymbol: "ES",
+        exchange: "CME",
+      },
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const authority = new InstrumentBindingAuthority(
+      defaultInstrumentRegistry,
+      [
+        {
+          instrumentId: "es_front",
+          conId: 987_654_321,
+          localSymbol: "ESZ6",
+          tradingClass: "ES",
+          exchange: "CME",
+          currency: "USD",
+          minTick: 0.25,
+        },
+      ],
+    );
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry([esInstrument]),
+      bindingAuthority: authority,
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    assert.equal(report.reports.length, 1);
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "SUBMITTED");
+    assert.equal(executionRuntime.preparedCalls.length, 1);
+    const call = executionRuntime.preparedCalls[0];
+    const bound = call.bound as
+      | { instrumentId: string; conId: number; brokerSymbol: string }
+      | undefined;
+    assert.ok(bound, "executePrepared must receive a bound view");
+    assert.equal(bound!.instrumentId, "es_front");
+    assert.equal(bound!.conId, 987_654_321);
+    assert.equal(bound!.brokerSymbol, "ES");
   });
 });
