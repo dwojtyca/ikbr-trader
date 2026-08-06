@@ -79,6 +79,20 @@ export interface SignalMetadata {
    * via the injected `performanceNow`. Informational only.
    */
   readonly evaluationTimeMs: number;
+  /**
+   * PR15.3 — optional identifier of the strategy that actually
+   * produced the winning intent. The shared `SignalEngine` does
+   * NOT populate this today (its pipeline is Decision + Risk
+   * without a named strategy layer); the field is reserved so a
+   * future strategy-aware pipeline can advertise its identity.
+   *
+   * Downstream consumers (in particular the trading-loop
+   * fail-closed strategy-policy check) MUST treat `undefined`
+   * as "no strategy identity reported" and MUST refuse the
+   * intent when `strategyId` is defined and disagrees with
+   * `Instrument.executionPolicy.strategyId`.
+   */
+  readonly strategyId?: string;
 }
 
 /**

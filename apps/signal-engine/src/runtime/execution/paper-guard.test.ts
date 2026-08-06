@@ -45,13 +45,14 @@ describe("PaperGuard — construction", () => {
 });
 
 describe("PaperGuard.check", () => {
-  it("passes when execution-engine reports paper + ready + account matches", async () => {
+  it("passes when execution-engine reports paper + ready + account matches + tradingEnabled=true", async () => {
     const guard = new PaperGuard({
       probe: fakeProbe({
         kind: "ok",
         ready: true,
         environment: "paper",
         accountMatchesEnvironment: true,
+        tradingEnabled: true,
       }),
       expectedEnvironment: "paper",
     });
@@ -67,6 +68,7 @@ describe("PaperGuard.check", () => {
         ready: true,
         environment: "live",
         accountMatchesEnvironment: true,
+        tradingEnabled: true,
       }),
       expectedEnvironment: "paper",
     });
@@ -82,6 +84,7 @@ describe("PaperGuard.check", () => {
         ready: false,
         environment: "paper",
         accountMatchesEnvironment: true,
+        tradingEnabled: true,
       }),
       expectedEnvironment: "paper",
     });
@@ -97,12 +100,47 @@ describe("PaperGuard.check", () => {
         ready: true,
         environment: "paper",
         accountMatchesEnvironment: false,
+        tradingEnabled: true,
       }),
       expectedEnvironment: "paper",
     });
     const result = await guard.check();
     assert.equal(result.ok, false);
     assert.match(result.reason!, /paper whitelist/i);
+  });
+
+  it("PR15.3 Finding 1 — refuses when execution-engine reports tradingEnabled=false (kill switch)", async () => {
+    const guard = new PaperGuard({
+      probe: fakeProbe({
+        kind: "ok",
+        ready: true,
+        environment: "paper",
+        accountMatchesEnvironment: true,
+        tradingEnabled: false,
+      }),
+      expectedEnvironment: "paper",
+    });
+    const result = await guard.check();
+    assert.equal(result.ok, false);
+    assert.match(result.reason!, /tradingEnabled=false/);
+    assert.match(result.reason!, /TRADING_ENABLED=false/);
+  });
+
+  it("PR15.3 Finding 1 — refuses when /ready response omits tradingEnabled (fail-closed on unknown)", async () => {
+    const guard = new PaperGuard({
+      probe: fakeProbe({
+        kind: "ok",
+        ready: true,
+        environment: "paper",
+        accountMatchesEnvironment: true,
+        // tradingEnabled intentionally omitted — pre-hostile-review
+        // probe shape MUST not silently open the gate.
+      }),
+      expectedEnvironment: "paper",
+    });
+    const result = await guard.check();
+    assert.equal(result.ok, false);
+    assert.match(result.reason!, /did not report tradingEnabled/);
   });
 
   it("refuses when the probe itself errors (fail-closed)", async () => {

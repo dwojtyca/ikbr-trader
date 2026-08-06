@@ -151,6 +151,9 @@ function paperOkGuard(): PaperGuard {
           ready: true,
           environment: "paper",
           accountMatchesEnvironment: true,
+          // PR15.3 Finding 1 — kill-switch cross-check must pass in
+          // the "paper OK" fixture.
+          tradingEnabled: true,
         };
       },
     },

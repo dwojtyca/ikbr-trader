@@ -24,9 +24,11 @@ import {
 import {
   EnvironmentGuardConfig,
   EnvironmentGuardError,
+  assertActiveAccountAllowed,
   assertEnvironmentAllowsWrite,
   whitelistForEnvironment,
 } from "./env-guard.js";
+import { isWriteGuardExempt } from "./write-guard-exemptions.js";
 import {
   evaluateReadiness,
   type PositionSnapshotHealthInput,
@@ -1681,12 +1683,26 @@ async function main(): Promise<void> {
       return;
     }
     if (!request.url.startsWith("/execution/")) return;
-    // PR15 §8 — reconciliation operator endpoints are EXEMPT from
-    // the trading environment write guard: operators must be able
-    // to trigger a run / resolve a hold even on a hold-blocked
-    // cluster to diagnose. Bearer + audit still apply.
-    if (request.url.startsWith("/execution/reconciliation/")) return;
-    assertEnvironmentAllowsWrite(envGuardConfig(), lastActiveAccountId);
+    const cfg = envGuardConfig();
+    if (
+      isWriteGuardExempt(
+        request.method,
+        request.routeOptions.url ?? request.url,
+      )
+    ) {
+      // PR15.3 r4 hostile-review Finding 1 — exempt / risk-reducing
+      // endpoints (cancel-proposed, reconciliation operator surface)
+      // BYPASS ONLY the administrative write kill switch. Environment,
+      // account allowlist, and known-account requirement STILL apply.
+      // Bearer + audit (registered earlier) STILL run. This prevents a
+      // pre-r4 shape where `isWriteGuardExempt(...) → return` let a
+      // cancel-proposed request through with no account check at all.
+      assertActiveAccountAllowed(cfg, lastActiveAccountId, {
+        requireKnownAccount: true,
+      });
+      return;
+    }
+    assertEnvironmentAllowsWrite(cfg, lastActiveAccountId);
   });
 
   // PR15 — register reconciliation routes.

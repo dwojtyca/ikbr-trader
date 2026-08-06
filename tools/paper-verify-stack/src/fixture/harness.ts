@@ -94,6 +94,13 @@ function envFor(mode: Mode, stack: FixtureHandle): Record<string, string> {
     PAPER_VERIFY_RUNTIME_EXPECTED_STATE: "registered",
     PAPER_VERIFY_EXECUTION_RUNTIME_EXPECTED_STATE: "registered",
     PAPER_VERIFY_TRADING_LOOP_EXPECTED_STATE: "disabled",
+    // PR15.3 r3 — fixture stack reports `tradingEnabled=false`
+    // (see `fixture-stack.ts`), matching the Phase A / writes-off
+    // baseline. Explicitly asserting the expected state locks the
+    // check in place; any regression that flips the fixture to
+    // `tradingEnabled=true` (or drops the expected-state
+    // comparison) turns UNHEALTHY.
+    PAPER_VERIFY_EXECUTION_WRITE_EXPECTED_STATE: "disabled",
   };
   if (mode === "opt-in") {
     base.PAPER_VERIFY_INCLUDE_ACCOUNT_SUMMARY = "true";

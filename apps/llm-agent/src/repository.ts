@@ -122,6 +122,23 @@ export class LlmAgentRepository {
     );
   }
 
+  /**
+   * Claim the next unclaimed `PROPOSED` row for LLM adjudication.
+   *
+   * PR15.3 fail-closed isolation: the WHERE clause requires
+   * `decision_source = 'signal'`. Rows created by the Phase 2
+   * trading loop / `/execution/execute-ticket` path carry
+   * `decision_source = 'user'` (set in
+   * `apps/execution-engine/src/repository.ts::insertProposedFromTicket`)
+   * and MUST NOT be picked up here. Without this filter the
+   * llm-agent could race the Phase 2 E2E window in the short
+   * interval between the INSERT commit and the atomic marker
+   * transaction inside `runThreePhase`, waste LLM/News budget on a
+   * ticket it does not own, and add ambiguity to the audit trail.
+   * Legacy signal-engine rows (default `decision_source = 'signal'`
+   * from the base migration / signal-engine `runAndPersist`) keep
+   * flowing through unchanged.
+   */
   async claimNextProposed(
     workerId: string,
     staleMs: number,
@@ -132,6 +149,7 @@ export class LlmAgentRepository {
         SELECT id
         FROM proposed_orders
         WHERE status = 'PROPOSED'
+          AND decision_source = 'signal'
           AND (
             processing_claimed_at IS NULL
             OR processing_claimed_at < NOW() - (($2::BIGINT || ' milliseconds')::interval)

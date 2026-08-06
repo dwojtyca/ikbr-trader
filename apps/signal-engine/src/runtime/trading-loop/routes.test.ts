@@ -224,7 +224,20 @@ const EXPECTED_INTENT_KEY = `loop:v4:aapl:test_strategy_v1:evaluation.1m.1784030
 
 const SUCCESS_PIPELINE = {
   outcome: "SUCCESS",
-  signal: { id: "sig-1" },
+  signal: {
+    id: "sig-1",
+    instrumentId: "aapl",
+    // PR15.3 hostile-review Finding 2 — the strict fail-closed
+    // check requires the pipeline to advertise the strategy that
+    // produced the intent. Match the fixture instrument's
+    // executionPolicy.strategyId (`test_strategy_v1`).
+    decision: { action: "LONG" },
+    metadata: {
+      engineVersions: {},
+      evaluationTimeMs: 0,
+      strategyId: "test_strategy_v1",
+    },
+  },
   ticket: SUCCESS_TICKET,
   warnings: [],
   durationMs: 1,
@@ -233,7 +246,11 @@ const SUCCESS_PIPELINE = {
 
 const NO_TRADE_PIPELINE = {
   outcome: "NO_TRADE",
-  signal: { id: "sig-1" },
+  signal: {
+    id: "sig-1",
+    instrumentId: "aapl",
+    metadata: { engineVersions: {}, evaluationTimeMs: 0 },
+  },
   ticket: null,
   reason: "HOLD",
   warnings: [],
@@ -261,6 +278,9 @@ function paperOkGuard(): PaperGuard {
         ready: true,
         environment: "paper",
         accountMatchesEnvironment: true,
+        // PR15.3 Finding 1 — kill-switch cross-check must pass in
+        // the "paper OK" fixture.
+        tradingEnabled: true,
       };
     },
   };

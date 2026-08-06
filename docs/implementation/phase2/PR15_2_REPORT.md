@@ -1,6 +1,6 @@
 # PR15.2 — Authoritative Instrument Binding — REPORT
 
-> Status: **implemented, in review**.
+> Status: **shipped as `1472a33`**.
 > Base commit: `89e1377` (PR15.1 shipped).
 > Scope: bind a logical registry `instrumentId` to one exact,
 > operator-selected, broker-verified IBKR contract identity;

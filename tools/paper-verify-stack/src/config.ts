@@ -9,6 +9,17 @@ import { z } from "zod";
 export type RuntimeExpectedState = "registered" | "absent";
 export type ExecutionRuntimeExpectedState = "registered" | "absent";
 export type TradingLoopExpectedState = "enabled" | "disabled" | "absent";
+/**
+ * PR15.3 r3 (hostile-review Finding 2) — administrative write
+ * gate expected by the operator running the verifier. Distinct
+ * from the runtime-registered check: `disabled` means "runtime
+ * is wired but `TRADING_ENABLED=false` — Phase A of the Paper
+ * Entry E2E runbook", `enabled` means "runtime is wired AND
+ * `TRADING_ENABLED=true` — Phase B write window". `absent`
+ * means the verifier has no expectation (execution runtime is
+ * itself expected absent, so the write gate is not applicable).
+ */
+export type ExecutionWriteExpectedState = "enabled" | "disabled" | "absent";
 
 export interface ToolConfig {
   readonly ingestionUrl: string;
@@ -21,6 +32,7 @@ export interface ToolConfig {
   readonly runtimeExpected: RuntimeExpectedState;
   readonly executionRuntimeExpected: ExecutionRuntimeExpectedState;
   readonly tradingLoopExpected: TradingLoopExpectedState;
+  readonly executionWriteExpected: ExecutionWriteExpectedState;
   readonly maxTickAgeMs: number;
   readonly maxCandleAgeMs: number;
   readonly maxMarketStateAgeMs: number;
@@ -44,6 +56,14 @@ const ExecutionRuntimeStateSchema = z
 const TradingLoopStateSchema = z
   .enum(["enabled", "disabled", "absent"])
   .default("absent");
+// PR15.3 r3 — default is `absent` (no expectation) so pre-existing
+// callers that never set the flag keep working. When the operator
+// explicitly asserts `disabled` (Phase A) or `enabled` (Phase B),
+// the verifier compares against execution-engine's
+// `/ready.tradingEnabled` field.
+const ExecutionWriteExpectedStateSchema = z
+  .enum(["enabled", "disabled", "absent"])
+  .default("absent");
 
 const EnvSchema = z.object({
   PAPER_VERIFY_INGESTION_URL: z.string().default("http://127.0.0.1:3101"),
@@ -58,6 +78,8 @@ const EnvSchema = z.object({
   PAPER_VERIFY_RUNTIME_EXPECTED_STATE: RuntimeStateSchema,
   PAPER_VERIFY_EXECUTION_RUNTIME_EXPECTED_STATE: ExecutionRuntimeStateSchema,
   PAPER_VERIFY_TRADING_LOOP_EXPECTED_STATE: TradingLoopStateSchema,
+  PAPER_VERIFY_EXECUTION_WRITE_EXPECTED_STATE:
+    ExecutionWriteExpectedStateSchema,
   PAPER_VERIFY_MAX_TICK_AGE_MS: z.coerce
     .number()
     .int()
@@ -144,6 +166,22 @@ export function parseConfig(
         "trading_loop_endpoints_always_registered_with_execution_runtime",
     };
   }
+  const write = e.PAPER_VERIFY_EXECUTION_WRITE_EXPECTED_STATE;
+  // PR15.3 r3 — the write-state expectation is only meaningful
+  // when the execution runtime is in scope. Reject the mismatch
+  // early so operators cannot silently mis-configure the flag
+  // with an absent runtime. When the runtime IS registered,
+  // `absent` is still accepted (backwards-compat) — the operator
+  // can leave the flag unset to keep the pre-PR15.3-r3 behaviour
+  // where `tradingEnabled` is only echoed, not asserted. The
+  // Paper Entry E2E runbook (Phase A / Phase B) MUST set the
+  // flag explicitly.
+  if (executionRuntime === "absent" && write !== "absent") {
+    return {
+      ok: false,
+      reason: "execution_write_expected_requires_execution_runtime",
+    };
+  }
   const token =
     e.PAPER_VERIFY_EXECUTION_TOKEN && e.PAPER_VERIFY_EXECUTION_TOKEN.length > 0
       ? e.PAPER_VERIFY_EXECUTION_TOKEN
@@ -168,6 +206,7 @@ export function parseConfig(
       runtimeExpected: runtime,
       executionRuntimeExpected: executionRuntime,
       tradingLoopExpected: loop,
+      executionWriteExpected: write,
       maxTickAgeMs: e.PAPER_VERIFY_MAX_TICK_AGE_MS,
       maxCandleAgeMs: e.PAPER_VERIFY_MAX_CANDLE_AGE_MS,
       maxMarketStateAgeMs: e.PAPER_VERIFY_MAX_MARKET_STATE_AGE_MS,

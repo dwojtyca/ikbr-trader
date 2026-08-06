@@ -576,6 +576,123 @@ export class TradingLoopService {
       });
     }
 
+    // ---- PR15.3 strategy/policy mismatch (fail-closed) -------------
+    // PR15.3 hostile-review Finding 2 — the check is STRICT:
+    // whenever the instrument has an `executionPolicy`, the pipeline
+    // signal MUST advertise both an `instrumentId` matching the
+    // scheduled instrument AND a `metadata.strategyId` matching
+    // `executionPolicy.strategyId`. When `executionPolicy.expectedDirection`
+    // is present, the winning `DecisionResult.action` must match it
+    // as well (a `SHORT` decision cannot pass under a
+    // `momentum_breakout_long_v1` policy).
+    //
+    // The shared `SignalEngine` today wires DecisionEngine + RiskEngine
+    // WITHOUT going through the strategy registry, so
+    // `signal.metadata.strategyId` is always `undefined` in production.
+    // That is deliberately fail-closed here: no execution-enabled seed
+    // ships in PR15.3, and any future seed activation MUST first plumb
+    // a real strategyId (and matching direction) through the pipeline
+    // — the loop refuses to make up either.
+    const winningSignal = dryRunResult.pipeline.signal;
+    if (winningSignal.instrumentId !== instrument.id) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "NOT_SUBMITTED",
+        instrumentId: instrument.id,
+        idempotencyKey: "",
+        runtime: {
+          outcome: "NOT_SUBMITTED",
+          pipeline: dryRunResult.pipeline,
+          reason: "PIPELINE_FAILURE",
+        },
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message:
+          `pipeline signal instrumentId=${winningSignal.instrumentId} ` +
+          `disagrees with loop instrument.id=${instrument.id}`,
+      });
+    }
+    const winningStrategyId = winningSignal.metadata?.strategyId;
+    if (winningStrategyId === undefined) {
+      // Fail-closed: the pipeline did NOT identify the strategy that
+      // produced this signal. We cannot trust it against the shipped
+      // policy — refuse.
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "NOT_SUBMITTED",
+        instrumentId: instrument.id,
+        idempotencyKey: "",
+        runtime: {
+          outcome: "NOT_SUBMITTED",
+          pipeline: dryRunResult.pipeline,
+          reason: "PIPELINE_FAILURE",
+        },
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message:
+          "pipeline signal did not advertise metadata.strategyId — cannot verify " +
+          `against Instrument.executionPolicy.strategyId=` +
+          `${policyResolution.executionPolicy.strategyId}`,
+      });
+    }
+    if (
+      winningStrategyId !== policyResolution.executionPolicy.strategyId
+    ) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "NOT_SUBMITTED",
+        instrumentId: instrument.id,
+        idempotencyKey: "",
+        runtime: {
+          outcome: "NOT_SUBMITTED",
+          pipeline: dryRunResult.pipeline,
+          reason: "PIPELINE_FAILURE",
+        },
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message:
+          `pipeline signal strategyId=${winningStrategyId} disagrees with ` +
+          `Instrument.executionPolicy.strategyId=` +
+          `${policyResolution.executionPolicy.strategyId}`,
+      });
+    }
+    const expectedDirection =
+      policyResolution.executionPolicy.expectedDirection;
+    if (expectedDirection !== undefined) {
+      const decisionAction = winningSignal.decision?.action;
+      if (
+        decisionAction !== "LONG" &&
+        decisionAction !== "SHORT"
+      ) {
+        return this.#finalize(cycleId, instrument.id, startedAt, {
+          kind: "NOT_SUBMITTED",
+          instrumentId: instrument.id,
+          idempotencyKey: "",
+          runtime: {
+            outcome: "NOT_SUBMITTED",
+            pipeline: dryRunResult.pipeline,
+            reason: "PIPELINE_FAILURE",
+          },
+          reason: "STRATEGY_POLICY_MISMATCH",
+          message:
+            `pipeline decision.action=${String(decisionAction)} is not a ` +
+            `directional trade — cannot match executionPolicy.expectedDirection=` +
+            `${expectedDirection}`,
+        });
+      }
+      if (decisionAction !== expectedDirection) {
+        return this.#finalize(cycleId, instrument.id, startedAt, {
+          kind: "NOT_SUBMITTED",
+          instrumentId: instrument.id,
+          idempotencyKey: "",
+          runtime: {
+            outcome: "NOT_SUBMITTED",
+            pipeline: dryRunResult.pipeline,
+            reason: "PIPELINE_FAILURE",
+          },
+          reason: "STRATEGY_POLICY_MISMATCH",
+          message:
+            `pipeline decision.action=${decisionAction} disagrees with ` +
+            `Instrument.executionPolicy.expectedDirection=${expectedDirection} ` +
+            `(strategy ${policyResolution.executionPolicy.strategyId})`,
+        });
+      }
+    }
+
     // ---- Trigger identity (round-4 blocker fix) --------------------
     // The v4 idempotency key separates strategy trigger identity
     // (strategyId + triggerId) from the trade intent hash. Trigger

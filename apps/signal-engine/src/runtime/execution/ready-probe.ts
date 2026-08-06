@@ -52,6 +52,7 @@ export class HttpReadyProbe implements ReadyProbe {
       const body = parsed as {
         ready?: unknown;
         environment?: unknown;
+        tradingEnabled?: unknown;
         checks?: { accountMatchesEnvironment?: unknown };
       };
       const environment = body.environment;
@@ -67,6 +68,20 @@ export class HttpReadyProbe implements ReadyProbe {
         environment,
         accountMatchesEnvironment:
           body.checks?.accountMatchesEnvironment === true,
+        // PR15.3 Finding 1 — surface the administrative write switch
+        // (`TRADING_ENABLED`) from execution-engine so `PaperGuard`
+        // fails-closed BEFORE the submitter contacts the write path.
+        // The switch does NOT block risk-reducing endpoints (cancel
+        // + reconciliation) — those retain a separate audited path.
+        // Only literal `true` opens the gate here; any other shape
+        // (missing, null, string) becomes `undefined` and the guard
+        // treats it as unknown.
+        tradingEnabled:
+          body.tradingEnabled === true
+            ? true
+            : body.tradingEnabled === false
+              ? false
+              : undefined,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -507,6 +507,9 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
   });
 
   it("ships with executionEnabled=false on every seed (opt-in)", () => {
+    // PR15.3 hostile-review Finding 2 — activation ROLLED BACK.
+    // Real strategy-registry integration is required before any
+    // seed may ship execution-enabled (see PR15_3_PLAN.md r2 §11).
     for (const instrument of defaultInstrumentRegistry.listAll()) {
       assert.equal(
         instrument.trading.executionEnabled,

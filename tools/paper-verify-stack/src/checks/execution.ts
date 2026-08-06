@@ -114,6 +114,22 @@ export async function runExecutionChecks(
       if (v === false) reasons.push(`check_${k}_false`);
     }
     for (const r of j.reasons) reasons.push(`reason_${r}`);
+    // PR15.3 r3 (hostile-review Finding 2) — expected write state.
+    // Paper Entry E2E Phase A is expected to run with
+    // `tradingEnabled=false`; a HEALTHY verdict there proves
+    // infrastructure is wired without falsely implying writes
+    // are unlocked. Phase B expects `tradingEnabled=true`; a
+    // `false` at that point means the kill switch is still on
+    // and the operator has skipped step B.1 of the runbook.
+    //   `absent`     — no expectation; skip comparison.
+    //   `disabled`   — HEALTHY iff j.tradingEnabled === false.
+    //   `enabled`    — HEALTHY iff j.tradingEnabled === true.
+    if (cfg.executionWriteExpected === "disabled" && j.tradingEnabled !== false) {
+      reasons.push("write_expected_disabled_but_enabled");
+    }
+    if (cfg.executionWriteExpected === "enabled" && j.tradingEnabled !== true) {
+      reasons.push("write_expected_enabled_but_disabled");
+    }
     out.push({
       id: "execution.ready",
       service: "execution",
@@ -130,6 +146,7 @@ export async function runExecutionChecks(
         account: j.account,
         reconciliation: j.reconciliation,
         checks: j.checks,
+        writeExpected: cfg.executionWriteExpected,
       },
     });
   }

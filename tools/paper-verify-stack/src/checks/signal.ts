@@ -169,17 +169,59 @@ export async function runSignalChecks(
     const failed: string[] = [];
     if (!j.checks.redis.ok) failed.push("redis");
     if (!j.checks.postgres.ok) failed.push("postgres");
-    if (!j.checks.paperGuard.ok) failed.push("paperGuard");
-    const unhealthy = !j.ready || failed.length > 0;
+    // PR15.3 r3 (hostile-review Finding 2) — `PaperGuard` now
+    // cross-checks execution-engine's `/ready.tradingEnabled`
+    // and refuses when writes are administratively disabled.
+    // That is the intended state during Phase A of the Paper
+    // Entry E2E runbook: infrastructure must still be verifiable
+    // even though PaperGuard.check() returns { ok: false,
+    // reason: /tradingEnabled=false/ }.
+    //
+    // We therefore treat that SPECIFIC paperGuard failure as an
+    // infrastructure-side pass ONLY when the operator explicitly
+    // declared `PAPER_VERIFY_EXECUTION_WRITE_EXPECTED_STATE=disabled`.
+    // Every other paperGuard failure (network error, environment
+    // mismatch, account mismatch, missing tradingEnabled field)
+    // still surfaces as UNHEALTHY. The `POST /runtime/execute`
+    // and `POST /runtime/trading-loop/run-once` handlers are
+    // unchanged — they continue to fail-closed on
+    // `paperGuard.ok=false`, so this expected-state gate CANNOT
+    // enable a submission by itself.
+    const paperGuardOk = j.checks.paperGuard.ok;
+    const paperGuardErr = j.checks.paperGuard.error ?? "";
+    const paperGuardFailureIsExpectedKillSwitch =
+      cfg.executionWriteExpected === "disabled" &&
+      !paperGuardOk &&
+      /tradingEnabled=false/.test(paperGuardErr);
+    if (!paperGuardOk && !paperGuardFailureIsExpectedKillSwitch) {
+      failed.push("paperGuard");
+    }
+    // Even in the accepted case, expose the runtime's raw
+    // `ready:false` verdict as a distinct signal so the operator
+    // knows the endpoint returned 503 (which is expected in Phase
+    // A). The check itself remains HEALTHY.
+    const rawReadyFalse = !j.ready;
+    const unhealthy = failed.length > 0 ||
+      (rawReadyFalse && !paperGuardFailureIsExpectedKillSwitch);
     out.push({
       id: "signal.execute.ready",
       service: "signal",
       status: unhealthy ? "UNHEALTHY" : "HEALTHY",
       summary: unhealthy
         ? `signal execution not ready (${failed.join(",") || "unknown"})`
-        : "signal execution ready",
+        : paperGuardFailureIsExpectedKillSwitch
+          ? "signal execution infrastructure ready; paper-guard reports " +
+            "tradingEnabled=false (writes disabled as expected in Phase A)"
+          : "signal execution ready",
       reasons: failed.map((f) => `signal.execute.ready:${f}`),
-      details: { ready: j.ready, failed },
+      details: {
+        ready: j.ready,
+        failed,
+        paperGuardOk,
+        writeExpected: cfg.executionWriteExpected,
+        paperGuardFailureAcceptedAsKillSwitch:
+          paperGuardFailureIsExpectedKillSwitch,
+      },
     });
   }
 

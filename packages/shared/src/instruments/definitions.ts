@@ -179,6 +179,18 @@ export const INSTRUMENT_DEFINITIONS: readonly Instrument[] = [
     currency: "USD",
     tradingClass: "ES",
     trading: {
+      // PR15.3 hostile-review Finding 2 — activation ROLLED BACK.
+      // The Phase 2 runtime pipeline is Decision + Risk with no
+      // strategy layer; it does NOT invoke
+      // `MomentumBreakoutLongStrategy` (nor any strategy from
+      // `apps/signal-engine/src/strategies/`) and cannot produce an
+      // authenticated `strategyId` on the winning signal. Activating
+      // `es_front` with `executionPolicy.strategyId =
+      // "momentum_breakout_long_v1"` would let the generic pipeline
+      // route ANY LONG/SHORT decision under a policy that promises
+      // one specific strategy. See PR15_3_PLAN.md r2 §11 for the
+      // required real strategy-registry integration; until that
+      // lands, no seed may be execution-enabled.
       executionEnabled: false,
       signalGenerationEnabled: true,
       aiAnalysisEnabled: true,
@@ -206,6 +218,10 @@ export const INSTRUMENT_DEFINITIONS: readonly Instrument[] = [
       sector: "equity_index",
       description: "E-mini S&P 500 futures, CME front-month.",
     },
+    // PR15.3 hostile-review Finding 2 — `executionPolicy` REMOVED
+    // together with the activation flip. The shape and the target
+    // values live in PR15_3_PLAN.md r2 §3.2; they re-enter this seed
+    // ONLY when the r2 strategy-integration step is complete.
   },
   {
     id: "nq_front",

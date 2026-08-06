@@ -249,4 +249,15 @@ export interface InstrumentExecutionPolicy {
    * per-instrument so the choice is auditable.
    */
   readonly allowCrossContractExposure?: boolean;
+  /**
+   * PR15.3 hostile-review Finding 2 — declarative direction that
+   * the referenced `strategyId` is authorised to trade for this
+   * instrument. When present, the trading-loop refuses to submit
+   * an intent whose winning `DecisionResult.action` disagrees
+   * (e.g. a `SHORT` decision under a `momentum_breakout_long_v1`
+   * policy). Optional so pre-PR15.3 policies keep validating;
+   * PR15.3 activation MUST supply it whenever the strategyId
+   * implies a fixed direction.
+   */
+  readonly expectedDirection?: "LONG" | "SHORT";
 }

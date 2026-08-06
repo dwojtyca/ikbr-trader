@@ -207,6 +207,13 @@ function paperOkGuard(): PaperGuard {
           ready: true,
           environment: "paper",
           accountMatchesEnvironment: true,
+          // PR15.3 Finding 1 — administrative write switch is ON in
+          // the "paper OK" fixture; individual tests can override it
+          // via a dedicated probe when they exercise the negative
+          // branch. The switch only gates exposure-creating paths;
+          // risk-reducing cancel + reconciliation endpoints stay
+          // available on the execution-engine side regardless.
+          tradingEnabled: true,
         };
       },
     } satisfies ReadyProbe,
@@ -274,6 +281,7 @@ describe("ExecutionRuntime.execute — pipeline gating", () => {
             ready: true,
             environment: "paper",
             accountMatchesEnvironment: true,
+            tradingEnabled: true,
           };
         },
       },

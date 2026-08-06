@@ -10,6 +10,12 @@
  *   2. execution-engine reports `ready === true`.
  *   3. the account, if known, matches the paper whitelist
  *      (`accountMatchesEnvironment === true`).
+ *   4. PR15.3 Finding 1 — execution-engine reports
+ *      `tradingEnabled === true`. The authoritative kill-switch
+ *      block lives inside `assertEnvironmentAllowsWrite` on the
+ *      write path; this early-signal check keeps the trading-loop
+ *      from spending pipeline cycles / snapshot reads / audit
+ *      writes on a request the server would refuse with 423 anyway.
  *
  * Any negative signal → the guard REFUSES; the runtime reports
  * `NOT_SUBMITTED / PAPER_GUARD_FAILED` and NEVER dispatches the
@@ -33,6 +39,13 @@ export interface ReadyProbe {
         readonly ready: boolean;
         readonly environment: "paper" | "live";
         readonly accountMatchesEnvironment: boolean;
+        /**
+         * PR15.3 Finding 1 — mirror of `ReadinessResponse.tradingEnabled`.
+         * Optional so pre-existing test doubles that predate the
+         * hostile-review fix keep compiling; `PaperGuard` treats
+         * `undefined` as "unknown" and fails-closed.
+         */
+        readonly tradingEnabled?: boolean;
       }
     | {
         readonly kind: "error";
@@ -93,6 +106,18 @@ export class PaperGuard {
         ok: false,
         reason:
           "execution-engine active account does not match the paper whitelist",
+      };
+    }
+    // PR15.3 Finding 1 — kill-switch cross-check. `undefined` is
+    // treated as "unknown" and fails-closed so a probe implementation
+    // that predates this field cannot silently strip the check.
+    if (result.tradingEnabled !== true) {
+      return {
+        ok: false,
+        reason:
+          result.tradingEnabled === false
+            ? "execution-engine reports tradingEnabled=false (TRADING_ENABLED=false — administrative kill switch)"
+            : "execution-engine /ready did not report tradingEnabled — refusing to submit",
       };
     }
     return { ok: true };

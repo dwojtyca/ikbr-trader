@@ -78,7 +78,15 @@ export type TradingLoopInstrumentOutcome =
         // ExecutionRuntime.execute() when the /runtime/execute
         // endpoint receives an unbound instrumentId.
         | "INSTRUMENT_BINDING_UNAVAILABLE"
-        | "INSTRUMENT_TICK_MISMATCH";
+        | "INSTRUMENT_TICK_MISMATCH"
+        // PR15.3 — fail-closed defence when the pipeline emits
+        // a signal whose `instrumentId` or (future) advertised
+        // `strategyId` diverges from the instrument the loop
+        // scheduled AND from
+        // `Instrument.executionPolicy.strategyId`. Nothing
+        // persists, nothing dispatches — an explicit skip is
+        // safer than trusting an ambiguous winning strategy.
+        | "STRATEGY_POLICY_MISMATCH";
       readonly message?: string;
     }
   | {

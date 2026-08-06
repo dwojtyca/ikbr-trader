@@ -212,11 +212,24 @@ function makeMarketDataRuntime(behaviour: {
   ticket?: ExecutionTicket;
   outcome?: "SUCCESS" | "NO_TRADE" | "FAILURE";
   priceObservedAtIso?: string | null;
+  /**
+   * PR15.3 Finding 2 — instruments in scope so the fixture can
+   * emit the SAME strategyId that the instrument's execution
+   * policy declares (simulating a strategy-aware pipeline). If
+   * omitted, defaults to `AAPL_POLICY.strategyId`. Never
+   * fabricates a strategyId different from the instrument's
+   * declared one — that is exactly what the loop's fail-closed
+   * check is meant to catch.
+   */
+  instruments?: readonly Instrument[];
 }): MarketDataRuntime & {
   calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }>;
 } {
   const calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }> =
     [];
+  const byId = new Map(
+    (behaviour.instruments ?? []).map((i) => [i.id, i]),
+  );
   return {
     calls,
     async dryRun(
@@ -235,7 +248,26 @@ function makeMarketDataRuntime(behaviour: {
         outcome === "SUCCESS"
           ? ({
               outcome: "SUCCESS",
-              signal: { id: "sig-1" },
+              signal: {
+                id: "sig-1",
+                instrumentId,
+                // PR15.3 hostile-review Finding 2 — the default
+                // fixture simulates a strategy-aware pipeline that
+                // correctly identifies the winning strategy; the
+                // loop's strict fail-closed check now requires it.
+                // Tests that want to exercise the "missing" or
+                // "mismatched" branch use a dedicated fixture
+                // (`makeMismatchedMarketDataRuntime`) instead of
+                // relying on this default.
+                decision: { action: "LONG" },
+                metadata: {
+                  engineVersions: {},
+                  evaluationTimeMs: 0,
+                  strategyId:
+                    byId.get(instrumentId)?.executionPolicy?.strategyId ??
+                    AAPL_POLICY.strategyId,
+                },
+              },
               ticket: behaviour.ticket ?? makeTicket(),
               warnings: [],
               durationMs: 1,
@@ -244,7 +276,14 @@ function makeMarketDataRuntime(behaviour: {
           : outcome === "NO_TRADE"
             ? ({
                 outcome: "NO_TRADE",
-                signal: { id: "sig-1" },
+                signal: {
+                  id: "sig-1",
+                  instrumentId,
+                  metadata: {
+                    engineVersions: {},
+                    evaluationTimeMs: 0,
+                  },
+                },
                 ticket: null,
                 reason: "HOLD",
                 warnings: [],
@@ -386,6 +425,9 @@ function makeService(
     ticket: overrides.ticket,
     outcome: overrides.pipelineOutcome,
     priceObservedAtIso: overrides.priceObservedAtIso,
+    // PR15.3 Finding 2 — thread instruments through so the
+    // default fixture emits the correct per-instrument strategyId.
+    instruments,
   });
   const executionRuntime = makeExecutionRuntime(
     overrides.runtimeOutcome ?? SUBMITTED_OUTCOME,
@@ -873,5 +915,345 @@ describe("TradingLoopService — PR15.2 binding gate", () => {
     assert.equal(bound!.instrumentId, "es_front");
     assert.equal(bound!.conId, 987_654_321);
     assert.equal(bound!.brokerSymbol, "ES");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR15.3 — Strategy/policy mismatch (fail-closed)
+// ---------------------------------------------------------------------------
+
+describe("TradingLoopService — PR15.3 strategy/policy mismatch", () => {
+  function makeMismatchedMarketDataRuntime(overrides: {
+    signalInstrumentId?: string;
+    signalStrategyId?: string | null; // null = omit strategyId entirely
+    decisionAction?: "LONG" | "SHORT" | "HOLD" | null;
+  }): MarketDataRuntime & {
+    calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }>;
+  } {
+    const calls: Array<{
+      instrumentId: string;
+      policy: ExecutionTicketPolicy;
+    }> = [];
+    return {
+      calls,
+      async dryRun(
+        instrumentId: string,
+        policy: ExecutionTicketPolicy,
+      ): Promise<DryRunResult> {
+        calls.push({ instrumentId, policy });
+        const snapshot = makeSnapshot(
+          instrumentId,
+          "2026-07-14T12:00:00.000Z",
+        );
+        // Default (unless the test opts out) → the fixture emulates
+        // a strategy-aware pipeline that correctly reports the
+        // winning strategy so only the field the test wants to
+        // corrupt is corrupted.
+        const strategyId =
+          overrides.signalStrategyId === null
+            ? undefined
+            : (overrides.signalStrategyId ?? AAPL_POLICY.strategyId);
+        const decisionAction =
+          overrides.decisionAction === null
+            ? undefined
+            : (overrides.decisionAction ?? "LONG");
+        const pipeline = {
+          outcome: "SUCCESS",
+          signal: {
+            id: "sig-1",
+            instrumentId: overrides.signalInstrumentId ?? instrumentId,
+            decision:
+              decisionAction !== undefined
+                ? { action: decisionAction }
+                : null,
+            metadata: {
+              engineVersions: {},
+              evaluationTimeMs: 0,
+              ...(strategyId !== undefined ? { strategyId } : {}),
+            },
+          },
+          ticket: makeTicket(),
+          warnings: [],
+          durationMs: 1,
+          metadata: { engineVersions: {}, ranAt: new Date() },
+        } as unknown as DryRunResult["pipeline"];
+        return { instrumentId, snapshot, pipeline };
+      },
+    } as unknown as MarketDataRuntime & {
+      calls: Array<{ instrumentId: string; policy: ExecutionTicketPolicy }>;
+    };
+  }
+
+  it("signal.instrumentId disagrees with loop instrument → NOT_SUBMITTED / STRATEGY_POLICY_MISMATCH; runtime NOT called", async () => {
+    const instruments = [makeInstrument("aapl")];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      signalInstrumentId: "some_other_instrument",
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    assert.equal(report.reports.length, 1);
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "NOT_SUBMITTED");
+    if (outcome.kind !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_POLICY_MISMATCH");
+    assert.equal(
+      executionRuntime.preparedCalls.length,
+      0,
+      "runtime.executePrepared MUST NOT run when the signal instrumentId is wrong",
+    );
+  });
+
+  it("signal.metadata.strategyId disagrees with executionPolicy.strategyId → NOT_SUBMITTED / STRATEGY_POLICY_MISMATCH; runtime NOT called", async () => {
+    const instruments = [makeInstrument("aapl")]; // AAPL_POLICY.strategyId = momentum_breakout_long_v1
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      signalStrategyId: "wrong_strategy_v9",
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    assert.equal(report.reports.length, 1);
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "NOT_SUBMITTED");
+    if (outcome.kind !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_POLICY_MISMATCH");
+    assert.match(
+      outcome.message ?? "",
+      /wrong_strategy_v9/,
+      "message should identify the diverging strategyId",
+    );
+    assert.equal(executionRuntime.preparedCalls.length, 0);
+  });
+
+  it("signal.metadata.strategyId matches executionPolicy.strategyId → happy path (SUBMITTED)", async () => {
+    const instruments = [makeInstrument("aapl")];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      signalStrategyId: AAPL_POLICY.strategyId,
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    assert.equal(report.reports.length, 1);
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "SUBMITTED");
+    assert.equal(executionRuntime.preparedCalls.length, 1);
+  });
+
+  it("PR15.3 Finding 2 — signal.metadata.strategyId MISSING → NOT_SUBMITTED / STRATEGY_POLICY_MISMATCH (no artificial ID injected)", async () => {
+    // The strict fail-closed contract: when the instrument carries
+    // an executionPolicy the pipeline MUST advertise the strategy
+    // that produced the signal. Falling back to "trust the policy"
+    // would let the current generic DecisionEngine+RiskEngine
+    // wiring silently pass under a strategy label it never
+    // computed for.
+    const instruments = [makeInstrument("aapl")];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      signalStrategyId: null, // omit strategyId
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "NOT_SUBMITTED");
+    if (outcome.kind !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_POLICY_MISMATCH");
+    assert.match(
+      outcome.message ?? "",
+      /did not advertise metadata\.strategyId/,
+    );
+    assert.equal(
+      executionRuntime.preparedCalls.length,
+      0,
+      "runtime MUST NOT run when strategyId is missing",
+    );
+  });
+
+  it("PR15.3 Finding 2 — SHORT decision under a LONG policy (expectedDirection=LONG) → NOT_SUBMITTED / STRATEGY_POLICY_MISMATCH", async () => {
+    const instruments = [
+      makeInstrument("aapl", {
+        executionPolicy: {
+          ...AAPL_POLICY,
+          expectedDirection: "LONG",
+        },
+      }),
+    ];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      // Correct strategy label, correct instrument, but a SHORT
+      // decision under a LONG policy.
+      decisionAction: "SHORT",
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "NOT_SUBMITTED");
+    if (outcome.kind !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_POLICY_MISMATCH");
+    assert.match(outcome.message ?? "", /decision\.action=SHORT/);
+    assert.match(outcome.message ?? "", /expectedDirection=LONG/);
+    assert.equal(
+      executionRuntime.preparedCalls.length,
+      0,
+      "runtime MUST NOT run when the decision direction disagrees with the policy",
+    );
+  });
+
+  it("PR15.3 Finding 2 — LONG decision under a LONG policy (expectedDirection=LONG) → SUBMITTED", async () => {
+    const instruments = [
+      makeInstrument("aapl", {
+        executionPolicy: {
+          ...AAPL_POLICY,
+          expectedDirection: "LONG",
+        },
+      }),
+    ];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      decisionAction: "LONG",
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "SUBMITTED");
+    assert.equal(executionRuntime.preparedCalls.length, 1);
+  });
+
+  it("PR15.3 Finding 2 — expectedDirection=LONG + non-directional decision (HOLD) → NOT_SUBMITTED / STRATEGY_POLICY_MISMATCH", async () => {
+    const instruments = [
+      makeInstrument("aapl", {
+        executionPolicy: {
+          ...AAPL_POLICY,
+          expectedDirection: "LONG",
+        },
+      }),
+    ];
+    const marketDataRuntime = makeMismatchedMarketDataRuntime({
+      decisionAction: "HOLD",
+    });
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+    });
+    const report = await svc.runOnce();
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "NOT_SUBMITTED");
+    if (outcome.kind !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_POLICY_MISMATCH");
+    assert.equal(executionRuntime.preparedCalls.length, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR15.3 — Scheduler off / run-once still callable
+// ---------------------------------------------------------------------------
+
+describe("TradingLoopService — PR15.3 scheduler-off / manual run-once", () => {
+  it("TRADING_LOOP_ENABLED=false → start() never registers timers; runOnce still executes one cycle", async () => {
+    // Track setInterval / setTimeout calls to prove no timer is
+    // ever scheduled when the loop is disabled.
+    const timerCalls: string[] = [];
+    const fakeSetTimeout = ((cb: () => void, ms: number) => {
+      timerCalls.push(`setTimeout(${ms})`);
+      return { unref: () => undefined } as unknown as ReturnType<
+        typeof setTimeout
+      >;
+    }) as unknown as typeof setTimeout;
+    const fakeSetInterval = ((cb: () => void, ms: number) => {
+      timerCalls.push(`setInterval(${ms})`);
+      return { unref: () => undefined } as unknown as ReturnType<
+        typeof setInterval
+      >;
+    }) as unknown as typeof setInterval;
+    const instruments = [makeInstrument("aapl")];
+    const marketDataRuntime = makeMarketDataRuntime({});
+    const executionRuntime = makeExecutionRuntime(SUBMITTED_OUTCOME);
+    const exposureReader = makeExposureReader();
+    const svc = new TradingLoopService({
+      // Default schema — TRADING_LOOP_ENABLED=false.
+      config: makeConfig(),
+      registry: makeRegistry(instruments),
+      marketDataRuntime,
+      executionRuntime,
+      exposureReader,
+      logger: makeLogger(),
+      setTimeoutFn: fakeSetTimeout,
+      setIntervalFn: fakeSetInterval,
+    });
+
+    svc.start();
+    assert.equal(
+      svc.status().enabled,
+      false,
+      "loop must be disabled by default",
+    );
+    assert.equal(svc.status().running, false);
+    assert.deepEqual(
+      timerCalls,
+      [],
+      "start() must NOT schedule any timer when TRADING_LOOP_ENABLED=false",
+    );
+
+    // Manual run-once still works — the operator-driven Paper E2E
+    // path in PR15.3 relies on this.
+    const cycle = await svc.runOnce();
+    assert.equal(cycle.reports.length, 1);
+    assert.equal(cycle.reports[0].outcome.kind, "SUBMITTED");
+    assert.equal(executionRuntime.preparedCalls.length, 1);
+    // Still no timers scheduled after runOnce.
+    assert.deepEqual(timerCalls, []);
   });
 });
