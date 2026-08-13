@@ -30,7 +30,10 @@ import type { RiskEvaluation } from "../risk-engine/types.js";
  *   - `GENERATED` — decision produced a directional action AND
  *                   risk approved it.
  *   - `HOLD`      — decision produced `HOLD` (with no blockers).
- *   - `BLOCKED`   — decision has at least one blocker.
+ *   - `BLOCKED`   — decision has at least one `blockedBy` entry, OR
+ *                   the pipeline emitted at least one
+ *                   `SignalBlocker` (e.g. attribution direction
+ *                   mismatch).
  *   - `REJECTED`  — risk engine returned `approved = false`.
  *   - `ERROR`     — decision engine or risk engine threw, or the
  *                   instrument could not be resolved. Never leaks
@@ -59,6 +62,45 @@ export interface SignalWarning {
   readonly code: string;
   readonly message: string;
   readonly source: SignalWarningSource;
+}
+
+/**
+ * PR15.4 — typed blocker code union for the pipeline-level
+ * classification blockers surfaced on `SignalEvaluation.blockers`.
+ * Distinct from `SignalWarning.code` (free-form string) — the two
+ * types serve different purposes.
+ *
+ * Currently exactly one member; kept as a discriminated union so
+ * future gates (e.g. instrument policy misalignment surfaced by
+ * the pipeline rather than by the loop) can extend it without
+ * breaking exhaustiveness at consumer sites.
+ */
+export type SignalBlockerCode = "STRATEGY_DIRECTION_UNCONFIRMED";
+
+/**
+ * PR15.4 — structured pipeline-level blocker. Propagated from
+ * `runSignalPipeline()` onto `SignalEvaluation.blockers`.
+ * `source` is a discriminator: attribution blockers surface
+ * `failedStage: "ATTRIBUTION"` in the trading pipeline; other
+ * sources map to their respective stages.
+ */
+export interface SignalBlocker {
+  readonly code: SignalBlockerCode;
+  readonly message: string;
+  readonly source: "attribution";
+}
+
+/**
+ * PR15.4 — minimal attribution carrier threaded through
+ * `TradingLoopService → MarketDataRuntime → TradingPipeline →
+ * SignalEngine → runSignalPipeline`. The pipeline uses
+ * `intendedAction` to enforce the direction gate (fail-closed
+ * before the Risk Engine) and always stamps `strategyId` onto
+ * `SignalEvaluation.metadata.strategyId`.
+ */
+export interface SignalAttributionContext {
+  readonly strategyId: string;
+  readonly intendedAction: "LONG" | "SHORT";
 }
 
 /**
@@ -114,5 +156,14 @@ export interface SignalEvaluation {
   readonly status: SignalStatus;
   readonly reasonSummary: string;
   readonly warnings: readonly SignalWarning[];
+  /**
+   * PR15.4 — pipeline-level blockers. Distinct from
+   * `SignalWarning` and from `DecisionResult.blockedBy`.
+   * Populated by `runSignalPipeline()` for classification-level
+   * failures (currently only the attribution direction gate).
+   * Empty array (never `undefined`) when no pipeline blocker
+   * fired.
+   */
+  readonly blockers: readonly SignalBlocker[];
   readonly metadata: SignalMetadata;
 }

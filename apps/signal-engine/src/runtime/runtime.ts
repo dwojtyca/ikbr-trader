@@ -25,6 +25,7 @@ import {
   type MarketContextProvider,
   type MarketContextSnapshot,
   type ExecutionTicketPolicy,
+  type SignalAttributionContext,
   type TradingPipeline,
   type TradingPipelineResult,
 } from "@ikbr/shared";
@@ -90,6 +91,7 @@ export class MarketDataRuntime {
   async dryRun(
     instrumentId: string,
     policy: ExecutionTicketPolicy,
+    attribution?: SignalAttributionContext,
   ): Promise<DryRunResult> {
     // Explicit registry check: MarketContextBuilder would already
     // throw, but we surface the error at the outer boundary with the
@@ -97,7 +99,12 @@ export class MarketDataRuntime {
     // "unknown instrument" from "provider failed".
     const instrument = this.#registry.getInstrumentOrThrow(instrumentId);
     const snapshot = await this.#builder.build({ instrumentId });
-    const pipelineResult = this.#pipeline.run(snapshot, instrument, policy);
+    const pipelineResult = this.#pipeline.run(
+      snapshot,
+      instrument,
+      policy,
+      attribution,
+    );
     return { instrumentId, snapshot, pipeline: pipelineResult };
   }
 }

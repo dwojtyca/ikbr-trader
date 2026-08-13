@@ -49,6 +49,10 @@ export type TradingPipelineOutcome = "SUCCESS" | "NO_TRADE" | "FAILURE";
  *                  resolution).
  *   - `TICKET`   — signal was `GENERATED` but the Execution Ticket
  *                  Builder returned `{ ok: false }`.
+ *   - `ATTRIBUTION` — PR15.4 — signal was `BLOCKED` by the
+ *                  pipeline-level attribution direction gate
+ *                  (typed `SignalBlocker` with
+ *                  `source: "attribution"`).
  *   - `UNKNOWN`  — unexpected exception escaped one of the composed
  *                  engines. Should not happen in production but is
  *                  covered by defence in depth.
@@ -58,6 +62,7 @@ export type TradingPipelineFailedStage =
   | "RISK"
   | "SIGNAL"
   | "TICKET"
+  | "ATTRIBUTION"
   | "UNKNOWN";
 
 /**
@@ -153,6 +158,10 @@ export interface TradingPipelineFailure {
    * For `failedStage` of `DECISION`, `RISK` or `SIGNAL`, this
    * evaluation is the authoritative source of diagnostics
    * (`decision?.blockedBy`, `risk?.blockers`, `warnings`).
+   *
+   * PR15.4 — for `failedStage: "ATTRIBUTION"`, diagnostics live
+   * on `signal.blockers` (typed `SignalBlocker[]` with
+   * `source: "attribution"`).
    */
   readonly signal: SignalEvaluation | null;
   /** Always `null` on failure — no partial tickets are shipped. */

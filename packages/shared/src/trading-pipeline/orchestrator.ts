@@ -54,6 +54,7 @@
 import type { Instrument } from "../instruments/types.js";
 import type { MarketContextSnapshot } from "../market-context/types.js";
 import type { ExecutionTicketPolicy } from "../execution-ticket/types.js";
+import type { SignalAttributionContext } from "../signal-engine/types.js";
 
 import {
   describeUnknownError,
@@ -135,6 +136,7 @@ export class TradingPipeline {
     snapshot: MarketContextSnapshot,
     instrument: Instrument,
     policy: ExecutionTicketPolicy,
+    attribution?: SignalAttributionContext,
   ): TradingPipelineResult {
     // ------------------------------------------------------------------
     // Read clocks defensively BEFORE anything else. A broken clock is
@@ -188,6 +190,7 @@ export class TradingPipeline {
         startClock,
         ranAt,
         measureDuration,
+        ...(attribution ? { attribution } : {}),
       });
     } catch (error) {
       // Last-resort catch: something inside the pipeline itself
@@ -220,13 +223,25 @@ export class TradingPipeline {
     readonly startClock: SafeClockOutcome<number>;
     readonly ranAt: Date;
     readonly measureDuration: () => number;
+    readonly attribution?: SignalAttributionContext;
   }): TradingPipelineResult {
-    const { snapshot, instrument, policy, ranAt, measureDuration } = ctx;
+    const {
+      snapshot,
+      instrument,
+      policy,
+      ranAt,
+      measureDuration,
+      attribution,
+    } = ctx;
 
     // ------------------------------------------------------------------
     // Stage 1 — Signal (Decision + Risk inside SignalEngine)
     // ------------------------------------------------------------------
-    const signalOutcome = runSignalStep(this.#signalEngine, snapshot);
+    const signalOutcome = runSignalStep(
+      this.#signalEngine,
+      snapshot,
+      attribution,
+    );
 
     if (signalOutcome.errored) {
       // Measure BEFORE constructing the blocker: `describeUnknownError`

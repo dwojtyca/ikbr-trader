@@ -646,7 +646,10 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     // pass a bogus value and observe it on the submitter; since
     // the signature no longer accepts one, misuse is prevented
     // at the type level.
-    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY);
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "execution-runtime",
+      intendedAction: "LONG",
+    });
     if (dryRunResult.pipeline.outcome !== "SUCCESS") {
       throw new Error("expected pipeline to succeed");
     }
@@ -660,6 +663,7 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     await runtime.executePrepared({
       dryRunResult,
       idempotencyKey: "idem-precomputed-hash-1",
+      strategyId: "execution-runtime",
     });
     assert.equal(submitter.calls.length, 1);
     assert.equal(submitter.calls[0].clientOrderHash, expectedHash);
@@ -673,5 +677,285 @@ describe("ExecutionRuntime.executePrepared — hash is always re-derived from th
     const forbidden: "clientOrderHash" extends keyof Input ? true : false =
       false;
     assert.equal(forbidden, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR15.4 — executePrepared four-stage validation and strategy attribution
+// ---------------------------------------------------------------------------
+
+describe("ExecutionRuntime.executePrepared — PR15.4 strategy attribution", () => {
+  it("valid strategyId matching pipeline metadata → SUBMITTED with strategy label", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        execution: {
+          orderId: 1,
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "test_strat_v1",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-attribution-happy",
+      strategyId: "test_strat_v1",
+    });
+    assert.equal(outcome.outcome, "SUBMITTED");
+    assert.equal(submitter.calls.length, 1);
+    assert.equal(submitter.calls[0].strategy, "test_strat_v1");
+  });
+
+  it("empty strategyId → STRATEGY_ATTRIBUTION_UNAVAILABLE, paperGuard NOT called, submitter NOT called", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const paperGuard = paperOkGuard();
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard,
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "s1",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-empty",
+      strategyId: "",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_ATTRIBUTION_UNAVAILABLE");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("whitespace-padded strategyId → STRATEGY_ATTRIBUTION_UNAVAILABLE", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "s1",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-ws",
+      strategyId: " s1 ",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_ATTRIBUTION_UNAVAILABLE");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("strategyId differs from pipeline metadata → STRATEGY_ATTRIBUTION_MISMATCH", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "s_pipeline",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-mismatch",
+      strategyId: "s_caller",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_ATTRIBUTION_MISMATCH");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("NO_TRADE pipeline → NOT_SUBMITTED / NO_TRADE (attribution match not enforced)", async () => {
+    const dryRun = buildDryRun(buildHoldPipeline());
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY);
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-hold",
+      strategyId: "any_strat",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "NO_TRADE");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("execute() operator path unchanged — submitter receives strategy: 'execution-runtime'", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({
+      kind: "submitted",
+      response: {
+        execution: {
+          orderId: 1,
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    await runtime.execute({
+      instrumentId: INSTRUMENT.id,
+      policy: POLICY,
+      idempotencyKey: "idem-exec",
+    });
+    assert.equal(submitter.calls.length, 1);
+    assert.equal(submitter.calls[0].strategy, "execution-runtime");
+  });
+
+  it("absent strategyId (undefined via cast) → STRATEGY_ATTRIBUTION_UNAVAILABLE; paperGuard NOT called; submitter NOT called", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    let paperGuardCalls = 0;
+    const paperGuard = {
+      async check() {
+        paperGuardCalls += 1;
+        return { ok: true };
+      },
+    } as unknown as PaperGuard;
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard,
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "s1",
+      intendedAction: "LONG",
+    });
+    const input = {
+      dryRunResult,
+      idempotencyKey: "idem-absent",
+    } as unknown as Parameters<ExecutionRuntime["executePrepared"]>[0];
+    const outcome = await runtime.executePrepared(input);
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_ATTRIBUTION_UNAVAILABLE");
+    assert.equal(paperGuardCalls, 0);
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("mismatch strategyId → STRATEGY_ATTRIBUTION_MISMATCH; paperGuard NOT called; submitter NOT called", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    let paperGuardCalls = 0;
+    const paperGuard = {
+      async check() {
+        paperGuardCalls += 1;
+        return { ok: true };
+      },
+    } as unknown as PaperGuard;
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard,
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "actual",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-mismatch",
+      strategyId: "impostor",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "STRATEGY_ATTRIBUTION_MISMATCH");
+    assert.equal(paperGuardCalls, 0);
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("FAILURE (RISK) pipeline → NOT_SUBMITTED / PIPELINE_FAILURE; submitter NOT called", async () => {
+    const stalePipeline = buildSuccessPipeline();
+    // Build a dry-run that produces a FAILURE outcome via stale-price reader.
+    const dryRun = buildDryRun(
+      stalePipeline,
+      fakeReader({
+        instrumentId: INSTRUMENT.id,
+        lastPrice: 100,
+        observedAt: new Date(Date.now() - 60 * 60 * 1000),
+        source: "redis:market-state:999001",
+      }),
+    );
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "unused" });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY);
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-failure",
+      strategyId: "any",
+    });
+    assert.equal(outcome.outcome, "NOT_SUBMITTED");
+    if (outcome.outcome !== "NOT_SUBMITTED") return;
+    assert.equal(outcome.reason, "PIPELINE_FAILURE");
+    assert.equal(submitter.calls.length, 0);
+  });
+
+  it("submitter resumed → SUBMITTED with resumed: true; strategyId forwarded", async () => {
+    const dryRun = buildDryRun(buildSuccessPipeline());
+    const submitter = trackingSubmitter({
+      kind: "resumed",
+      response: {
+        execution: {
+          orderId: 1,
+          accountId: "PAPER-1",
+          brokerOrderId: "b-1",
+          status: "SUBMITTED",
+        },
+      },
+    });
+    const runtime = new ExecutionRuntime({
+      dryRun,
+      paperGuard: paperOkGuard(),
+      submitter,
+    });
+    const dryRunResult = await dryRun.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "s1",
+      intendedAction: "LONG",
+    });
+    const outcome = await runtime.executePrepared({
+      dryRunResult,
+      idempotencyKey: "idem-resumed",
+      strategyId: "s1",
+    });
+    assert.equal(outcome.outcome, "SUBMITTED");
+    if (outcome.outcome !== "SUBMITTED") return;
+    assert.equal(outcome.resumed, true);
+    assert.equal(submitter.calls[0].strategy, "s1");
   });
 });

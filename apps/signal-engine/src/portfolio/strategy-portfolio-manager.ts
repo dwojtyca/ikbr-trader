@@ -9,16 +9,46 @@ export interface StrategyPortfolioSelection {
   strategy: Strategy;
 }
 
-export interface StrategyPortfolioRunResult {
-  selected: StrategyPortfolioSelection | null;
-  rejectionReasons: string[];
+/**
+ * PR15.4 — discriminated result. `kind:"ok"` carries the winner
+ * (or `null` when no strategy produced a signal); `kind:"error"`
+ * carries a strategy-scoped exception without leaking raw
+ * exception text.
+ */
+export type StrategyPortfolioRunResult =
+  | {
+      readonly kind: "ok";
+      readonly selected: StrategyPortfolioSelection | null;
+      readonly candidates: readonly StrategyPortfolioSelection[];
+      readonly rejectionReasons: readonly string[];
+    }
+  | {
+      readonly kind: "error";
+      readonly strategyId: string;
+      readonly errorCode: "STRATEGY_EVALUATION_EXCEPTION";
+      readonly message: string;
+    };
+
+export interface StrategyPortfolioManagerOptions {
+  /**
+   * PR15.4 — invoked with the raw error object when a strategy's
+   * `generateSignal()` throws. Best-effort: callback exceptions
+   * are silenced and the manager still returns `kind:"error"`.
+   */
+  onStrategyError?: (strategyId: string, error: unknown) => void;
 }
 
 export class StrategyPortfolioManager {
-  constructor(private readonly strategies: readonly Strategy[]) {
+  private readonly options: StrategyPortfolioManagerOptions;
+
+  constructor(
+    private readonly strategies: readonly Strategy[],
+    options: StrategyPortfolioManagerOptions = {},
+  ) {
     if (strategies.length === 0) {
       throw new Error("SignalEngine requires at least one strategy");
     }
+    this.options = options;
   }
 
   get strategyIds(): string[] {
@@ -66,7 +96,22 @@ export class StrategyPortfolioManager {
         continue;
       }
 
-      const signal = strategy.generateSignal(context);
+      let signal: StrategySignal | null;
+      try {
+        signal = strategy.generateSignal(context);
+      } catch (err) {
+        try {
+          this.options.onStrategyError?.(strategy.id, err);
+        } catch {
+          // callback exceptions are silenced; domain result unchanged
+        }
+        return {
+          kind: "error",
+          strategyId: strategy.id,
+          errorCode: "STRATEGY_EVALUATION_EXCEPTION",
+          message: "strategy evaluation failed; check logs",
+        };
+      }
       if (!signal) {
         rejectionReasons.push(
           `${strategy.id}: ${strategy.getLastRejectionReason?.() ?? "no signal"}`,
@@ -85,7 +130,9 @@ export class StrategyPortfolioManager {
     );
 
     return {
+      kind: "ok",
       selected: candidates[0] ?? null,
+      candidates,
       rejectionReasons,
     };
   }

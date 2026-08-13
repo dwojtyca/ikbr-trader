@@ -432,3 +432,112 @@ describe("MarketDataRuntime.dryRun — structural side-effect guarantees", () =>
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// PR15.4 — attribution threading integration (§14.15)
+// ---------------------------------------------------------------------------
+
+describe("MarketDataRuntime.dryRun — PR15.4 attribution threading", () => {
+  async function buildAttributionSetup(recordRiskCalls: () => void) {
+    // Real DecisionEngine w/ bullish rule (returns LONG deterministically).
+    // Real RiskEngine wrapped to count calls.
+    const decisionEngine = new DecisionEngine({
+      rules: [new BullishFixtureRule()],
+    });
+    const wrappedRisk = new RiskEngine({ rules: [] });
+    const spiedRisk = {
+      evaluate: (
+        decision: Parameters<typeof wrappedRisk.evaluate>[0],
+        snapshot: Parameters<typeof wrappedRisk.evaluate>[1],
+        instrument: Parameters<typeof wrappedRisk.evaluate>[2],
+      ) => {
+        recordRiskCalls();
+        return wrappedRisk.evaluate(decision, snapshot, instrument);
+      },
+    } as unknown as RiskEngine;
+    const signalEngine = new SignalEngine({
+      decisionEngine,
+      riskEngine: spiedRisk,
+      instrumentResolver: (id) => REGISTRY.getInstrumentOrThrow(id),
+    });
+    const ticketBuilder = new ExecutionTicketBuilder({
+      idFactory: () => "attribution-ticket",
+      correlationIdFactory: () => "attribution-corr",
+    });
+    const pipeline = new TradingPipeline({ signalEngine, ticketBuilder });
+    const observedAt = new Date();
+    const reader = fakeReader({
+      state: {
+        instrumentId: INSTRUMENT.id,
+        lastPrice: 100,
+        bid: 99.98,
+        ask: 100.02,
+        observedAt,
+        source: "redis:market-state:test",
+      },
+    });
+    const provider = new PriceContextProvider({
+      reader,
+      freshnessTtlMs: 30_000,
+    });
+    const runtime = new MarketDataRuntime({
+      registry: REGISTRY,
+      providers: [provider],
+      pipeline,
+      freshnessPolicy: buildRuntimeFreshnessPolicy({
+        base: DEFAULT_FRESHNESS_POLICY,
+        maxTickAgeMs: 30_000,
+      }),
+    });
+    return { runtime };
+  }
+
+  it("attribution LONG + Decision LONG → SUCCESS, metadata.strategyId set, Risk called", async () => {
+    let riskCalls = 0;
+    const { runtime } = await buildAttributionSetup(() => {
+      riskCalls += 1;
+    });
+    const result = await runtime.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "test_long_v1",
+      intendedAction: "LONG",
+    });
+    assert.equal(result.pipeline.outcome, "SUCCESS");
+    if (result.pipeline.outcome !== "SUCCESS") return;
+    assert.equal(
+      result.pipeline.signal.metadata.strategyId,
+      "test_long_v1",
+    );
+    assert.equal(riskCalls, 1);
+  });
+
+  it("attribution SHORT + Decision LONG → FAILURE / ATTRIBUTION, Risk NOT called", async () => {
+    let riskCalls = 0;
+    const { runtime } = await buildAttributionSetup(() => {
+      riskCalls += 1;
+    });
+    const result = await runtime.dryRun(INSTRUMENT.id, POLICY, {
+      strategyId: "test_short_v1",
+      intendedAction: "SHORT",
+    });
+    assert.equal(result.pipeline.outcome, "FAILURE");
+    if (result.pipeline.outcome !== "FAILURE") return;
+    assert.equal(result.pipeline.failedStage, "ATTRIBUTION");
+    assert.equal(
+      result.pipeline.signal?.metadata.strategyId,
+      "test_short_v1",
+    );
+    assert.equal(riskCalls, 0);
+  });
+
+  it("no attribution → metadata.strategyId undefined; pre-PR15.4 behaviour preserved", async () => {
+    let riskCalls = 0;
+    const { runtime } = await buildAttributionSetup(() => {
+      riskCalls += 1;
+    });
+    const result = await runtime.dryRun(INSTRUMENT.id, POLICY);
+    assert.equal(result.pipeline.outcome, "SUCCESS");
+    if (result.pipeline.outcome !== "SUCCESS") return;
+    assert.equal(result.pipeline.signal.metadata.strategyId, undefined);
+    assert.equal(riskCalls, 1);
+  });
+});

@@ -615,3 +615,148 @@ describe("SignalEngine — construction", () => {
 // touch fixture type to keep unused-import guard silent if strict rules land
 const _i: Instrument = buildInstrument();
 void _i;
+
+// ---------------------------------------------------------------------------
+// PR15.4 §14.3 — metadata.strategyId stamped for every SignalStatus when
+// attribution is provided; undefined when it isn't. Real SignalEngine +
+// runSignalPipeline drive the check across GENERATED / HOLD / BLOCKED /
+// REJECTED / ERROR.
+// ---------------------------------------------------------------------------
+
+describe("SignalEngine — PR15.4 §14.3 attribution.strategyId per SignalStatus", () => {
+  const ATTRIBUTION = { strategyId: "test_v1", intendedAction: "LONG" as const };
+
+  it("GENERATED: metadata.strategyId equals attribution.strategyId", () => {
+    const { engine } = buildEngine({
+      decisionRules: [directionalRule("bull", 40)],
+      riskRules: [new RiskScoreRule("mild", 10)],
+    });
+    const evaluation = engine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "GENERATED");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("HOLD: metadata.strategyId equals attribution.strategyId", () => {
+    const { engine } = buildEngine({
+      decisionRules: [directionalRule("weak", 2)],
+    });
+    const evaluation = engine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "HOLD");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("BLOCKED (decision blocker): metadata.strategyId equals attribution.strategyId", () => {
+    const { engine } = buildEngine({
+      decisionRules: [
+        directionalRule("bull", 40),
+        decisionBlockerRule("stale"),
+      ],
+    });
+    const evaluation = engine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "BLOCKED");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("BLOCKED (attribution direction gate): metadata.strategyId equals attribution.strategyId", () => {
+    const { engine } = buildEngine({
+      decisionRules: [directionalRule("bear", -40)],
+      riskRules: [new RiskScoreRule("mild", 10)],
+    });
+    const evaluation = engine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "BLOCKED");
+    assert.equal(evaluation.blockers.length, 1);
+    assert.equal(evaluation.blockers[0].source, "attribution");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("REJECTED: metadata.strategyId equals attribution.strategyId", () => {
+    const { engine } = buildEngine({
+      decisionRules: [directionalRule("bull", 40)],
+      riskRules: [new RiskBlockerRule()],
+    });
+    const evaluation = engine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "REJECTED");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("ERROR: metadata.strategyId equals attribution.strategyId", () => {
+    const brokenEngine = new SignalEngine({
+      decisionEngine: {
+        evaluate: () => {
+          throw new Error("boom");
+        },
+      } as unknown as DecisionEngine,
+      riskEngine: new RiskEngine({ rules: [] }),
+      instrumentResolver: () => buildInstrument(),
+      now: () => new Date("2026-07-13T12:00:05Z"),
+      idFactory: () => "signal-id",
+      performanceNow: (() => {
+        let t = 0;
+        return () => (t += 1);
+      })(),
+    });
+    const evaluation = brokenEngine.evaluate(fixtureSnapshot(), ATTRIBUTION);
+    assert.equal(evaluation.status, "ERROR");
+    assert.equal(evaluation.metadata.strategyId, ATTRIBUTION.strategyId);
+  });
+
+  it("without attribution: metadata.strategyId is undefined for every status", () => {
+    const cases: Array<{ status: string; make: () => SignalEngine }> = [
+      {
+        status: "GENERATED",
+        make: () =>
+          buildEngine({
+            decisionRules: [directionalRule("bull", 40)],
+            riskRules: [new RiskScoreRule("mild", 10)],
+          }).engine,
+      },
+      {
+        status: "HOLD",
+        make: () =>
+          buildEngine({ decisionRules: [directionalRule("weak", 2)] }).engine,
+      },
+      {
+        status: "BLOCKED",
+        make: () =>
+          buildEngine({
+            decisionRules: [
+              directionalRule("bull", 40),
+              decisionBlockerRule("stale"),
+            ],
+          }).engine,
+      },
+      {
+        status: "REJECTED",
+        make: () =>
+          buildEngine({
+            decisionRules: [directionalRule("bull", 40)],
+            riskRules: [new RiskBlockerRule()],
+          }).engine,
+      },
+      {
+        status: "ERROR",
+        make: () =>
+          new SignalEngine({
+            decisionEngine: {
+              evaluate: () => {
+                throw new Error("boom");
+              },
+            } as unknown as DecisionEngine,
+            riskEngine: new RiskEngine({ rules: [] }),
+            instrumentResolver: () => buildInstrument(),
+            now: () => new Date("2026-07-13T12:00:05Z"),
+            idFactory: () => "signal-id",
+            performanceNow: (() => {
+              let t = 0;
+              return () => (t += 1);
+            })(),
+          }),
+      },
+    ];
+    for (const c of cases) {
+      const evaluation = c.make().evaluate(fixtureSnapshot());
+      assert.equal(evaluation.status, c.status);
+      assert.equal(evaluation.metadata.strategyId, undefined);
+    }
+  });
+});

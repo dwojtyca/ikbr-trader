@@ -72,6 +72,7 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
     status,
     reasonSummary: overrides.reasonSummary ?? `${status} — fixture`,
     warnings: overrides.warnings ?? [],
+    blockers: [],
     metadata: {
       engineVersions: {
         signal: "0.1.0",

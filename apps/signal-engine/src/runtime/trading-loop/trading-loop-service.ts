@@ -40,17 +40,25 @@
 import { randomUUID } from "node:crypto";
 
 import type {
+  CandleTimeframe,
   ExecutionTicketPolicy,
   Instrument,
   InstrumentBindingAuthority,
   InstrumentExecutionPolicy,
   InstrumentRegistry,
+  SignalAttributionContext,
 } from "@ikbr/shared";
-import { mapAssetClassToIbkrSecType } from "@ikbr/shared";
+import { findStrategyProfile, mapAssetClassToIbkrSecType } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
 import type { ExecutionRuntime } from "../execution/execution-runtime.js";
+import type { StrategyPortfolioManager } from "../../portfolio/strategy-portfolio-manager.js";
+import { resolveActiveStrategyIds } from "../strategy/active-strategy-resolver.js";
+import type { StrategyRuntimeStateReader } from "../strategy/active-strategy-resolver.js";
+import { StrategyContextLoader } from "../strategy/strategy-context-loader.js";
+import type { StrategyContextLoaderRepo } from "../strategy/strategy-context-loader.js";
+import type { Strategy } from "../../strategies/strategy.types.js";
 
 import type { TradingLoopConfig } from "./config.js";
 import { TradingLoopIdempotencyKeyBuilder } from "./idempotency-key.js";
@@ -60,10 +68,24 @@ import type {
   TradingLoopCycleReport,
   TradingLoopInstrumentOutcome,
   TradingLoopInstrumentReport,
+  TradingLoopSkipReason,
   TradingLoopStatus,
   TriggerIdentity,
 } from "./types.js";
 import type { ReconciliationReader } from "./reconciliation-reader.js";
+
+/**
+ * PR15.4 — sync+read repository interface used by the trading
+ * loop. `SignalRepository` implements this structurally, so no
+ * adapter is required.
+ */
+export interface StrategyRuntimeStateRepository
+  extends StrategyRuntimeStateReader, StrategyContextLoaderRepo {
+  syncStrategyRuntimeStates(
+    strategyIds: string[],
+    cooldownMs: number,
+  ): Promise<void>;
+}
 
 export interface TradingLoopServiceOptions {
   readonly config: TradingLoopConfig;
@@ -89,6 +111,32 @@ export interface TradingLoopServiceOptions {
    * that pre-date PR15.
    */
   readonly reconciliationReader?: ReconciliationReader;
+  /**
+   * PR15.4 — required. The trading loop no longer trusts the
+   * pipeline to identify the winning strategy: it drives
+   * `StrategyPortfolioManager.run()` itself and threads
+   * attribution through the entire pipeline.
+   */
+  readonly portfolioManager: StrategyPortfolioManager;
+  /**
+   * PR15.4 — required. Same repository instance the legacy
+   * `SignalEngine` uses. Serialization inside
+   * `syncStrategyRuntimeStates` is the repository's
+   * responsibility.
+   */
+  readonly repo: StrategyRuntimeStateRepository;
+  /**
+   * PR15.4 — cooldown seed (ms) passed straight into
+   * `syncStrategyRuntimeStates`. Sourced from
+   * `SIGNAL_STRATEGY_COOLDOWN_MS`.
+   */
+  readonly strategyCooldownMs: number;
+  /**
+   * PR15.4 — ceiling on market-state age used by
+   * `StrategyContextLoader`. Sourced from
+   * `SIGNAL_MAX_MARKET_STATE_AGE_MS`.
+   */
+  readonly maxMarketStateAgeMs: number;
   readonly logger: Pick<FastifyBaseLogger, "info" | "warn" | "error" | "debug">;
   /** Test hook. Defaults to `new Date()`. */
   readonly clock?: () => Date;
@@ -99,6 +147,21 @@ export interface TradingLoopServiceOptions {
 }
 
 const HISTORY_LIMIT = 100;
+
+/**
+ * PR15.4 — timeframes required for indicator + regime computation
+ * regardless of which strategies are active. Union with the
+ * strategy-declared `requiredTimeframes` before fetch.
+ */
+const INDICATOR_REQUIRED_TIMEFRAMES: readonly CandleTimeframe[] = [
+  "1m",
+  "5m",
+  "1h",
+  "4h",
+  "12h",
+  "1d",
+  "1w",
+];
 
 /**
  * PR15 §4 — trusted mapping from the shared `AssetClass` union
@@ -130,6 +193,10 @@ export class TradingLoopService {
   readonly #executionRuntime: ExecutionRuntime;
   readonly #exposureReader: TradingExposureReader;
   readonly #reconciliationReader: ReconciliationReader | null;
+  readonly #portfolioManager: StrategyPortfolioManager;
+  readonly #repo: StrategyRuntimeStateRepository;
+  readonly #strategyCooldownMs: number;
+  readonly #contextLoader: StrategyContextLoader;
   readonly #logger: TradingLoopServiceOptions["logger"];
   readonly #clock: () => Date;
   readonly #setTimeoutFn: typeof setTimeout;
@@ -162,6 +229,12 @@ export class TradingLoopService {
     if (!options.exposureReader) {
       throw new Error("TradingLoopService: exposureReader is required");
     }
+    if (!options.portfolioManager) {
+      throw new Error("TradingLoopService: portfolioManager is required");
+    }
+    if (!options.repo) {
+      throw new Error("TradingLoopService: repo is required");
+    }
     if (!options.logger)
       throw new Error("TradingLoopService: logger is required");
     this.#config = options.config;
@@ -171,6 +244,9 @@ export class TradingLoopService {
     this.#executionRuntime = options.executionRuntime;
     this.#exposureReader = options.exposureReader;
     this.#reconciliationReader = options.reconciliationReader ?? null;
+    this.#portfolioManager = options.portfolioManager;
+    this.#repo = options.repo;
+    this.#strategyCooldownMs = options.strategyCooldownMs;
     this.#logger = options.logger;
     this.#clock = options.clock ?? (() => new Date());
     this.#setTimeoutFn = options.setTimeoutFn ?? setTimeout;
@@ -178,6 +254,11 @@ export class TradingLoopService {
     this.#setIntervalFn = options.setIntervalFn ?? setInterval;
     this.#clearIntervalFn = options.clearIntervalFn ?? clearInterval;
     this.#keyBuilder = new TradingLoopIdempotencyKeyBuilder();
+    this.#contextLoader = new StrategyContextLoader({
+      repo: options.repo,
+      clock: this.#clock,
+      maxMarketStateAgeMs: options.maxMarketStateAgeMs,
+    });
   }
 
   start(): void {
@@ -327,6 +408,41 @@ export class TradingLoopService {
 
     const instruments = this.#selectInstruments();
     const reports: TradingLoopInstrumentReport[] = [];
+
+    // PR15.4 — once-per-cycle sync of strategy runtime state.
+    // Shared by scheduler and runOnce(). Serialization inside
+    // `SignalRepository.syncStrategyRuntimeStates` (promise-chain
+    // mutex) protects concurrent callers.
+    try {
+      await this.#repo.syncStrategyRuntimeStates(
+        this.#portfolioManager.strategyIds,
+        this.#strategyCooldownMs,
+      );
+    } catch (err) {
+      this.#logger.error(
+        { component: "trading-loop", cycleId, err },
+        "trading-loop: strategy runtime state sync failed",
+      );
+      for (const instrument of instruments) {
+        this.#recordSkip(
+          cycleId,
+          instrument.id,
+          "STRATEGY_STATE_SYNC_UNAVAILABLE",
+          reports,
+          "strategy runtime state sync unavailable; check logs",
+        );
+      }
+      this.#trimLastOutcomes();
+      const finishedAt = this.#clock();
+      return {
+        cycleId,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt.getTime() - startedAt.getTime(),
+        reports,
+      };
+    }
+
     const promises: Promise<void>[] = [];
 
     for (const instrument of instruments) {
@@ -381,11 +497,7 @@ export class TradingLoopService {
     for (const report of reports) {
       this.#lastOutcomes.set(report.instrumentId, report);
     }
-    while (this.#lastOutcomes.size > HISTORY_LIMIT) {
-      const oldestKey = this.#lastOutcomes.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.#lastOutcomes.delete(oldestKey);
-    }
+    this.#trimLastOutcomes();
     return {
       cycleId,
       startedAt,
@@ -393,6 +505,14 @@ export class TradingLoopService {
       durationMs: finishedAt.getTime() - startedAt.getTime(),
       reports,
     };
+  }
+
+  #trimLastOutcomes(): void {
+    while (this.#lastOutcomes.size > HISTORY_LIMIT) {
+      const oldestKey = this.#lastOutcomes.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.#lastOutcomes.delete(oldestKey);
+    }
   }
 
   async #runInstrument(
@@ -424,9 +544,9 @@ export class TradingLoopService {
     // Fast skip BEFORE market-data / pipeline work. Execution-engine
     // remains the authoritative gate — this reader is an optimisation.
     if (this.#reconciliationReader) {
-      let reconciliation:
-        | Awaited<ReturnType<ReconciliationReader["checkInstrument"]>>
-        | null = null;
+      let reconciliation: Awaited<
+        ReturnType<ReconciliationReader["checkInstrument"]>
+      > | null = null;
       try {
         reconciliation = await this.#reconciliationReader.checkInstrument({
           instrument: instrument.brokerSymbol,
@@ -502,11 +622,31 @@ export class TradingLoopService {
       });
     }
 
+    // ---- PR15.4 exposure data contradiction (fail-closed) ----------
+    // Reconciled `hasOpenPosition === false` but `quantity` is
+    // non-zero — the reader itself is inconsistent, refuse to
+    // proceed.
+    if (
+      exposure.hasOpenPosition === false &&
+      exposure.quantity !== undefined &&
+      exposure.quantity !== 0
+    ) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "EXPOSURE_DATA_CONTRADICTION",
+        message: `hasOpenPosition=false but quantity=${exposure.quantity}`,
+      });
+    }
+
     // ---- Per-instrument policy (round-4 blocker) -------------------
     // Registry MUST supply an executionPolicy for every enabled
     // instrument — a single global default is no longer acceptable.
     // Fail-closed if missing or if the resolved shape violates the
     // instrument's own contract (e.g. tick size / allowed types).
+    // PR15.4 — also fail-closed if `expectedDirection` is missing
+    // or invalid; the attribution chain cannot verify direction
+    // without it.
     const policyResolution = resolveInstrumentPolicy(instrument);
     if (!policyResolution.ok) {
       return this.#finalize(cycleId, instrument.id, startedAt, {
@@ -533,12 +673,190 @@ export class TradingLoopService {
     }
     const { policy, executionPolicy } = policyResolution;
 
+    // ---- PR15.4 resolve active strategies for this symbol ----------
+    const resolution = await resolveActiveStrategyIds(
+      instrument.brokerSymbol,
+      this.#portfolioManager.strategyIds,
+      findStrategyProfile,
+      this.#repo,
+      {
+        clock: this.#clock,
+        onStateError: (strategyId, err) => {
+          this.#logger.error(
+            { component: "trading-loop", strategyId, err },
+            "trading-loop: strategy runtime state unavailable",
+          );
+        },
+      },
+    );
+    if (resolution.kind === "error") {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_STATE_UNAVAILABLE",
+        message: resolution.message,
+      });
+    }
+    if (resolution.activeIds.length === 0) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "NO_STRATEGY_SIGNAL",
+        message: resolution.disabledReasons.join("; "),
+      });
+    }
+    const activeInstances = resolution.activeIds
+      .map((id) => this.#portfolioManager.getStrategy(id))
+      .filter((s): s is Strategy => s !== undefined);
+    if (activeInstances.length === 0) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "NO_STRATEGY_SIGNAL",
+        message: "no active strategy instances resolved",
+      });
+    }
+
+    // ---- PR15.4 build strategy context ------------------------------
+    if (!bound) {
+      // The plan requires the trading loop to run only when a
+      // binding authority is wired (production). Absence here
+      // means neither a binding nor a legacy `instrument.conId`
+      // was available — surface as MISSING binding rather than
+      // silently building without one.
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "INSTRUMENT_BINDING_UNAVAILABLE",
+        message: `no binding available for ${instrument.id}`,
+      });
+    }
+    const strategyTimeframeSet = new Set<CandleTimeframe>();
+    for (const s of activeInstances) {
+      for (const tf of s.requiredTimeframes) strategyTimeframeSet.add(tf);
+    }
+    for (const tf of INDICATOR_REQUIRED_TIMEFRAMES) {
+      strategyTimeframeSet.add(tf);
+    }
+    const positionQuantity = exposure.quantity ?? 0;
+    const contextResult = await this.#contextLoader.load({
+      instrument,
+      bound,
+      positionQuantity,
+      timeframes: Array.from(strategyTimeframeSet),
+    });
+    if (contextResult.kind === "error") {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: contextResult.code,
+        message: contextResult.message,
+      });
+    }
+    const context = contextResult.context;
+
+    // ---- PR15.4 run portfolio manager -------------------------------
+    const portfolioResult = this.#portfolioManager.run(
+      context,
+      new Set(resolution.activeIds),
+    );
+    if (portfolioResult.kind === "error") {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_EVALUATION_ERROR",
+        message: portfolioResult.message,
+      });
+    }
+    const candidateDirections = new Set(
+      portfolioResult.candidates.map((c) => c.signal.direction),
+    );
+    if (candidateDirections.has("LONG") && candidateDirections.has("SHORT")) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_CONFLICT",
+        message: "conflicting LONG and SHORT strategy candidates",
+      });
+    }
+    const winner = portfolioResult.selected;
+    if (!winner) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "NO_STRATEGY_SIGNAL",
+        message: portfolioResult.rejectionReasons.join("; "),
+      });
+    }
+
+    // ---- PR15.4 full attribution chain (pre-dryRun) ----------------
+    const normalize = (s: string): string => s.trim().toUpperCase();
+    if (
+      normalize(winner.signal.symbol) !== normalize(instrument.brokerSymbol)
+    ) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "symbol_mismatch",
+      });
+    }
+    if (winner.strategy.id !== winner.signal.strategyId) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "strategy_signal_id_mismatch",
+      });
+    }
+    if (winner.strategy.id !== executionPolicy.strategyId) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "strategy_policy_id_mismatch",
+      });
+    }
+    if (
+      !winner.strategy.supportedDirections.includes(winner.signal.direction)
+    ) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "direction_unsupported",
+      });
+    }
+    if (winner.signal.direction !== executionPolicy.expectedDirection) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "direction_mismatch",
+      });
+    }
+    const expectedSide = winner.signal.direction === "LONG" ? "BUY" : "SELL";
+    if (winner.signal.side !== expectedSide) {
+      return this.#finalize(cycleId, instrument.id, startedAt, {
+        kind: "SKIPPED",
+        instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH",
+        message: "side_direction_inconsistent",
+      });
+    }
+
+    const attribution: SignalAttributionContext = {
+      strategyId: winner.strategy.id,
+      intendedAction: winner.signal.direction,
+    };
+
     // ---- Run pipeline ONCE to derive stable trigger identity --------
     let dryRunResult: DryRunResult;
     try {
       dryRunResult = await this.#marketDataRuntime.dryRun(
         instrument.id,
         policy,
+        attribution,
       );
     } catch (error) {
       return this.#finalize(cycleId, instrument.id, startedAt, {
@@ -576,121 +894,18 @@ export class TradingLoopService {
       });
     }
 
-    // ---- PR15.3 strategy/policy mismatch (fail-closed) -------------
-    // PR15.3 hostile-review Finding 2 — the check is STRICT:
-    // whenever the instrument has an `executionPolicy`, the pipeline
-    // signal MUST advertise both an `instrumentId` matching the
-    // scheduled instrument AND a `metadata.strategyId` matching
-    // `executionPolicy.strategyId`. When `executionPolicy.expectedDirection`
-    // is present, the winning `DecisionResult.action` must match it
-    // as well (a `SHORT` decision cannot pass under a
-    // `momentum_breakout_long_v1` policy).
-    //
-    // The shared `SignalEngine` today wires DecisionEngine + RiskEngine
-    // WITHOUT going through the strategy registry, so
-    // `signal.metadata.strategyId` is always `undefined` in production.
-    // That is deliberately fail-closed here: no execution-enabled seed
-    // ships in PR15.3, and any future seed activation MUST first plumb
-    // a real strategyId (and matching direction) through the pipeline
-    // — the loop refuses to make up either.
-    const winningSignal = dryRunResult.pipeline.signal;
-    if (winningSignal.instrumentId !== instrument.id) {
-      return this.#finalize(cycleId, instrument.id, startedAt, {
-        kind: "NOT_SUBMITTED",
-        instrumentId: instrument.id,
-        idempotencyKey: "",
-        runtime: {
-          outcome: "NOT_SUBMITTED",
-          pipeline: dryRunResult.pipeline,
-          reason: "PIPELINE_FAILURE",
-        },
-        reason: "STRATEGY_POLICY_MISMATCH",
-        message:
-          `pipeline signal instrumentId=${winningSignal.instrumentId} ` +
-          `disagrees with loop instrument.id=${instrument.id}`,
-      });
-    }
-    const winningStrategyId = winningSignal.metadata?.strategyId;
-    if (winningStrategyId === undefined) {
-      // Fail-closed: the pipeline did NOT identify the strategy that
-      // produced this signal. We cannot trust it against the shipped
-      // policy — refuse.
-      return this.#finalize(cycleId, instrument.id, startedAt, {
-        kind: "NOT_SUBMITTED",
-        instrumentId: instrument.id,
-        idempotencyKey: "",
-        runtime: {
-          outcome: "NOT_SUBMITTED",
-          pipeline: dryRunResult.pipeline,
-          reason: "PIPELINE_FAILURE",
-        },
-        reason: "STRATEGY_POLICY_MISMATCH",
-        message:
-          "pipeline signal did not advertise metadata.strategyId — cannot verify " +
-          `against Instrument.executionPolicy.strategyId=` +
-          `${policyResolution.executionPolicy.strategyId}`,
-      });
-    }
+    // ---- PR15.4 post-pipeline defence-in-depth (attribution) --------
+    const pipelineSignal = dryRunResult.pipeline.signal;
     if (
-      winningStrategyId !== policyResolution.executionPolicy.strategyId
+      pipelineSignal.metadata.strategyId !== attribution.strategyId ||
+      pipelineSignal.decision?.action !== attribution.intendedAction
     ) {
       return this.#finalize(cycleId, instrument.id, startedAt, {
-        kind: "NOT_SUBMITTED",
+        kind: "SKIPPED",
         instrumentId: instrument.id,
-        idempotencyKey: "",
-        runtime: {
-          outcome: "NOT_SUBMITTED",
-          pipeline: dryRunResult.pipeline,
-          reason: "PIPELINE_FAILURE",
-        },
         reason: "STRATEGY_POLICY_MISMATCH",
-        message:
-          `pipeline signal strategyId=${winningStrategyId} disagrees with ` +
-          `Instrument.executionPolicy.strategyId=` +
-          `${policyResolution.executionPolicy.strategyId}`,
+        message: "pipeline_attribution_mismatch",
       });
-    }
-    const expectedDirection =
-      policyResolution.executionPolicy.expectedDirection;
-    if (expectedDirection !== undefined) {
-      const decisionAction = winningSignal.decision?.action;
-      if (
-        decisionAction !== "LONG" &&
-        decisionAction !== "SHORT"
-      ) {
-        return this.#finalize(cycleId, instrument.id, startedAt, {
-          kind: "NOT_SUBMITTED",
-          instrumentId: instrument.id,
-          idempotencyKey: "",
-          runtime: {
-            outcome: "NOT_SUBMITTED",
-            pipeline: dryRunResult.pipeline,
-            reason: "PIPELINE_FAILURE",
-          },
-          reason: "STRATEGY_POLICY_MISMATCH",
-          message:
-            `pipeline decision.action=${String(decisionAction)} is not a ` +
-            `directional trade — cannot match executionPolicy.expectedDirection=` +
-            `${expectedDirection}`,
-        });
-      }
-      if (decisionAction !== expectedDirection) {
-        return this.#finalize(cycleId, instrument.id, startedAt, {
-          kind: "NOT_SUBMITTED",
-          instrumentId: instrument.id,
-          idempotencyKey: "",
-          runtime: {
-            outcome: "NOT_SUBMITTED",
-            pipeline: dryRunResult.pipeline,
-            reason: "PIPELINE_FAILURE",
-          },
-          reason: "STRATEGY_POLICY_MISMATCH",
-          message:
-            `pipeline decision.action=${decisionAction} disagrees with ` +
-            `Instrument.executionPolicy.expectedDirection=${expectedDirection} ` +
-            `(strategy ${policyResolution.executionPolicy.strategyId})`,
-        });
-      }
     }
 
     // ---- Trigger identity (round-4 blocker fix) --------------------
@@ -741,6 +956,7 @@ export class TradingLoopService {
       runtimeOutcome = await this.#executionRuntime.executePrepared({
         dryRunResult,
         idempotencyKey,
+        strategyId: attribution.strategyId,
         // PR15.2 — carry the bound broker identity through so
         // the ticket sent to execution-engine matches what
         // its server-side authority will verify.
@@ -788,8 +1004,9 @@ export class TradingLoopService {
   #recordSkip(
     cycleId: string,
     instrumentId: string,
-    reason: "RUN_IN_PROGRESS" | "CONCURRENCY_CAP" | "LOOP_DISABLED",
+    reason: TradingLoopSkipReason,
     reports: TradingLoopInstrumentReport[],
+    message?: string,
   ): void {
     const at = this.#clock();
     const report: TradingLoopInstrumentReport = {
@@ -798,7 +1015,12 @@ export class TradingLoopService {
       startedAt: at,
       finishedAt: at,
       durationMs: 0,
-      outcome: { kind: "SKIPPED", instrumentId, reason },
+      outcome: {
+        kind: "SKIPPED",
+        instrumentId,
+        reason,
+        ...(message !== undefined ? { message } : {}),
+      },
     };
     reports.push(report);
     this.#lastOutcomes.set(instrumentId, report);
@@ -986,6 +1208,12 @@ export function resolveInstrumentPolicy(
   }
   if (!ep.strategyId) {
     return { ok: false, message: `strategyId missing for ${instrument.id}` };
+  }
+  if (ep.expectedDirection !== "LONG" && ep.expectedDirection !== "SHORT") {
+    return {
+      ok: false,
+      message: `expectedDirection missing or invalid for ${instrument.id}`,
+    };
   }
   if (!timeframeToMs(ep.timeframe)) {
     return {

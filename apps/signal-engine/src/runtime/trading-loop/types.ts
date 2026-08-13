@@ -17,7 +17,10 @@
  * `ExecutionRuntime` (PR13).
  */
 
-import type { ExecutionRuntimeOutcome } from "../execution/execution-runtime.js";
+import type {
+  ExecutionRuntimeOutcome,
+  NotSubmittedReason,
+} from "../execution/execution-runtime.js";
 
 /**
  * Reasons the loop can skip an instrument BEFORE calling the
@@ -40,7 +43,41 @@ export type TradingLoopSkipReason =
   // `INSTRUMENT_BINDINGS_JSON` entry, or the entry is stale
   // relative to the shared registry. Loop refuses to fabricate
   // symbol / conId identity.
-  | "INSTRUMENT_BINDING_UNAVAILABLE";
+  | "INSTRUMENT_BINDING_UNAVAILABLE"
+  // PR15.4 — `hasOpenPosition === false` but `quantity` is
+  // non-zero. Fail-closed: exposure data is internally
+  // inconsistent, refuse to build a context on top of it.
+  | "EXPOSURE_DATA_CONTRADICTION"
+  // PR15.4 — the once-per-cycle `syncStrategyRuntimeStates` call
+  // threw before per-instrument work started; every selected
+  // instrument surfaces this reason.
+  | "STRATEGY_STATE_SYNC_UNAVAILABLE"
+  // PR15.4 — a single-strategy `getStrategyRuntimeState()` call
+  // threw inside `resolveActiveStrategyIds()`.
+  | "STRATEGY_STATE_UNAVAILABLE"
+  // PR15.4 — no strategy is currently active for this
+  // instrument (all excluded, disabled, or in cooldown), OR
+  // the portfolio manager produced no `selected` candidate.
+  | "NO_STRATEGY_SIGNAL"
+  // PR15.4 — the persisted contract for the bound `conId`
+  // disagrees with `BoundInstrument` on any required field.
+  | "STRATEGY_CONTRACT_MISMATCH"
+  // PR15.4 — candles / market state missing, stale, or
+  // insufficient to compute indicators for the strategy
+  // context.
+  | "STRATEGY_CONTEXT_UNAVAILABLE"
+  // PR15.4 — a strategy's `generateSignal()` threw inside
+  // `StrategyPortfolioManager.run()`.
+  | "STRATEGY_EVALUATION_ERROR"
+  // PR15.4 — the portfolio manager returned both LONG and
+  // SHORT candidates for the same instrument.
+  | "STRATEGY_CONFLICT"
+  // PR15.4 — the pre-dryRun attribution chain (§10.1)
+  // detected a mismatch between the winning signal, the
+  // instrument, and the execution policy; or the post-pipeline
+  // defence-in-depth (§10.2) detected pipeline attribution
+  // divergence.
+  | "STRATEGY_POLICY_MISMATCH";
 
 /**
  * Outcome union for a single instrument tick. Kept small on
@@ -64,28 +101,17 @@ export type TradingLoopInstrumentOutcome =
       readonly instrumentId: string;
       readonly idempotencyKey: string;
       readonly runtime: ExecutionRuntimeOutcome;
+      // PR15.4 — import the canonical `NotSubmittedReason` union
+      // from `ExecutionRuntime` instead of maintaining a manual
+      // mirror. Loop-owned orchestration reasons (that
+      // `ExecutionRuntime` never produces) are the three extra
+      // literals below. `#classifyRuntimeOutcome` can now pass
+      // `runtime.reason` through without any cast, and future
+      // `NotSubmittedReason` additions require no second union.
       readonly reason:
-        | "NO_TRADE"
-        | "PIPELINE_FAILURE"
-        | "PAPER_GUARD_FAILED"
-        | "UNSUPPORTED_TICKET_SHAPE"
-        | "ACTIVE_INTENT_EXISTS"
-        | "OPEN_POSITION_EXISTS"
-        | "POSITION_STATE_UNAVAILABLE"
+        | NotSubmittedReason
         | "INSTRUMENT_POLICY_UNAVAILABLE"
         | "TRIGGER_UNAVAILABLE"
-        // PR15.2 hostile-review fix — bubbled up from
-        // ExecutionRuntime.execute() when the /runtime/execute
-        // endpoint receives an unbound instrumentId.
-        | "INSTRUMENT_BINDING_UNAVAILABLE"
-        | "INSTRUMENT_TICK_MISMATCH"
-        // PR15.3 — fail-closed defence when the pipeline emits
-        // a signal whose `instrumentId` or (future) advertised
-        // `strategyId` diverges from the instrument the loop
-        // scheduled AND from
-        // `Instrument.executionPolicy.strategyId`. Nothing
-        // persists, nothing dispatches — an explicit skip is
-        // safer than trusting an ambiguous winning strategy.
         | "STRATEGY_POLICY_MISMATCH";
       readonly message?: string;
     }

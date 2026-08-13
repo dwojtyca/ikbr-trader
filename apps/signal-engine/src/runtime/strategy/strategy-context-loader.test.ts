@@ -1,0 +1,649 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+
+import type {
+  BoundInstrument,
+  Candle,
+  CandleTimeframe,
+  Instrument,
+  InstrumentContract,
+} from "@ikbr/shared";
+
+import {
+  StrategyContextLoader,
+  type StrategyContextLoaderRepo,
+} from "./strategy-context-loader.js";
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const NOW = new Date("2026-08-12T12:00:00.000Z");
+const NOW_MS = NOW.getTime();
+
+const INSTRUMENT: Instrument = {
+  id: "aapl",
+  displayName: "Apple",
+  assetClass: "stock",
+  broker: "ibkr",
+  brokerSymbol: "AAPL",
+  exchange: "NASDAQ",
+  currency: "USD",
+  trading: {
+    executionEnabled: true,
+    signalGenerationEnabled: true,
+    monitoringEnabled: true,
+    aiAnalysisEnabled: false,
+  },
+  risk: {
+    maxQuantity: 100,
+    quantityUnit: "shares",
+    maxLeverage: 1,
+    allowOvernight: true,
+    maxSpread: 0.5,
+    maxSlippage: 1,
+  },
+  session: {
+    useRegularTradingHours: true,
+    timezone: "America/New_York",
+    sessionTemplate: "us_stock_rth",
+  },
+  metadata: { tags: [] },
+} as Instrument;
+
+const BOUND: BoundInstrument = {
+  instrumentId: "aapl",
+  instrument: INSTRUMENT,
+  broker: "ibkr",
+  brokerSymbol: "AAPL",
+  conId: 265598,
+  localSymbol: "AAPL",
+  tradingClass: "NMS",
+  exchange: "NASDAQ",
+  currency: "USD",
+  minTick: 0.01,
+};
+
+function makeContract(
+  overrides: Partial<InstrumentContract> = {},
+): InstrumentContract {
+  return {
+    symbol: "AAPL",
+    conid: "265598",
+    secType: "STK",
+    exchange: "NASDAQ",
+    primaryExchange: "NASDAQ",
+    currency: "USD",
+    localSymbol: "AAPL",
+    tradingClass: "NMS",
+    source: "ibkr",
+    ...overrides,
+  };
+}
+
+interface MarketStateOverrides {
+  readonly conid?: string;
+  readonly symbol?: string;
+  readonly lastPrice?: unknown;
+  readonly bid?: unknown;
+  readonly ask?: unknown;
+  readonly spread?: unknown;
+  readonly ts?: string;
+}
+
+function makeMarketState(
+  overrides: MarketStateOverrides = {},
+): NonNullable<
+  Awaited<ReturnType<StrategyContextLoaderRepo["getMarketState"]>>
+> {
+  return {
+    conid: overrides.conid ?? "265598",
+    symbol: overrides.symbol ?? "AAPL",
+    lastPrice: (overrides.lastPrice ?? 150.25) as number,
+    ...(overrides.bid !== undefined
+      ? { bid: overrides.bid as number }
+      : { bid: 150.24 }),
+    ...(overrides.ask !== undefined
+      ? { ask: overrides.ask as number }
+      : { ask: 150.26 }),
+    ...(overrides.spread !== undefined
+      ? { spread: overrides.spread as number }
+      : { spread: 0.02 }),
+    ts: overrides.ts ?? new Date(NOW_MS - 1_000).toISOString(),
+  };
+}
+
+function makeCandles(
+  count: number,
+  timeframeMs: number,
+  endTs: number = NOW_MS - 60_000,
+  conid: string = "265598",
+  symbol: string = "AAPL",
+): Candle[] {
+  const out: Candle[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const ts = new Date(endTs - (count - 1 - i) * timeframeMs);
+    out.push({
+      conid,
+      symbol,
+      timeframe: "1m",
+      ts,
+      open: 100 + i * 0.01,
+      high: 100 + i * 0.01 + 0.05,
+      low: 100 + i * 0.01 - 0.05,
+      close: 100 + i * 0.01,
+      volume: 1000 + i,
+    } as Candle);
+  }
+  return out;
+}
+
+const TIMEFRAME_MS: Record<CandleTimeframe, number> = {
+  "1m": 60_000,
+  "5m": 300_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "12h": 43_200_000,
+  "1d": 86_400_000,
+  "1w": 604_800_000,
+};
+
+function fullCandleSets(): Partial<Record<CandleTimeframe, Candle[]>> {
+  return {
+    "1m": makeCandles(300, TIMEFRAME_MS["1m"], NOW_MS - 60_000),
+    "5m": makeCandles(60, TIMEFRAME_MS["5m"], NOW_MS - 300_000),
+    "1h": makeCandles(60, TIMEFRAME_MS["1h"], NOW_MS - 3_600_000),
+    "4h": makeCandles(60, TIMEFRAME_MS["4h"], NOW_MS - 14_400_000),
+    "12h": makeCandles(60, TIMEFRAME_MS["12h"], NOW_MS - 43_200_000),
+    "1d": makeCandles(60, TIMEFRAME_MS["1d"], NOW_MS - 86_400_000),
+    "1w": makeCandles(60, TIMEFRAME_MS["1w"], NOW_MS - 604_800_000),
+  };
+}
+
+interface RepoOverrides {
+  readonly contract?: InstrumentContract | null;
+  readonly candles?: Partial<Record<CandleTimeframe, Candle[]>>;
+  readonly marketState?: ReturnType<typeof makeMarketState> | null;
+  readonly getRecentCandlesForContract?: StrategyContextLoaderRepo["getRecentCandlesForContract"];
+  readonly getInstrumentContractByConId?: StrategyContextLoaderRepo["getInstrumentContractByConId"];
+  readonly getMarketState?: StrategyContextLoaderRepo["getMarketState"];
+}
+
+function makeRepo(o: RepoOverrides = {}): StrategyContextLoaderRepo & {
+  candleCalls: Array<{
+    symbol: string;
+    conId: string;
+    timeframe: CandleTimeframe;
+    limit: number;
+  }>;
+  contractCalls: string[];
+  marketStateCalls: string[];
+} {
+  const candles = o.candles ?? fullCandleSets();
+  const spy = {
+    candleCalls: [] as Array<{
+      symbol: string;
+      conId: string;
+      timeframe: CandleTimeframe;
+      limit: number;
+    }>,
+    contractCalls: [] as string[],
+    marketStateCalls: [] as string[],
+    async getInstrumentContractByConId(conId: string) {
+      spy.contractCalls.push(conId);
+      if (o.getInstrumentContractByConId)
+        return o.getInstrumentContractByConId(conId);
+      return o.contract === undefined ? makeContract() : o.contract;
+    },
+    async getRecentCandlesForContract(
+      symbol: string,
+      conId: string,
+      timeframe: CandleTimeframe,
+      limit: number,
+    ) {
+      spy.candleCalls.push({ symbol, conId, timeframe, limit });
+      if (o.getRecentCandlesForContract) {
+        return o.getRecentCandlesForContract(symbol, conId, timeframe, limit);
+      }
+      return candles[timeframe] ?? [];
+    },
+    async getMarketState(conid: string) {
+      spy.marketStateCalls.push(conid);
+      if (o.getMarketState) return o.getMarketState(conid);
+      return o.marketState === undefined ? makeMarketState() : o.marketState;
+    },
+  };
+  return spy as unknown as StrategyContextLoaderRepo & {
+    candleCalls: typeof spy.candleCalls;
+    contractCalls: typeof spy.contractCalls;
+    marketStateCalls: typeof spy.marketStateCalls;
+  };
+}
+
+function makeLoader(
+  repo: StrategyContextLoaderRepo,
+  maxMarketStateAgeMs = 300_000,
+): StrategyContextLoader {
+  return new StrategyContextLoader({
+    repo,
+    clock: () => NOW,
+    maxMarketStateAgeMs,
+  });
+}
+
+const ALL_TIMEFRAMES: readonly CandleTimeframe[] = [
+  "1m",
+  "5m",
+  "1h",
+  "4h",
+  "12h",
+  "1d",
+  "1w",
+];
+
+async function loadDefault(
+  loader: StrategyContextLoader,
+  overrides: {
+    positionQuantity?: number;
+    timeframes?: readonly CandleTimeframe[];
+  } = {},
+) {
+  return loader.load({
+    instrument: INSTRUMENT,
+    bound: BOUND,
+    positionQuantity: overrides.positionQuantity ?? 0,
+    timeframes: overrides.timeframes ?? ALL_TIMEFRAMES,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tests — §14.5 plus market-state fail-closed extensions
+// ---------------------------------------------------------------------------
+
+describe("StrategyContextLoader — happy path", () => {
+  it("valid data → kind:'ok' with populated StrategyContext", async () => {
+    const repo = makeRepo();
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "ok");
+    if (result.kind !== "ok") return;
+    assert.equal(result.context.symbol, "AAPL");
+    assert.equal(result.context.conid, "265598");
+    assert.equal(result.context.secType, "STK");
+    assert.equal(result.context.latestCandle.close > 0, true);
+    assert.equal(result.context.marketState?.lastPrice, 150.25);
+    assert.equal(result.context.currentPosition?.quantity, 0);
+    assert.deepEqual(repo.candleCalls.map((c) => c.timeframe).sort(), [
+      "12h",
+      "1d",
+      "1h",
+      "1m",
+      "1w",
+      "4h",
+      "5m",
+    ]);
+    for (const call of repo.candleCalls) {
+      assert.equal(call.conId, "265598");
+      assert.equal(call.symbol, "AAPL");
+    }
+    assert.deepEqual(repo.contractCalls, ["265598"]);
+    assert.deepEqual(repo.marketStateCalls, ["265598"]);
+  });
+});
+
+describe("StrategyContextLoader — candle failures", () => {
+  it("no 1m candles → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({ candles: { ...fullCandleSets(), "1m": [] } });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+    assert.deepEqual(repo.contractCalls, []);
+    assert.deepEqual(repo.marketStateCalls, []);
+  });
+
+  it("1m candle count below minimum → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "1m": makeCandles(200, TIMEFRAME_MS["1m"], NOW_MS - 60_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("stale latest 1m candle → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "1m": makeCandles(300, TIMEFRAME_MS["1m"], NOW_MS - 10 * 60_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("future-timestamped latest 1m candle → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "1m": makeCandles(300, TIMEFRAME_MS["1m"], NOW_MS + 60_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("non-1m timeframe below minimum → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "5m": makeCandles(10, TIMEFRAME_MS["5m"], NOW_MS - 300_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  // PR15.4 §6.3 — effective minimum boundary: EMA50 requires 50 bars
+  // on every higher timeframe used by MarketRegimeDetector.
+  const HIGHER_TFS: readonly Exclude<CandleTimeframe, "1m">[] = [
+    "5m",
+    "1h",
+    "4h",
+    "12h",
+    "1d",
+    "1w",
+  ];
+  for (const tf of HIGHER_TFS) {
+    it(`${tf}: 49 candles → STRATEGY_CONTEXT_UNAVAILABLE`, async () => {
+      const repo = makeRepo({
+        candles: {
+          ...fullCandleSets(),
+          [tf]: makeCandles(49, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf]),
+        },
+      });
+      const loader = makeLoader(repo);
+      const result = await loadDefault(loader);
+      assert.equal(result.kind, "error");
+      if (result.kind !== "error") return;
+      assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+    });
+
+    it(`${tf}: exactly 50 candles → accepted`, async () => {
+      const repo = makeRepo({
+        candles: {
+          ...fullCandleSets(),
+          [tf]: makeCandles(50, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf]),
+        },
+      });
+      const loader = makeLoader(repo);
+      const result = await loadDefault(loader);
+      assert.equal(result.kind, "ok");
+    });
+  }
+
+  it("1m: 219 candles → STRATEGY_CONTEXT_UNAVAILABLE (minimum stays 220)", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "1m": makeCandles(219, TIMEFRAME_MS["1m"], NOW_MS - 60_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("1m: exactly 220 candles → accepted (minimum boundary)", async () => {
+    const repo = makeRepo({
+      candles: {
+        ...fullCandleSets(),
+        "1m": makeCandles(220, TIMEFRAME_MS["1m"], NOW_MS - 60_000),
+      },
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "ok");
+  });
+});
+
+describe("StrategyContextLoader — contract failures", () => {
+  it("no contract row → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({ contract: null });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+    assert.deepEqual(repo.marketStateCalls, []);
+  });
+
+  it("contract.symbol mismatch → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({ contract: makeContract({ symbol: "MSFT" }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("contract.conid mismatch → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({ contract: makeContract({ conid: "999999" }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("contract.exchange + primaryExchange both mismatch → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({
+      contract: makeContract({ exchange: "ISLAND", primaryExchange: "ARCA" }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("primaryExchange matches when exchange does not → accepted", async () => {
+    const repo = makeRepo({
+      contract: makeContract({ exchange: "ISLAND", primaryExchange: "NASDAQ" }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "ok");
+  });
+
+  it("null currency → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({ contract: makeContract({ currency: undefined }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("null localSymbol → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({
+      contract: makeContract({ localSymbol: undefined }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("null tradingClass → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({
+      contract: makeContract({ tradingClass: undefined }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+
+  it("secType mismatch → STRATEGY_CONTRACT_MISMATCH", async () => {
+    const repo = makeRepo({ contract: makeContract({ secType: "FUT" }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTRACT_MISMATCH");
+  });
+});
+
+describe("StrategyContextLoader — market state failures", () => {
+  it("no market state row → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({ marketState: null });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state conid mismatch → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ conid: "999999" }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state symbol mismatch → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({ marketState: makeMarketState({ symbol: "MSFT" }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state lastPrice NaN → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ lastPrice: Number.NaN }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state lastPrice Infinity → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ lastPrice: Number.POSITIVE_INFINITY }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state lastPrice non-numeric → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ lastPrice: "150" }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state bid NaN → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ bid: Number.NaN }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state ask non-numeric → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({ marketState: makeMarketState({ ask: "150" }) });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state spread Infinity → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({ spread: Number.POSITIVE_INFINITY }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state timestamp in future → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({
+        ts: new Date(NOW_MS + 60_000).toISOString(),
+      }),
+    });
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+
+  it("market state age exceeds maxMarketStateAgeMs → STRATEGY_CONTEXT_UNAVAILABLE", async () => {
+    const repo = makeRepo({
+      marketState: makeMarketState({
+        ts: new Date(NOW_MS - 10 * 60_000).toISOString(),
+      }),
+    });
+    const loader = makeLoader(repo, 60_000);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "error");
+    if (result.kind !== "error") return;
+    assert.equal(result.code, "STRATEGY_CONTEXT_UNAVAILABLE");
+  });
+});
+
+describe("StrategyContextLoader — cross-conId query safety", () => {
+  it("candles are fetched with exact bound.conId, never symbol-only", async () => {
+    const repo = makeRepo();
+    const loader = makeLoader(repo);
+    const result = await loadDefault(loader);
+    assert.equal(result.kind, "ok");
+    for (const call of repo.candleCalls) {
+      assert.equal(call.conId, "265598");
+    }
+    assert.deepEqual(repo.contractCalls, ["265598"]);
+  });
+});

@@ -17,15 +17,24 @@ import type {
   ExecutionTicketBuildResult,
 } from "../execution-ticket/types.js";
 import type { MarketContextSnapshot } from "../market-context/types.js";
-import type { SignalEvaluation } from "../signal-engine/types.js";
+import type {
+  SignalAttributionContext,
+  SignalEvaluation,
+} from "../signal-engine/types.js";
 
 /**
  * Structural port for the signal engine. Kept minimal so the
  * pipeline can be unit-tested with a bare fake and does not couple
  * to the full `SignalEngineOptions` surface.
+ *
+ * PR15.4 — accepts optional `attribution`. Concrete `SignalEngine`
+ * uses it to drive the direction gate; test fakes may ignore it.
  */
 export interface SignalEngineLike {
-  evaluate(snapshot: MarketContextSnapshot): SignalEvaluation;
+  evaluate(
+    snapshot: MarketContextSnapshot,
+    attribution?: SignalAttributionContext,
+  ): SignalEvaluation;
 }
 
 /**
@@ -47,9 +56,10 @@ export type TicketStepOutcome =
 export function runSignalStep(
   engine: SignalEngineLike,
   snapshot: MarketContextSnapshot,
+  attribution?: SignalAttributionContext,
 ): SignalStepOutcome {
   try {
-    const signal = engine.evaluate(snapshot);
+    const signal = engine.evaluate(snapshot, attribution);
     return { errored: false, signal };
   } catch (error) {
     return { errored: true, error };

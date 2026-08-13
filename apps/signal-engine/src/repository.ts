@@ -202,6 +202,17 @@ export interface LatestFilledOrderContext {
 }
 
 export class SignalRepository {
+  /**
+   * PR15.4 — serializes concurrent `syncStrategyRuntimeStates`
+   * calls via a promise-chain mutex. Multiple call sites share
+   * the same repository instance (trading loop, legacy
+   * `SignalEngine.runForSymbol`, UI endpoints); overlapping
+   * read–modify–write cycles could double-count losses or
+   * corrupt cooldown timestamps. Each caller receives its own
+   * promise result; a rejection does not poison the mutex tail.
+   */
+  #syncMutex: Promise<void> = Promise.resolve();
+
   constructor(
     private readonly pool: Pool,
     private readonly redis: Redis,
@@ -531,6 +542,89 @@ export class SignalRepository {
     };
   }
 
+  /**
+   * PR15.4 — exact-conId lookup with NO symbol fallback. Used by
+   * `StrategyContextLoader` to fetch the authoritative broker
+   * contract for a bound instrument. A stale symbol row for a
+   * different `conId` will not be returned.
+   */
+  async getInstrumentContractByConId(
+    conId: string,
+  ): Promise<InstrumentContract | null> {
+    const result = await this.pool.query(
+      `
+      SELECT symbol, conid, sec_type, exchange, primary_exchange, currency,
+             local_symbol, trading_class, min_tick, display_name,
+             contract_json, details_json, source, resolved_at
+      FROM instrument_contracts
+      WHERE conid = $1
+      LIMIT 1
+      `,
+      [conId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    return {
+      symbol: String(row.symbol),
+      conid: String(row.conid),
+      secType: String(row.sec_type),
+      exchange: row.exchange ?? undefined,
+      primaryExchange: row.primary_exchange ?? undefined,
+      currency: row.currency ?? undefined,
+      localSymbol: row.local_symbol ?? undefined,
+      tradingClass: row.trading_class ?? undefined,
+      minTick:
+        row.min_tick === null || row.min_tick === undefined
+          ? undefined
+          : Number(row.min_tick),
+      displayName: row.display_name ?? undefined,
+      contractJson: row.contract_json ?? undefined,
+      detailsJson: row.details_json ?? undefined,
+      source: row.source === "override_fallback" ? "override_fallback" : "ibkr",
+      resolvedAt: row.resolved_at ? new Date(row.resolved_at) : undefined,
+    };
+  }
+
+  /**
+   * PR15.4 — exact-conId candle fetch. Excludes rows whose
+   * `conid` differs from the bound contract, even when the
+   * broker symbol collides (rollovers, share-class migrations).
+   */
+  async getRecentCandlesForContract(
+    symbol: string,
+    conId: string,
+    timeframe: CandleTimeframe,
+    limit: number,
+  ): Promise<Candle[]> {
+    const table = this.tableForTimeframe(timeframe);
+    const result = await this.pool.query(
+      `
+      SELECT conid, symbol, ts, open, high, low, close, volume
+      FROM ${table}
+      WHERE UPPER(symbol) = UPPER($1)
+        AND conid = $2
+      ORDER BY ts DESC
+      LIMIT $3;
+      `,
+      [symbol, conId, limit],
+    );
+
+    return result.rows
+      .map((row) => ({
+        conid: row.conid as string,
+        symbol: row.symbol as string,
+        timeframe,
+        ts: new Date(row.ts),
+        open: Number(row.open),
+        high: Number(row.high),
+        low: Number(row.low),
+        close: Number(row.close),
+        volume: Number(row.volume),
+      }))
+      .reverse();
+  }
+
   async getOpenExposureNotional(): Promise<number> {
     const positions = await this.getDbNetPositions();
     return positions.reduce(
@@ -659,6 +753,20 @@ export class SignalRepository {
   }
 
   async syncStrategyRuntimeStates(
+    strategyIds: string[],
+    cooldownMs: number,
+  ): Promise<void> {
+    // PR15.4 — promise-chain mutex. `next` awaits the previous
+    // tail; each caller gets its own result. A rejection resolves
+    // the tail (via `.catch(() => {})`) so later calls proceed.
+    const next = this.#syncMutex.then(() =>
+      this.#doSyncStrategyRuntimeStates(strategyIds, cooldownMs),
+    );
+    this.#syncMutex = next.catch(() => {});
+    return next;
+  }
+
+  async #doSyncStrategyRuntimeStates(
     strategyIds: string[],
     cooldownMs: number,
   ): Promise<void> {

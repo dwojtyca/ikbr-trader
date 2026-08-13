@@ -44,6 +44,8 @@ import type {
  * stage; the ticket stage decides its own `failedStage`).
  *
  * Rules:
+ *   - `BLOCKED` with a typed attribution `SignalBlocker`
+ *                              → `ATTRIBUTION`
  *   - `BLOCKED`   → `DECISION`
  *   - `REJECTED`  → `RISK`
  *   - `ERROR`     → derived from the first warning's `source`:
@@ -58,6 +60,9 @@ export function deriveFailedStageFromSignal(
 ): TradingPipelineFailedStage {
   switch (signal.status) {
     case "BLOCKED":
+      if (signal.blockers.some((b) => b.source === "attribution")) {
+        return "ATTRIBUTION";
+      }
       return "DECISION";
     case "REJECTED":
       return "RISK";

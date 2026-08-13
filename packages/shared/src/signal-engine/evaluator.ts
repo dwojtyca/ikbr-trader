@@ -9,6 +9,7 @@ import {
   summarizeReason,
 } from "./result.js";
 import type {
+  SignalAttributionContext,
   SignalEngineVersions,
   SignalEvaluation,
   SignalMetadata,
@@ -88,11 +89,13 @@ export class SignalEngine {
     this.#idFactory =
       options.idFactory ?? (() => globalThis.crypto.randomUUID());
     this.#version = options.version ?? SIGNAL_ENGINE_VERSION;
-    this.#performanceNow =
-      options.performanceNow ?? (() => performance.now());
+    this.#performanceNow = options.performanceNow ?? (() => performance.now());
   }
 
-  evaluate(snapshot: MarketContextSnapshot): SignalEvaluation {
+  evaluate(
+    snapshot: MarketContextSnapshot,
+    attribution?: SignalAttributionContext,
+  ): SignalEvaluation {
     const start = this.#performanceNow();
     const generatedAt = this.#now();
 
@@ -101,6 +104,7 @@ export class SignalEngine {
       decisionEngine: this.#decisionEngine,
       riskEngine: this.#riskEngine,
       instrumentResolver: this.#instrumentResolver,
+      ...(attribution ? { attribution } : {}),
     });
 
     const status = deriveSignalStatus(outcome);
@@ -111,14 +115,13 @@ export class SignalEngine {
       ...(outcome.decision
         ? { decision: outcome.decision.metadata.engineVersion }
         : {}),
-      ...(outcome.risk
-        ? { risk: outcome.risk.metadata.engineVersion }
-        : {}),
+      ...(outcome.risk ? { risk: outcome.risk.metadata.engineVersion } : {}),
     };
 
     const metadata: SignalMetadata = {
       engineVersions,
       evaluationTimeMs: this.#performanceNow() - start,
+      ...(attribution ? { strategyId: attribution.strategyId } : {}),
     };
 
     const evaluation: SignalEvaluation = {
@@ -130,6 +133,7 @@ export class SignalEngine {
       status,
       reasonSummary,
       warnings: outcome.warnings,
+      blockers: outcome.signalBlockers,
       metadata,
     };
 
@@ -138,7 +142,8 @@ export class SignalEngine {
 
   evaluateMany(
     snapshots: readonly MarketContextSnapshot[],
+    attribution?: SignalAttributionContext,
   ): readonly SignalEvaluation[] {
-    return snapshots.map((snapshot) => this.evaluate(snapshot));
+    return snapshots.map((snapshot) => this.evaluate(snapshot, attribution));
   }
 }

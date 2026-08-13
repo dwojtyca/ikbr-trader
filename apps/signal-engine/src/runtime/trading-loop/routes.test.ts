@@ -4,11 +4,17 @@ import assert from "node:assert/strict";
 import Fastify from "fastify";
 
 import type {
+  BoundInstrument,
+  Candle,
+  CandleTimeframe,
   ExecutionTicket,
   ExecutionTicketPolicy,
   Instrument,
+  InstrumentBindingAuthority,
+  InstrumentContract,
   InstrumentRegistry,
   MarketContextSnapshot,
+  SignalAttributionContext,
   TradingPipelineResult,
 } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
@@ -26,7 +32,211 @@ import type {
 import { buildTradingLoopConfig, tradingLoopSchema } from "./config.js";
 import { tradingLoopRoutesPlugin } from "./routes.js";
 import { TradingLoopService } from "./trading-loop-service.js";
+import type { StrategyRuntimeStateRepository } from "./trading-loop-service.js";
 import type { TradingExposureReader } from "./types.js";
+import { StrategyPortfolioManager } from "../../portfolio/strategy-portfolio-manager.js";
+import type {
+  Strategy,
+  StrategyContext,
+  StrategySignal,
+} from "../../strategies/strategy.types.js";
+
+const AAPL_CONID = 265598;
+const NOW_ISO = "2026-07-14T12:00:00.000Z";
+const NOW_MS = new Date(NOW_ISO).getTime();
+const CLOCK = () => new Date(NOW_MS);
+
+function makeAAPLBound(inst: Instrument): BoundInstrument {
+  return {
+    instrumentId: inst.id,
+    instrument: inst,
+    broker: "ibkr",
+    brokerSymbol: inst.brokerSymbol,
+    conId: AAPL_CONID,
+    localSymbol: inst.brokerSymbol,
+    tradingClass: "NMS",
+    exchange: inst.exchange,
+    currency: inst.currency,
+    minTick: 0.01,
+  };
+}
+
+function makeBindingAuthority(
+  bounds: readonly BoundInstrument[],
+): InstrumentBindingAuthority {
+  const byId = new Map(bounds.map((b) => [b.instrumentId, b]));
+  const byConId = new Map(bounds.map((b) => [b.conId, b]));
+  const ids = [...byId.keys()].sort();
+  return {
+    getBoundInstrument: (id: string) => byId.get(id),
+    getBoundInstrumentByConId: (c: number) => byConId.get(c),
+    hasBinding: (id: string) => byId.has(id),
+    listBoundInstrumentIds: () => ids,
+    listBoundInstruments: () => Object.freeze([...bounds]),
+    toDiagnostics: () => ({ boundCount: bounds.length, ids }),
+  } as unknown as InstrumentBindingAuthority;
+}
+
+const TIMEFRAME_MS: Record<CandleTimeframe, number> = {
+  "1m": 60_000,
+  "5m": 300_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+  "12h": 43_200_000,
+  "1d": 86_400_000,
+  "1w": 604_800_000,
+};
+
+function makeCandles(
+  bound: BoundInstrument,
+  tf: CandleTimeframe,
+  count: number,
+  endTs: number,
+): Candle[] {
+  const step = TIMEFRAME_MS[tf];
+  const out: Candle[] = [];
+  for (let i = 0; i < count; i += 1) {
+    out.push({
+      conid: String(bound.conId),
+      symbol: bound.brokerSymbol,
+      timeframe: tf,
+      ts: new Date(endTs - (count - 1 - i) * step),
+      open: 100 + i * 0.01,
+      high: 100 + i * 0.01 + 0.05,
+      low: 100 + i * 0.01 - 0.05,
+      close: 100 + i * 0.01,
+      volume: 1000 + i,
+    } as Candle);
+  }
+  return out;
+}
+
+function makeRealLoaderRepo(
+  bound: BoundInstrument,
+): StrategyRuntimeStateRepository {
+  const candles: Record<CandleTimeframe, Candle[]> = {
+    "1m": makeCandles(bound, "1m", 300, NOW_MS - 60_000),
+    "5m": makeCandles(bound, "5m", 60, NOW_MS - 300_000),
+    "1h": makeCandles(bound, "1h", 60, NOW_MS - 3_600_000),
+    "4h": makeCandles(bound, "4h", 60, NOW_MS - 14_400_000),
+    "12h": makeCandles(bound, "12h", 60, NOW_MS - 43_200_000),
+    "1d": makeCandles(bound, "1d", 60, NOW_MS - 86_400_000),
+    "1w": makeCandles(bound, "1w", 60, NOW_MS - 604_800_000),
+  };
+  const contract: InstrumentContract = {
+    symbol: bound.brokerSymbol,
+    conid: String(bound.conId),
+    secType: "STK",
+    exchange: bound.exchange,
+    primaryExchange: bound.exchange,
+    currency: bound.currency,
+    localSymbol: bound.localSymbol,
+    tradingClass: bound.tradingClass,
+    source: "ibkr",
+  };
+  const marketState = {
+    conid: String(bound.conId),
+    symbol: bound.brokerSymbol,
+    lastPrice: 150.25,
+    bid: 150.24,
+    ask: 150.26,
+    spread: 0.02,
+    ts: new Date(NOW_MS - 1_000).toISOString(),
+  };
+  return {
+    async syncStrategyRuntimeStates() {
+      return;
+    },
+    async getStrategyRuntimeState() {
+      return { enabled: true, permanentlyDisabled: false };
+    },
+    async getInstrumentContractByConId() {
+      return contract;
+    },
+    async getRecentCandlesForContract(_s, _c, tf) {
+      return candles[tf];
+    },
+    async getMarketState() {
+      return marketState;
+    },
+  } as StrategyRuntimeStateRepository;
+}
+
+function makeRealStrategy(id: string): Strategy {
+  return {
+    id,
+    secTypes: ["STK"],
+    supportedDirections: ["LONG"],
+    allowedDirectionalRegimes: [
+      "bull_trend",
+      "bear_trend",
+      "range",
+    ] as Strategy["allowedDirectionalRegimes"],
+    allowedVolatilityRegimes: [
+      "normal_volatility",
+      "high_volatility",
+      "low_volatility",
+    ] as Strategy["allowedVolatilityRegimes"],
+    requiredTimeframes: ["1m"],
+    generateSignal: (context: StrategyContext): StrategySignal => ({
+      strategyId: id,
+      symbol: context.symbol,
+      side: "BUY",
+      direction: "LONG",
+      confidenceScore: 0.7,
+      entryReason: "test",
+      stopLoss: 99,
+      takeProfit: 105,
+    }),
+  } as Strategy;
+}
+
+function makeRealPortfolio(): StrategyPortfolioManager {
+  return new StrategyPortfolioManager([makeRealStrategy("test_strategy_v1")]);
+}
+
+const FAKE_STRATEGY: Strategy = {
+  id: "test_strategy_v1",
+  secTypes: ["STK"],
+  supportedDirections: ["LONG"],
+  allowedDirectionalRegimes: [
+    "bull_trend",
+    "bear_trend",
+    "range",
+    "sideways",
+  ] as unknown as Strategy["allowedDirectionalRegimes"],
+  allowedVolatilityRegimes: [
+    "normal_volatility",
+    "high_volatility",
+    "low_volatility",
+  ] as unknown as Strategy["allowedVolatilityRegimes"],
+  requiredTimeframes: ["1m"],
+  generateSignal: () => null,
+};
+
+function makeFakePortfolioManager(): StrategyPortfolioManager {
+  return new StrategyPortfolioManager([FAKE_STRATEGY]);
+}
+
+function makeFakeRepo(): StrategyRuntimeStateRepository {
+  return {
+    async syncStrategyRuntimeStates() {
+      return;
+    },
+    async getStrategyRuntimeState() {
+      return { enabled: true, permanentlyDisabled: false };
+    },
+    async getInstrumentContractByConId() {
+      return null;
+    },
+    async getRecentCandlesForContract() {
+      return [];
+    },
+    async getMarketState() {
+      return null;
+    },
+  } as StrategyRuntimeStateRepository;
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -74,6 +284,7 @@ function instrument(id: string): Instrument {
       transmit: true,
       priceTickSize: 0.01,
       priceRoundingMode: "nearest",
+      expectedDirection: "LONG",
     },
   } as Instrument;
 }
@@ -303,12 +514,29 @@ function makeMarketDataRuntime(
     async dryRun(
       instrumentId: string,
       _policy: ExecutionTicketPolicy,
+      attribution?: SignalAttributionContext,
     ): Promise<DryRunResult> {
       void _policy;
+      // PR15.4 — mirror attribution into the fake pipeline signal
+      // so the loop's post-pipeline defence-in-depth accepts it.
+      let effective = pipeline;
+      if (effective.outcome === "SUCCESS" && attribution && effective.signal) {
+        effective = {
+          ...effective,
+          signal: {
+            ...effective.signal,
+            metadata: {
+              ...effective.signal.metadata,
+              strategyId: attribution.strategyId,
+            },
+            decision: { action: attribution.intendedAction },
+          },
+        } as unknown as TradingPipelineResult;
+      }
       return {
         instrumentId,
         snapshot: makeSnapshot("2026-07-14T12:00:00.000Z"),
-        pipeline,
+        pipeline: effective,
       };
     },
   } as unknown as MarketDataRuntime;
@@ -380,6 +608,8 @@ async function buildApp(opts: {
 }) {
   const app = Fastify({ logger: false });
   const reg = registry(["aapl"]);
+  const aaplInst = reg.getInstrumentOrThrow("aapl");
+  const bound = makeAAPLBound(aaplInst);
   const marketDataRuntime = makeMarketDataRuntime(
     opts.pipeline ?? SUCCESS_PIPELINE,
   );
@@ -392,10 +622,16 @@ async function buildApp(opts: {
       env: tradingLoopSchema.parse(opts.configOverrides ?? {}),
     }),
     registry: reg,
+    bindingAuthority: makeBindingAuthority([bound]),
     marketDataRuntime,
     executionRuntime,
     exposureReader,
+    portfolioManager: makeRealPortfolio(),
+    repo: makeRealLoaderRepo(bound),
+    strategyCooldownMs: 0,
+    maxMarketStateAgeMs: 0,
     logger: silentLogger(),
+    clock: CLOCK,
   });
   const readiness = opts.readinessDeps ?? {
     redis: { async ping() {} },

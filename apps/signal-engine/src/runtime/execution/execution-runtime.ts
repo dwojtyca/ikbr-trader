@@ -84,7 +84,24 @@ export type NotSubmittedReason =
    * the operator-configured `bound.minTick`. Fail-closed so no
    * ticket is built with an unverified tick size.
    */
-  | "INSTRUMENT_TICK_MISMATCH";
+  | "INSTRUMENT_TICK_MISMATCH"
+  /**
+   * PR15.4 — `executePrepared` was called without a canonical
+   * `strategyId` (absent, empty, or whitespace-padded). The
+   * trading loop refuses to submit an intent without a real
+   * strategy attribution; the runtime enforces this itself so
+   * that any future caller of `executePrepared` cannot bypass
+   * attribution.
+   */
+  | "STRATEGY_ATTRIBUTION_UNAVAILABLE"
+  /**
+   * PR15.4 — the caller-supplied `strategyId` disagrees with
+   * `dryRunResult.pipeline.signal.metadata.strategyId`. Independent
+   * of the trading loop's pre-dryRun check — this is a final
+   * defence-in-depth so a fabricated attribution cannot ride on
+   * a mis-attributed pipeline result.
+   */
+  | "STRATEGY_ATTRIBUTION_MISMATCH";
 
 export type PendingReason = "ambiguous_attempt" | "claim_held_by_other";
 
@@ -155,6 +172,31 @@ export interface ExecuteInput {
   readonly idempotencyKey: string;
 }
 
+/**
+ * PR15.4 — canonical input for `executePrepared`. `strategyId` is
+ * required at the type level AND validated at runtime (§11.3 of the
+ * plan). Callers that do not have a real strategy attribution MUST
+ * NOT invoke this method.
+ */
+export interface ExecutePreparedInput {
+  readonly dryRunResult: DryRunResult;
+  readonly idempotencyKey: string;
+  /**
+   * PR15.2 — authoritative operator-selected contract identity
+   * for the instrument. When supplied, the runtime OVERRIDES the
+   * ticket's `conId`, `localSymbol`, `tradingClass`, and
+   * `brokerSymbol` with the bound values before submission.
+   */
+  readonly bound?: BoundInstrument;
+  /**
+   * PR15.4 — the strategy that produced the winning signal.
+   * Persisted as `proposed_orders.strategy`. Required; empty /
+   * whitespace values are rejected as
+   * `STRATEGY_ATTRIBUTION_UNAVAILABLE`.
+   */
+  readonly strategyId: string;
+}
+
 export class ExecutionRuntime {
   readonly #dryRun: MarketDataRuntime;
   readonly #paperGuard: PaperGuard;
@@ -222,6 +264,7 @@ export class ExecutionRuntime {
       dryRunResult,
       input.idempotencyKey,
       bound,
+      this.#strategy,
     );
   }
 
@@ -231,6 +274,19 @@ export class ExecutionRuntime {
    * identity from `dryRunResult.snapshot` and pass it back as
    * `idempotencyKey` WITHOUT running the pipeline twice.
    *
+   * PR15.4 — `strategyId` is now REQUIRED. The runtime performs
+   * four fail-closed checks in order:
+   *   1. `strategyId` must be a non-empty, trimmed string.
+   *   2. Non-SUCCESS pipelines fall through to `#submitFromDryRun`
+   *      (existing NO_TRADE / PIPELINE_FAILURE handling); the
+   *      attribution mismatch check is meaningless without a
+   *      successful signal.
+   *   3. `pipeline.signal.metadata.strategyId` must equal the
+   *      caller-supplied `strategyId` (defence-in-depth against a
+   *      caller that fabricates an attribution).
+   *   4. All checks pass → submit with `strategyId` as the
+   *      persisted `strategy` label.
+   *
    * The `clientOrderHash` is ALWAYS re-derived from the ticket
    * inside the submission path — this method intentionally does
    * NOT accept a pre-computed hash. Trusting a caller-supplied
@@ -238,33 +294,69 @@ export class ExecutionRuntime {
    * conflict-detection layer while the caller's stale hash
    * matches the previously-submitted intent. Round-5 blocker fix.
    */
-  async executePrepared(input: {
-    readonly dryRunResult: DryRunResult;
-    readonly idempotencyKey: string;
-    /**
-     * PR15.2 — authoritative operator-selected contract
-     * identity for the instrument. When supplied, the runtime
-     * OVERRIDES the ticket's `conId`, `localSymbol`,
-     * `tradingClass`, and `brokerSymbol` with the bound values
-     * before submission. The registry seed intentionally carries
-     * no `conId` for front-month futures — this bound view is
-     * the only authoritative source. Absence keeps the legacy
-     * (pre-binding) behavior of trusting the ticket-builder's
-     * derivation from the frozen registry.
-     */
-    readonly bound?: BoundInstrument;
-  }): Promise<ExecutionRuntimeOutcome> {
+  async executePrepared(
+    input: ExecutePreparedInput,
+  ): Promise<ExecutionRuntimeOutcome> {
+    // 1. Canonical strategyId required. Guarded before touching the
+    //    pipeline / paper guard / submitter so a bad caller cannot
+    //    reach any write path.
+    if (
+      typeof input.strategyId !== "string" ||
+      input.strategyId.length === 0 ||
+      input.strategyId !== input.strategyId.trim()
+    ) {
+      return {
+        outcome: "NOT_SUBMITTED",
+        pipeline: input.dryRunResult.pipeline,
+        reason: "STRATEGY_ATTRIBUTION_UNAVAILABLE",
+        message: "executePrepared: canonical strategyId is required",
+      };
+    }
+
+    const pipeline = input.dryRunResult.pipeline;
+
+    // 2. Non-SUCCESS pipelines fall through to the existing
+    //    NO_TRADE / PIPELINE_FAILURE handling. Attribution match
+    //    is only meaningful for SUCCESS results (there is no
+    //    signal to attribute otherwise).
+    if (pipeline.outcome !== "SUCCESS") {
+      return this.#submitFromDryRun(
+        input.dryRunResult,
+        input.idempotencyKey,
+        input.bound,
+        input.strategyId,
+      );
+    }
+
+    // 3. Defence-in-depth: the caller-supplied strategyId MUST
+    //    match what the pipeline attributed. The trading loop
+    //    already validates this pre-dryRun; the runtime enforces
+    //    it independently so any future caller of `executePrepared`
+    //    cannot bypass attribution.
+    if (pipeline.signal.metadata.strategyId !== input.strategyId) {
+      return {
+        outcome: "NOT_SUBMITTED",
+        pipeline,
+        reason: "STRATEGY_ATTRIBUTION_MISMATCH",
+        message: "executePrepared: strategy attribution mismatch",
+      };
+    }
+
+    // 4. All checks passed; delegate to the standard submission
+    //    path with the validated strategyId as the persisted label.
     return this.#submitFromDryRun(
       input.dryRunResult,
       input.idempotencyKey,
       input.bound,
+      input.strategyId,
     );
   }
 
   async #submitFromDryRun(
     dryRunResult: DryRunResult,
     idempotencyKey: string,
-    bound?: BoundInstrument,
+    bound: BoundInstrument | undefined,
+    strategyLabel: string,
   ): Promise<ExecutionRuntimeOutcome> {
     const pipeline = dryRunResult.pipeline;
 
@@ -314,7 +406,7 @@ export class ExecutionRuntime {
 
     const submission = await this.#submitter.submit({
       ticket: legacyTicket,
-      strategy: this.#strategy,
+      strategy: strategyLabel,
       clientOrderId: idempotencyKey,
       clientOrderHash,
     });

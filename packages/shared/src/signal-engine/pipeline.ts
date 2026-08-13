@@ -4,7 +4,11 @@ import type { Instrument } from "../instruments/types.js";
 import type { MarketContextSnapshot } from "../market-context/types.js";
 import type { RiskEngine } from "../risk-engine/evaluator.js";
 import type { RiskEvaluation } from "../risk-engine/types.js";
-import type { SignalWarning } from "./types.js";
+import type {
+  SignalAttributionContext,
+  SignalBlocker,
+  SignalWarning,
+} from "./types.js";
 
 /**
  * Function that resolves the `Instrument` associated with a
@@ -35,6 +39,15 @@ export interface PipelineOutcome {
    * missing, risk threw). Drives `SignalStatus.ERROR`.
    */
   readonly errored: boolean;
+  /**
+   * PR15.4 — pipeline-level blockers surfaced by classification
+   * gates (currently only the attribution direction gate).
+   * Empty array (never `undefined`) when no pipeline blocker
+   * fired. Never populated on the same run as `errored: true` —
+   * the direction gate only fires after a successful, directional
+   * decision.
+   */
+  readonly signalBlockers: readonly SignalBlocker[];
 }
 
 export interface PipelineInputs {
@@ -42,6 +55,16 @@ export interface PipelineInputs {
   readonly decisionEngine: DecisionEngine;
   readonly riskEngine: RiskEngine;
   readonly instrumentResolver: InstrumentResolver;
+  /**
+   * PR15.4 — optional attribution carrier. When present, the
+   * pipeline enforces a fail-closed direction gate: a directional
+   * decision that disagrees with `attribution.intendedAction`
+   * short-circuits the pipeline before the Risk Engine is called
+   * and yields a `signalBlockers` entry with
+   * `code: "STRATEGY_DIRECTION_UNCONFIRMED"`.
+   * Absent → gate is inactive; existing behaviour is preserved.
+   */
+  readonly attribution?: SignalAttributionContext;
 }
 
 /**
@@ -75,6 +98,7 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
       warnings,
       riskSkipped: false,
       errored: true,
+      signalBlockers: [],
     };
   }
 
@@ -88,7 +112,32 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
       warnings,
       riskSkipped: true,
       errored: false,
+      signalBlockers: [],
     };
+  }
+
+  // --- PR15.4 attribution direction gate ---------------------------------
+  // Fires only when the decision is directional (LONG/SHORT) and an
+  // attribution is present. Fail-closed BEFORE instrument resolution
+  // and Risk Engine — a direction disagreement makes downstream work
+  // meaningless.
+  if (inputs.attribution) {
+    if (decision.action !== inputs.attribution.intendedAction) {
+      return {
+        decision,
+        risk: null,
+        warnings,
+        riskSkipped: true,
+        errored: false,
+        signalBlockers: [
+          {
+            code: "STRATEGY_DIRECTION_UNCONFIRMED",
+            message: `decision.action="${decision.action}" disagrees with intendedAction="${inputs.attribution.intendedAction}"`,
+            source: "attribution",
+          },
+        ],
+      };
+    }
   }
 
   // --- Instrument resolution ---------------------------------------------
@@ -107,6 +156,7 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
       warnings,
       riskSkipped: false,
       errored: true,
+      signalBlockers: [],
     };
   }
   if (!instrument) {
@@ -121,6 +171,7 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
       warnings,
       riskSkipped: false,
       errored: true,
+      signalBlockers: [],
     };
   }
 
@@ -140,6 +191,7 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
       warnings,
       riskSkipped: false,
       errored: true,
+      signalBlockers: [],
     };
   }
 
@@ -149,6 +201,7 @@ export function runSignalPipeline(inputs: PipelineInputs): PipelineOutcome {
     warnings,
     riskSkipped: false,
     errored: false,
+    signalBlockers: [],
   };
 }
 

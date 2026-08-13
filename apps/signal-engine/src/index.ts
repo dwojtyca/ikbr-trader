@@ -7,6 +7,7 @@ import { buildInstrumentBindingAuthority } from "@ikbr/shared";
 import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
 import { SignalEngine } from "./signal-engine.js";
+import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
 import { createStrategies } from "./strategies/strategy-registry.js";
 import {
@@ -75,6 +76,18 @@ const engine = new SignalEngine(repo, {
     maxExposurePct: config.SIGNAL_MAX_EXPOSURE_PCT,
     maxNotionalPerTradePct: config.MAX_NOTIONAL_PER_TRADE_PCT,
     maxOpenPositions: config.SIGNAL_MAX_OPEN_POSITIONS,
+  },
+  onStrategyError: (strategyId, error) => {
+    app.log.error(
+      { strategyId, err: error },
+      "signal-engine: strategy evaluation threw",
+    );
+  },
+  onStrategyStateError: (strategyId, error) => {
+    app.log.error(
+      { strategyId, err: error },
+      "signal-engine: strategy runtime state read threw",
+    );
   },
 });
 
@@ -386,6 +399,19 @@ if (config.runtimeEnabled) {
       bearerToken,
       timeoutMs: config.tradingLoop.exposureTimeoutMs,
     });
+    // PR15.4 — the trading loop owns the strategy attribution.
+    // A separate `StrategyPortfolioManager` instance (built from
+    // the same `strategies` array as the legacy `SignalEngine`)
+    // is threaded in so the loop can drive `.run()` itself. The
+    // two managers are not shared.
+    const portfolioManagerForLoop = new StrategyPortfolioManager(strategies, {
+      onStrategyError: (strategyId, error) => {
+        app.log.error(
+          { strategyId, err: error },
+          "trading-loop: strategy evaluation threw",
+        );
+      },
+    });
     tradingLoopService = new TradingLoopService({
       config: config.tradingLoop,
       registry: defaultInstrumentRegistry,
@@ -394,6 +420,10 @@ if (config.runtimeEnabled) {
       executionRuntime,
       exposureReader,
       reconciliationReader,
+      portfolioManager: portfolioManagerForLoop,
+      repo,
+      strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
+      maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
       logger: app.log,
     });
     await app.register(tradingLoopRoutesPlugin, {

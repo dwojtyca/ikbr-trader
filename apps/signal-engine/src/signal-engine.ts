@@ -29,6 +29,7 @@ import {
 } from "./indicators.js";
 import { MarketRegimeDetector } from "./regime/market-regime-detector.js";
 import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
+import { resolveActiveStrategyIds } from "./runtime/strategy/active-strategy-resolver.js";
 import {
   ExposureSnapshot,
   SignalPerformanceStats,
@@ -80,6 +81,20 @@ interface SignalEngineOptions {
   executionApiToken: string;
   strategyCooldownMs: number;
   riskLimits: RiskLimits;
+  /**
+   * PR15.4 — invoked with the raw error when a strategy's
+   * `generateSignal()` throws inside `StrategyPortfolioManager.run()`.
+   * Best-effort: callback exceptions do not change the domain
+   * result. Optional to keep pre-PR15.4 constructors compatible.
+   */
+  onStrategyError?: (strategyId: string, error: unknown) => void;
+  /**
+   * PR15.4 — invoked with the raw error when
+   * `getStrategyRuntimeState()` throws inside
+   * `resolveActiveStrategyIds()`. Best-effort: callback
+   * exceptions do not change the domain result.
+   */
+  onStrategyStateError?: (strategyId: string, error: unknown) => void;
 }
 
 interface EntryPriceSelection {
@@ -104,7 +119,11 @@ export class SignalEngine {
     private readonly repo: SignalRepository,
     private readonly options: SignalEngineOptions,
   ) {
-    this.portfolioManager = new StrategyPortfolioManager(options.strategies);
+    this.portfolioManager = new StrategyPortfolioManager(options.strategies, {
+      ...(options.onStrategyError
+        ? { onStrategyError: options.onStrategyError }
+        : {}),
+    });
   }
 
   get strategyId(): string {
@@ -253,45 +272,30 @@ export class SignalEngine {
       this.options.strategyCooldownMs,
     );
 
-    const activeStrategyIds: string[] = [];
-    const disabledReasons: string[] = [];
-    const symbolUpper = symbol.toUpperCase();
-    for (const strategyId of this.portfolioManager.strategyIds) {
-      const profile = findStrategyProfile(strategyId);
-      if (
-        profile?.excludedSymbols?.some(
-          (excluded) => excluded.toUpperCase() === symbolUpper,
-        )
-      ) {
-        disabledReasons.push(`${strategyId} excluded for ${symbolUpper}`);
-        continue;
-      }
-      if (
-        profile?.includedSymbols &&
-        profile.includedSymbols.length > 0 &&
-        !profile.includedSymbols.some(
-          (included) => included.toUpperCase() === symbolUpper,
-        )
-      ) {
-        disabledReasons.push(
-          `${strategyId} not in includedSymbols for ${symbolUpper}`,
-        );
-        continue;
-      }
-      const runtimeState = await this.repo.getStrategyRuntimeState(strategyId);
-      if (!runtimeState.enabled || runtimeState.permanentlyDisabled) {
-        disabledReasons.push(`${strategyId} is disabled`);
-        continue;
-      }
-      if (
-        runtimeState.cooldownUntil &&
-        runtimeState.cooldownUntil.getTime() > Date.now()
-      ) {
-        disabledReasons.push(`${strategyId} is in cooldown`);
-        continue;
-      }
-      activeStrategyIds.push(strategyId);
+    const resolution = await resolveActiveStrategyIds(
+      symbol,
+      this.portfolioManager.strategyIds,
+      findStrategyProfile,
+      this.repo,
+      {
+        clock: () => new Date(),
+        ...(this.options.onStrategyStateError
+          ? { onStateError: this.options.onStrategyStateError }
+          : {}),
+      },
+    );
+    if (resolution.kind === "error") {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `strategy runtime state unavailable (${resolution.strategyId}); check logs`,
+        indicators,
+        "HOLD",
+        generatedFromCandleTs,
+      );
     }
+    const activeStrategyIds = resolution.activeIds;
+    const disabledReasons = resolution.disabledReasons;
 
     if (activeStrategyIds.length === 0) {
       return this.rejectedOrder(
@@ -433,6 +437,16 @@ export class SignalEngine {
       },
       new Set(activeStrategyIds),
     );
+    if (portfolioResult.kind === "error") {
+      return this.rejectedOrder(
+        symbol,
+        latest.conid,
+        `${portfolioResult.errorCode}: ${portfolioResult.message}`,
+        indicators,
+        "HOLD",
+        generatedFromCandleTs,
+      );
+    }
     const signal = portfolioResult.selected?.signal ?? null;
 
     if (!signal) {
@@ -875,7 +889,7 @@ export class SignalEngine {
     existingPositionQty: number,
     entryPrice: number | undefined,
     riskSnapshot: ExposureSnapshot,
-    activeStrategyIds: string[],
+    activeStrategyIds: readonly string[],
     generatedFromCandleTs?: Date,
   ): Promise<ProposedOrder | null> {
     // Look up which strategy opened this position (stored in proposed_orders)

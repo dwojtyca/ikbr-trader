@@ -6,7 +6,10 @@ import {
   samplePriceData,
   type SectionOverride,
 } from "../decision-engine/snapshot.testfixture.js";
-import { buildDecision, buildInstrument } from "../risk-engine/risk-input.testfixture.js";
+import {
+  buildDecision,
+  buildInstrument,
+} from "../risk-engine/risk-input.testfixture.js";
 import type { DecisionResult } from "../decision-engine/types.js";
 import type { Instrument } from "../instruments/types.js";
 import type { MarketContextSnapshot } from "../market-context/types.js";
@@ -14,10 +17,7 @@ import type {
   RiskEvaluation,
   RiskEvaluation as _R,
 } from "../risk-engine/types.js";
-import type {
-  SignalEvaluation,
-  SignalStatus,
-} from "../signal-engine/types.js";
+import type { SignalEvaluation, SignalStatus } from "../signal-engine/types.js";
 import {
   EXECUTION_TICKET_BUILDER_VERSION,
   ExecutionTicketBuilder,
@@ -63,8 +63,7 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
     overrides.decision === undefined
       ? buildDecision({ action: "LONG", confidence: 80 })
       : overrides.decision;
-  const risk =
-    overrides.risk === undefined ? buildRisk() : overrides.risk;
+  const risk = overrides.risk === undefined ? buildRisk() : overrides.risk;
   const status = overrides.status ?? "GENERATED";
   return {
     signalId: overrides.signalId ?? "signal-fixture",
@@ -75,6 +74,7 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
     status,
     reasonSummary: `${status} — fixture`,
     warnings: [],
+    blockers: [],
     metadata: {
       engineVersions: {
         signal: "0.1.0",
@@ -86,7 +86,9 @@ function buildSignal(overrides: SignalOverrides = {}): SignalEvaluation {
   };
 }
 
-function policy(overrides: Partial<ExecutionTicketPolicy> = {}): ExecutionTicketPolicy {
+function policy(
+  overrides: Partial<ExecutionTicketPolicy> = {},
+): ExecutionTicketPolicy {
   return {
     quantity: overrides.quantity ?? 1,
     orderType: (overrides.orderType ?? "LMT") as SupportedOrderType,
@@ -98,7 +100,8 @@ function policy(overrides: Partial<ExecutionTicketPolicy> = {}): ExecutionTicket
     takeProfitDistance: overrides.takeProfitDistance,
     trailingStopDistance: overrides.trailingStopDistance,
     priceTickSize: overrides.priceTickSize ?? 0.25,
-    priceRoundingMode: (overrides.priceRoundingMode ?? "nearest") as PriceRoundingMode,
+    priceRoundingMode: (overrides.priceRoundingMode ??
+      "nearest") as PriceRoundingMode,
   };
 }
 
@@ -112,7 +115,9 @@ function snapshotWithPrice(
   } = {},
 ): MarketContextSnapshot {
   const status = overrides.status ?? "fresh";
-  const priceOverride: SectionOverride<ReturnType<typeof samplePriceData>> | undefined =
+  const priceOverride:
+    | SectionOverride<ReturnType<typeof samplePriceData>>
+    | undefined =
     status === "unavailable"
       ? { kind: "unavailable" }
       : {
@@ -181,7 +186,11 @@ describe("ExecutionTicketBuilder — direction mapping", () => {
     const b = makeBuilder();
     const input = happyInput();
     input.signal = buildSignal({
-      decision: buildDecision({ action: "SHORT", confidence: 80, overallScore: -30 }),
+      decision: buildDecision({
+        action: "SHORT",
+        confidence: 80,
+        overallScore: -30,
+      }),
     });
     const r = b.build(input);
     assert.equal(r.ok, true);
@@ -413,7 +422,10 @@ describe("ExecutionTicketBuilder — instrument alignment", () => {
   it("rejects INSTRUMENT_DISABLED", () => {
     const b = makeBuilder();
     const input = happyInput();
-    input.instrument = buildInstrument({ id: "ctx_fut", executionEnabled: false });
+    input.instrument = buildInstrument({
+      id: "ctx_fut",
+      executionEnabled: false,
+    });
     const r = b.build(input);
     assert.equal(r.ok, false);
     if (r.ok) return;
@@ -439,7 +451,12 @@ describe("ExecutionTicketBuilder — price section", () => {
   it("rejects PRICE_NOT_FRESH when snapshot is stale", () => {
     const b = makeBuilder();
     const input = happyInput();
-    input.snapshot = snapshotWithPrice({ status: "stale", last: 100, bid: 99.9, ask: 100.1 });
+    input.snapshot = snapshotWithPrice({
+      status: "stale",
+      last: 100,
+      bid: 99.9,
+      ask: 100.1,
+    });
     const r = b.build(input);
     assert.equal(r.ok, false);
     if (r.ok) return;
@@ -573,8 +590,7 @@ describe("ExecutionTicketBuilder — immutability + determinism", () => {
       correlationIdFactory: () => "cor",
     });
     assert.throws(
-      () =>
-        b.build(undefined as unknown as Parameters<typeof b.build>[0]),
+      () => b.build(undefined as unknown as Parameters<typeof b.build>[0]),
       /requires signal, snapshot, instrument and policy/,
     );
   });
@@ -584,7 +600,9 @@ describe("ExecutionTicketBuilder — immutability + determinism", () => {
       () =>
         new ExecutionTicketBuilder({
           correlationIdFactory: () => "cor",
-        } as unknown as ConstructorParameters<typeof ExecutionTicketBuilder>[0]),
+        } as unknown as ConstructorParameters<
+          typeof ExecutionTicketBuilder
+        >[0]),
       /idFactory is required/,
     );
   });
@@ -594,7 +612,9 @@ describe("ExecutionTicketBuilder — immutability + determinism", () => {
       () =>
         new ExecutionTicketBuilder({
           idFactory: () => "id",
-        } as unknown as ConstructorParameters<typeof ExecutionTicketBuilder>[0]),
+        } as unknown as ConstructorParameters<
+          typeof ExecutionTicketBuilder
+        >[0]),
       /correlationIdFactory is required/,
     );
   });

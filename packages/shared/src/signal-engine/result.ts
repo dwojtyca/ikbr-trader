@@ -6,11 +6,15 @@ import type { SignalStatus } from "./types.js";
 /**
  * Terminal-status resolver. Rules — evaluated in this exact order:
  *
- *   1. `errored`                → ERROR
- *   2. decision has blockers    → BLOCKED
- *   3. decision action = HOLD   → HOLD
- *   4. risk.approved = false    → REJECTED
- *   5. otherwise                → GENERATED
+ *   1. `errored`                     → ERROR
+ *   2. `signalBlockers.length > 0`   → BLOCKED  (PR15.4 — pipeline
+ *                                     classification blocker fires
+ *                                     before the decision blocker
+ *                                     path)
+ *   3. decision has blockers         → BLOCKED
+ *   4. decision action = HOLD        → HOLD
+ *   5. risk.approved = false         → REJECTED
+ *   6. otherwise                     → GENERATED
  *
  * The ordering matches the spec: ERROR beats everything (short-
  * circuits the pipeline), BLOCKED beats HOLD (a blocked decision is
@@ -20,6 +24,7 @@ import type { SignalStatus } from "./types.js";
  */
 export function deriveSignalStatus(outcome: PipelineOutcome): SignalStatus {
   if (outcome.errored) return "ERROR";
+  if (outcome.signalBlockers.length > 0) return "BLOCKED";
   const decision = outcome.decision;
   if (!decision) return "ERROR"; // defensive: errored=false but no decision
   if (decision.blockedBy.length > 0) return "BLOCKED";
@@ -42,6 +47,9 @@ export function summarizeReason(
       return first ? `ERROR — ${first.message}` : "ERROR — pipeline failure";
     }
     case "BLOCKED":
+      if (outcome.signalBlockers.length > 0) {
+        return `BLOCKED — ${outcome.signalBlockers.map((b) => b.code).join(", ")}`;
+      }
       return `BLOCKED — ${listBlockerCodes(outcome.decision)}`;
     case "HOLD":
       return `HOLD — ${describeHold(outcome.decision)}`;
