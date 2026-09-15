@@ -73,7 +73,7 @@ export const SMALL_CAP_UNIVERSE: string[] = [
 const PROFILES: StrategyProfile[] = [
   {
     id: "momentum_breakout_long_v1",
-    secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
+    secType: ["STK", "IND"],
     directionalRegimes: ["bull_trend"],
     volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "breakout",
@@ -94,7 +94,7 @@ const PROFILES: StrategyProfile[] = [
   },
   {
     id: "momentum_breakdown_short_v1",
-    secType: ["STK", "IND", "ETF", "CMDTY", "FUT"],
+    secType: ["STK", "IND"],
     directionalRegimes: ["bear_trend"],
     volatilityRegimes: ["normal_volatility", "high_volatility"],
     style: "breakout",
