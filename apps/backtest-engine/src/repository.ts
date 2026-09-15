@@ -6,6 +6,7 @@ import type {
   BacktestDataset,
   BacktestFillRecord,
   BacktestFxRate,
+  BacktestFuturesContractMetadata,
   BacktestOrderRecord,
   BacktestRun,
   BacktestSignalDiagnosticRecord,
@@ -216,6 +217,16 @@ export class BacktestRepository {
       ON backtest_instrument_contracts (conid);
     `);
     await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS backtest_futures_contracts (
+        conid TEXT PRIMARY KEY,
+        symbol TEXT NOT NULL,
+        local_symbol TEXT NOT NULL,
+        trading_class TEXT NOT NULL,
+        last_trade_at TIMESTAMPTZ NOT NULL,
+        UNIQUE (symbol, local_symbol)
+      );
+    `);
+    await this.pool.query(`
       CREATE TABLE IF NOT EXISTS backtest_runs (
         id BIGSERIAL PRIMARY KEY,
         dataset_id BIGINT NOT NULL REFERENCES backtest_datasets(id) ON DELETE CASCADE,
@@ -289,6 +300,22 @@ export class BacktestRepository {
         exit_reason TEXT NOT NULL
       );
     `);
+    for (const statement of [
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS entry_reference_price DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS entry_fill_price DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS exit_reference_price DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS exit_fill_price DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS multiplier DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS tick_size DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS entry_slippage DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS exit_slippage DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS slippage_cost DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS commission_per_contract_side DOUBLE PRECISION;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS entry_conid TEXT;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS exit_conid TEXT;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS execution_model_version TEXT;`,
+      `ALTER TABLE backtest_fills ADD COLUMN IF NOT EXISTS calendar_version TEXT;`,
+    ]) await this.pool.query(statement);
     await this.pool.query(
       `ALTER TABLE backtest_fills DROP COLUMN IF EXISTS regime;`,
     );
@@ -475,6 +502,36 @@ export class BacktestRepository {
       ).toUpperCase();
     }
     return out;
+  }
+
+  async getFuturesContractMetadata(): Promise<Map<string, BacktestFuturesContractMetadata>> {
+    const result = await this.pool.query(`
+      SELECT symbol, conid, local_symbol, trading_class, last_trade_at
+      FROM backtest_futures_contracts
+    `);
+    const out = new Map<string, BacktestFuturesContractMetadata>();
+    for (const row of result.rows) {
+      if (!row.last_trade_at) continue;
+      out.set(String(row.conid), {
+        conid: String(row.conid), symbol: String(row.symbol).toUpperCase(),
+        localSymbol: String(row.local_symbol ?? ""),
+        tradingClass: String(row.trading_class ?? "").toUpperCase(),
+        lastTradeAt: new Date(row.last_trade_at),
+      });
+    }
+    return out;
+  }
+
+  async upsertFuturesContractMetadata(metadata: BacktestFuturesContractMetadata): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO backtest_futures_contracts (conid, symbol, local_symbol, trading_class, last_trade_at)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (conid) DO UPDATE SET symbol=EXCLUDED.symbol,
+         local_symbol=EXCLUDED.local_symbol, trading_class=EXCLUDED.trading_class,
+         last_trade_at=EXCLUDED.last_trade_at`,
+      [metadata.conid, metadata.symbol.toUpperCase(), metadata.localSymbol,
+        metadata.tradingClass.toUpperCase(), metadata.lastTradeAt],
+    );
   }
 
   async insertCandles1m(candles: Candle[]): Promise<void> {
@@ -870,8 +927,12 @@ export class BacktestRepository {
     await this.pool.query(
       `INSERT INTO backtest_fills (
         run_id, order_id, instrument, conid, strategy, side, directional_regime, volatility_regime, confidence, quantity,
-        entry_price, exit_price, entry_at, exit_at, gross_pnl, commission, net_pnl, pnl_pct, exit_reason
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+        entry_price, exit_price, entry_at, exit_at, gross_pnl, commission, net_pnl, pnl_pct, exit_reason,
+        entry_reference_price, entry_fill_price, exit_reference_price, exit_fill_price,
+        multiplier, tick_size, entry_slippage, exit_slippage, slippage_cost,
+        commission_per_contract_side, entry_conid, exit_conid, execution_model_version, calendar_version
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+        $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`,
       [
         fill.runId,
         fill.orderId,
@@ -892,6 +953,20 @@ export class BacktestRepository {
         fill.netPnl,
         fill.pnlPct,
         fill.exitReason,
+        fill.entryReferencePrice ?? null,
+        fill.entryFillPrice ?? null,
+        fill.exitReferencePrice ?? null,
+        fill.exitFillPrice ?? null,
+        fill.multiplier ?? null,
+        fill.tickSize ?? null,
+        fill.entrySlippage ?? null,
+        fill.exitSlippage ?? null,
+        fill.slippageCost ?? null,
+        fill.commissionPerContractSide ?? null,
+        fill.entryConid ?? null,
+        fill.exitConid ?? null,
+        fill.executionModelVersion ?? null,
+        fill.calendarVersion ?? null,
       ],
     );
   }

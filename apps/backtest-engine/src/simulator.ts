@@ -8,12 +8,33 @@ import type {
   Side,
 } from "@ikbr/shared";
 import {
+  applyAdverseSlippage,
+  futuresRoundTripPnl,
+  normalizeInstructionPrice,
+  priceToTicks,
+  stopExitReference,
+} from "./bar-execution.js";
+import {
+  assertWholeContracts,
+  FUTURES_EXECUTION_MODEL_VERSION,
+  requireFuturesSpec,
+  validateFuturesContractMetadata,
+  type FuturesContractSpec,
+} from "./futures-model.js";
+import {
+  aggregateCmeFuturesCandles,
+  CmeSessionCalendar,
+  type CmeCalendarDefinition,
+} from "./cme-session-calendar.js";
+import {
   listAllStrategyProfiles,
   listStrategyProfiles,
   type StrategyProfile,
 } from "@ikbr/shared";
 import type { BacktestRepository } from "./repository.js";
 import type {
+  BacktestFillRecord,
+  BacktestFuturesContractMetadata,
   BacktestSignalDiagnosticRecord,
   LoadedBacktestData,
 } from "./types.js";
@@ -42,6 +63,9 @@ export interface SimulatorOptions {
   commissionPassthroughBps: number;
   syntheticSpreadBps: number;
   orderTtlCandles: number;
+  futuresSpecs: ReadonlyMap<string, FuturesContractSpec>;
+  futuresContracts: ReadonlyMap<string, BacktestFuturesContractMetadata>;
+  futuresCalendars: ReadonlyMap<string, CmeCalendarDefinition>;
   strategyIds?: string[];
   riskLimits: {
     accountEquity: number;
@@ -136,6 +160,9 @@ interface Position {
   side: Side;
   priceMultiplier: number;
   fxToBaseAtEntry: number;
+  entryReferencePrice: number;
+  entrySlippage: number;
+  futuresSpec?: FuturesContractSpec;
 }
 
 const YIELD_EVERY_EVENTS = 1000;
@@ -194,31 +221,14 @@ function signedQuantity(side: Side, quantity: number): number {
   return side === "SELL" ? -Math.abs(quantity) : Math.abs(quantity);
 }
 
-function binarySearchLastAtOrBefore(candles: Candle[], ts: Date): number {
-  let lo = 0;
-  let hi = candles.length - 1;
-  let best = -1;
-  const target = ts.getTime();
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (candles[mid].ts.getTime() <= target) {
-      best = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  return best;
-}
-
 export class BacktestSimulator {
   private readonly candles1mBySymbol: Map<string, Candle[]>;
-  private readonly candles1hBySymbol: Map<string, Candle[]>;
   private readonly candlesByTimeframe: Record<
     "1m" | "5m" | "1h" | "4h" | "12h" | "1d" | "1w",
     Map<string, Candle[]>
   >;
   private readonly currentIndexBySymbol = new Map<string, number>();
+  private readonly futuresCalendarBySymbol = new Map<string, CmeSessionCalendar>();
   private readonly positions = new Map<string, Position>();
   private readonly pendingOrders: PendingOrder[] = [];
   private readonly strategyStates = new Map<string, StrategyState>();
@@ -229,6 +239,7 @@ export class BacktestSimulator {
   >();
   private currentCandle?: Candle;
   private currentTime?: Date;
+  private readonly lastCandleBySymbol = new Map<string, Candle>();
   private currentEquity: number;
 
   constructor(
@@ -238,15 +249,14 @@ export class BacktestSimulator {
     private readonly options: SimulatorOptions,
   ) {
     this.candles1mBySymbol = data.candles1m;
-    this.candles1hBySymbol = data.candles1h;
     this.candlesByTimeframe = {
-      "1m": data.candles1m,
-      "5m": data.candles5m,
-      "1h": data.candles1h,
-      "4h": data.candles4h,
-      "12h": data.candles12h,
-      "1d": data.candles1d,
-      "1w": data.candles1w,
+      "1m": new Map(data.candles1m),
+      "5m": new Map(data.candles5m),
+      "1h": new Map(data.candles1h),
+      "4h": new Map(data.candles4h),
+      "12h": new Map(data.candles12h),
+      "1d": new Map(data.candles1d),
+      "1w": new Map(data.candles1w),
     };
     this.currentEquity = options.riskLimits.accountEquity;
     const activeStrategyIds = new Set(
@@ -264,6 +274,18 @@ export class BacktestSimulator {
         reason: undefined,
       });
     }
+    for (const [symbol, candles] of data.candles1m) {
+      if (!this.isFuturesSymbol(symbol) || candles.length === 0) continue;
+      const metadata = this.options.futuresContracts.get(candles[0].conid);
+      const spec = metadata ? this.options.futuresSpecs.get(metadata.tradingClass.toUpperCase()) : undefined;
+      const definition = spec ? this.options.futuresCalendars.get(spec.calendarVersion) : undefined;
+      if (!definition) continue;
+      const calendar = new CmeSessionCalendar(definition);
+      this.futuresCalendarBySymbol.set(symbol.toUpperCase(), calendar);
+      for (const timeframe of ["1h", "4h", "1d"] as const) {
+        this.candlesByTimeframe[timeframe].set(symbol.toUpperCase(), aggregateCmeFuturesCandles(candles, timeframe, calendar));
+      }
+    }
   }
 
   async run(progress?: RunProgressOptions): Promise<{
@@ -272,6 +294,7 @@ export class BacktestSimulator {
     wins: number;
     winRate: number;
   }> {
+    this.validateFuturesDataset();
     const signalEngine = new SignalEngine(this as any, {
       strategies: createStrategies(this.options.strategyIds),
       minCandles: this.options.minCandles,
@@ -368,6 +391,7 @@ export class BacktestSimulator {
       const index = (cursorBySymbol.get(eventKey) ?? -1) + 1;
       cursorBySymbol.set(eventKey, index);
 
+      await this.processContractTransition(eventCandle);
       this.currentCandle = eventCandle;
       this.currentTime = eventCandle.ts;
       this.currentIndexBySymbol.set(eventKey, index);
@@ -417,6 +441,8 @@ export class BacktestSimulator {
       }
       this.recordDiagnostic(order, "proposed", "pass");
       if (perfEnabled) perf.diag += performance.now() - tDiag;
+
+      this.validateFuturesOrder(order, eventCandle);
 
       const tInsert = perfEnabled ? performance.now() : 0;
       const orderId = await this.repo.insertOrder({
@@ -475,6 +501,110 @@ export class BacktestSimulator {
     };
   }
 
+  private isFuturesSymbol(symbol: string): boolean {
+    return this.options.secTypeBySymbol[symbol.toUpperCase()]?.toUpperCase() === "FUT";
+  }
+
+  private validateFuturesDataset(): void {
+    for (const [symbolRaw, candles] of this.candles1mBySymbol) {
+      const symbol = symbolRaw.toUpperCase();
+      if (!this.isFuturesSymbol(symbol)) continue;
+      if (candles.length === 0) continue;
+      const retired = new Set<string>();
+      let activeConid: string | undefined;
+      let previousTs = -Infinity;
+      for (const candle of candles) {
+        if (!candle.conid?.trim()) throw new Error(`Futures candle for ${symbol} is missing conId`);
+        if (candle.ts.getTime() <= previousTs)
+          throw new Error(`Futures candles for ${symbol} overlap or are not strictly ordered`);
+        previousTs = candle.ts.getTime();
+        const metadata = this.options.futuresContracts.get(candle.conid);
+        if (!metadata) throw new Error(`Missing futures contract metadata for conId ${candle.conid}`);
+        const validated = validateFuturesContractMetadata(metadata);
+        if (validated.symbol !== symbol)
+          throw new Error(`Futures conId ${candle.conid} belongs to ${validated.symbol}, not ${symbol}`);
+        const spec = requireFuturesSpec(this.options.futuresSpecs, validated.tradingClass);
+        const calendarDefinition = this.options.futuresCalendars.get(spec.calendarVersion);
+        if (!calendarDefinition)
+          throw new Error(`Missing CME calendar ${spec.calendarVersion} for ${symbol}`);
+        const calendar = new CmeSessionCalendar(calendarDefinition);
+        if (!calendar.sessionFor(candle.ts))
+          throw new Error(`Futures candle for conId ${candle.conid} is outside its CME session`);
+        if (this.currencyForSymbol(symbol) !== spec.currency)
+          throw new Error(`Futures currency mismatch for ${symbol}`);
+        if (spec.currency !== this.options.baseCurrency.trim().toUpperCase() &&
+          this.fxToBaseForCurrency(spec.currency, candle.ts) === undefined)
+          throw new Error(`Missing FX rate for ${symbol} at ${candle.ts.toISOString()}`);
+        for (const [field, price] of [["open", candle.open], ["high", candle.high],
+          ["low", candle.low], ["close", candle.close]] as const) {
+          if (!Number.isInteger(priceToTicks(price, spec.tickSize)))
+            throw new Error(`Futures candle ${field} for conId ${candle.conid} is off tick grid`);
+        }
+        if (candle.ts.getTime() >= validated.lastTradeAt.getTime())
+          throw new Error(`Futures candle for conId ${candle.conid} is at or after last trade`);
+        if (activeConid !== candle.conid) {
+          if (retired.has(candle.conid))
+            throw new Error(`Retired futures conId ${candle.conid} reappeared`);
+          if (activeConid) retired.add(activeConid);
+          activeConid = candle.conid;
+        }
+      }
+    }
+  }
+
+  private async processContractTransition(candle: Candle): Promise<void> {
+    const symbol = candle.symbol.toUpperCase();
+    const previous = this.lastCandleBySymbol.get(symbol);
+    if (this.isFuturesSymbol(symbol) && previous && previous.conid !== candle.conid) {
+      const position = this.positions.get(symbol);
+      if (position) {
+        const exitSide = position.quantity > 0 ? "SELL" : "BUY";
+        const exitPrice = position.futuresSpec
+          ? applyAdverseSlippage(previous.close, exitSide, position.futuresSpec)
+          : previous.close;
+        const outgoingMetadata = this.options.futuresContracts.get(previous.conid);
+        const reason = outgoingMetadata && candle.ts.getTime() >= outgoingMetadata.lastTradeAt.getTime()
+          ? "expiry"
+          : "contract_roll";
+        await this.closePosition(position, exitPrice, previous.ts, reason, position.orderId, previous.close, previous.conid);
+      }
+      const keep: PendingOrder[] = [];
+      for (const pending of this.pendingOrders) {
+        if (pending.order.instrument.toUpperCase() === symbol) {
+          await this.repo.updateOrderStatus(pending.id, "CANCELLED", "contract_roll");
+        } else keep.push(pending);
+      }
+      this.pendingOrders.length = 0;
+      this.pendingOrders.push(...keep);
+    }
+    this.lastCandleBySymbol.set(symbol, candle);
+  }
+
+  private validateFuturesOrder(order: ProposedOrder, candle: Candle): void {
+    if (!this.isFuturesSymbol(order.instrument)) return;
+    if (order.conid !== candle.conid)
+      throw new Error(`Futures order conId ${order.conid ?? "missing"} does not match current contract ${candle.conid}`);
+    const spec = this.futuresSpecForConid(candle.conid);
+    if (!spec) throw new Error(`Missing futures specification for conId ${candle.conid}`);
+    assertWholeContracts(order.quantity);
+    const existing = this.positions.get(order.instrument.toUpperCase());
+    const orderDirection = order.side === "SELL" ? -1 : 1;
+    if (existing && Math.sign(existing.quantity) === orderDirection)
+      throw new Error("Futures pyramiding is not supported by execution model pr15.5b-v1");
+    if (order.orderType !== "MKT") {
+      if (!Number.isFinite(order.entry)) throw new Error("Futures limit/stop order requires an entry price");
+      normalizeInstructionPrice(Number(order.entry), spec.tickSize, order.side as "BUY" | "SELL",
+        order.orderType === "STP" ? "stop" : "limit");
+    }
+    const exitSide = order.side === "BUY" ? "SELL" : "BUY";
+    if (order.stop !== undefined)
+      normalizeInstructionPrice(order.stop, spec.tickSize, exitSide, "stop");
+    if (order.takeProfit !== undefined)
+      normalizeInstructionPrice(order.takeProfit, spec.tickSize, exitSide, "limit");
+    for (const partial of order.partialTakeProfits ?? [])
+      normalizeInstructionPrice(partial.price, spec.tickSize, exitSide, "limit");
+  }
+
   async getRecentCandles(
     symbol: string,
     timeframe: Candle["timeframe"],
@@ -485,16 +615,26 @@ export class BacktestSimulator {
       const rows = this.candles1mBySymbol.get(key) ?? [];
       const index = this.currentIndexBySymbol.get(key) ?? -1;
       if (index < 0) return [];
-      return rows.slice(Math.max(0, index - limit + 1), index + 1);
+      const currentConid = this.currentCandle?.symbol.toUpperCase() === key
+        ? this.currentCandle.conid : rows[index]?.conid;
+      return rows.slice(0, index + 1).filter((row) => row.conid === currentConid).slice(-limit);
     }
 
     const rows = this.candlesByTimeframe[timeframe].get(key) ?? [];
-    const index = binarySearchLastAtOrBefore(
-      rows,
-      this.currentTime ?? new Date(0),
-    );
-    if (index < 0) return [];
-    return rows.slice(Math.max(0, index - limit + 1), index + 1);
+    const evaluationTime = this.currentTime ?? new Date(0);
+    const durationMs: Record<Exclude<Candle["timeframe"], "1m">, number> = {
+      "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
+      "12h": 12 * 60 * 60_000, "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
+    };
+    const currentConid = this.currentCandle?.symbol.toUpperCase() === key
+      ? this.currentCandle.conid : undefined;
+    const calendar = this.futuresCalendarBySymbol.get(key);
+    return rows.filter((row) =>
+      (calendar && (timeframe === "1h" || timeframe === "4h" || timeframe === "1d")
+        ? calendar.completedAt(row.ts, timeframe).getTime()
+        : row.ts.getTime() + durationMs[timeframe]) <= evaluationTime.getTime() &&
+      (!currentConid || row.conid === currentConid),
+    ).slice(-limit);
   }
 
   async getInstrumentContract(
@@ -505,17 +645,28 @@ export class BacktestSimulator {
     if (!normalized) return null;
 
     const candles = this.candles1mBySymbol.get(normalized) ?? [];
-    const latestConid = candles[candles.length - 1]?.conid;
+    const currentConid = this.currentCandle?.symbol.toUpperCase() === normalized
+      ? this.currentCandle.conid
+      : candles[this.currentIndexBySymbol.get(normalized) ?? -1]?.conid;
     const secTypeRaw =
       this.options.secTypeBySymbol[normalized]?.trim().toUpperCase() ?? "STK";
     const secType =
-      secTypeRaw === "IND" || secTypeRaw === "CMDTY" ? secTypeRaw : "STK";
+      secTypeRaw === "IND" || secTypeRaw === "CMDTY" || secTypeRaw === "FUT"
+        ? secTypeRaw : "STK";
+    const effectiveConid = String(conid ?? currentConid ?? normalized);
+    const futuresMetadata = secType === "FUT"
+      ? this.options.futuresContracts.get(effectiveConid) : undefined;
+    const futuresSpec = futuresMetadata
+      ? requireFuturesSpec(this.options.futuresSpecs, futuresMetadata.tradingClass) : undefined;
 
     return {
       symbol: normalized,
-      conid: String(conid ?? latestConid ?? normalized),
+      conid: effectiveConid,
       secType,
-      currency: this.currencyForSymbol(normalized),
+      currency: futuresSpec?.currency ?? this.currencyForSymbol(normalized),
+      localSymbol: futuresMetadata?.localSymbol,
+      tradingClass: futuresMetadata?.tradingClass,
+      minTick: futuresSpec?.tickSize,
       source: "override_fallback",
       resolvedAt: this.currentTime ?? new Date(),
     };
@@ -709,7 +860,7 @@ export class BacktestSimulator {
         continue;
       }
 
-      if (isOrderTouched(pending.order, candle)) {
+      if (this.isOrderTouchedForCandle(pending.order, candle)) {
         this.recordDiagnostic(pending.order, "filled", "entry_filled");
         await this.fillOrder(pending, candle);
         continue;
@@ -732,20 +883,48 @@ export class BacktestSimulator {
     this.pendingOrders.push(...remaining);
   }
 
+  private futuresSpecForConid(conid: string | undefined): FuturesContractSpec | undefined {
+    if (!conid) return undefined;
+    const metadata = this.options.futuresContracts.get(conid);
+    return metadata ? requireFuturesSpec(this.options.futuresSpecs, metadata.tradingClass) : undefined;
+  }
+
+  private isOrderTouchedForCandle(order: ProposedOrder, candle: Candle): boolean {
+    const spec = this.isFuturesSymbol(order.instrument)
+      ? this.futuresSpecForConid(order.conid ?? candle.conid) : undefined;
+    if (!spec || order.orderType === "MKT") return isOrderTouched(order, candle);
+    if (!Number.isFinite(order.entry)) return false;
+    const instruction = order.orderType === "STP" ? "stop" : "limit";
+    const normalized = normalizeInstructionPrice(Number(order.entry), spec.tickSize, order.side as "BUY" | "SELL", instruction);
+    return order.orderType === "STP"
+      ? order.side === "BUY" ? candle.high >= normalized : candle.low <= normalized
+      : order.side === "BUY" ? candle.low <= normalized : candle.high >= normalized;
+  }
+
   private async fillOrder(
     pending: PendingOrder,
     candle: Candle,
   ): Promise<void> {
     const order = pending.order;
     const symbol = order.instrument.toUpperCase();
-    const fillPrice = Number(order.entry ?? candle.open);
+    const futuresSpec = this.isFuturesSymbol(symbol)
+      ? this.futuresSpecForConid(order.conid ?? candle.conid) : undefined;
+    if (futuresSpec) assertWholeContracts(order.quantity);
+    const rawReference = futuresSpec && order.orderType === "MKT"
+      ? candle.open
+      : Number(order.entry ?? candle.open);
+    const normalizedReference = futuresSpec && order.orderType !== "MKT"
+      ? normalizeInstructionPrice(rawReference, futuresSpec.tickSize, order.side as "BUY" | "SELL", order.orderType === "STP" ? "stop" : "limit")
+      : rawReference;
+    const entryReferencePrice = futuresSpec && order.orderType === "STP"
+      ? order.side === "BUY"
+        ? Math.max(normalizedReference, candle.open)
+        : Math.min(normalizedReference, candle.open)
+      : normalizedReference;
+    const fillPrice = futuresSpec && order.orderType !== "LMT"
+      ? applyAdverseSlippage(entryReferencePrice, order.side as "BUY" | "SELL", futuresSpec)
+      : entryReferencePrice;
     const existing = this.positions.get(symbol);
-
-    await this.repo.updateOrderStatus(
-      pending.id,
-      "FILLED",
-      "backtest_entry_filled",
-    );
 
     if (order.positionEffect === "CLOSE_OR_REDUCE") {
       if (existing) {
@@ -755,13 +934,22 @@ export class BacktestSimulator {
           candle.ts,
           "managed_exit",
           pending.id,
+          entryReferencePrice,
+          candle.conid,
         );
       }
+      await this.repo.updateOrderStatus(
+        pending.id,
+        "FILLED",
+        "backtest_entry_filled",
+      );
       return;
     }
 
     const qty = signedQuantity(order.side, order.quantity);
     if (!existing || Math.sign(existing.quantity) === Math.sign(qty)) {
+      if (futuresSpec && existing)
+        throw new Error("Futures pyramiding is not supported by execution model pr15.5b-v1");
       const fxToBase = this.fxToBaseForSymbol(symbol, candle.ts);
       if (fxToBase === undefined)
         throw new Error(
@@ -789,6 +977,12 @@ export class BacktestSimulator {
             (oldLocalNotional + newLocalNotional)
           : fxToBase;
 
+      await this.repo.updateOrderStatus(
+        pending.id,
+        "FILLED",
+        "backtest_entry_filled",
+      );
+
       this.positions.set(symbol, {
         symbol: order.instrument,
         conid: order.conid,
@@ -797,11 +991,14 @@ export class BacktestSimulator {
           ? existing.originalQuantityAbs + Math.abs(qty)
           : Math.abs(qty),
         averageCost,
-        stop: order.stop,
-        initialStop: existing?.initialStop ?? order.stop,
-        takeProfit: order.takeProfit,
+        stop: futuresSpec && order.stop !== undefined
+          ? normalizeInstructionPrice(order.stop, futuresSpec.tickSize, order.side === "BUY" ? "SELL" : "BUY", "stop") : order.stop,
+        initialStop: existing?.initialStop ?? (futuresSpec && order.stop !== undefined
+          ? normalizeInstructionPrice(order.stop, futuresSpec.tickSize, order.side === "BUY" ? "SELL" : "BUY", "stop") : order.stop),
+        takeProfit: futuresSpec && order.takeProfit !== undefined
+          ? normalizeInstructionPrice(order.takeProfit, futuresSpec.tickSize, order.side === "BUY" ? "SELL" : "BUY", "limit") : order.takeProfit,
         pendingPartials:
-          existing?.pendingPartials ?? this.buildPendingPartials(order),
+          existing?.pendingPartials ?? this.buildPendingPartials(order, futuresSpec),
         trailingStopPct: existing?.trailingStopPct ?? order.trailingStopPct,
         trailingStopActivationR:
           existing?.trailingStopActivationR ?? order.trailingStopActivationR,
@@ -836,6 +1033,9 @@ export class BacktestSimulator {
         side: qty < 0 ? "SELL" : "BUY",
         priceMultiplier,
         fxToBaseAtEntry,
+        entryReferencePrice,
+        entrySlippage: Math.abs(fillPrice - entryReferencePrice),
+        futuresSpec,
       });
       return;
     }
@@ -846,14 +1046,39 @@ export class BacktestSimulator {
       candle.ts,
       "opposite_signal",
       pending.id,
+      entryReferencePrice,
+      candle.conid,
+    );
+    await this.repo.updateOrderStatus(
+      pending.id,
+      "FILLED",
+      "backtest_entry_filled",
     );
   }
 
   private async processBracketExit(candle: Candle): Promise<void> {
     const position = this.positions.get(candle.symbol.toUpperCase());
-    if (!position || position.entryAt.getTime() >= candle.ts.getTime()) return;
+    if (!position) return;
 
     const isLong = position.quantity > 0;
+    const stopTouchedAtOpen = position.stop !== undefined
+      ? isLong ? candle.low <= position.stop : candle.high >= position.stop
+      : false;
+    if (stopTouchedAtOpen) {
+      const exitSide = isLong ? "SELL" : "BUY";
+      const exitReference = position.futuresSpec
+        ? stopExitReference(exitSide, Number(position.stop), candle.open, position.futuresSpec.tickSize)
+        : Number(position.stop);
+      const exitFill = position.futuresSpec
+        ? applyAdverseSlippage(exitReference, exitSide, position.futuresSpec)
+        : exitReference;
+      await this.closePosition(position, exitFill, candle.ts, "stop", position.orderId, exitReference, candle.conid);
+      return;
+    }
+
+    // On an entry candle only an adverse protective stop is creditable from
+    // OHLC. Favorable targets and stop ratchets wait for the next candle.
+    if (position.entryAt.getTime() === candle.ts.getTime()) return;
 
     // Move stop to breakeven (entry) once price has travelled 1R in our favor.
     // Per-strategy opt-in: globally enabling BE hurt 3/4 strategies (run #9).
@@ -927,33 +1152,16 @@ export class BacktestSimulator {
         if (!reached) continue;
         await this.closePartialPosition(position, partial, candle.ts);
         // If the partial close drained the position, stop processing.
-        if (Math.abs(position.quantity) < 1) return;
+        if (!this.positions.has(position.symbol.toUpperCase())) return;
       }
     }
 
-    const stopTouched =
-      position.stop !== undefined
-        ? isLong
-          ? candle.low <= position.stop
-          : candle.high >= position.stop
-        : false;
     const takeProfitTouched =
       position.takeProfit !== undefined
         ? isLong
           ? candle.high >= position.takeProfit
           : candle.low <= position.takeProfit
         : false;
-
-    if (stopTouched) {
-      await this.closePosition(
-        position,
-        Number(position.stop),
-        candle.ts,
-        "stop",
-        position.orderId,
-      );
-      return;
-    }
 
     if (takeProfitTouched) {
       await this.closePosition(
@@ -1009,7 +1217,18 @@ export class BacktestSimulator {
 
         if (position.trailActivated !== false) {
           const trailedStop = position.peakPrice * (1 - pct);
-          position.stop = Math.max(position.stop ?? -Infinity, trailedStop);
+          const normalizedTrailedStop = position.futuresSpec
+            ? normalizeInstructionPrice(
+                trailedStop,
+                position.futuresSpec.tickSize,
+                "SELL",
+                "stop",
+              )
+            : trailedStop;
+          position.stop = Math.max(
+            position.stop ?? -Infinity,
+            normalizedTrailedStop,
+          );
         }
       } else {
         position.troughPrice = Math.min(
@@ -1040,7 +1259,18 @@ export class BacktestSimulator {
 
         if (position.trailActivated !== false) {
           const trailedStop = position.troughPrice * (1 + pct);
-          position.stop = Math.min(position.stop ?? Infinity, trailedStop);
+          const normalizedTrailedStop = position.futuresSpec
+            ? normalizeInstructionPrice(
+                trailedStop,
+                position.futuresSpec.tickSize,
+                "BUY",
+                "stop",
+              )
+            : trailedStop;
+          position.stop = Math.min(
+            position.stop ?? Infinity,
+            normalizedTrailedStop,
+          );
         }
       }
     }
@@ -1048,6 +1278,7 @@ export class BacktestSimulator {
 
   private buildPendingPartials(
     order: ProposedOrder,
+    futuresSpec?: FuturesContractSpec,
   ): PendingPartial[] | undefined {
     const levels = order.partialTakeProfits;
     if (!levels || levels.length === 0) return undefined;
@@ -1057,7 +1288,9 @@ export class BacktestSimulator {
     );
     return sorted.map((level) => ({
       fraction: level.fraction,
-      price: level.price,
+      price: futuresSpec
+        ? normalizeInstructionPrice(level.price, futuresSpec.tickSize, order.side === "BUY" ? "SELL" : "BUY", "limit")
+        : level.price,
       executed: false,
     }));
   }
@@ -1102,10 +1335,16 @@ export class BacktestSimulator {
           closeQtyAbs *
           priceMultiplier *
           exitFxToBase;
-    const commission =
-      this.commissionForSide(closeQtyAbs, entryNotional) +
-      this.commissionForSide(closeQtyAbs, exitNotional);
-    const netPnl = grossPnl - commission;
+    const futuresPnl = position.futuresSpec
+      ? futuresRoundTripPnl({ direction: position.quantity > 0 ? 1 : -1,
+          quantity: closeQtyAbs, entryFillPrice: position.averageCost,
+          exitFillPrice: exitPrice, fxRate: exitFxToBase, spec: position.futuresSpec })
+      : undefined;
+    const effectiveGrossPnl = futuresPnl?.grossPnl ?? grossPnl;
+    const commission = futuresPnl?.commission ??
+      (this.commissionForSide(closeQtyAbs, entryNotional) +
+      this.commissionForSide(closeQtyAbs, exitNotional));
+    const netPnl = effectiveGrossPnl - commission;
     const pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
 
     await this.repo.insertFill({
@@ -1123,16 +1362,20 @@ export class BacktestSimulator {
       exitPrice,
       entryAt: position.entryAt,
       exitAt,
-      grossPnl,
+      grossPnl: effectiveGrossPnl,
       commission,
       netPnl,
       pnlPct,
       exitReason: "partial_take_profit",
+      ...(position.futuresSpec ? this.futuresAudit(position, exitPrice, exitPrice, 0, closeQtyAbs, position.conid) : {}),
     });
 
     // Decrement position size (preserving direction sign).
     const direction = position.quantity > 0 ? 1 : -1;
     position.quantity = direction * (remainingAbs - closeQtyAbs);
+    if (position.quantity === 0) {
+      this.positions.delete(position.symbol.toUpperCase());
+    }
 
     this.closedTrades.push({
       instrument: position.symbol,
@@ -1158,6 +1401,8 @@ export class BacktestSimulator {
     exitAt: Date,
     exitReason: string,
     orderId: number,
+    exitReferencePrice = exitPrice,
+    exitConid = position.conid,
   ): Promise<void> {
     const quantityAbs = Math.abs(position.quantity);
     if (!(quantityAbs > 0)) return;
@@ -1187,10 +1432,16 @@ export class BacktestSimulator {
           quantityAbs *
           priceMultiplier *
           exitFxToBase;
-    const commission =
-      this.commissionForSide(quantityAbs, entryNotional) +
-      this.commissionForSide(quantityAbs, exitNotional);
-    const netPnl = grossPnl - commission;
+    const futuresPnl = position.futuresSpec
+      ? futuresRoundTripPnl({ direction: position.quantity > 0 ? 1 : -1,
+          quantity: quantityAbs, entryFillPrice: position.averageCost,
+          exitFillPrice: exitPrice, fxRate: exitFxToBase, spec: position.futuresSpec })
+      : undefined;
+    const effectiveGrossPnl = futuresPnl?.grossPnl ?? grossPnl;
+    const commission = futuresPnl?.commission ??
+      (this.commissionForSide(quantityAbs, entryNotional) +
+      this.commissionForSide(quantityAbs, exitNotional));
+    const netPnl = effectiveGrossPnl - commission;
     const pnlPct = entryNotional > 0 ? (netPnl / entryNotional) * 100 : 0;
 
     await this.repo.insertFill({
@@ -1208,11 +1459,15 @@ export class BacktestSimulator {
       exitPrice,
       entryAt: position.entryAt,
       exitAt,
-      grossPnl,
+      grossPnl: effectiveGrossPnl,
       commission,
       netPnl,
       pnlPct,
       exitReason,
+      ...(position.futuresSpec ? this.futuresAudit(
+        position, exitReferencePrice, exitPrice,
+        Math.abs(exitPrice - exitReferencePrice), quantityAbs, exitConid,
+      ) : {}),
     });
 
     this.positions.delete(position.symbol.toUpperCase());
@@ -1234,6 +1489,35 @@ export class BacktestSimulator {
     );
   }
 
+  private futuresAudit(
+    position: Position,
+    exitReferencePrice: number,
+    exitFillPrice: number,
+    exitSlippage: number,
+    quantity: number,
+    exitConid: string | undefined,
+  ): Partial<BacktestFillRecord> {
+    const spec = position.futuresSpec!;
+    const slippageCost = (position.entrySlippage + exitSlippage) * quantity *
+      spec.multiplier * position.fxToBaseAtEntry;
+    return {
+      entryReferencePrice: position.entryReferencePrice,
+      entryFillPrice: position.averageCost,
+      exitReferencePrice,
+      exitFillPrice,
+      multiplier: spec.multiplier,
+      tickSize: spec.tickSize,
+      entrySlippage: position.entrySlippage,
+      exitSlippage,
+      slippageCost,
+      commissionPerContractSide: spec.commissionPerContractPerSide,
+      entryConid: position.conid,
+      exitConid,
+      executionModelVersion: FUTURES_EXECUTION_MODEL_VERSION,
+      calendarVersion: spec.calendarVersion,
+    };
+  }
+
   private async closeOpenPositionsAtDatasetEnd(): Promise<void> {
     for (const position of Array.from(this.positions.values())) {
       const price =
@@ -1242,12 +1526,21 @@ export class BacktestSimulator {
         this.latestCandleTs(position.symbol.toUpperCase()) ??
         this.currentTime ??
         new Date();
+      const metadata = position.conid ? this.options.futuresContracts.get(position.conid) : undefined;
+      const reason = metadata && this.data.dataset.dateTo
+        && new Date(this.data.dataset.dateTo).getTime() >= metadata.lastTradeAt.getTime()
+        ? "expiry" : "dataset_end";
+      const exitSide = position.quantity > 0 ? "SELL" : "BUY";
+      const exitPrice = position.futuresSpec
+        ? applyAdverseSlippage(price, exitSide, position.futuresSpec) : price;
       await this.closePosition(
         position,
-        price,
+        exitPrice,
         lastTs,
-        "dataset_end",
+        reason,
         position.orderId,
+        price,
+        position.conid,
       );
     }
   }

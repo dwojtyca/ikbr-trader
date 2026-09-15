@@ -79,6 +79,28 @@ export interface BacktestFillRecord {
   netPnl: number;
   pnlPct: number;
   exitReason: string;
+  entryReferencePrice?: number;
+  entryFillPrice?: number;
+  exitReferencePrice?: number;
+  exitFillPrice?: number;
+  multiplier?: number;
+  tickSize?: number;
+  entrySlippage?: number;
+  exitSlippage?: number;
+  slippageCost?: number;
+  commissionPerContractSide?: number;
+  entryConid?: string;
+  exitConid?: string;
+  executionModelVersion?: string;
+  calendarVersion?: string;
+}
+
+export interface BacktestFuturesContractMetadata {
+  conid: string;
+  symbol: string;
+  localSymbol: string;
+  tradingClass: string;
+  lastTradeAt: Date;
 }
 
 export interface BacktestSignalDiagnosticRecord {

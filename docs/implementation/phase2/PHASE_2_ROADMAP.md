@@ -26,8 +26,9 @@
 | PR15.4    | Strategy attribution + fail-closed direction gate; loop-owned `StrategyPortfolioManager` + attribution chain; typed `SignalBlocker`; exact-`conId` `StrategyContextLoader`; `ExecutionRuntime.executePrepared` four-stage validation | **shipped `53213fe`**; independent review and PR15.4.1 stabilization complete (see [PR15_4_PLAN.md](PR15_4_PLAN.md), [PR15_4_REPORT.md](PR15_4_REPORT.md), and [PR15_4_1_REPORT.md](PR15_4_1_REPORT.md)) |
 | PR15.4.1  | Clean-checkout CI, direct dependency declaration, trading-loop error redaction, and vulnerable transitive dependency updates | **shipped `8a2f923`**; CI run `34979744641` green |
 | PR15.5    | Controlled entry-only Paper E2E unlock for one instrument | **blocked**; ES compatibility evidence is not credible yet |
-| PR15.5A   | Static ES compatibility prerequisite closure, profile correction, and contract tests | **implemented locally; terminal `INCONCLUSIVE`; independent review approved**, awaiting commit/push/green CI |
-| PR15.5B   | Futures backtest execution and economics model | **next stage; plan required and not yet authorized** |
+| PR15.5A   | Static ES compatibility prerequisite closure, profile correction, and contract tests | **shipped `70f7f9b`; terminal `INCONCLUSIVE`; CI run `34986037525` green** |
+| PR15.5B   | Futures backtest execution and economics model | **complete locally; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
+| PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **next stage after PR15.5B is accepted; separate plan and approval required** |
 
 ## Ordering rationale
 

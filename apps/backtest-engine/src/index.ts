@@ -118,6 +118,17 @@ function parseDateEnd(value: string): Date {
 }
 
 async function simulatorOptions() {
+  const futuresContracts = await repo.getFuturesContractMetadata();
+  const priceMultiplierBySymbol = { ...config.priceMultiplierOverrides };
+  const currencyBySymbol = { ...config.currencyBySymbol };
+  for (const metadata of futuresContracts.values()) {
+    const spec = config.futuresSpecs.get(metadata.tradingClass);
+    if (spec) {
+      const symbol = metadata.symbol.toUpperCase();
+      priceMultiplierBySymbol[symbol] = spec.multiplier;
+      currencyBySymbol[symbol] = spec.currency;
+    }
+  }
   return {
     minCandles: config.SIGNAL_MIN_CANDLES,
     maxSpreadBps: config.SIGNAL_MAX_SPREAD_BPS,
@@ -133,9 +144,9 @@ async function simulatorOptions() {
       CMDTY: config.SIGNAL_MIN_STOP_BPS_CMDTY,
     },
     baseCurrency: config.IB_CURRENCY,
-    currencyBySymbol: config.currencyBySymbol,
+    currencyBySymbol,
     secTypeBySymbol: await repo.getSecTypeBySymbol(),
-    priceMultiplierBySymbol: config.priceMultiplierOverrides,
+    priceMultiplierBySymbol,
     strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
     commissionBps: config.BACKTEST_COMMISSION_BPS,
     commissionPerShare: config.BACKTEST_COMMISSION_PER_SHARE,
@@ -143,6 +154,9 @@ async function simulatorOptions() {
     commissionPassthroughBps: config.BACKTEST_COMMISSION_PASSTHROUGH_BPS,
     syntheticSpreadBps: config.BACKTEST_SYNTHETIC_SPREAD_BPS,
     orderTtlCandles: config.BACKTEST_ORDER_TTL_CANDLES,
+    futuresSpecs: config.futuresSpecs,
+    futuresContracts,
+    futuresCalendars: config.futuresCalendars,
     riskLimits: {
       accountEquity: config.SIGNAL_ACCOUNT_EQUITY,
       maxRiskPerTradePct: config.SIGNAL_MAX_RISK_PER_TRADE_PCT,
@@ -158,7 +172,10 @@ function requiredFxQuoteCurrencies(): string[] {
   const baseCurrency = config.IB_CURRENCY.trim().toUpperCase();
   return Array.from(
     new Set(
-      Object.values(config.currencyBySymbol)
+      [
+        ...Object.values(config.currencyBySymbol),
+        ...[...config.futuresSpecs.values()].map((spec) => spec.currency),
+      ]
         .map((currency) => currency.trim().toUpperCase())
         .filter((currency) => currency && currency !== baseCurrency),
     ),
@@ -683,6 +700,14 @@ app.post("/backtest/run", async (request, reply) => {
       mode,
       ...options,
       fractionalSymbols: Array.from(config.fractionalSymbols),
+      futuresSpecs: Object.fromEntries(options.futuresSpecs),
+      futuresContracts: Object.fromEntries(
+        [...options.futuresContracts].map(([conid, metadata]) => [
+          conid,
+          { ...metadata, lastTradeAt: metadata.lastTradeAt.toISOString() },
+        ]),
+      ),
+      futuresCalendars: Object.fromEntries(options.futuresCalendars),
     },
     mode,
   );

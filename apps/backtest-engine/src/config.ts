@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { parseFuturesSpecsJson } from "./futures-model.js";
+import { parseCmeCalendarsJson } from "./cme-session-calendar.js";
 
 dotenv.config();
 
@@ -76,6 +78,8 @@ const schema = z.object({
   BACKTEST_COMMISSION_PASSTHROUGH_BPS: z.coerce.number().min(0).default(1),
   BACKTEST_SYNTHETIC_SPREAD_BPS: z.coerce.number().min(0).default(2),
   BACKTEST_ORDER_TTL_CANDLES: z.coerce.number().int().min(1).default(2),
+  BACKTEST_FUTURES_SPECS_JSON: z.string().default(""),
+  BACKTEST_FUTURES_CALENDARS_JSON: z.string().default(""),
   BACKTEST_STRATEGY_LAB_CONCURRENCY: z.coerce
     .number()
     .int()
@@ -215,6 +219,8 @@ export const config = {
   priceMultiplierOverrides: parsePriceMultiplierOverrides(
     env.SIGNAL_PRICE_MULTIPLIER_OVERRIDES,
   ),
+  futuresSpecs: parseFuturesSpecsJson(env.BACKTEST_FUTURES_SPECS_JSON),
+  futuresCalendars: parseCmeCalendarsJson(env.BACKTEST_FUTURES_CALENDARS_JSON),
   fractionalSymbols: new Set(
     env.SIGNAL_FRACTIONAL_SYMBOLS.split(",")
       .map((s) => s.trim().toUpperCase())
