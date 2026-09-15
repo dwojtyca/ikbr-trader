@@ -34,6 +34,7 @@ import {
   resolveInstrumentPolicy,
 } from "./trading-loop-service.js";
 import type { TradingExposure, TradingExposureReader } from "./types.js";
+import { ReconciliationReader } from "./reconciliation-reader.js";
 import { StrategyPortfolioManager } from "../../portfolio/strategy-portfolio-manager.js";
 import type {
   Strategy,
@@ -1059,6 +1060,7 @@ function makeAttributionAwareMarketDataRuntime(
     overrideMetadataStrategyId?: string;
     overrideDecisionAction?: "LONG" | "SHORT" | "HOLD";
     ticket?: ExecutionTicket;
+    throwErr?: unknown;
   } = {},
 ): RichMarketDataRuntime {
   const calls: RichMarketDataRuntime["calls"] = [];
@@ -1070,6 +1072,7 @@ function makeAttributionAwareMarketDataRuntime(
       attribution?: SignalAttributionContext,
     ): Promise<DryRunResult> {
       calls.push({ instrumentId, policy, attribution });
+      if (behavior.throwErr !== undefined) throw behavior.throwErr;
       const snapshot = makeSnapshot(
         instrumentId,
         behavior.priceObservedAtIso === undefined
@@ -1187,6 +1190,8 @@ function makeIntegrationSvc(
     loaderRepo?: LoaderRepoSpy;
     strategies?: readonly Strategy[];
     exposure?: TradingExposure;
+    exposureReader?: TradingExposureReader;
+    reconciliationReader?: ReconciliationReader;
     runtimeBehavior?: Parameters<
       typeof makeAttributionAwareMarketDataRuntime
     >[0];
@@ -1218,7 +1223,8 @@ function makeIntegrationSvc(
   const executionRuntime = makeExecutionRuntime(
     overrides.runtimeOutcome ?? SUBMITTED_OUTCOME,
   );
-  const exposureReader = makeExposureReader(overrides.exposure);
+  const exposureReader =
+    overrides.exposureReader ?? makeExposureReader(overrides.exposure);
   const svc = new TradingLoopService({
     config: makeConfig(),
     registry: makeRegistry(instruments),
@@ -1226,6 +1232,9 @@ function makeIntegrationSvc(
     marketDataRuntime: marketDataRuntime as unknown as MarketDataRuntime,
     executionRuntime,
     exposureReader,
+    ...(overrides.reconciliationReader !== undefined
+      ? { reconciliationReader: overrides.reconciliationReader }
+      : {}),
     portfolioManager: new StrategyPortfolioManager(strategies),
     repo: loaderRepo,
     strategyCooldownMs: overrides.strategyCooldownMs ?? 0,
@@ -1736,6 +1745,112 @@ describe("TradingLoopService — PR15.4 §14.7 integration", () => {
     assert.equal(o.reason, "STRATEGY_ATTRIBUTION_MISMATCH");
     assert.notEqual(o.idempotencyKey, "");
     assert.ok(o.runtime);
+  });
+});
+
+describe("TradingLoopService — PR15.4.1 operator-safe exception outcomes", () => {
+  const assertRedacted = (
+    outcome: { readonly message?: string },
+    expected: string,
+  ): void => {
+    assert.equal(outcome.message, expected);
+    assert.doesNotMatch(outcome.message ?? "", /SECRET-DETAIL/);
+  };
+
+  it("redacts an exposure-reader exception", async () => {
+    const exposureReader: TradingExposureReader = {
+      async readExposure() {
+        throw new Error("database DSN SECRET-DETAIL-EXPOSURE");
+      },
+      async probeReady() {
+        return { ok: true };
+      },
+    };
+    const env = makeIntegrationSvc({ exposureReader });
+
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+
+    assert.equal(outcome.kind, "SKIPPED");
+    if (outcome.kind !== "SKIPPED") return;
+    assert.equal(outcome.reason, "EXPOSURE_READ_FAILED");
+    assertRedacted(outcome, "exposure read failed; check logs");
+  });
+
+  it("redacts a reconciliation exception in cycle and status outcomes", async () => {
+    class ThrowingReconciliationReader extends ReconciliationReader {
+      override async checkInstrument(): Promise<never> {
+        throw new Error("broker response SECRET-DETAIL-RECONCILIATION");
+      }
+    }
+    const reconciliationReader = new ThrowingReconciliationReader({
+      baseUrl: "http://execution.test",
+      bearerToken: "test-token",
+    });
+    const env = makeIntegrationSvc({ reconciliationReader });
+
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+
+    assert.equal(outcome.kind, "SKIPPED");
+    if (outcome.kind !== "SKIPPED") return;
+    assert.equal(outcome.reason, "RECONCILIATION_UNAVAILABLE");
+    assertRedacted(outcome, "reconciliation pre-check failed; check logs");
+
+    const statusOutcome = env.svc.status().lastOutcomes[AAPL_INSTRUMENT.id];
+    assert.ok(statusOutcome);
+    assert.equal(statusOutcome.outcome.kind, "SKIPPED");
+    assertRedacted(
+      statusOutcome.outcome,
+      "reconciliation pre-check failed; check logs",
+    );
+  });
+
+  it("redacts a market-data dry-run exception", async () => {
+    const env = makeIntegrationSvc({
+      runtimeBehavior: {
+        throwErr: new Error("upstream response SECRET-DETAIL-DRY-RUN"),
+      },
+    });
+
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+
+    assert.equal(outcome.kind, "ERROR");
+    assertRedacted(outcome, "market-data dry run failed; check logs");
+  });
+
+  it("redacts an executePrepared exception", async () => {
+    const env = makeIntegrationSvc({
+      runtimeOutcome: async () => {
+        throw new Error("execution token SECRET-DETAIL-EXECUTION");
+      },
+    });
+
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+
+    assert.equal(outcome.kind, "ERROR");
+    assertRedacted(outcome, "prepared execution failed; check logs");
+  });
+
+  it("redacts an unexpected per-instrument exception", async () => {
+    let clockCalls = 0;
+    const env = makeIntegrationSvc({
+      clock: () => {
+        clockCalls += 1;
+        if (clockCalls === 2) {
+          throw new Error("clock payload SECRET-DETAIL-INSTRUMENT");
+        }
+        return new Date(NOW_ISO);
+      },
+    });
+
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+
+    assert.equal(outcome.kind, "ERROR");
+    assertRedacted(outcome, "unexpected instrument run failure; check logs");
   });
 });
 

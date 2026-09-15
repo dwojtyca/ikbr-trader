@@ -468,7 +468,7 @@ export class TradingLoopService {
               component: "trading-loop",
               cycleId,
               instrumentId: instrument.id,
-              err: error instanceof Error ? error.message : String(error),
+              err: error,
             },
             "trading-loop: unexpected instrument run failure",
           );
@@ -481,7 +481,7 @@ export class TradingLoopService {
             outcome: {
               kind: "ERROR",
               instrumentId: instrument.id,
-              message: error instanceof Error ? error.message : String(error),
+              message: "unexpected instrument run failure; check logs",
             },
           });
         })
@@ -565,11 +565,20 @@ export class TradingLoopService {
           currency: instrument.currency,
         });
       } catch (err) {
+        this.#logger.error(
+          {
+            component: "trading-loop",
+            cycleId,
+            instrumentId: instrument.id,
+            err,
+          },
+          "trading-loop: reconciliation pre-check failed",
+        );
         return this.#finalize(cycleId, instrument.id, startedAt, {
           kind: "SKIPPED",
           instrumentId: instrument.id,
           reason: "RECONCILIATION_UNAVAILABLE",
-          message: err instanceof Error ? err.message : String(err),
+          message: "reconciliation pre-check failed; check logs",
         });
       }
       if (reconciliation.kind !== "pass") {
@@ -601,11 +610,20 @@ export class TradingLoopService {
         brokerSymbol: instrument.brokerSymbol,
       });
     } catch (error) {
+      this.#logger.error(
+        {
+          component: "trading-loop",
+          cycleId,
+          instrumentId: instrument.id,
+          err: error,
+        },
+        "trading-loop: exposure read failed",
+      );
       return this.#finalize(cycleId, instrument.id, startedAt, {
         kind: "SKIPPED",
         instrumentId: instrument.id,
         reason: "EXPOSURE_READ_FAILED",
-        message: error instanceof Error ? error.message : String(error),
+        message: "exposure read failed; check logs",
       });
     }
     if (
@@ -859,10 +877,19 @@ export class TradingLoopService {
         attribution,
       );
     } catch (error) {
+      this.#logger.error(
+        {
+          component: "trading-loop",
+          cycleId,
+          instrumentId: instrument.id,
+          err: error,
+        },
+        "trading-loop: market-data dry run failed",
+      );
       return this.#finalize(cycleId, instrument.id, startedAt, {
         kind: "ERROR",
         instrumentId: instrument.id,
-        message: error instanceof Error ? error.message : String(error),
+        message: "market-data dry run failed; check logs",
       });
     }
 
@@ -963,10 +990,19 @@ export class TradingLoopService {
         ...(bound ? { bound } : {}),
       });
     } catch (error) {
+      this.#logger.error(
+        {
+          component: "trading-loop",
+          cycleId,
+          instrumentId: instrument.id,
+          err: error,
+        },
+        "trading-loop: prepared execution failed",
+      );
       return this.#finalize(cycleId, instrument.id, startedAt, {
         kind: "ERROR",
         instrumentId: instrument.id,
-        message: error instanceof Error ? error.message : String(error),
+        message: "prepared execution failed; check logs",
       });
     }
 

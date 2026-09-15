@@ -1,11 +1,12 @@
 # PR15.4 — Strategy Attribution & Direction Gate — REPORT
 
-**Status:** implementation complete, all §14 tests shipped, all §16
-acceptance criteria met; awaiting independent code review.
+**Status:** committed as `53213fe`; independent review completed on
+2026-09-15. Review findings are addressed locally by PR15.4.1 and await
+commit/push/green CI.
 
 **Plan:** `docs/implementation/phase2/PR15_4_PLAN.md` (r15, approved).
 
-**No commit, no push.**
+**Implementation commit:** `53213fe`.
 
 ---
 
