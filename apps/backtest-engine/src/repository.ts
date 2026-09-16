@@ -12,6 +12,10 @@ import type {
   BacktestSignalDiagnosticRecord,
   LoadedBacktestData,
 } from "./types.js";
+import {
+  databaseNameFromUrl,
+  RESEARCH_DATABASE_NAME,
+} from "./research-dataset-schema.js";
 
 function mapDataset(row: any): BacktestDataset {
   return {
@@ -130,9 +134,17 @@ export async function ensureBacktestDatabase(
 
 export class BacktestRepository {
   private readonly pool: Pool;
+  private readonly protectedResearchDatabase: boolean;
 
   constructor(connectionString: string) {
-    this.pool = new Pool({ connectionString });
+    this.pool = new Pool({ connectionString, options: "-c search_path=public" });
+    this.protectedResearchDatabase =
+      databaseNameFromUrl(connectionString) === RESEARCH_DATABASE_NAME;
+  }
+
+  private assertLegacyDatasetWriteAllowed(): void {
+    if (this.protectedResearchDatabase)
+      throw new Error("Legacy dataset writes are forbidden on the PR15.5C research database");
   }
 
   async close(): Promise<void> {
@@ -379,6 +391,7 @@ export class BacktestRepository {
     dateTo: Date,
     symbols: string[],
   ): Promise<BacktestDataset> {
+    this.assertLegacyDatasetWriteAllowed();
     await this.pool.query(`
       TRUNCATE backtest_signal_diagnostics, backtest_fills, backtest_orders, backtest_strategy_state, backtest_runs,
                backtest_candles_1m, backtest_candles_5m, backtest_candles_1h,
@@ -400,6 +413,7 @@ export class BacktestRepository {
     status: "ready" | "failed",
     error?: string,
   ): Promise<BacktestDataset> {
+    this.assertLegacyDatasetWriteAllowed();
     const countResult = await this.pool.query(
       "SELECT COUNT(*) AS count FROM backtest_candles_1m",
     );
@@ -419,6 +433,7 @@ export class BacktestRepository {
   }
 
   async resumeDataset(datasetId: number): Promise<BacktestDataset> {
+    this.assertLegacyDatasetWriteAllowed();
     const countResult = await this.pool.query(
       "SELECT COUNT(*) AS count FROM backtest_candles_1m",
     );
@@ -448,6 +463,7 @@ export class BacktestRepository {
   }
 
   async upsertInstrumentContract(contract: InstrumentContract): Promise<void> {
+    this.assertLegacyDatasetWriteAllowed();
     await this.pool.query(
       `
       INSERT INTO backtest_instrument_contracts (
@@ -523,6 +539,7 @@ export class BacktestRepository {
   }
 
   async upsertFuturesContractMetadata(metadata: BacktestFuturesContractMetadata): Promise<void> {
+    this.assertLegacyDatasetWriteAllowed();
     await this.pool.query(
       `INSERT INTO backtest_futures_contracts (conid, symbol, local_symbol, trading_class, last_trade_at)
        VALUES ($1,$2,$3,$4,$5)
@@ -535,6 +552,7 @@ export class BacktestRepository {
   }
 
   async insertCandles1m(candles: Candle[]): Promise<void> {
+    this.assertLegacyDatasetWriteAllowed();
     const chunkSize = 1000;
     for (let offset = 0; offset < candles.length; offset += chunkSize) {
       const chunk = candles.slice(offset, offset + chunkSize);
@@ -570,6 +588,7 @@ export class BacktestRepository {
   }
 
   async insertFxRates(rates: BacktestFxRate[]): Promise<void> {
+    this.assertLegacyDatasetWriteAllowed();
     if (rates.length === 0) return;
 
     const uniqueRates = Array.from(
@@ -639,6 +658,7 @@ export class BacktestRepository {
   }
 
   async rebuildAggregates(): Promise<void> {
+    this.assertLegacyDatasetWriteAllowed();
     await this.pool.query(
       "TRUNCATE backtest_candles_5m, backtest_candles_1h, backtest_candles_4h, backtest_candles_12h, backtest_candles_1d, backtest_candles_1w;",
     );
@@ -667,6 +687,7 @@ export class BacktestRepository {
     datasetId: number,
     symbols: string[],
   ): Promise<BacktestDataset | null> {
+    this.assertLegacyDatasetWriteAllowed();
     const normalized = Array.from(
       new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)),
     );
@@ -696,6 +717,7 @@ export class BacktestRepository {
   async refreshDatasetCandlesCount(
     datasetId: number,
   ): Promise<BacktestDataset | null> {
+    this.assertLegacyDatasetWriteAllowed();
     const countResult = await this.pool.query(
       "SELECT COUNT(*) AS count FROM backtest_candles_1m",
     );

@@ -11,11 +11,12 @@ import {
   BacktestSimulator,
   runParallelIsolatedStrategyBacktest,
 } from "./simulator.js";
+import { installProtectedResearchRouteGuard } from "./research-route-guard.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+installProtectedResearchRouteGuard(app, config.BACKTEST_POSTGRES_URL);
 let historyJob: Promise<void> | null = null;
 let runJob: Promise<void> | null = null;
-
 const CHUNK_MS = 5 * 24 * 60 * 60 * 1000;
 
 type HistoryProgressPhase = "fetch" | "resume" | "partial";

@@ -27,8 +27,8 @@
 | PR15.4.1  | Clean-checkout CI, direct dependency declaration, trading-loop error redaction, and vulnerable transitive dependency updates | **shipped `8a2f923`**; CI run `34979744641` green |
 | PR15.5    | Controlled entry-only Paper E2E unlock for one instrument | **blocked**; ES compatibility evidence is not credible yet |
 | PR15.5A   | Static ES compatibility prerequisite closure, profile correction, and contract tests | **shipped `70f7f9b`; terminal `INCONCLUSIVE`; CI run `34986037525` green** |
-| PR15.5B   | Futures backtest execution and economics model | **complete locally; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
-| PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **next stage after PR15.5B is accepted; separate plan and approval required** |
+| PR15.5B   | Futures backtest execution and economics model | **shipped `bcf0344`; CI run `34998202271` green; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
+| PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **complete locally; independent hostile review approved; data readiness `INCONCLUSIVE` because no approved real ES bundle is available; PR15.5D blocked** (see [PR15_5C_REPORT.md](PR15_5C_REPORT.md)) |
 
 ## Ordering rationale
 
