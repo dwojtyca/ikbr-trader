@@ -2,12 +2,14 @@ import Fastify from "fastify";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { config } from "./config.js";
-import { TwsClient } from "./tws-client.js";
+import { NativeFinalBarRequestError, TwsClient } from "./tws-client.js";
 import { MarketRepository } from "./db.js";
 import { CandleAggregator } from "./candle-aggregator.js";
 import { HigherTimeframeAggregator } from "./higher-timeframe-aggregator.js";
 import { InstrumentSubscription } from "./types.js";
 import { verifyBoundSubscriptions } from "./binding-verification.js";
+import { FuturesFinalBarCoordinator, isFuturesSubscription } from "./futures-final-bar.js";
+import { isCmeEquityIndexOpenMinuteV1 } from "@ikbr/shared";
 
 const TIMEFRAME_INTERVAL_MS: Record<
   import("@ikbr/shared").CandleTimeframe,
@@ -53,6 +55,11 @@ let bootstrapInFlight = false;
 async function flushBufferedCandles(): Promise<void> {
   const buffered = aggregator.flushAll();
   for (const candle of buffered) {
+    const subscription = activeSubscriptions.find((entry) => entry.conid === candle.conid);
+    if (isFuturesSubscription(subscription)) {
+      app.log.info({ conid: candle.conid, ts: candle.ts }, "discarded provisional FUT candle during shutdown");
+      continue;
+    }
     await repo.upsertCandle(candle);
   }
 
@@ -107,6 +114,27 @@ async function triggerSignalsForCandle(
   }
 }
 
+async function persistCanonicalCandle(oneMinuteCandle: import("@ikbr/shared").Candle): Promise<void> {
+  lastCandleAt = oneMinuteCandle.ts;
+  await repo.upsertCandle(oneMinuteCandle);
+  app.log.debug({ candle: oneMinuteCandle }, "persisted canonical candle 1m");
+  const higherCandles = higherTimeframeAggregator.ingest(oneMinuteCandle);
+  for (const higherCandle of higherCandles) {
+    await repo.upsertCandle(higherCandle);
+    app.log.debug({ candle: higherCandle }, `persisted candle ${higherCandle.timeframe}`);
+  }
+  void triggerSignalsForCandle(oneMinuteCandle.symbol, oneMinuteCandle.ts);
+}
+
+const finalBarCoordinator = new FuturesFinalBarCoordinator(
+  (subscription, minute) => twsClient.confirmFinalEsMinute(subscription, minute),
+  persistCanonicalCandle,
+  {
+    isOpenMinute: isCmeEquityIndexOpenMinuteV1,
+    isTerminalError: (error) => error instanceof NativeFinalBarRequestError && error.terminal,
+  },
+);
+
 const twsClient = new TwsClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -137,19 +165,10 @@ const twsClient = new TwsClient(
 
     const ready = aggregator.ingest(tick);
     for (const oneMinuteCandle of ready) {
-      lastCandleAt = oneMinuteCandle.ts;
-      await repo.upsertCandle(oneMinuteCandle);
-      app.log.debug({ candle: oneMinuteCandle }, "persisted candle 1m");
-      void triggerSignalsForCandle(oneMinuteCandle.symbol, oneMinuteCandle.ts);
-
-      const higherCandles = higherTimeframeAggregator.ingest(oneMinuteCandle);
-      for (const higherCandle of higherCandles) {
-        await repo.upsertCandle(higherCandle);
-        app.log.debug(
-          { candle: higherCandle },
-          `persisted candle ${higherCandle.timeframe}`,
-        );
-      }
+      const subscription = activeSubscriptions.find((entry) => entry.conid === oneMinuteCandle.conid);
+      const persisted = await finalBarCoordinator.route(oneMinuteCandle, subscription);
+      if (!persisted && isFuturesSubscription(subscription))
+        app.log.warn({ conid: oneMinuteCandle.conid, ts: oneMinuteCandle.ts }, "FUT candle remained provisional; no signal triggered");
     }
   },
   (line) => app.log.info(line),

@@ -63,7 +63,7 @@ function weekday(id: string): number {
   return new Date(`${id}T12:00:00Z`).getUTCDay();
 }
 
-function chicagoWallToUtc(id: string, time: string): Date {
+export function chicagoWallToUtc(id: string, time: string): Date {
   const [year, month, day] = id.split("-").map(Number);
   const [hour, minute] = time.split(":").map(Number);
   const desired = Date.UTC(year, month - 1, day, hour, minute);

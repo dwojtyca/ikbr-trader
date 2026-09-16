@@ -1,5 +1,12 @@
 import IB from "ib";
-import { Candle, CandleTimeframe, InstrumentContract } from "@ikbr/shared";
+import {
+  buildExactIbkrEsHistoricalContract,
+  formatIbUtcEndDateTime,
+  IBKR_ES_BAR_REQUEST,
+  Candle,
+  CandleTimeframe,
+  InstrumentContract,
+} from "@ikbr/shared";
 import {
   InstrumentSubscription,
   TickEvent,
@@ -42,6 +49,10 @@ export interface HistoricalBackfillResult {
   candles: Candle[];
 }
 
+export class NativeFinalBarRequestError extends Error {
+  constructor(message: string, readonly terminal: boolean) { super(message); }
+}
+
 function toNum(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
@@ -55,6 +66,14 @@ function toStr(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed || undefined;
+}
+
+function ibErrorMeta(codeOrMeta: unknown, legacyReqId?: number): { code?: number; reqId?: number } {
+  if (codeOrMeta && typeof codeOrMeta === "object") {
+    const value = codeOrMeta as { code?: unknown; id?: unknown };
+    return { code: toNum(value.code), reqId: toNum(value.id) };
+  }
+  return { code: toNum(codeOrMeta), reqId: legacyReqId };
 }
 
 function pickContract(details: ContractDetailsShape): ContractShape {
@@ -96,6 +115,13 @@ export interface AwaitExactlyOneContractDetailsInput {
   readonly contract: Record<string, unknown>;
   readonly label: string;
   readonly timeoutMs: number;
+}
+
+export interface TwsClientDependencies {
+  /** Test seam for the installed ib client without opening a broker socket. */
+  readonly ib?: any;
+  readonly now?: () => number;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
 /**
@@ -215,17 +241,21 @@ export class TwsClient {
   private nextReqId = 10_000;
   private readonly tickerStates = new Map<number, TickerState>();
   private readonly subscriptionsByConid = new Map<string, number>();
+  private readonly finalBarRequestTimes: number[] = [];
 
   constructor(
     private readonly config: TwsClientConfig,
     private readonly onTick: (tick: TickEvent) => Promise<void> | void,
     private readonly onLog: (line: string) => void,
+    private readonly dependencies: TwsClientDependencies = {},
   ) {
-    this.ib = new IB({
-      host: config.host,
-      port: config.port,
-      clientId: config.clientId,
-    });
+    this.ib =
+      dependencies.ib ??
+      new IB({
+        host: config.host,
+        port: config.port,
+        clientId: config.clientId,
+      });
 
     this.bindCoreListeners();
   }
@@ -281,6 +311,92 @@ export class TwsClient {
     if (!this.connected) return;
     this.ib.disconnect();
     this.connected = false;
+  }
+
+  async confirmFinalEsMinute(
+    sub: InstrumentSubscription,
+    minute: Date,
+  ): Promise<Candle | null> {
+    if (minute.getTime() % 60_000 !== 0) throw new Error("FUT confirmation minute is off-grid");
+    const raw = sub.contract ?? {};
+    const minTick = sub.instrumentContract?.minTick;
+    const contract = buildExactIbkrEsHistoricalContract({
+      conId: Number(sub.conid),
+      localSymbol: toStr(raw.localSymbol) ?? sub.instrumentContract?.localSymbol ?? "",
+      lastTradeDateOrContractMonth: toStr(raw.expiry) ?? toStr(raw.lastTradeDateOrContractMonth) ?? "",
+      minTick: typeof minTick === "number" ? minTick : 0,
+      symbol: toStr(raw.symbol) ?? sub.symbol,
+      secType: toStr(raw.secType) ?? sub.instrumentContract?.secType ?? "",
+      tradingClass: toStr(raw.tradingClass) ?? sub.instrumentContract?.tradingClass ?? "",
+      exchange: toStr(raw.exchange) ?? sub.instrumentContract?.exchange ?? "",
+      currency: toStr(raw.currency) ?? sub.instrumentContract?.currency ?? "",
+      multiplier: toStr(raw.multiplier) ?? "",
+    });
+    await this.acquireFinalBarPacingToken();
+    const reqId = this.allocReqId();
+    return new Promise<Candle | null>((resolve, reject) => {
+      const matches: Candle[] = [];
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.ib.off("historicalData", onHistoricalData);
+        this.ib.off("error", onError);
+      };
+      const finish = () => {
+        cleanup();
+        if (matches.length > 1) reject(new Error("Ambiguous native FUT final bar"));
+        else resolve(matches[0] ?? null);
+      };
+      const onHistoricalData = (
+        incomingReqId: number, date: string, open: number, high: number,
+        low: number, close: number, volume: number,
+      ) => {
+        if (incomingReqId !== reqId) return;
+        if (String(date).toLowerCase().startsWith("finished")) return finish();
+        const ts = this.parseHistoricalDate(date);
+        if (!ts || ts.getTime() !== minute.getTime()) return;
+        matches.push({ conid: sub.conid, symbol: sub.symbol, timeframe: "1m", ts,
+          open: Number(open), high: Number(high), low: Number(low), close: Number(close), volume: Number(volume) });
+      };
+      const onError = (_error: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+        const meta = ibErrorMeta(codeOrMeta, legacyReqId);
+        if (meta.reqId !== reqId) return;
+        cleanup();
+        reject(new NativeFinalBarRequestError(
+          `Native FUT final-bar request failed (IBKR ${meta.code ?? "unknown"})`,
+          meta.code === 162 || meta.code === 166,
+        ));
+      };
+      const timeout = setTimeout(() => { cleanup(); reject(new Error("Native FUT final-bar request timed out")); }, 30_000);
+      this.ib.on("historicalData", onHistoricalData);
+      this.ib.on("error", onError);
+      try {
+        this.ib.reqHistoricalData(reqId, contract,
+          formatIbUtcEndDateTime(new Date(minute.getTime() + 60_000)), "120 S",
+          IBKR_ES_BAR_REQUEST.barSize, IBKR_ES_BAR_REQUEST.whatToShow,
+          IBKR_ES_BAR_REQUEST.useRTH, IBKR_ES_BAR_REQUEST.formatDate,
+          IBKR_ES_BAR_REQUEST.keepUpToDate);
+      } catch {
+        cleanup(); reject(new Error("Native FUT final-bar request could not be sent"));
+      }
+    });
+  }
+
+  private async acquireFinalBarPacingToken(): Promise<void> {
+    const windowMs = 10 * 60_000;
+    while (true) {
+      const now = this.dependencies.now?.() ?? Date.now();
+      while (this.finalBarRequestTimes.length && now - this.finalBarRequestTimes[0] >= windowMs)
+        this.finalBarRequestTimes.shift();
+      if (this.finalBarRequestTimes.length < 50) {
+        this.finalBarRequestTimes.push(now);
+        return;
+      }
+      const wait = windowMs - (now - this.finalBarRequestTimes[0]) + 50;
+      await (this.dependencies.sleep?.(Math.min(wait, 30_000)) ??
+        new Promise((resolve) =>
+          setTimeout(resolve, Math.min(wait, 30_000)),
+        ));
+    }
   }
 
   isConnected(): boolean {
@@ -773,6 +889,7 @@ export class TwsClient {
     candlesPerSymbol: number,
     options: { progressPrefix?: string } = {},
   ): Promise<Candle[]> {
+    await this.acquireFinalBarPacingToken();
     const reqId = this.allocReqId();
     const { barSize, durationStr } = this.historicalParamsFor(
       timeframe,

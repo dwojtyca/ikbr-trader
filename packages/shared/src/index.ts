@@ -1,4 +1,5 @@
 export type Side = "BUY" | "SELL" | "HOLD";
+export * from "./ibkr-bar-source.js";
 export type RiskCheckStatus = "PASS" | "REJECT";
 export type ProposedOrderStatus =
   | "PROPOSED"

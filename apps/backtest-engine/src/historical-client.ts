@@ -1,5 +1,11 @@
 import IB from "ib";
-import type { Candle, InstrumentContract } from "@ikbr/shared";
+import {
+  assertExactIbkrEsContract,
+  formatIbUtcEndDateTime,
+  type Candle,
+  type IbkrEsContractIdentity,
+  type InstrumentContract,
+} from "@ikbr/shared";
 import type { WatchlistInstrument } from "./config.js";
 
 interface HistoricalClientConfig {
@@ -31,7 +37,39 @@ type ContractDetailsShape = {
   longName?: string;
   marketName?: string;
   minTick?: number | string;
+  realExpirationDate?: string;
+  contractMonth?: string;
+  timeZoneId?: string;
 };
+
+export interface ContractDetailsEventPort {
+  on(event: string, listener: (...args: any[]) => void): unknown;
+  off(event: string, listener: (...args: any[]) => void): unknown;
+  reqContractDetails(reqId: number, contract: ContractShape): unknown;
+}
+
+export interface ExactIbkrEsContractInventory extends IbkrEsContractIdentity {
+  expiryDate: string;
+  expiryDateSource: "ibkr-summary-expiry";
+}
+
+class HistoricalDataRequestError extends Error {
+  constructor(
+    message: string,
+    readonly terminal: boolean,
+    readonly connectionLost = false,
+  ) {
+    super(message);
+  }
+}
+
+function ibErrorMeta(codeOrMeta: unknown, legacyReqId?: number): { code?: number; reqId?: number } {
+  if (codeOrMeta && typeof codeOrMeta === "object") {
+    const value = codeOrMeta as { code?: unknown; id?: unknown };
+    return { code: toNum(value.code), reqId: toNum(value.id) };
+  }
+  return { code: toNum(codeOrMeta), reqId: legacyReqId };
+}
 
 function toNum(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -56,19 +94,77 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function formatIbEndDateTime(date: Date): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return (
-    [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join(
-      "",
-    ) +
-    ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  );
+export function awaitExactlyOneContractDetail(
+  ib: ContractDetailsEventPort,
+  reqId: number,
+  contract: ContractShape,
+  label: string,
+  timeoutMs = 10_000,
+): Promise<ContractDetailsShape> {
+  return new Promise((resolve, reject) => {
+    const matches: ContractDetailsShape[] = [];
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      ib.off("contractDetails", onDetails);
+      ib.off("contractDetailsEnd", onEnd);
+      ib.off("error", onError);
+      if (error) reject(error);
+      else if (matches.length !== 1)
+        reject(new Error(`Expected exactly one contract detail for ${label}; received ${matches.length}`));
+      else resolve(matches[0]);
+    };
+    const onDetails = (incomingReqId: number, details: ContractDetailsShape) => {
+      if (incomingReqId === reqId) matches.push(details);
+    };
+    const onEnd = (incomingReqId: number) => {
+      if (incomingReqId === reqId) finish();
+    };
+    const onError = (error: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+      const meta = ibErrorMeta(codeOrMeta, legacyReqId);
+      if (meta.reqId === reqId)
+        finish(new Error(`Contract inventory failed for ${label} (IBKR ${meta.code ?? "unknown"})`));
+    };
+    const timeout = setTimeout(() => finish(new Error(`Contract inventory timed out for ${label}`)), timeoutMs);
+    ib.on("contractDetails", onDetails);
+    ib.on("contractDetailsEnd", onEnd);
+    ib.on("error", onError);
+    try { ib.reqContractDetails(reqId, contract); }
+    catch { finish(new Error(`Contract inventory request failed for ${label}`)); }
+  });
+}
+
+export function parseExactIbkrEsContractDetail(
+  details: ContractDetailsShape,
+  expectedLocalSymbol: string,
+): ExactIbkrEsContractInventory {
+  const contract = pickContract(details);
+  const identity: ExactIbkrEsContractInventory = {
+    conId: toNum(contract.conId) ?? 0,
+    localSymbol: toStr(contract.localSymbol) ?? "",
+    lastTradeDateOrContractMonth: toStr(contract.expiry) ?? toStr(contract.lastTradeDateOrContractMonth) ?? "",
+    minTick: toNum(details.minTick) ?? 0,
+    symbol: toStr(contract.symbol) ?? "",
+    secType: toStr(contract.secType) ?? "",
+    tradingClass: toStr(contract.tradingClass) ?? "",
+    exchange: toStr(contract.exchange) ?? "",
+    currency: toStr(contract.currency) ?? "",
+    multiplier: toStr(contract.multiplier) ?? "",
+    expiryDate: /^\d{8}$/.test(toStr(contract.expiry) ?? "") ? toStr(contract.expiry)! : "",
+    expiryDateSource: "ibkr-summary-expiry",
+  };
+  assertExactIbkrEsContract(identity, expectedLocalSymbol);
+  if (!/^\d{8}$/.test(identity.expiryDate))
+    throw new Error(`IBKR contract ${expectedLocalSymbol} has no exact dated expiry`);
+  return identity;
 }
 
 export class HistoricalClient {
   private readonly ib: any;
   private connected = false;
+  private apiServerVersion?: number;
   private nextReqId = 70_000;
   /** Timestamps (ms) of recent historicalData requests, used for IB pacing. */
   private readonly requestTimes: number[] = [];
@@ -76,14 +172,17 @@ export class HistoricalClient {
   private inFlight = 0;
   /** Resolvers awaiting a free concurrency slot. */
   private readonly slotWaiters: Array<() => void> = [];
+  /** Requests may resume only after IBKR confirms a usable API session. */
+  private readonly connectionWaiters: Array<() => void> = [];
   private readonly pacingPer10Min: number;
   private readonly maxConcurrency: number;
 
   constructor(
     private readonly config: HistoricalClientConfig,
     private readonly onLog: (line: string) => void,
+    ibPort?: any,
   ) {
-    this.ib = new IB({
+    this.ib = ibPort ?? new IB({
       host: config.host,
       port: config.port,
       clientId: config.clientId,
@@ -109,17 +208,18 @@ export class HistoricalClient {
       };
 
       const onNextValidId = (orderId: number) => {
-        this.connected = true;
+        this.markSessionReady();
         this.nextReqId = Math.max(this.nextReqId, Number(orderId) + 1);
         cleanup();
         resolve();
       };
 
-      const onError = (err: Error, code?: number) => {
-        if (code === 502 || code === 503 || code === 504) {
+      const onError = (_err: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+        const meta = ibErrorMeta(codeOrMeta, legacyReqId);
+        if (meta.code === 502 || meta.code === 503 || meta.code === 504) {
           cleanup();
           reject(
-            new Error(`TWS socket connection failed (${code}): ${err.message}`),
+            new Error(`TWS socket connection failed (IBKR ${meta.code})`),
           );
         }
       };
@@ -134,6 +234,24 @@ export class HistoricalClient {
     if (!this.connected) return;
     this.ib.disconnect();
     this.connected = false;
+  }
+
+  getServerVersion(): number {
+    const value = this.apiServerVersion;
+    if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) throw new Error("IBKR API server version is unavailable");
+    return value;
+  }
+
+  async resolveExactExpiredEsContract(localSymbol: string): Promise<ExactIbkrEsContractInventory> {
+    if (!/^ES[HMUZ]\d$/.test(localSymbol)) throw new Error(`Unsupported ES quarterly localSymbol ${localSymbol}`);
+    const contract = {
+      symbol: "ES", secType: "FUT", exchange: "CME", currency: "USD",
+      multiplier: "50", localSymbol, tradingClass: "ES", includeExpired: true,
+    };
+    const details = await awaitExactlyOneContractDetail(
+      this.ib as ContractDetailsEventPort, this.allocReqId(), contract, localSymbol,
+    );
+    return parseExactIbkrEsContractDetail(details, localSymbol);
   }
 
   async resolveContracts(
@@ -190,6 +308,14 @@ export class HistoricalClient {
     );
   }
 
+  async fetchExactHistorical1mChunk(
+    sub: InstrumentSubscription,
+    end: Date,
+    durationStr: string,
+  ): Promise<Candle[]> {
+    return this.requestHistorical1mChunkWithRetry(sub, end, durationStr);
+  }
+
   private async requestHistorical1mChunkWithRetry(
     sub: InstrumentSubscription,
     end: Date,
@@ -199,16 +325,19 @@ export class HistoricalClient {
     let lastError: Error | undefined;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      await this.waitForSession();
       await this.acquireRateLimit();
       try {
         return await this.requestHistorical1mChunk(sub, end, durationStr);
       } catch (error) {
         lastError = error as Error;
+        if (error instanceof HistoricalDataRequestError && error.terminal) break;
         if (attempt === attempts) break;
         this.onLog(
           `historical ${sub.symbol}: retry ${attempt}/${attempts - 1} after ${(error as Error).message} for chunk ending ${end.toISOString()}`,
         );
-        await sleep(5000 * attempt);
+        if (!(error instanceof HistoricalDataRequestError && error.connectionLost))
+          await sleep(5000 * attempt);
       } finally {
         this.releaseRateLimit();
       }
@@ -439,6 +568,7 @@ export class HistoricalClient {
         clearTimeout(timeout);
         this.ib.off("historicalData", onHistoricalData);
         this.ib.off("error", onError);
+        this.ib.off("disconnected", onDisconnected);
       };
 
       const finalize = () => {
@@ -479,22 +609,38 @@ export class HistoricalClient {
         });
       };
 
-      const onError = (err: Error, code?: number, incomingReqId?: number) => {
-        if (incomingReqId !== reqId) return;
+      const onError = (_err: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+        const meta = ibErrorMeta(codeOrMeta, legacyReqId);
+        if (meta.reqId !== reqId) return;
         cleanup();
         reject(
-          new Error(
-            `historicalData error ${code ?? "unknown"} for ${sub.symbol}: ${err?.message ?? "unknown"}`,
+          new HistoricalDataRequestError(
+            `historicalData failed for ${sub.symbol} (IBKR ${meta.code ?? "unknown"})`,
+            meta.code === 162 || meta.code === 166 || meta.code === 200,
           ),
         );
       };
 
+      const onDisconnected = () => {
+        cleanup();
+        reject(new HistoricalDataRequestError(
+          `historicalData connection lost for ${sub.symbol}`,
+          false,
+          true,
+        ));
+      };
+
       this.ib.on("historicalData", onHistoricalData);
       this.ib.on("error", onError);
+      this.ib.on("disconnected", onDisconnected);
+      if (!this.connected) {
+        onDisconnected();
+        return;
+      }
       this.ib.reqHistoricalData(
         reqId,
         contract,
-        formatIbEndDateTime(end),
+        formatIbUtcEndDateTime(end),
         durationStr,
         "1 min",
         "TRADES",
@@ -566,17 +712,51 @@ export class HistoricalClient {
     return this.nextReqId;
   }
 
+  private markSessionReady(): void {
+    this.connected = true;
+    while (this.connectionWaiters.length > 0) this.connectionWaiters.shift()?.();
+  }
+
+  private async waitForSession(): Promise<void> {
+    if (this.connected) return;
+    await new Promise<void>((resolve, reject) => {
+      const waiter = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      const timeout = setTimeout(() => {
+        const index = this.connectionWaiters.indexOf(waiter);
+        if (index >= 0) this.connectionWaiters.splice(index, 1);
+        reject(new Error("TWS session unavailable waiting for nextValidId"));
+      }, 90_000);
+      this.connectionWaiters.push(waiter);
+      if (this.connected) {
+        const index = this.connectionWaiters.indexOf(waiter);
+        if (index >= 0) this.connectionWaiters.splice(index, 1);
+        waiter();
+      }
+    });
+  }
+
   private bindListeners(): void {
+    this.ib.on("server", (version: number) => {
+      if (Number.isInteger(version) && version > 0) this.apiServerVersion = version;
+    });
     this.ib.on("connected", () =>
       this.onLog("TWS socket connected event received"),
     );
+    this.ib.on("nextValidId", (orderId: number) => {
+      this.nextReqId = Math.max(this.nextReqId, Number(orderId) + 1);
+      this.markSessionReady();
+    });
     this.ib.on("disconnected", () => {
       this.connected = false;
       this.onLog("TWS socket disconnected");
     });
-    this.ib.on("error", (err: Error, code?: number, reqId?: number) => {
+    this.ib.on("error", (_err: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+      const meta = ibErrorMeta(codeOrMeta, legacyReqId);
       this.onLog(
-        `TWS error code=${code ?? "n/a"} reqId=${reqId ?? "n/a"}: ${err?.message ?? err}`,
+        `TWS error code=${meta.code ?? "n/a"} reqId=${meta.reqId ?? "n/a"}`,
       );
     });
   }

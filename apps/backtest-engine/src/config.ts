@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { parseFuturesSpecsJson } from "./futures-model.js";
 import { parseCmeCalendarsJson } from "./cme-session-calendar.js";
+import { withBuiltInResearchCalendar } from "./cme-equity-index-calendar.js";
 
 dotenv.config();
 
@@ -225,7 +226,9 @@ export const config = {
     env.SIGNAL_PRICE_MULTIPLIER_OVERRIDES,
   ),
   futuresSpecs: parseFuturesSpecsJson(env.BACKTEST_FUTURES_SPECS_JSON),
-  futuresCalendars: parseCmeCalendarsJson(env.BACKTEST_FUTURES_CALENDARS_JSON),
+  futuresCalendars: withBuiltInResearchCalendar(
+    parseCmeCalendarsJson(env.BACKTEST_FUTURES_CALENDARS_JSON),
+  ),
   fractionalSymbols: new Set(
     env.SIGNAL_FRACTIONAL_SYMBOLS.split(",")
       .map((s) => s.trim().toUpperCase())

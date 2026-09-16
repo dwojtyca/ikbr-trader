@@ -5,6 +5,7 @@ coverage
 *.log
 dist
 /backups
+/.local/ibkr-es-acquisition/
 
 # TypeScript composite / incremental build artefacts.
 *.tsbuildinfo
