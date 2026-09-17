@@ -8,8 +8,18 @@ import { Pool } from "pg";
 import Fastify from "fastify";
 import { BacktestRepository, ensureBacktestDatabase } from "./repository.js";
 import { importResearchDataset } from "./research-dataset-importer.js";
+import { loadRegisteredResearchDataset } from "./research-dataset-loader.js";
 import { RESEARCH_DATABASE_NAME } from "./research-dataset-schema.js";
 import { researchFixture } from "./research-dataset.test-fixture.js";
+import { researchEsSimulatorOptions } from "./research-es-experiment.js";
+import { installResearchEsRoutes } from "./research-es-routes.js";
+import { BacktestSimulator } from "./simulator.js";
+import {
+  RESEARCH_ES_DATASET_FINGERPRINT,
+  RESEARCH_ES_EXPERIMENT_ID,
+  RESEARCH_ES_EXPERIMENT_SPEC_SHA256,
+  RESEARCH_ES_PROVENANCE_ID,
+} from "./research-run-request.js";
 import { installProtectedResearchRouteGuard, PROTECTED_RESEARCH_ROUTES } from "./research-route-guard.js";
 
 const sourceUrl = process.env.TEST_POSTGRES_URL;
@@ -55,6 +65,64 @@ async function writeBundle(
     writeFile(join(directory, "candles-1m.ndjson"), raw),
   ]);
   return { directory, calendars: fixture.calendars };
+}
+
+async function writeAuditableExecutionBundle(label: string) {
+  const base = researchFixture();
+  const start = new Date("2026-06-01T08:00:00.000Z").getTime();
+  const rollIndex = 230;
+  const rows = Array.from({ length: 250 }, (_, index) => {
+    const conId = index < rollIndex ? "101" : "102";
+    const closeTicks = 24000 + Math.floor(index / 30);
+    return {
+      symbol: "ES", conId, ts: new Date(start + index * 60_000).toISOString(),
+      openTicks: String(closeTicks), highTicks: String(closeTicks + 4),
+      lowTicks: String(closeTicks - 4), closeTicks: String(closeTicks),
+      volume: String(100 + (index % 7)),
+    };
+  });
+  const raw = Buffer.from(`${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+  const manifest = structuredClone(base.manifest);
+  manifest.provenanceId = "synthetic-es-auditable-fixture-v1";
+  manifest.dateFrom = rows[0].ts;
+  manifest.dateTo = rows.at(-1)!.ts;
+  manifest.source.artifactId = "es-auditable-fixture";
+  manifest.source.candlesSha256 = createHash("sha256").update(raw).digest("hex");
+  manifest.contracts[0].validFrom = rows[0].ts;
+  manifest.contracts[0].validTo = rows[rollIndex - 1].ts;
+  manifest.contracts[0].rollAt = rows[rollIndex].ts;
+  manifest.contracts[1].validFrom = rows[rollIndex].ts;
+  manifest.contracts[1].validTo = rows.at(-1)!.ts;
+  const directory = join(tempRoot, label);
+  await mkdir(directory);
+  await Promise.all([
+    writeFile(join(directory, "manifest.json"), JSON.stringify(manifest)),
+    writeFile(join(directory, "candles-1m.ndjson"), raw),
+  ]);
+  return { directory, calendars: base.calendars, manifest };
+}
+
+class DeterministicResearchExecutionStrategy {
+  readonly id = "momentum_breakout_long_v1";
+  readonly secTypes = ["FUT"] as const;
+  readonly supportedDirections = ["LONG"] as const;
+  readonly allowedDirectionalRegimes = ["bull_trend", "bear_trend", "range"] as const;
+  readonly allowedVolatilityRegimes = ["low_volatility", "normal_volatility", "high_volatility"] as const;
+  readonly requiredTimeframes = ["1m"] as const;
+  readonly lanePriority = 10;
+  private emitted = false;
+
+  generateSignal(context: any) {
+    if (this.emitted) return null;
+    this.emitted = true;
+    const close = context.latestCandle.close;
+    return {
+      strategyId: this.id, symbol: context.symbol, side: "BUY", direction: "LONG",
+      confidenceScore: 0.9, entryReason: "deterministic integration execution",
+      invalidationLevel: close - 10, suggestedEntry: close, stopLoss: close - 10,
+      takeProfit: close + 100, metadata: {},
+    };
+  }
 }
 
 describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
@@ -267,6 +335,134 @@ describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
     } finally {
       if (previous === undefined) delete process.env.PGOPTIONS;
       else process.env.PGOPTIONS = previous;
+    }
+  });
+
+  it("rejects synthetic content at the production registered-identity boundary before claiming a run", async () => {
+    await freshDatabase();
+    const bundle = await writeAuditableExecutionBundle("pr155d-identity-rejection");
+    await importResearchDataset(databaseUrl, adminUrl, bundle.directory, bundle.calendars);
+    const request = {
+      experimentId: RESEARCH_ES_EXPERIMENT_ID,
+      specificationSha256: RESEARCH_ES_EXPERIMENT_SPEC_SHA256,
+      implementationCommitSha: "a".repeat(40),
+      provenanceId: RESEARCH_ES_PROVENANCE_ID,
+      datasetFingerprint: RESEARCH_ES_DATASET_FINGERPRINT,
+    } as const;
+    const app = Fastify({ logger: false });
+    installResearchEsRoutes(app, {
+      implementationCommitSha: request.implementationCommitSha,
+      researchDatabaseUrl: databaseUrl,
+      researchDatabaseExists: async () => true,
+      loadDataset: loadRegisteredResearchDataset,
+      repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
+      runExperiment: async () => { throw new Error("identity failure must prevent execution"); },
+    });
+    try {
+      const rejected = await app.inject({
+        method: "POST", url: "/backtest/research/es-compatibility", payload: request,
+      });
+      assert.equal(rejected.statusCode, 409);
+      assert.equal(rejected.json().error, "research_dataset_identity_mismatch");
+      const pool = new Pool({ connectionString: databaseUrl });
+      try {
+        const counts = await pool.query(`SELECT
+          (SELECT COUNT(*) FROM backtest_research_experiments) AS experiments,
+          (SELECT COUNT(*) FROM backtest_runs) AS runs`);
+        assert.deepEqual(counts.rows[0], { experiments: "0", runs: "0" });
+      } finally { await pool.end(); }
+    } finally { await app.close(); }
+  });
+
+  it("executes auditable synthetic primary, stress, and reproduction without claiming the registered identity", async () => {
+    await freshDatabase();
+    const bundle = await writeAuditableExecutionBundle("pr155d-execution-audit");
+    const imported = await importResearchDataset(databaseUrl, adminUrl, bundle.directory, bundle.calendars);
+    const identity = {
+      datasetId: imported.datasetId,
+      provenanceId: bundle.manifest.provenanceId,
+      fingerprint: imported.fingerprint,
+      candlesCount: imported.candlesCount,
+      manifest: {
+        ...bundle.manifest,
+        sessionPolicy: {
+          ...bundle.manifest.sessionPolicy,
+          calendarVersion: "cme-equity-index-2024-2026-v1",
+        },
+      },
+    } as any;
+    const repository = new BacktestRepository(databaseUrl);
+    await repository.init();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => { throw new Error("external I/O is forbidden"); }) as typeof fetch;
+    try {
+      const metrics = [];
+      for (const storedScenario of ["primary", "stress", "primary_reproduction"] as const) {
+        const scenario = storedScenario === "primary_reproduction" ? "primary" : storedScenario;
+        const run = await repository.createResearchScenarioRun(imported.datasetId, {
+          experimentId: "pr15.5d-synthetic-execution-audit",
+          scenario: storedScenario,
+          syntheticDatasetFingerprint: imported.fingerprint,
+        });
+        const data = await repository.loadBacktestData(["ES"]);
+        const options = researchEsSimulatorOptions(identity, scenario);
+        const summary = await new BacktestSimulator(repository, run.id, data, {
+          ...options,
+          strategyFactory: () => [new DeterministicResearchExecutionStrategy()],
+        }).run();
+        await repository.finishRun(run.id, "completed", summary);
+        metrics.push(await repository.getResearchScenarioMetrics(
+          run.id, scenario, imported.fingerprint, imported.fingerprint,
+        ));
+      }
+      assert.deepEqual(metrics.map((entry) => entry.closedTrades), [1, 1, 1]);
+      assert.deepEqual(metrics.map((entry) => entry.countsByExitReason.contract_roll), [1, 1, 1]);
+      assert.deepEqual(metrics.map((entry) => entry.datasetFingerprintAfter), [
+        imported.fingerprint, imported.fingerprint, imported.fingerprint,
+      ]);
+      const pool = new Pool({ connectionString: databaseUrl });
+      try {
+        const runs = await pool.query(`SELECT status,config_json->>'scenario' AS scenario
+          FROM backtest_runs ORDER BY id`);
+        assert.deepEqual(runs.rows.map((row) => [row.status, row.scenario]), [
+          ["completed", "primary"], ["completed", "stress"],
+          ["completed", "primary_reproduction"],
+        ]);
+        const audit = await pool.query(`SELECT r.config_json->>'scenario' AS scenario,
+            COUNT(DISTINCT o.id) AS orders,COUNT(DISTINCT f.id) AS fills,
+            MIN(f.commission) AS commission,MIN(f.slippage_cost) AS slippage_cost,
+            MIN(f.exit_reason) AS exit_reason,
+            BOOL_AND(f.entry_conid IS NOT NULL AND f.exit_conid IS NOT NULL) AS contract_ids
+          FROM backtest_runs r
+          JOIN backtest_orders o ON o.run_id=r.id
+          JOIN backtest_fills f ON f.run_id=r.id AND f.order_id=o.id
+          GROUP BY r.id,r.config_json->>'scenario' ORDER BY r.id`);
+        assert.deepEqual(audit.rows.map((row) => row.scenario), [
+          "primary", "stress", "primary_reproduction",
+        ]);
+        for (const row of audit.rows) {
+          assert.equal(Number(row.orders), 1);
+          assert.equal(Number(row.fills), 1);
+          assert.equal(Number(row.commission) > 0, true);
+          assert.equal(Number(row.slippage_cost) > 0, true);
+          assert.equal(row.exit_reason, "contract_roll");
+          assert.equal(row.contract_ids, true);
+        }
+        assert.equal(Number(audit.rows[1].commission) > Number(audit.rows[0].commission), true);
+        assert.equal(Number(audit.rows[1].slippage_cost) > Number(audit.rows[0].slippage_cost), true);
+        const diagnostics = await pool.query(`SELECT r.config_json->>'scenario' AS scenario,
+            d.stage,SUM(d.samples)::int AS samples
+          FROM backtest_runs r JOIN backtest_signal_diagnostics d ON d.run_id=r.id
+          GROUP BY r.id,r.config_json->>'scenario',d.stage ORDER BY r.id,d.stage`);
+        for (const scenario of ["primary", "stress", "primary_reproduction"])
+          assert.equal(diagnostics.rows.some((row) => row.scenario === scenario && row.stage === "proposed" && row.samples > 0), true);
+        const dataset = await pool.query("SELECT fingerprint,candles_count FROM backtest_datasets");
+        assert.equal(dataset.rows[0].fingerprint, imported.fingerprint);
+        assert.equal(Number(dataset.rows[0].candles_count), imported.candlesCount);
+      } finally { await pool.end(); }
+    } finally {
+      globalThis.fetch = originalFetch;
+      await repository.close();
     }
   });
 });

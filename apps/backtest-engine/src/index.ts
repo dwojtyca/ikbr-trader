@@ -6,12 +6,19 @@ import {
   type InstrumentSubscription,
 } from "./historical-client.js";
 import { FrankfurterFxClient } from "./fx-client.js";
-import { BacktestRepository, ensureBacktestDatabase } from "./repository.js";
+import {
+  BacktestRepository,
+  backtestDatabaseExists,
+  ensureBacktestDatabase,
+} from "./repository.js";
 import {
   BacktestSimulator,
   runParallelIsolatedStrategyBacktest,
 } from "./simulator.js";
 import { installProtectedResearchRouteGuard } from "./research-route-guard.js";
+import { loadRegisteredResearchDataset } from "./research-dataset-loader.js";
+import { runResearchEsExperiment } from "./research-es-experiment.js";
+import { installResearchEsRoutes } from "./research-es-routes.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 installProtectedResearchRouteGuard(app, config.BACKTEST_POSTGRES_URL);
@@ -531,6 +538,24 @@ await ensureBacktestDatabase(
 );
 const repo = new BacktestRepository(config.BACKTEST_POSTGRES_URL);
 await repo.init();
+const researchRoutes = installResearchEsRoutes(app, {
+  implementationCommitSha: config.BACKTEST_RESEARCH_IMPLEMENTATION_SHA,
+  researchDatabaseUrl: config.BACKTEST_RESEARCH_POSTGRES_URL,
+  researchDatabaseExists: () => backtestDatabaseExists(
+    config.BACKTEST_POSTGRES_ADMIN_URL,
+    config.BACKTEST_RESEARCH_POSTGRES_URL,
+  ),
+  loadDataset: loadRegisteredResearchDataset,
+  repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
+  runExperiment: runResearchEsExperiment,
+});
+const recoveredResearchAttempt = await researchRoutes.recoverAbandonedAttempt();
+if (recoveredResearchAttempt) {
+  app.log.warn(
+    { experimentId: "pr15.5d-es-momentum-breakout-long-v1" },
+    "recovered abandoned research experiment as INCONCLUSIVE",
+  );
+}
 const abandonedRuns = await repo.failRunningRuns(
   "Backtest engine restarted before run completed",
 );
@@ -542,6 +567,7 @@ app.get("/health", async () => ({
   ok: true,
   historyJobRunning: Boolean(historyJob),
   runJobRunning: Boolean(runJob),
+  researchJobRunning: researchRoutes.isRunning(),
 }));
 
 app.get("/backtest/dataset", async () => ({

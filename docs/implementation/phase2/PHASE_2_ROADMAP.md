@@ -30,7 +30,7 @@
 | PR15.5B   | Futures backtest execution and economics model | **shipped `bcf0344`; CI run `34998202271` green; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
 | PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **shipped `5de9de6`; CI run `35064103236` green; independent hostile review approved; data readiness `INCONCLUSIVE`** (see [PR15_5C_REPORT.md](PR15_5C_REPORT.md)) |
 | PR15.5C.1 | IBKR ES source parity and immutable real-dataset acquisition | **COMPLETE / READY: IBKR bundle acquired and imported; provenance `ibkr-es-20250622-20260831-e39a59790324`, fingerprint `6dc425610feb44665226228bbd2c561b64504b47588b4dd38d26cc9dab93e026`, 99.9858% selected-contract completeness; PR15.5D unblocked** (see [PR15_5C_1_REPORT.md](PR15_5C_1_REPORT.md)) |
-| PR15.5D   | Pre-registered ES compatibility experiment on the finalized real dataset | **ready to plan** — PR15.5C.1 returned `READY` with verified provenance + fingerprint |
+| PR15.5D   | Pre-registered ES compatibility experiment on the finalized real dataset | **Stage A implemented and independently approved locally; awaiting commit and CI; real ES run not authorized** (see [PR15_5D_ES_COMPATIBILITY_EXPERIMENT_PLAN.md](PR15_5D_ES_COMPATIBILITY_EXPERIMENT_PLAN.md), [PR15_5D_STAGE_A_REPORT.md](PR15_5D_STAGE_A_REPORT.md)) |
 
 ## Ordering rationale
 

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Candle } from '@ikbr/shared';
-import { MomentumBreakoutLongStrategy } from './momentum-breakout-long.strategy.js';
+import {
+  MomentumBreakoutLongStrategy,
+  evaluateMomentumBreakoutLong,
+} from './momentum-breakout-long.strategy.js';
 import type { StrategyContext } from './strategy.types.js';
 
 function candle(index: number, close: number, volume = 10000): Candle {
@@ -97,6 +100,22 @@ test('MomentumBreakoutLongStrategy emits BUY signal for IND trend breakout', () 
 
   assert.ok(signal);
   assert.equal(signal.side, 'BUY');
+});
+
+test('pure momentum evaluator preserves production behavior and does not enable FUT', () => {
+  const context = baseContext();
+  const strategy = new MomentumBreakoutLongStrategy();
+  const productionSignal = strategy.generateSignal(context);
+  const evaluation = evaluateMomentumBreakoutLong(context);
+
+  assert.deepEqual(evaluation.signal, productionSignal);
+  assert.equal(evaluation.rejectionReason, strategy.getLastRejectionReason());
+
+  const futuresContext = baseContext({ secType: 'FUT', symbol: 'ES' });
+  assert.equal(strategy.generateSignal(futuresContext), null);
+  assert.equal(strategy.getLastRejectionReason(), 'sec_type_not_supported');
+  assert.equal(evaluateMomentumBreakoutLong(futuresContext).signal, null);
+  assert.ok(evaluateMomentumBreakoutLong(futuresContext, ['FUT']).signal);
 });
 
 test('MomentumBreakoutLongStrategy rejects overextended 20m move', () => {

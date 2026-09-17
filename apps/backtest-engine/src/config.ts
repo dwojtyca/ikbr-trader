@@ -39,6 +39,10 @@ const schema = z.object({
     .default(
       "postgresql://postgres:postgres@localhost:5432/ikbr_trader_backtest_pr15_5a",
     ),
+  BACKTEST_RESEARCH_IMPLEMENTATION_SHA: z
+    .string()
+    .regex(/^(?:|[a-f0-9]{40})$/)
+    .default(""),
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   BACKTEST_INGESTION_CLIENT_ID: z.coerce.number().default(104),

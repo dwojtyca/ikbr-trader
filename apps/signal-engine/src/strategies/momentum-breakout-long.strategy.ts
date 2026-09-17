@@ -146,6 +146,20 @@ function candleQuality(candle: Candle): {
   };
 }
 
+export interface MomentumBreakoutLongEvaluation {
+  signal: StrategySignal | null;
+  rejectionReason?: string;
+}
+
+export function evaluateMomentumBreakoutLong(
+  context: StrategyContext,
+  allowedSecTypes: readonly SecType[] = ["STK", "IND"],
+): MomentumBreakoutLongEvaluation {
+  const evaluator = new MomentumBreakoutLongStrategy();
+  const signal = evaluator.evaluateForAllowedSecTypes(context, allowedSecTypes);
+  return { signal, rejectionReason: evaluator.getLastRejectionReason() };
+}
+
 export class MomentumBreakoutLongStrategy implements Strategy {
   readonly id = "momentum_breakout_long_v1";
   readonly secTypes = ["STK", "IND"] as const;
@@ -167,9 +181,18 @@ export class MomentumBreakoutLongStrategy implements Strategy {
   }
 
   generateSignal(context: StrategyContext): StrategySignal | null {
+    const evaluation = evaluateMomentumBreakoutLong(context, this.secTypes);
+    this.lastRejectionReason = evaluation.rejectionReason;
+    return evaluation.signal;
+  }
+
+  evaluateForAllowedSecTypes(
+    context: StrategyContext,
+    allowedSecTypes: readonly SecType[],
+  ): StrategySignal | null {
     this.lastRejectionReason = undefined;
 
-    if (context.secType !== "STK" && context.secType !== "IND")
+    if (!allowedSecTypes.includes(context.secType))
       return this.reject("sec_type_not_supported");
     if (context.directionalRegime !== "bull_trend")
       return this.reject("directional_regime_not_bull_trend");

@@ -67,6 +67,8 @@ export interface SimulatorOptions {
   futuresContracts: ReadonlyMap<string, BacktestFuturesContractMetadata>;
   futuresCalendars: ReadonlyMap<string, CmeCalendarDefinition>;
   strategyIds?: string[];
+  /** Research-only injection seam. Production callers use the registry. */
+  strategyFactory?: () => readonly object[];
   riskLimits: {
     accountEquity: number;
     maxRiskPerTradePct: number;
@@ -296,7 +298,9 @@ export class BacktestSimulator {
   }> {
     this.validateFuturesDataset();
     const signalEngine = new SignalEngine(this as any, {
-      strategies: createStrategies(this.options.strategyIds),
+      strategies: this.options.strategyFactory
+        ? [...this.options.strategyFactory()]
+        : createStrategies(this.options.strategyIds),
       minCandles: this.options.minCandles,
       maxSpreadBps: this.options.maxSpreadBps,
       minVolume1m: this.options.minVolume1m,

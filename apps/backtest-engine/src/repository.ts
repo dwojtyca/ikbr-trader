@@ -1,4 +1,4 @@
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import type { Candle, InstrumentContract } from "@ikbr/shared";
 import { listStrategyProfiles } from "@ikbr/shared";
 import type {
@@ -12,6 +12,7 @@ import type {
   BacktestSignalDiagnosticRecord,
   LoadedBacktestData,
 } from "./types.js";
+import type { ResearchScenarioMetrics } from "./research-run-request.js";
 import {
   databaseNameFromUrl,
   RESEARCH_DATABASE_NAME,
@@ -132,9 +133,28 @@ export async function ensureBacktestDatabase(
   }
 }
 
+export async function backtestDatabaseExists(
+  adminUrl: string,
+  targetUrl: string,
+): Promise<boolean> {
+  const target = new URL(targetUrl);
+  const dbName = target.pathname.replace(/^\//, "");
+  if (!/^[A-Za-z0-9_]+$/.test(dbName))
+    throw new Error(`Unsafe backtest database name: ${dbName}`);
+  const pool = new Pool({ connectionString: adminUrl });
+  try {
+    const result = await pool.query("SELECT 1 FROM pg_database WHERE datname=$1", [dbName]);
+    return (result.rowCount ?? 0) > 0;
+  } finally {
+    await pool.end();
+  }
+}
+
 export class BacktestRepository {
   private readonly pool: Pool;
   private readonly protectedResearchDatabase: boolean;
+  private researchClaimClient: PoolClient | null = null;
+  private researchClaimLockKey: string | null = null;
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString, options: "-c search_path=public" });
@@ -148,6 +168,14 @@ export class BacktestRepository {
   }
 
   async close(): Promise<void> {
+    if (this.researchClaimClient && this.researchClaimLockKey) {
+      await this.researchClaimClient.query("SELECT pg_advisory_unlock(hashtext($1))", [
+        this.researchClaimLockKey,
+      ]);
+      this.researchClaimClient.release();
+      this.researchClaimClient = null;
+      this.researchClaimLockKey = null;
+    }
     await this.pool.end();
   }
 
@@ -251,6 +279,17 @@ export class BacktestRepository {
         total_pnl DOUBLE PRECISION,
         trades INTEGER,
         win_rate DOUBLE PRECISION
+      );
+    `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS backtest_research_experiments (
+        experiment_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        request_json JSONB NOT NULL,
+        canonical_result JSONB,
+        result_sha256 TEXT,
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at TIMESTAMPTZ
       );
     `);
     await this.pool.query(`
@@ -848,6 +887,285 @@ export class BacktestRepository {
       [datasetId, mode, configJson],
     );
     return mapRun(result.rows[0]);
+  }
+
+  async createResearchScenarioRun(
+    datasetId: number,
+    configJson: Record<string, unknown> & {
+      experimentId: string;
+      scenario: "primary" | "stress" | "primary_reproduction";
+    },
+  ): Promise<BacktestRun> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [configJson.experimentId]);
+      const existing = await client.query(
+        `SELECT id FROM backtest_runs
+         WHERE config_json->>'experimentId'=$1 AND config_json->>'scenario'=$2`,
+        [configJson.experimentId, configJson.scenario],
+      );
+      if ((existing.rowCount ?? 0) > 0)
+        throw new Error(`Research scenario already exists: ${configJson.scenario}`);
+      const result = await client.query(
+        `INSERT INTO backtest_runs (dataset_id,mode,status,config_json)
+         VALUES ($1,'isolated','running',$2) RETURNING *`,
+        [datasetId, configJson],
+      );
+      await client.query("COMMIT");
+      return mapRun(result.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  }
+
+  async getResearchScenarioMetrics(
+    runId: number,
+    scenario: "primary" | "stress",
+    datasetFingerprintBefore: string,
+    datasetFingerprintAfter: string,
+  ): Promise<ResearchScenarioMetrics> {
+    const [fillsResult, pendingResult, stateResult, diagnosticsResult] = await Promise.all([
+      this.pool.query(`SELECT quantity,entry_price,exit_price,gross_pnl,commission,net_pnl,
+        slippage_cost,fills.multiplier,tick_size,entry_conid,exit_conid,execution_model_version,
+        calendar_version,entry_at,exit_at,exit_reason,directional_regime,volatility_regime,
+        entry_contract.valid_from AS entry_valid_from,entry_contract.valid_to AS entry_valid_to,
+        exit_contract.valid_from AS exit_valid_from,exit_contract.valid_to AS exit_valid_to
+        FROM backtest_fills fills
+        LEFT JOIN backtest_futures_contracts entry_contract ON entry_contract.conid=fills.entry_conid
+        LEFT JOIN backtest_futures_contracts exit_contract ON exit_contract.conid=fills.exit_conid
+        WHERE run_id=$1 ORDER BY exit_at,fills.id`, [runId]),
+      this.pool.query(`SELECT
+        COUNT(*) FILTER (WHERE status='PROPOSED') AS pending,
+        COUNT(*) FILTER (WHERE status='FILLED' AND NOT EXISTS
+          (SELECT 1 FROM backtest_fills f WHERE f.order_id=backtest_orders.id)) AS unclosed
+        FROM backtest_orders WHERE run_id=$1`, [runId]),
+      this.pool.query(`SELECT permanently_disabled FROM backtest_strategy_state
+        WHERE run_id=$1 AND strategy_id='momentum_breakout_long_v1'`, [runId]),
+      this.pool.query(`SELECT stage,reason_group,SUM(samples) AS samples
+        FROM backtest_signal_diagnostics WHERE run_id=$1 AND stage IN ('rejected','rejected_detail')
+        GROUP BY stage,reason_group ORDER BY stage,reason_group`, [runId]),
+    ]);
+    const rows = fillsResult.rows;
+    const net = rows.map((row) => Number(row.net_pnl));
+    const wins = net.filter((value) => value > 0);
+    const losses = net.filter((value) => value <= 0);
+    const grossWins = wins.reduce((sum, value) => sum + value, 0);
+    const grossLosses = Math.abs(losses.reduce((sum, value) => sum + value, 0));
+    let cumulative = 0;
+    let peak = 0;
+    let maxDrawdown = 0;
+    for (const value of net) {
+      cumulative += value;
+      peak = Math.max(peak, cumulative);
+      maxDrawdown = Math.min(maxDrawdown, cumulative - peak);
+    }
+    const invariantViolations: string[] = [];
+    if (stateResult.rowCount !== 1)
+      invariantViolations.push("missing_or_duplicate_strategy_state");
+    for (const row of rows) {
+      const quantity = Number(row.quantity);
+      const tick = Number(row.tick_size);
+      const onGrid = (value: unknown) => Math.abs(Number(value) / 0.25 - Math.round(Number(value) / 0.25)) < 1e-8;
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) invariantViolations.push("non_whole_contract_quantity");
+      if (Number(row.multiplier) !== 50 || tick !== 0.25) invariantViolations.push("invalid_es_economics");
+      if (!onGrid(row.entry_price) || !onGrid(row.exit_price)) invariantViolations.push("off_tick_fill");
+      if (!row.entry_conid || !row.exit_conid) invariantViolations.push("missing_contract_identity");
+      const within = (value: unknown, from: unknown, to: unknown) =>
+        Boolean(from && to) && new Date(String(value)).getTime() >= new Date(String(from)).getTime() &&
+        new Date(String(value)).getTime() <= new Date(String(to)).getTime();
+      if (!within(row.entry_at, row.entry_valid_from, row.entry_valid_to) ||
+        !within(row.exit_at, row.exit_valid_from, row.exit_valid_to))
+        invariantViolations.push("fill_outside_contract_validity");
+      if (row.execution_model_version !== "pr15.5b-v1") invariantViolations.push("execution_model_mismatch");
+      if (row.calendar_version !== "cme-equity-index-2024-2026-v1") invariantViolations.push("calendar_mismatch");
+    }
+    const sorted = [...net].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    const median = sorted.length === 0 ? 0 : sorted.length % 2 === 0
+      ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
+    const pending = Number(pendingResult.rows[0]?.pending ?? 0);
+    const unclosed = Number(pendingResult.rows[0]?.unclosed ?? 0);
+    const countBy = (key: string, transform: (value: unknown, row: any) => string = String) => {
+      const counts: Record<string, number> = {};
+      for (const row of rows) {
+        const value = transform(row[key], row);
+        counts[value] = (counts[value] ?? 0) + 1;
+      }
+      return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
+    };
+    const signalRejections = Object.fromEntries(diagnosticsResult.rows.map((row) =>
+      [`${String(row.stage)}:${String(row.reason_group)}`, Number(row.samples)]));
+    const countsByExitReason = countBy("exit_reason");
+    return {
+      scenario,
+      closedTrades: rows.length,
+      wins: wins.length,
+      losses: losses.length,
+      winRate: net.length ? wins.length / net.length : 0,
+      grossPnl: rows.reduce((sum, row) => sum + Number(row.gross_pnl), 0),
+      grossWins,
+      grossLosses,
+      commissions: rows.reduce((sum, row) => sum + Number(row.commission), 0),
+      slippageCost: rows.reduce((sum, row) => sum + Number(row.slippage_cost ?? 0), 0),
+      netPnl: net.reduce((sum, value) => sum + value, 0),
+      meanNetPnl: net.length ? net.reduce((sum, value) => sum + value, 0) / net.length : 0,
+      medianNetPnl: median,
+      profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 999 : undefined,
+      maxDrawdown,
+      largestWinningTrade: wins.length ? Math.max(...wins) : 0,
+      largestLosingTrade: losses.length ? Math.min(...losses) : 0,
+      countsByMonth: countBy("exit_at", (value) => new Date(String(value)).toISOString().slice(0, 7)),
+      countsByContract: countBy("exit_conid"),
+      countsByExitReason,
+      countsByDirectionalRegime: countBy("directional_regime"),
+      countsByVolatilityRegime: countBy("volatility_regime"),
+      signalRejections,
+      lifecycleExitCounts: Object.fromEntries(
+        ["contract_roll", "expiry", "dataset_end"].map((reason) =>
+          [reason, countsByExitReason[reason] ?? 0]),
+      ),
+      openPositions: unclosed,
+      pendingOrders: pending,
+      unclosedFills: unclosed,
+      strategyPermanentlyDisabled: stateResult.rows[0]?.permanently_disabled === true,
+      invariantViolations: [...new Set(invariantViolations)].sort(),
+      datasetFingerprintBefore,
+      datasetFingerprintAfter,
+    };
+  }
+
+  async saveResearchExperimentArtifact(
+    experimentId: string,
+    result: Record<string, unknown>,
+    resultSha256: string,
+  ): Promise<void> {
+    const updated = await this.pool.query(
+      `UPDATE backtest_research_experiments
+       SET status='finished', canonical_result=$2::jsonb, result_sha256=$3,
+           finished_at=NOW()
+       WHERE experiment_id=$1 AND status='running'`,
+      [experimentId, JSON.stringify(result), resultSha256],
+    );
+    if (updated.rowCount !== 1)
+      throw new Error("Unable to persist the canonical research artifact");
+  }
+
+  async getResearchExperimentResult(experimentId: string): Promise<unknown | null> {
+    const result = await this.pool.query(
+      `SELECT canonical_result AS result, result_sha256
+       FROM backtest_research_experiments
+       WHERE experiment_id=$1 AND canonical_result IS NOT NULL`,
+      [experimentId],
+    );
+    if ((result.rowCount ?? 0) === 0 || !result.rows[0]?.result) return null;
+    return { result: result.rows[0].result, resultSha256: result.rows[0].result_sha256 };
+  }
+
+  async researchExperimentExists(experimentId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM backtest_research_experiments WHERE experiment_id=$1
+       ) AS present`,
+      [experimentId],
+    );
+    return result.rows[0]?.present === true;
+  }
+
+  async claimResearchExperiment(
+    experimentId: string,
+    request: Record<string, unknown>,
+  ): Promise<boolean> {
+    if (this.researchClaimClient)
+      throw new Error("This repository already owns a research experiment claim");
+    const client = await this.pool.connect();
+    const lockKey = `backtest-research-experiment:${experimentId}`;
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtext($1)) AS acquired",
+        [lockKey],
+      );
+      if (lock.rows[0]?.acquired !== true) return false;
+      const inserted = await client.query(
+        `INSERT INTO backtest_research_experiments (experiment_id,status,request_json)
+         VALUES ($1,'running',$2::jsonb)
+         ON CONFLICT (experiment_id) DO NOTHING
+         RETURNING experiment_id`,
+        [experimentId, JSON.stringify(request)],
+      );
+      if (inserted.rowCount !== 1) {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+        return false;
+      }
+      this.researchClaimClient = client;
+      this.researchClaimLockKey = lockKey;
+      return true;
+    } finally {
+      if (this.researchClaimClient !== client) client.release();
+    }
+  }
+
+  async recoverAbandonedResearchExperiment(
+    experimentId: string,
+    buildArtifact: (request: unknown) => {
+      result: Record<string, unknown>;
+      resultSha256: string;
+    },
+  ): Promise<boolean> {
+    const client = await this.pool.connect();
+    const lockKey = `backtest-research-experiment:${experimentId}`;
+    let lockAcquired = false;
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtext($1)) AS acquired",
+        [lockKey],
+      );
+      if (lock.rows[0]?.acquired !== true) return false;
+      lockAcquired = true;
+      await client.query("BEGIN");
+      try {
+        const claim = await client.query<{ request_json: unknown }>(
+          `SELECT request_json FROM backtest_research_experiments
+           WHERE experiment_id=$1 AND status='running' FOR UPDATE`,
+          [experimentId],
+        );
+        if (claim.rowCount !== 1) {
+          await client.query("COMMIT");
+          await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+          lockAcquired = false;
+          return false;
+        }
+        const artifact = buildArtifact(claim.rows[0].request_json);
+        const recovered = await client.query(
+          `UPDATE backtest_research_experiments
+           SET status='finished', canonical_result=$2::jsonb, result_sha256=$3,
+               finished_at=NOW()
+           WHERE experiment_id=$1 AND status='running'
+           RETURNING experiment_id`,
+          [experimentId, JSON.stringify(artifact.result), artifact.resultSha256],
+        );
+        if (recovered.rowCount === 1) {
+          await client.query(
+            `UPDATE backtest_runs SET status='failed', finished_at=NOW(),
+               error='Backtest engine restarted before research experiment completed'
+             WHERE status='running' AND config_json->>'experimentId'=$1`,
+            [experimentId],
+          );
+        }
+        await client.query("COMMIT");
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+        lockAcquired = false;
+        return recovered.rowCount === 1;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      if (lockAcquired)
+        await client.query("SELECT pg_advisory_unlock(hashtext($1))", [lockKey]);
+      client.release();
+    }
   }
 
   async finishRun(

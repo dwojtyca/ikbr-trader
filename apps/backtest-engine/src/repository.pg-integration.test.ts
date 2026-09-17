@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { Pool } from "pg";
-import { BacktestRepository, ensureBacktestDatabase } from "./repository.js";
+import {
+  BacktestRepository,
+  backtestDatabaseExists,
+  ensureBacktestDatabase,
+} from "./repository.js";
 import { BacktestSimulator, type SimulatorOptions } from "./simulator.js";
 import type { LoadedBacktestData } from "./types.js";
 
@@ -30,6 +34,20 @@ describe("BacktestRepository PostgreSQL integration", { skip }, () => {
     if (!adminUrl || !dbName.startsWith("ikbr_trader_test_")) return;
     const admin = new Pool({ connectionString: adminUrl });
     try { await admin.query(`DROP DATABASE ${dbName}`); } finally { await admin.end(); }
+  });
+
+  it("checks database presence without creating an absent research database", async () => {
+    const missing = new URL(targetUrl);
+    missing.pathname = `/${dbName}_missing`;
+    assert.equal(await backtestDatabaseExists(adminUrl, missing.toString()), false);
+    assert.equal(await backtestDatabaseExists(adminUrl, targetUrl), true);
+    const admin = new Pool({ connectionString: adminUrl });
+    try {
+      const result = await admin.query("SELECT 1 FROM pg_database WHERE datname=$1", [
+        `${dbName}_missing`,
+      ]);
+      assert.equal(result.rowCount, 0);
+    } finally { await admin.end(); }
   });
 
   it("initializes additively and round-trips the futures audit model", async () => {
@@ -122,5 +140,148 @@ describe("BacktestRepository PostgreSQL integration", { skip }, () => {
       assert.equal(Number(counts.rows[0].orders), 1);
       assert.equal(Number(counts.rows[0].fills), 1);
     } finally { await pool.end(); }
+  });
+
+  it("atomically claims across repository instances and recovers an abandoned claim", async () => {
+    const owner = new BacktestRepository(targetUrl);
+    const contender = new BacktestRepository(targetUrl);
+    const recovery = new BacktestRepository(targetUrl);
+    await Promise.all([owner.init(), contender.init(), recovery.init()]);
+    const recoveredArtifact = () => ({
+      result: { verdict: "INCONCLUSIVE" }, resultSha256: "b".repeat(64),
+    });
+    try {
+      assert.equal(await owner.claimResearchExperiment("restart-fixture", {
+        experimentId: "restart-fixture",
+      }), true);
+      assert.equal(await contender.claimResearchExperiment("restart-fixture", {
+        experimentId: "restart-fixture",
+      }), false);
+      assert.equal(await recovery.recoverAbandonedResearchExperiment(
+        "restart-fixture", recoveredArtifact,
+      ), false, "a live owner's session lock must prevent false recovery");
+      const pool = new Pool({ connectionString: targetUrl });
+      const dataset = await pool.query("SELECT id FROM backtest_datasets ORDER BY id DESC LIMIT 1");
+      await owner.createResearchScenarioRun(Number(dataset.rows[0].id), {
+        experimentId: "restart-fixture", scenario: "primary",
+      });
+      await owner.close();
+      await pool.query(`CREATE OR REPLACE FUNCTION fail_research_recovery() RETURNS trigger
+        LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''fixture recovery failure''; END'`);
+      await pool.query(`CREATE TRIGGER fail_research_recovery_trigger BEFORE UPDATE ON backtest_runs
+        FOR EACH ROW WHEN (OLD.status='running' AND NEW.status='failed')
+        EXECUTE FUNCTION fail_research_recovery()`);
+      await assert.rejects(() => recovery.recoverAbandonedResearchExperiment(
+        "restart-fixture", recoveredArtifact,
+      ), /fixture recovery failure/);
+      const rolledBack = await pool.query(`SELECT
+        (SELECT status FROM backtest_research_experiments WHERE experiment_id='restart-fixture') AS experiment_status,
+        (SELECT status FROM backtest_runs WHERE config_json->>'experimentId'='restart-fixture') AS run_status`);
+      assert.deepEqual(rolledBack.rows[0], {
+        experiment_status: "running", run_status: "running",
+      });
+      await pool.query("DROP TRIGGER fail_research_recovery_trigger ON backtest_runs");
+      await pool.query("DROP FUNCTION fail_research_recovery()");
+      assert.equal(await recovery.recoverAbandonedResearchExperiment(
+        "restart-fixture", recoveredArtifact,
+      ), true);
+      assert.deepEqual(await recovery.getResearchExperimentResult("restart-fixture"), {
+        result: { verdict: "INCONCLUSIVE" }, resultSha256: "b".repeat(64),
+      });
+      const recoveredRun = await pool.query(`SELECT status FROM backtest_runs
+        WHERE config_json->>'experimentId'='restart-fixture'`);
+      assert.equal(recoveredRun.rows[0].status, "failed");
+      await pool.end();
+    } finally {
+      await contender.close();
+      await recovery.close();
+    }
+  });
+
+  it("persists one research experiment and derives canonical audit metrics", async () => {
+    const dataset = await repo.resetHistoricalData(
+      new Date("2026-06-01T22:00:00Z"),
+      new Date("2026-06-02T20:59:00Z"),
+      ["ES"],
+    );
+    const pool = new Pool({ connectionString: targetUrl });
+    try {
+      assert.equal(await repo.claimResearchExperiment("fixture-experiment", {
+        experimentId: "fixture-experiment",
+      }), true);
+      await pool.query(`ALTER TABLE backtest_futures_contracts
+        ADD COLUMN IF NOT EXISTS valid_from TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS valid_to TIMESTAMPTZ`);
+      await repo.upsertFuturesContractMetadata({
+        conid: "123", symbol: "ES", localSymbol: "ESM6", tradingClass: "ES",
+        lastTradeAt: new Date("2026-06-18T13:30:00Z"),
+      });
+      await pool.query(`UPDATE backtest_futures_contracts
+        SET valid_from='2026-06-01T22:00:00Z',valid_to='2026-06-02T20:59:00Z'
+        WHERE conid='123'`);
+      const run = await repo.createResearchScenarioRun(dataset.id, {
+        experimentId: "fixture-experiment", scenario: "primary",
+      });
+      await assert.rejects(() => repo.createResearchScenarioRun(dataset.id, {
+        experimentId: "fixture-experiment", scenario: "primary",
+      }), /already exists/);
+      const orderId = await repo.insertOrder({
+        runId: run.id, instrument: "ES", conid: "123", side: "BUY", orderType: "LMT",
+        quantity: 1, entry: 5000, stop: 4995, takeProfit: 5010, reason: "fixture",
+        confidence: 1, riskCheckStatus: "PASS", status: "FILLED",
+        strategy: "momentum_breakout_long_v1", createdAt: new Date("2026-06-01T22:00:00Z"),
+      });
+      await repo.insertFill({
+        runId: run.id, orderId, instrument: "ES", conid: "123",
+        strategy: "momentum_breakout_long_v1", side: "BUY",
+        directionalRegime: "bull_trend", volatilityRegime: "normal_volatility",
+        confidence: 1, quantity: 1, entryPrice: 5000.25, exitPrice: 5001.75,
+        entryAt: new Date("2026-06-01T22:00:00Z"), exitAt: new Date("2026-06-01T23:00:00Z"),
+        grossPnl: 75, commission: 5, netPnl: 70, pnlPct: 0.014,
+        exitReason: "dataset_end", entryReferencePrice: 5000, entryFillPrice: 5000.25,
+        exitReferencePrice: 5002, exitFillPrice: 5001.75, multiplier: 50, tickSize: 0.25,
+        entrySlippage: 0.25, exitSlippage: 0.25, slippageCost: 25,
+        commissionPerContractSide: 2.5, entryConid: "123", exitConid: "123",
+        executionModelVersion: "pr15.5b-v1", calendarVersion: "cme-equity-index-2024-2026-v1",
+      });
+      await repo.upsertStrategyStates(run.id, [{
+        strategyId: "momentum_breakout_long_v1", enabled: true,
+        permanentlyDisabled: false,
+      }]);
+      await repo.upsertSignalDiagnostics([{
+        runId: run.id, strategy: "momentum_breakout_long_v1", instrument: "ES",
+        side: "HOLD", stage: "rejected", reasonGroup: "no_signal", samples: 3,
+      }]);
+      const metrics = await repo.getResearchScenarioMetrics(
+        run.id, "primary", "f".repeat(64), "f".repeat(64),
+      );
+      assert.equal(metrics.closedTrades, 1);
+      assert.equal(metrics.netPnl, 70);
+      assert.deepEqual(metrics.invariantViolations, []);
+      assert.equal(metrics.countsByContract["123"], 1);
+      assert.equal(metrics.signalRejections["rejected:no_signal"], 3);
+      await repo.createResearchScenarioRun(dataset.id, {
+        experimentId: "fixture-experiment", scenario: "stress",
+      });
+      await repo.saveResearchExperimentArtifact(
+        "fixture-experiment", { verdict: "REJECTED_FOR_ES" }, "a".repeat(64),
+      );
+      assert.equal(await repo.researchExperimentExists("fixture-experiment"), true);
+      assert.deepEqual(await repo.getResearchExperimentResult("fixture-experiment"), {
+        result: { verdict: "REJECTED_FOR_ES" }, resultSha256: "a".repeat(64),
+      });
+      const concurrent = await Promise.allSettled([
+        repo.createResearchScenarioRun(dataset.id, {
+          experimentId: "concurrent-fixture", scenario: "primary",
+        }),
+        repo.createResearchScenarioRun(dataset.id, {
+          experimentId: "concurrent-fixture", scenario: "primary",
+        }),
+      ]);
+      assert.equal(concurrent.filter((entry) => entry.status === "fulfilled").length, 1);
+      assert.equal(concurrent.filter((entry) => entry.status === "rejected").length, 1);
+    } finally {
+      await pool.end();
+    }
   });
 });
