@@ -2,8 +2,8 @@
 
 Date: 2026-09-17
 
-Status: Stage A implementation committed and independently approved; awaiting
-CI
+Status: Stage A complete; implementation committed, independently approved,
+and verified by green CI run `35215511842`
 
 ## Outcome
 
@@ -19,7 +19,7 @@ The immutable Stage-A implementation commit SHA is:
 
 `304f2e90bf860d720ea41b5d11d439c072da7943`
 
-Stage B remains unauthorized until green CI and separate owner approval.
+Stage B remains unauthorized until separate owner approval.
 
 ## Delivered boundaries
 
@@ -113,8 +113,7 @@ command with local-port permission passed.
 
 Before any real execution:
 
-1. obtain green CI for the Stage-A implementation;
-2. obtain explicit owner approval for Stage B using the commit SHA and spec
+1. obtain explicit owner approval for Stage B using the commit SHA and spec
    hash above.
 
 Until then `BACKTEST_RESEARCH_IMPLEMENTATION_SHA` remains empty and the
