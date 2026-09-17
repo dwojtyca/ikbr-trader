@@ -2,8 +2,8 @@
 
 Date: 2026-09-17
 
-Status: Stage A complete; implementation committed, independently approved,
-and verified by green CI run `35215511842`
+Status: Stage A runner plus operational preflight correction independently
+approved; awaiting green CI and renewed Stage B authorization
 
 ## Outcome
 
@@ -17,9 +17,11 @@ The frozen experiment-spec SHA-256 is:
 
 The immutable Stage-A implementation commit SHA is:
 
-`304f2e90bf860d720ea41b5d11d439c072da7943`
+`d833146b4a16228d364b082193b7d7ddd891f7ad`
 
-Stage B remains unauthorized until separate owner approval.
+This supersedes the initially approved runner commit
+`304f2e90bf860d720ea41b5d11d439c072da7943`. Stage B remains unauthorized
+until green CI and renewed owner approval of the exact new SHA.
 
 ## Delivered boundaries
 
@@ -105,6 +107,14 @@ When the protected research database has not been imported yet, startup now
 detects its absence through the administrative database and skips recovery
 without creating it or preventing the ordinary backtest service from starting.
 
+The first authorized Stage-B preflight exposed a PostgreSQL 16 driver
+representation difference: `name[]` was returned as `"{public}"` instead of a
+JavaScript array. Commit `d833146b4a16228d364b082193b7d7ddd891f7ad`
+normalizes the read-only identity query through `array_to_json`, preserving the
+exact public-only validation. The production loader then recomputed and
+confirmed the registered fingerprint over 483,608 candles and five contracts.
+No experiment claim, scenario, or result was created during preflight.
+
 The first sandboxed full-test attempt was not a product failure: the sandbox
 denied fixture `listen()` calls on dynamic loopback ports. Re-running the same
 command with local-port permission passed.
@@ -113,8 +123,9 @@ command with local-port permission passed.
 
 Before any real execution:
 
-1. obtain explicit owner approval for Stage B using the commit SHA and spec
-   hash above.
+1. obtain green CI for the superseding implementation commit;
+2. obtain renewed explicit owner approval for Stage B using the commit SHA and
+   spec hash above.
 
 Until then `BACKTEST_RESEARCH_IMPLEMENTATION_SHA` remains empty and the
 dedicated POST endpoint returns `503` without creating a run.
