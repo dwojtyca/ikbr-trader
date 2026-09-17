@@ -30,7 +30,7 @@
 | PR15.5B   | Futures backtest execution and economics model | **shipped `bcf0344`; CI run `34998202271` green; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
 | PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **shipped `5de9de6`; CI run `35064103236` green; independent hostile review approved; data readiness `INCONCLUSIVE`** (see [PR15_5C_REPORT.md](PR15_5C_REPORT.md)) |
 | PR15.5C.1 | IBKR ES source parity and immutable real-dataset acquisition | **COMPLETE / READY: IBKR bundle acquired and imported; provenance `ibkr-es-20250622-20260831-e39a59790324`, fingerprint `6dc425610feb44665226228bbd2c561b64504b47588b4dd38d26cc9dab93e026`, 99.9858% selected-contract completeness; PR15.5D unblocked** (see [PR15_5C_1_REPORT.md](PR15_5C_1_REPORT.md)) |
-| PR15.5D   | Pre-registered ES compatibility experiment on the finalized real dataset | **Preflight correction committed as `d833146b4a16228d364b082193b7d7ddd891f7ad` and independently approved; awaiting CI and renewed Stage B authorization; no real ES run started** (see [PR15_5D_ES_COMPATIBILITY_EXPERIMENT_PLAN.md](PR15_5D_ES_COMPATIBILITY_EXPERIMENT_PLAN.md), [PR15_5D_STAGE_A_REPORT.md](PR15_5D_STAGE_A_REPORT.md)) |
+| PR15.5D   | Pre-registered ES compatibility experiment on the finalized real dataset | **Authorized attempt closed `INCONCLUSIVE`: continuous-contract projection defect before any order or fill; dataset unchanged; experiment incomplete and remediation required; no ES activation** (see [PR15_5D_STAGE_B_REPORT.md](PR15_5D_STAGE_B_REPORT.md), [PR15_5D_ES_DECISION_RECORD.md](PR15_5D_ES_DECISION_RECORD.md)) |
 
 ## Ordering rationale
 

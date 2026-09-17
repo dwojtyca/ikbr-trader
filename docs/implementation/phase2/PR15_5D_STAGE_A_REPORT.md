@@ -2,8 +2,9 @@
 
 Date: 2026-09-17
 
-Status: Stage A runner plus operational preflight correction independently
-approved; awaiting green CI and renewed Stage B authorization
+Status: complete; the runner and operational preflight correction were
+independently approved and CI run `35217385649` passed. The separately
+authorized Stage B outcome is recorded in `PR15_5D_STAGE_B_REPORT.md`.
 
 ## Outcome
 
@@ -119,13 +120,9 @@ The first sandboxed full-test attempt was not a product failure: the sandbox
 denied fixture `listen()` calls on dynamic loopback ports. Re-running the same
 command with local-port permission passed.
 
-## Stage B hold point
+## Stage B disposition
 
-Before any real execution:
-
-1. obtain green CI for the superseding implementation commit;
-2. obtain renewed explicit owner approval for Stage B using the commit SHA and
-   spec hash above.
-
-Until then `BACKTEST_RESEARCH_IMPLEMENTATION_SHA` remains empty and the
-dedicated POST endpoint returns `503` without creating a run.
+CI passed and the owner subsequently authorized Stage B for the exact
+implementation and specification identities above. The one authorized attempt
+ended terminally `INCONCLUSIVE`; see `PR15_5D_STAGE_B_REPORT.md`. This report
+does not authorize a rerun or a replacement experiment.

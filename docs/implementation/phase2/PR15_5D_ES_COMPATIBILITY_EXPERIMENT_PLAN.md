@@ -1,6 +1,9 @@
 # PR15.5D — Pre-registered ES compatibility experiment — PLAN
 
-Status: preflight correction committed as `d833146b4a16228d364b082193b7d7ddd891f7ad` and independently approved; awaiting CI and renewed Stage B authorization
+Status: the one authorized Stage B attempt is closed with terminal
+`INCONCLUSIVE` after failing an integrity check before processing candles. The
+PR15.5D experiment did not satisfy its definition of done, and no rerun is
+permitted under this registration.
 
 Date: 2026-09-17
 
