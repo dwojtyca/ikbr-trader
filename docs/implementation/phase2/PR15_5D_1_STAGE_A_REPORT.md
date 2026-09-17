@@ -19,6 +19,8 @@ No real P&L, trade count, v2 claim, run, or artifact was created.
 
 ## Frozen identities
 
+- Stage A implementation commit:
+  `ab072e752eb6d9e53ed79ce49b182e3c8e4133e5`
 - experiment ID: `pr15.5d1-es-momentum-breakout-long-v1`
 - v2 specification SHA-256:
   `22ae7af844f549d06d3eaa64715556ca028d1dee69cbd35254f55e48d82ff85e`
