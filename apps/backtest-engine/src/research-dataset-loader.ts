@@ -84,7 +84,8 @@ export async function loadRegisteredResearchDataset(
   const port = injectedPort ?? pool!;
   try {
     const identity = await port.query(`SELECT current_database() AS database,
-      current_schema() AS schema, current_schemas(false) AS schemas`);
+      current_schema() AS schema,
+      array_to_json(current_schemas(false)) AS schemas`);
     const server = identity.rows[0];
     const schemas = Array.isArray(server?.schemas) ? server.schemas.map(String) : [];
     if (server?.database !== RESEARCH_DATABASE_NAME || server?.schema !== "public" ||

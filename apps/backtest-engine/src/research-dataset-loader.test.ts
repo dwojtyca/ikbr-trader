@@ -64,6 +64,7 @@ function result(rows: Record<string, unknown>[]): QueryResult {
 function port(
   datasetPatch: Record<string, unknown> = {},
   readBackPatch: Partial<{ fingerprint: string; candlesCount: number }> = {},
+  queries?: string[],
 ): ResearchDatasetQueryPort {
   let call = 0;
   return {
@@ -74,7 +75,8 @@ function port(
         ...readBackPatch,
       };
     },
-    async query() {
+    async query(text) {
+      queries?.push(text);
       call += 1;
       if (call === 1) return result([{ database: "ikbr_trader_backtest_pr15_5a", schema: "public", schemas: ["public"] }]);
       return result([{
@@ -89,11 +91,13 @@ function port(
 
 describe("PR15.5D registered dataset loader", () => {
   it("resolves the runtime id only after exact durable identity validation", async () => {
-    const loaded = await loadRegisteredResearchDataset(researchUrl, request, port());
+    const queries: string[] = [];
+    const loaded = await loadRegisteredResearchDataset(researchUrl, request, port({}, {}, queries));
     assert.equal(loaded.datasetId, 7);
     assert.equal(loaded.fingerprint, RESEARCH_ES_DATASET_FINGERPRINT);
     assert.deepEqual(loaded.manifest.contracts.map((contract) => contract.localSymbol),
       ["ESU5", "ESZ5", "ESH6", "ESM6", "ESU6"]);
+    assert.match(queries[0], /array_to_json\(current_schemas\(false\)\)/);
   });
 
   it("fails closed for database, finalization, fingerprint, and manifest mismatches", async () => {
