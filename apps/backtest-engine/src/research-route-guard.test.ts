@@ -19,8 +19,10 @@ describe("PR15.5C HTTP route guard", () => {
       "postgresql://localhost/ikbr_trader_backtest", "/backtest/history"), null);
   });
 
-  it("allows only the dedicated PR15.5D experiment route on the research database", () => {
+  it("allows the dedicated versioned research experiment routes", () => {
     assert.equal(protectedResearchRouteRejection(
       researchUrl, "/backtest/research/es-compatibility"), null);
+    assert.equal(protectedResearchRouteRejection(
+      researchUrl, "/backtest/research/es-compatibility-v2"), null);
   });
 });

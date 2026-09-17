@@ -19,6 +19,10 @@ import { installProtectedResearchRouteGuard } from "./research-route-guard.js";
 import { loadRegisteredResearchDataset } from "./research-dataset-loader.js";
 import { runResearchEsExperiment } from "./research-es-experiment.js";
 import { installResearchEsRoutes } from "./research-es-routes.js";
+import { loadResearchActiveContractProjection } from "./research-active-contract-projector.js";
+import { runResearchEsV2Experiment } from "./research-es-v2-experiment.js";
+import { installResearchEsV2Routes } from "./research-es-v2-routes.js";
+import { REGISTERED_ES_V2_PROJECTION } from "./research-v2-run-request.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 installProtectedResearchRouteGuard(app, config.BACKTEST_POSTGRES_URL);
@@ -549,11 +553,31 @@ const researchRoutes = installResearchEsRoutes(app, {
   repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
   runExperiment: runResearchEsExperiment,
 });
+const researchV2Routes = installResearchEsV2Routes(app, {
+  implementationCommitSha: config.BACKTEST_RESEARCH_IMPLEMENTATION_SHA,
+  researchDatabaseUrl: config.BACKTEST_RESEARCH_POSTGRES_URL,
+  researchDatabaseExists: () => backtestDatabaseExists(
+    config.BACKTEST_POSTGRES_ADMIN_URL,
+    config.BACKTEST_RESEARCH_POSTGRES_URL,
+  ),
+  loadDataset: loadRegisteredResearchDataset,
+  loadProjection: (connectionString, identity) =>
+    loadResearchActiveContractProjection(connectionString, identity, REGISTERED_ES_V2_PROJECTION),
+  repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
+  runExperiment: runResearchEsV2Experiment,
+});
 const recoveredResearchAttempt = await researchRoutes.recoverAbandonedAttempt();
 if (recoveredResearchAttempt) {
   app.log.warn(
     { experimentId: "pr15.5d-es-momentum-breakout-long-v1" },
     "recovered abandoned research experiment as INCONCLUSIVE",
+  );
+}
+const recoveredResearchV2Attempt = await researchV2Routes.recoverAbandonedAttempt();
+if (recoveredResearchV2Attempt) {
+  app.log.warn(
+    { experimentId: "pr15.5d1-es-momentum-breakout-long-v1" },
+    "recovered abandoned research v2 experiment as INCONCLUSIVE",
   );
 }
 const abandonedRuns = await repo.failRunningRuns(
@@ -567,7 +591,7 @@ app.get("/health", async () => ({
   ok: true,
   historyJobRunning: Boolean(historyJob),
   runJobRunning: Boolean(runJob),
-  researchJobRunning: researchRoutes.isRunning(),
+  researchJobRunning: researchRoutes.isRunning() || researchV2Routes.isRunning(),
 }));
 
 app.get("/backtest/dataset", async () => ({

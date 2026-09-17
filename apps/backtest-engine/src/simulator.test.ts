@@ -33,6 +33,35 @@ const data = (candles1m: Candle[], candles1h: Candle[] = []): LoadedBacktestData
 });
 
 describe("BacktestSimulator futures safety", () => {
+  it("research mode rebuilds all six higher timeframes from projected 1m per conId", () => {
+    const projected = [
+      candle("1", "2026-06-01T22:01:00Z", { open: 100, high: 101, low: 99, close: 100, volume: 2 }),
+      candle("1", "2026-06-01T22:04:00Z", { open: 100, high: 102, low: 98, close: 101, volume: 3 }),
+      candle("2", "2026-06-01T22:05:00Z", { open: 900, high: 901, low: 899, close: 900, volume: 7 }),
+    ];
+    const stale = candle("stale", "2026-06-01T22:00:00Z", { timeframe: "1h", close: 9999 });
+    const input = data(projected, [stale]);
+    for (const key of ["candles5m", "candles4h", "candles12h", "candles1d", "candles1w"] as const)
+      input[key] = new Map([["ES", [stale]]]);
+    const spec = { tradingClass: "ES", secType: "FUT", currency: "USD", multiplier: 50,
+      tickSize: 0.25, commissionPerContractPerSide: 1, slippageTicks: 1,
+      sessionTemplate: "cme_equity_index", timezone: "America/Chicago", calendarVersion: "fixture" } as const;
+    const metadata = new Map(["1", "2"].map((conid) => [conid, { conid, symbol: "ES",
+      localSymbol: `ES${conid}`, tradingClass: "ES", lastTradeAt: new Date("2026-12-18T16:00:00Z") }]));
+    const simulator = new BacktestSimulator({} as BacktestRepository, 1, input, options({
+      secTypeBySymbol: { ES: "FUT" }, futuresSpecs: new Map([["ES", spec]]),
+      futuresContracts: metadata, deriveAllFuturesTimeframesFrom1m: true,
+      futuresCalendars: new Map([["fixture", { version: "fixture", coverageStart: "2026-01-01",
+        coverageEnd: "2026-12-31", fullClosures: [], earlyCloses: {} }]]),
+    }));
+    const maps = (simulator as unknown as { candlesByTimeframe: Record<string, Map<string, Candle[]>> }).candlesByTimeframe;
+    for (const timeframe of ["5m", "1h", "4h", "12h", "1d", "1w"])
+      assert.deepEqual(maps[timeframe].get("ES")?.map((row) => row.conid), ["1", "2"]);
+    assert.equal(maps["5m"].get("ES")?.[0]?.close, 101);
+    assert.equal(maps["5m"].get("ES")?.[0]?.volume, 5);
+    assert.equal(maps["5m"].get("ES")?.some((row) => row.close === 9999), false);
+  });
+
   it("fails futures preflight before writing when contract metadata is absent", async () => {
     let writes = 0;
     const repo = new Proxy({}, { get: () => async () => { writes += 1; } }) as BacktestRepository;

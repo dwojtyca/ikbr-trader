@@ -85,11 +85,11 @@ function canonicalValue(value: unknown): unknown {
   return value;
 }
 
-function canonicalJson(value: unknown): string {
+export function canonicalJson(value: unknown): string {
   return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
 }
 
-function sha256(value: string): string {
+export function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 

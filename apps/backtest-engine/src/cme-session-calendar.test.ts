@@ -39,8 +39,15 @@ describe("CME equity index session calendar", () => {
   });
   it("exposes completion rather than bucket start", () => {
     const ts = new Date("2026-06-02T03:15:00Z");
+    assert.equal(calendar.completedAt(ts, "5m").toISOString(), "2026-06-02T03:20:00.000Z");
     assert.equal(calendar.completedAt(ts, "1h").toISOString(), "2026-06-02T04:00:00.000Z");
+    assert.equal(calendar.completedAt(ts, "12h").toISOString(), "2026-06-02T10:00:00.000Z");
     assert.equal(calendar.completedAt(ts, "1d").toISOString(), "2026-06-02T21:00:00.000Z");
+    assert.equal(calendar.completedAt(ts, "1w").toISOString(), "2026-06-05T21:00:00.000Z");
+    const christmasWeek = new Date("2026-12-21T23:30:00Z");
+    assert.equal(calendar.completedAt(christmasWeek, "1w").toISOString(), "2026-12-24T22:00:00.000Z");
+    const earlyClose = new Date("2026-11-27T17:00:00Z");
+    assert.equal(calendar.completedAt(earlyClose, "12h").toISOString(), "2026-11-27T18:15:00.000Z");
   });
   it("aggregates by session and conId without creating a synthetic roll candle", () => {
     const make = (conid: string, iso: string, price: number) => ({
@@ -55,5 +62,36 @@ describe("CME equity index session calendar", () => {
     assert.equal(rows.length, 2);
     assert.deepEqual(rows.map((row) => row.conid), ["1", "2"]);
     assert.equal(rows[0].ts.toISOString(), "2026-06-01T22:00:00.000Z");
+  });
+  it("aggregates every research timeframe per conId with session-aligned buckets", () => {
+    const make = (conid: string, value: string, price: number) => ({
+      symbol: "ES", conid, timeframe: "1m" as const, ts: new Date(value),
+      open: price, high: price + 1, low: price - 1, close: price + 0.25, volume: 2,
+    });
+    const source = [
+      make("1", "2026-06-01T22:01:00Z", 5000),
+      make("1", "2026-06-01T22:04:00Z", 5001),
+      make("2", "2026-06-01T22:01:00Z", 9000),
+    ];
+    for (const timeframe of ["5m", "1h", "4h", "12h", "1d", "1w"] as const) {
+      const rows = aggregateCmeFuturesCandles(source, timeframe, calendar);
+      assert.equal(rows.length, 2);
+      assert.deepEqual(rows.map((row) => row.conid), ["1", "2"]);
+      assert.equal(rows[0].open, 5000);
+      assert.equal(rows[0].close, 5001.25);
+      assert.equal(rows[0].volume, 4);
+      assert.equal(rows[1].open, 9000, `${timeframe} must not mix contracts`);
+    }
+  });
+  it("omits a weekly bucket whose safe completion is outside calendar coverage", () => {
+    const bounded = new CmeSessionCalendar({
+      version: "bounded", coverageStart: "2026-08-31", coverageEnd: "2026-08-31",
+      fullClosures: [], earlyCloses: {},
+    });
+    const partial = [{
+      symbol: "ES", conid: "1", timeframe: "1m" as const,
+      ts: new Date("2026-08-30T22:00:00Z"), open: 1, high: 1, low: 1, close: 1, volume: 1,
+    }];
+    assert.deepEqual(aggregateCmeFuturesCandles(partial, "1w", bounded), []);
   });
 });

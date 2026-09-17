@@ -7,10 +7,12 @@ import {
   RESEARCH_DATABASE_NAME,
   type ResearchDatasetManifest,
 } from "./research-dataset-schema.js";
-import {
-  REGISTERED_ES_EXPERIMENT_SPEC,
-  type ResearchEsRunRequest,
-} from "./research-run-request.js";
+import { REGISTERED_ES_EXPERIMENT_SPEC } from "./research-run-request.js";
+
+export interface ResearchDatasetIdentityRequest {
+  provenanceId: string;
+  datasetFingerprint: string;
+}
 
 export interface ResearchDatasetQueryPort {
   query(text: string, values?: unknown[]): Promise<QueryResult>;
@@ -76,7 +78,7 @@ async function readBackFingerprint(
 
 export async function loadRegisteredResearchDataset(
   connectionString: string,
-  request: ResearchEsRunRequest,
+  request: ResearchDatasetIdentityRequest,
   injectedPort?: ResearchDatasetQueryPort,
 ): Promise<LoadedResearchDatasetIdentity> {
   assertResearchDatabaseUrl(connectionString);

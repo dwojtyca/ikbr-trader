@@ -69,6 +69,8 @@ export interface SimulatorOptions {
   strategyIds?: string[];
   /** Research-only injection seam. Production callers use the registry. */
   strategyFactory?: () => readonly object[];
+  /** Research-only: ignore stored aggregates and derive every timeframe from projected 1m futures rows. */
+  deriveAllFuturesTimeframesFrom1m?: boolean;
   riskLimits: {
     accountEquity: number;
     maxRiskPerTradePct: number;
@@ -284,7 +286,10 @@ export class BacktestSimulator {
       if (!definition) continue;
       const calendar = new CmeSessionCalendar(definition);
       this.futuresCalendarBySymbol.set(symbol.toUpperCase(), calendar);
-      for (const timeframe of ["1h", "4h", "1d"] as const) {
+      const timeframes = options.deriveAllFuturesTimeframesFrom1m
+        ? (["5m", "1h", "4h", "12h", "1d", "1w"] as const)
+        : (["1h", "4h", "1d"] as const);
+      for (const timeframe of timeframes) {
         this.candlesByTimeframe[timeframe].set(symbol.toUpperCase(), aggregateCmeFuturesCandles(candles, timeframe, calendar));
       }
     }
@@ -634,7 +639,8 @@ export class BacktestSimulator {
       ? this.currentCandle.conid : undefined;
     const calendar = this.futuresCalendarBySymbol.get(key);
     return rows.filter((row) =>
-      (calendar && (timeframe === "1h" || timeframe === "4h" || timeframe === "1d")
+      (calendar && (this.options.deriveAllFuturesTimeframesFrom1m ||
+        timeframe === "1h" || timeframe === "4h" || timeframe === "1d")
         ? calendar.completedAt(row.ts, timeframe).getTime()
         : row.ts.getTime() + durationMs[timeframe]) <= evaluationTime.getTime() &&
       (!currentConid || row.conid === currentConid),

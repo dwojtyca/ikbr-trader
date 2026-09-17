@@ -11,8 +11,12 @@ import { importResearchDataset } from "./research-dataset-importer.js";
 import { loadRegisteredResearchDataset } from "./research-dataset-loader.js";
 import { RESEARCH_DATABASE_NAME } from "./research-dataset-schema.js";
 import { researchFixture } from "./research-dataset.test-fixture.js";
+import { loadResearchActiveContractProjection } from "./research-active-contract-projector.js";
+import { withBuiltInResearchCalendar } from "./cme-equity-index-calendar.js";
 import { researchEsSimulatorOptions } from "./research-es-experiment.js";
 import { installResearchEsRoutes } from "./research-es-routes.js";
+import { installResearchEsV2Routes } from "./research-es-v2-routes.js";
+import { RESEARCH_ES_V2_EXPERIMENT_ID, RESEARCH_ES_V2_EXPERIMENT_SPEC_SHA256 } from "./research-v2-run-request.js";
 import { BacktestSimulator } from "./simulator.js";
 import {
   RESEARCH_ES_DATASET_FINGERPRINT,
@@ -64,7 +68,7 @@ async function writeBundle(
     writeFile(join(directory, "manifest.json"), JSON.stringify(manifest)),
     writeFile(join(directory, "candles-1m.ndjson"), raw),
   ]);
-  return { directory, calendars: fixture.calendars };
+  return { directory, calendars: fixture.calendars, manifest };
 }
 
 async function writeAuditableExecutionBundle(label: string) {
@@ -336,6 +340,107 @@ describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
       if (previous === undefined) delete process.env.PGOPTIONS;
       else process.env.PGOPTIONS = previous;
     }
+  });
+
+  it("projects one active contract from genuine overlapping PostgreSQL rows", async () => {
+    await freshDatabase();
+    const bundle = await writeBundle("active-projection", (rows) => {
+      rows.splice(2, 0, { ...rows[0], ts: "2026-06-01T22:01:00.000Z",
+        openTicks: "44000", highTicks: "44004", lowTicks: "43996", closeTicks: "44001", volume: "999" });
+      rows.splice(4, 0, { ...rows[0], ts: "2026-06-01T22:02:00.000Z",
+        openTicks: "48000", highTicks: "48004", lowTicks: "47996", closeTicks: "48001", volume: "1001" });
+    }, (manifest) => {
+      manifest.sessionPolicy.calendarVersion = "cme-equity-index-2024-2026-v1";
+    });
+    const calendars = withBuiltInResearchCalendar(new Map());
+    const imported = await importResearchDataset(databaseUrl, adminUrl, bundle.directory, calendars);
+    const identity = {
+      datasetId: imported.datasetId, provenanceId: imported.provenanceId,
+      fingerprint: imported.fingerprint, candlesCount: imported.candlesCount,
+      manifest: bundle.manifest,
+    } as any;
+    const projected = await loadResearchActiveContractProjection(databaseUrl, identity);
+    assert.equal(projected.evidence.rawRows, 6);
+    assert.equal(projected.evidence.selectedRows, 3);
+    assert.deepEqual(projected.data.candles1m.get("ES")?.map((row) =>
+      [row.conid, row.ts.toISOString(), row.close]), [
+      ["101", "2026-06-01T22:00:00.000Z", 6000.25],
+      ["102", "2026-06-01T22:01:00.000Z", 6001.5],
+      ["102", "2026-06-01T22:02:00.000Z", 6001],
+    ]);
+    assert.deepEqual(projected.evidence.contracts.map((value) => value.count), [1, 2]);
+    for (const timeframe of projected.evidence.higherTimeframes) {
+      assert.equal(timeframe.count, 2);
+      assert.deepEqual(timeframe.contracts.map((value) => value.count), [1, 1]);
+      assert.equal(projected.data[`candles${timeframe.timeframe}` as keyof typeof projected.data] instanceof Map, true);
+    }
+    await assert.rejects(() => loadResearchActiveContractProjection(databaseUrl, identity, {
+      ...projected.evidence, selectedRows: 4,
+    }), /projection identity mismatch/);
+  });
+
+  it("durably admits one concurrent v2 claim and records three versioned scenarios", async () => {
+    await freshDatabase();
+    const bundle = await writeBundle("v2-route-claim", undefined, (manifest) => {
+      manifest.sessionPolicy.calendarVersion = "cme-equity-index-2024-2026-v1";
+    });
+    const imported = await importResearchDataset(databaseUrl, adminUrl, bundle.directory,
+      withBuiltInResearchCalendar(new Map()));
+    const identity = { datasetId: imported.datasetId, provenanceId: RESEARCH_ES_PROVENANCE_ID,
+      fingerprint: RESEARCH_ES_DATASET_FINGERPRINT, candlesCount: imported.candlesCount,
+      manifest: bundle.manifest } as any;
+    const realIdentity = { ...identity, fingerprint: imported.fingerprint,
+      provenanceId: imported.provenanceId };
+    const projection = await loadResearchActiveContractProjection(databaseUrl, realIdentity);
+    const implementationCommitSha = "a".repeat(40);
+    const request = { experimentId: RESEARCH_ES_V2_EXPERIMENT_ID,
+      specificationSha256: RESEARCH_ES_V2_EXPERIMENT_SPEC_SHA256,
+      implementationCommitSha, provenanceId: RESEARCH_ES_PROVENANCE_ID,
+      datasetFingerprint: RESEARCH_ES_DATASET_FINGERPRINT };
+    let completions = 0;
+    let resolveCompleted!: () => void;
+    const completed = new Promise<void>((resolve) => { resolveCompleted = resolve; });
+    const createApp = () => {
+      const app = Fastify({ logger: false });
+      installResearchEsV2Routes(app, { implementationCommitSha, researchDatabaseUrl: databaseUrl,
+        researchDatabaseExists: async () => true, loadDataset: async () => identity,
+        loadProjection: async () => projection,
+        repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
+        runExperiment: async ({ repository }) => {
+          for (const scenario of ["primary", "stress", "primary_reproduction"] as const) {
+            const run = await repository.createResearchScenarioRun(imported.datasetId, {
+              experimentId: RESEARCH_ES_V2_EXPERIMENT_ID, scenario,
+            });
+            await repository.finishRun(run.id, "completed", { totalPnl: 0, trades: 0, winRate: 0 });
+          }
+          await repository.saveResearchExperimentArtifact(RESEARCH_ES_V2_EXPERIMENT_ID,
+            { verdict: "INCONCLUSIVE", syntheticStructuralTest: true }, "f".repeat(64));
+          completions += 1; resolveCompleted();
+        },
+      });
+      return app;
+    };
+    const first = createApp();
+    const second = createApp();
+    try {
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = (async () => { throw new Error("external I/O forbidden"); }) as typeof fetch;
+      try {
+        const responses = await Promise.all([
+          first.inject({ method: "POST", url: "/backtest/research/es-compatibility-v2", payload: request }),
+          second.inject({ method: "POST", url: "/backtest/research/es-compatibility-v2", payload: request }),
+        ]);
+        assert.deepEqual(responses.map((value) => value.statusCode).sort(), [202, 409]);
+        await completed;
+      } finally { globalThis.fetch = originalFetch; }
+      assert.equal(completions, 1);
+      const pool = new Pool({ connectionString: databaseUrl });
+      try {
+        assert.equal(Number((await pool.query("SELECT COUNT(*) AS count FROM backtest_research_experiments WHERE experiment_id=$1", [RESEARCH_ES_V2_EXPERIMENT_ID])).rows[0].count), 1);
+        assert.equal(Number((await pool.query("SELECT COUNT(*) AS count FROM backtest_runs WHERE config_json->>'experimentId'=$1", [RESEARCH_ES_V2_EXPERIMENT_ID])).rows[0].count), 3);
+        assert.equal(Number((await pool.query("SELECT COUNT(*) AS count FROM backtest_research_experiments WHERE experiment_id=$1", [RESEARCH_ES_EXPERIMENT_ID])).rows[0].count), 0);
+      } finally { await pool.end(); }
+    } finally { await Promise.all([first.close(), second.close()]); }
   });
 
   it("rejects synthetic content at the production registered-identity boundary before claiming a run", async () => {
