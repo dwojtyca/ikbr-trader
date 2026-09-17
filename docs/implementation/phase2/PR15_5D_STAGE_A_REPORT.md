@@ -2,8 +2,8 @@
 
 Date: 2026-09-17
 
-Status: Stage A implementation complete locally; independent hostile review
-approved; awaiting commit and CI
+Status: Stage A implementation committed and independently approved; awaiting
+CI
 
 ## Outcome
 
@@ -15,9 +15,11 @@ The frozen experiment-spec SHA-256 is:
 
 `4afee9646d4f8aea18f35effca741c2cc80c82195b5519f6a88161077a65dff6`
 
-The implementation commit SHA remains unset until the owner authorizes the
-Stage-A commit. Stage B remains unauthorized until both identities are known
-and separately approved.
+The immutable Stage-A implementation commit SHA is:
+
+`304f2e90bf860d720ea41b5d11d439c072da7943`
+
+Stage B remains unauthorized until green CI and separate owner approval.
 
 ## Delivered boundaries
 
@@ -111,9 +113,8 @@ command with local-port permission passed.
 
 Before any real execution:
 
-1. commit Stage A and obtain green CI;
-2. record the immutable implementation commit SHA in this report;
-3. obtain explicit owner approval for Stage B using the commit SHA and spec
+1. obtain green CI for the Stage-A implementation;
+2. obtain explicit owner approval for Stage B using the commit SHA and spec
    hash above.
 
 Until then `BACKTEST_RESEARCH_IMPLEMENTATION_SHA` remains empty and the

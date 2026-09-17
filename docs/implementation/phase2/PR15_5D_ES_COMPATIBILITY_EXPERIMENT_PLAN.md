@@ -1,6 +1,6 @@
 # PR15.5D — Pre-registered ES compatibility experiment — PLAN
 
-Status: Stage A implemented and independently approved locally; awaiting commit and CI
+Status: Stage A committed and independently approved; awaiting CI
 
 Date: 2026-09-17
 
