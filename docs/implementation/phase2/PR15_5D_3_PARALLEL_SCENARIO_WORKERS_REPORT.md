@@ -1,6 +1,6 @@
 # PR15.5D.3 — Parallel ES scenario workers — REPORT
 
-Status: implementation complete; full Stage B not started
+Status: implementation complete; Stage B terminal `REJECTED_FOR_ES`
 
 Date: 2026-09-18
 
@@ -28,7 +28,8 @@ specification hashes remain frozen. The new v3 specification hash is
 - at least three process-visible CPUs;
 - at least 12 GiB process/cgroup-visible memory;
 - 3072 MiB V8 old-generation ceiling per worker;
-- no Stage B execution was performed by this change.
+- the separately authorized Stage B execution is recorded in
+  `PR15_5D_3_STAGE_B_REPORT.md`.
 
 The Docker Desktop observation supplied by the owner (8 CPUs and 15.47 GiB)
 satisfies the static capacity gate. This is capacity, not a promise that each
@@ -48,8 +49,7 @@ thread is pinned to a named core or that all memory is free at runtime.
   claim;
 - full monorepo tests: PASS (the first sandboxed attempt could not bind local
   fixture ports; the unrestricted verification run passed);
-- production-image parallel benchmark remains to be recorded before the
-  operational Stage B POST.
+- CI run 14 for implementation commit `68b67e5` passed before Stage B.
 
 ## Hostile review
 
@@ -58,10 +58,12 @@ database/I/O contention between three workers and OS scheduler variability.
 They affect duration, not scenario ordering or experiment identity. A worker
 thread is deliberately not replaced or retried after an unknown failure.
 
-## Stage B hold
+## Stage B disposition
 
-Stage B remains blocked until the owner confirms AC power and explicitly
-authorizes execution. Before that POST, record the final full test result and
-run the parallel production-image forecast benchmark. The single operational
-POST must use the exact committed implementation SHA and corresponding image
-digest.
+The owner explicitly authorized the single Stage B POST after commit and push.
+The production-image parallel forecast benchmark described by the plan was not
+run as a separate workload before the POST; the owner chose to proceed after
+the prior single-scenario measurements, green CI, static capacity checks, and
+the 20–35 minute forecast. Live execution confirmed three-core utilization and
+completed in 531 seconds. See the Stage B report for the terminal evidence and
+the disclosed late power-source transition.
