@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "pr15.5d2-benchmark-manifest-v1",
+  "eventsPerScenario": 423300,
+  "warmupRunsPerComponent": 1,
+  "measuredRunsPerComponent": 3,
+  "components": ["preflight", "no_order_full", "exact_evaluator", "high_write_full", "identity_reload", "artifact", "composed"],
+  "highWriteUpperBound": {
+    "derivation": "At most one order can be proposed per processed ES event. A pending market order may fill at the next event before signal evaluation, permitting one new order on that same event. The conservative bound is therefore one order and one terminal fill record per event.",
+    "orders": 423300,
+    "fills": 423300,
+    "orderStatusUpdates": 423300,
+    "diagnosticRows": 1269900,
+    "diagnosticDerivation": "The simulator emits at most three diagnostic observations per event (analyzed, rejected and rejected_detail). The persistence upper bound deliberately assumes every observation has a unique key: 3 * 423300 = 1269900 rows.",
+    "strategyStateRows": 1,
+    "extrapolationPermitted": false
+  },
+  "runtimeUpperBoundFormula": "U=(median+max(0.5*median,2*sampleSD))*1.20",
+  "scenarioFormula": "U_scenario=U_no_order_full+U_exact_evaluator+U_high_write_full",
+  "totalFormula": "U_total=U_preflight+3*U_scenario+3*U_identity_reload+U_artifact+U_startup+U_shutdown",
+  "executionWindow": {
+    "startupSeconds": 0,
+    "shutdownSeconds": 0,
+    "rationale": "The real Stage B service is started and health-checked before the single POST; service startup and shutdown are outside the experiment execution window. External container wall time is still recorded for benchmark audit only."
+  },
+  "checkpointPolicy": "Record cumulative elapsed milliseconds at every 10000 processed events and at 423300; derive each 10000-event interval by differencing adjacent cumulative checkpoints. For high-write an event means one complete order+status-update+fill tuple. Exact evaluator uses one evaluator invocation.",
+  "externalEvidence": ["container wall time", "Docker peak memory", "Docker memory limit", "Docker CPU limit", "host swap before/after", "host power state"],
+  "gates": {
+    "scenarioSecondsMax": 1800,
+    "totalSecondsMax": 7200,
+    "peakRssBytesMax": 4294967296,
+    "swapPermitted": false,
+    "failedMeasuredRunsPermitted": 0,
+    "outlierRemovalPermitted": false
+  }
+}
