@@ -13,6 +13,7 @@
     "research:ibkr-es": "tsx src/ibkr-es-acquisition-cli.ts",
     "research:v2-preflight": "tsx src/research-v2-preflight-cli.ts",
     "research:v3-benchmark": "tsx src/research-v3-benchmark-cli.ts",
+    "research:v3-benchmark-suite": "tsx src/research-v3-benchmark-suite-cli.ts",
     "test": "BACKTEST_UNIT_ONLY=1 node --import tsx --test 'src/**/*.test.ts'",
     "test:integration": "node --import tsx --test 'src/**/*.pg-integration.test.ts'"
   },

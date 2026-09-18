@@ -103,6 +103,12 @@ async function measured(component: string, work: (checkpoint: Checkpoint) => Pro
     nodeHeapLimitBytes: getHeapStatistics().heap_size_limit,
     containerMemoryLimit: await readCgroup("/sys/fs/cgroup/memory.max"),
     containerCpuLimit: await readCgroup("/sys/fs/cgroup/cpu.max"),
+    containerMemoryPeakBytes: await readCgroup("/sys/fs/cgroup/memory.peak"),
+    containerMemoryCurrentBytes: await readCgroup("/sys/fs/cgroup/memory.current"),
+    containerSwapCurrentBytes: await readCgroup("/sys/fs/cgroup/memory.swap.current"),
+    containerSwapPeakBytes: await readCgroup("/sys/fs/cgroup/memory.swap.peak"),
+    containerMemoryEvents: await readCgroup("/sys/fs/cgroup/memory.events"),
+    containerMemoryPressure: await readCgroup("/sys/fs/cgroup/memory.pressure"),
   })}\n`);
 }
 
@@ -115,6 +121,28 @@ async function loadRealProjection(connectionString: string) {
     connectionString, identity, REGISTERED_ES_V2_PROJECTION,
   );
   return { identity, projection };
+}
+
+async function runIdentityBoundary(connectionString: string): Promise<void> {
+  const first = await loadRegisteredResearchDataset(connectionString, {
+    provenanceId: RESEARCH_ES_PROVENANCE_ID,
+    datasetFingerprint: RESEARCH_ES_DATASET_FINGERPRINT,
+  });
+  const second = await loadRegisteredResearchDataset(connectionString, {
+    provenanceId: RESEARCH_ES_PROVENANCE_ID,
+    datasetFingerprint: RESEARCH_ES_DATASET_FINGERPRINT,
+  });
+  const third = await loadRegisteredResearchDataset(connectionString, {
+    provenanceId: RESEARCH_ES_PROVENANCE_ID,
+    datasetFingerprint: RESEARCH_ES_DATASET_FINGERPRINT,
+  });
+  if (first.fingerprint !== second.fingerprint || first.fingerprint !== third.fingerprint)
+    throw new Error("Benchmark identity boundary changed between reloads");
+  const projection = await loadResearchActiveContractProjection(
+    connectionString, third, REGISTERED_ES_V2_PROJECTION,
+  );
+  if (projection.evidence.activeSeriesSha256 !== REGISTERED_ES_V2_PROJECTION.activeSeriesSha256)
+    throw new Error("Benchmark projection differs from the registered identity boundary");
 }
 
 async function runNoOrder(
@@ -241,8 +269,10 @@ if (!component || !connectionString) throw new Error("BENCHMARK_COMPONENT and BA
 const repository = new BacktestRepository(connectionString);
 await repository.init();
 try {
-  if (component === "preflight" || component === "identity_reload")
+  if (component === "preflight")
     await measured(component, async () => { await loadRealProjection(connectionString); });
+  else if (component === "identity_reload")
+    await measured(component, async () => { await runIdentityBoundary(connectionString); });
   else if (component === "artifact")
     await measured(component, () => runArtifact(repository));
   else if (component === "no_order_full")

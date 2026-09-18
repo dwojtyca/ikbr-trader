@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "pr15.5d2-benchmark-manifest-v1",
+  "schemaVersion": "pr15.5d2-benchmark-manifest-v2",
   "eventsPerScenario": 423300,
   "warmupRunsPerComponent": 1,
   "measuredRunsPerComponent": 3,
@@ -23,7 +23,28 @@
     "rationale": "The real Stage B service is started and health-checked before the single POST; service startup and shutdown are outside the experiment execution window. External container wall time is still recorded for benchmark audit only."
   },
   "checkpointPolicy": "Record cumulative elapsed milliseconds at every 10000 processed events and at 423300; derive each 10000-event interval by differencing adjacent cumulative checkpoints. For high-write an event means one complete order+status-update+fill tuple. Exact evaluator uses one evaluator invocation.",
-  "externalEvidence": ["container wall time", "Docker peak memory", "Docker memory limit", "Docker CPU limit", "host swap before/after", "host power state"],
+  "executionProtocol": {
+    "matrixOrder": "For each component in manifest order: warmup, measured-1, measured-2, measured-3. No extra, missing, duplicate, retried, or reordered invocation is admissible.",
+    "databaseLifecycle": "The original ikbr_trader_backtest_pr15_5a remains read-only. At suite start, prove it has zero active connections, dump it once, and restore that dump into a template database in a dedicated PostgreSQL container using the exact source image ID and a dedicated named pgdata volume with the same Docker volume driver as Stage B. Require identical server version and frozen planner/WAL/memory/autovacuum settings, run deterministic ANALYZE after restore, then verify template row counts and durable fingerprint against the original. Before every invocation, recreate a fresh database named exactly ikbr_trader_backtest_pr15_5a from that analyzed private template so production database-name guards remain active. Compare starting table row counts with the original, record and validate component-specific ending deltas (including terminal status-update and wide order/fill fields), then discard the run database. Warmup mutations are therefore discarded. At suite end, recheck the original row counts and fingerprint byte-for-byte and remove the dedicated database container and volume.",
+    "cachePolicy": "Do not restart PostgreSQL, Docker Desktop, or the host between invocations. The fixed component-major order and warmup preserve ordinary warmed host/page-cache behavior while database contents are reset. PostgreSQL checkpoint, WAL, and autovacuum settings remain unchanged and are recorded before the suite.",
+    "identityBinding": "The suite must begin from a clean Git worktree at the exact 40-character HEAD, build backtest-engine with docker compose, inspect the resulting ikbr-trader-app:local image ID, and inject that inspected value into every invocation. The suite rejects any record whose SHA, image ID, Node version, heap limit, Docker memory limit, or Docker CPU limit differs.",
+    "rawEvidence": "Write exactly one JSONL envelope per matrix cell in prescribed order, validate the complete 7 x 4 matrix, reject failures and duplicates, hash the complete raw JSONL bytes with SHA-256, and write one calculated summary tied to that raw-log hash.",
+    "memoryAndPower": "For every invocation record cgroup memory.peak, memory.current, memory.events, memory.pressure, memory.swap.current and memory.swap.peak from inside the container; inspect container OOMKilled and exit status after completion; and capture host vm.swapusage and pmset power state immediately before and after. Missing cgroup or host evidence fails closed. Container swap current/peak, OOM, oom_kill and oom_group_kill must remain zero; host swap used may not increase; host must remain on AC power for the whole suite.",
+    "rowCountTables": ["backtest_runs", "backtest_orders", "backtest_fills", "backtest_strategy_state", "backtest_signal_diagnostics", "backtest_research_experiments"],
+    "highWriteTerminalAssertions": "For high_write_full and composed, require exactly 423300 orders in FILLED state with the appended benchmark_fill reason, all 423300 wide order payloads, and all 423300 wide futures fill/economic payloads scoped to the synthetic high-write run."
+  },
+  "calculationPolicy": {
+    "wallTimeUnit": "milliseconds internally; seconds only for presentation",
+    "median": "middle value of the three sorted measured wallMs values",
+    "sampleStandardDeviation": "sqrt(sum((x-mean)^2)/(n-1)) for n=3",
+    "rounding": "no rounding before gate comparison; presentation may round afterward",
+    "warmup": "excluded from calculations but mandatory",
+    "measuredSamples": "all and exactly measured-1, measured-2, measured-3; no outlier removal",
+    "composed": "used only for the RSS/swap/OOM/memory-pressure gate, not runtime composition",
+    "evaluatorAssertionProbes": "the two fail-closed fixture assertions occur inside timed wallMs and remain included as a conservative 423302-call cost",
+    "startupShutdown": "zero only for the Stage B POST execution window because the service is prestarted and health-checked; external benchmark container wall time is audit-only"
+  },
+  "externalEvidence": ["container wall time", "cgroup memory peak/current/events/pressure", "cgroup swap current/peak", "Docker OOM and exit state", "Docker memory limit", "Docker CPU limit", "host swap before/after every run", "host power state before/after every run", "PostgreSQL settings and row counts"],
   "gates": {
     "scenarioSecondsMax": 1800,
     "totalSecondsMax": 7200,
