@@ -501,39 +501,55 @@ describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => { throw new Error("external I/O is forbidden"); }) as typeof fetch;
     try {
-      const metrics = [];
-      for (const storedScenario of ["primary", "stress", "primary_reproduction"] as const) {
-        const scenario = storedScenario === "primary_reproduction" ? "primary" : storedScenario;
-        const run = await repository.createResearchScenarioRun(imported.datasetId, {
-          experimentId: "pr15.5d-synthetic-execution-audit",
-          scenario: storedScenario,
-          syntheticDatasetFingerprint: imported.fingerprint,
-        });
-        const data = await repository.loadBacktestData(["ES"]);
-        const options = researchEsSimulatorOptions(identity, scenario);
-        const summary = await new BacktestSimulator(repository, run.id, data, {
-          ...options,
-          strategyFactory: () => [new DeterministicResearchExecutionStrategy()],
-        }).run();
-        await repository.finishRun(run.id, "completed", summary);
-        metrics.push(await repository.getResearchScenarioMetrics(
-          run.id, scenario, imported.fingerprint, imported.fingerprint,
-        ));
+      const metrics: Array<{ lookup: "reference" | "indexed"; storedScenario: string; value: any }> = [];
+      for (const lookup of ["reference", "indexed"] as const) {
+        for (const storedScenario of ["primary", "stress", "primary_reproduction"] as const) {
+          const scenario = storedScenario === "primary_reproduction" ? "primary" : storedScenario;
+          const run = await repository.createResearchScenarioRun(imported.datasetId, {
+            experimentId: `pr15.5d2-synthetic-lookup-parity-${lookup}`,
+            scenario: storedScenario,
+            lookup,
+            syntheticDatasetFingerprint: imported.fingerprint,
+          });
+          const data = await repository.loadBacktestData(["ES"]);
+          const options = researchEsSimulatorOptions(identity, scenario);
+          const summary = await new BacktestSimulator(repository, run.id, data, {
+            ...options,
+            recentCandleLookup: lookup,
+            strategyFactory: () => [new DeterministicResearchExecutionStrategy()],
+          }).run();
+          await repository.finishRun(run.id, "completed", summary);
+          metrics.push({ lookup, storedScenario, value: await repository.getResearchScenarioMetrics(
+            run.id, scenario, imported.fingerprint, imported.fingerprint,
+          ) });
+        }
       }
-      assert.deepEqual(metrics.map((entry) => entry.closedTrades), [1, 1, 1]);
-      assert.deepEqual(metrics.map((entry) => entry.countsByExitReason.contract_roll), [1, 1, 1]);
-      assert.deepEqual(metrics.map((entry) => entry.datasetFingerprintAfter), [
-        imported.fingerprint, imported.fingerprint, imported.fingerprint,
-      ]);
+      assert.deepEqual(metrics.map((entry) => entry.value.closedTrades), new Array(6).fill(1));
+      assert.deepEqual(metrics.map((entry) => entry.value.countsByExitReason.contract_roll), new Array(6).fill(1));
+      assert.deepEqual(metrics.map((entry) => entry.value.datasetFingerprintAfter), new Array(6).fill(imported.fingerprint));
+      for (const storedScenario of ["primary", "stress", "primary_reproduction"]) {
+        const reference = metrics.find((entry) => entry.lookup === "reference" && entry.storedScenario === storedScenario)!.value;
+        const indexed = metrics.find((entry) => entry.lookup === "indexed" && entry.storedScenario === storedScenario)!.value;
+        assert.deepEqual(indexed, reference, `${storedScenario} metrics parity`);
+        assert.equal(
+          createHash("sha256").update(JSON.stringify(indexed)).digest("hex"),
+          createHash("sha256").update(JSON.stringify(reference)).digest("hex"),
+          `${storedScenario} canonical metrics hash parity`,
+        );
+      }
       const pool = new Pool({ connectionString: databaseUrl });
       try {
-        const runs = await pool.query(`SELECT status,config_json->>'scenario' AS scenario
+        const runs = await pool.query(`SELECT status,config_json->>'scenario' AS scenario,
+            config_json->>'lookup' AS lookup
           FROM backtest_runs ORDER BY id`);
-        assert.deepEqual(runs.rows.map((row) => [row.status, row.scenario]), [
-          ["completed", "primary"], ["completed", "stress"],
-          ["completed", "primary_reproduction"],
+        assert.deepEqual(runs.rows.map((row) => [row.status, row.lookup, row.scenario]), [
+          ["completed", "reference", "primary"], ["completed", "reference", "stress"],
+          ["completed", "reference", "primary_reproduction"],
+          ["completed", "indexed", "primary"], ["completed", "indexed", "stress"],
+          ["completed", "indexed", "primary_reproduction"],
         ]);
         const audit = await pool.query(`SELECT r.config_json->>'scenario' AS scenario,
+            r.config_json->>'lookup' AS lookup,
             COUNT(DISTINCT o.id) AS orders,COUNT(DISTINCT f.id) AS fills,
             MIN(f.commission) AS commission,MIN(f.slippage_cost) AS slippage_cost,
             MIN(f.exit_reason) AS exit_reason,
@@ -541,10 +557,8 @@ describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
           FROM backtest_runs r
           JOIN backtest_orders o ON o.run_id=r.id
           JOIN backtest_fills f ON f.run_id=r.id AND f.order_id=o.id
-          GROUP BY r.id,r.config_json->>'scenario' ORDER BY r.id`);
-        assert.deepEqual(audit.rows.map((row) => row.scenario), [
-          "primary", "stress", "primary_reproduction",
-        ]);
+          GROUP BY r.id,r.config_json->>'scenario',r.config_json->>'lookup' ORDER BY r.id`);
+        assert.equal(audit.rows.length, 6);
         for (const row of audit.rows) {
           assert.equal(Number(row.orders), 1);
           assert.equal(Number(row.fills), 1);
@@ -555,12 +569,24 @@ describe("PR15.5C research dataset PostgreSQL integration", { skip }, () => {
         }
         assert.equal(Number(audit.rows[1].commission) > Number(audit.rows[0].commission), true);
         assert.equal(Number(audit.rows[1].slippage_cost) > Number(audit.rows[0].slippage_cost), true);
+        assert.deepEqual(
+          audit.rows.slice(3).map((row) => ({ ...row, lookup: "reference" })),
+          audit.rows.slice(0, 3),
+          "orders, fills, commissions, slippage, exits, and contract identities must match",
+        );
         const diagnostics = await pool.query(`SELECT r.config_json->>'scenario' AS scenario,
+            r.config_json->>'lookup' AS lookup,
             d.stage,SUM(d.samples)::int AS samples
           FROM backtest_runs r JOIN backtest_signal_diagnostics d ON d.run_id=r.id
-          GROUP BY r.id,r.config_json->>'scenario',d.stage ORDER BY r.id,d.stage`);
-        for (const scenario of ["primary", "stress", "primary_reproduction"])
-          assert.equal(diagnostics.rows.some((row) => row.scenario === scenario && row.stage === "proposed" && row.samples > 0), true);
+          GROUP BY r.id,r.config_json->>'scenario',r.config_json->>'lookup',d.stage ORDER BY r.id,d.stage`);
+        for (const lookup of ["reference", "indexed"])
+          for (const scenario of ["primary", "stress", "primary_reproduction"])
+            assert.equal(diagnostics.rows.some((row) => row.lookup === lookup && row.scenario === scenario && row.stage === "proposed" && row.samples > 0), true);
+        assert.deepEqual(
+          diagnostics.rows.filter((row) => row.lookup === "indexed").map((row) => ({ ...row, lookup: "reference" })),
+          diagnostics.rows.filter((row) => row.lookup === "reference"),
+          "diagnostics must match",
+        );
         const dataset = await pool.query("SELECT fingerprint,candles_count FROM backtest_datasets");
         assert.equal(dataset.rows[0].fingerprint, imported.fingerprint);
         assert.equal(Number(dataset.rows[0].candles_count), imported.candlesCount);

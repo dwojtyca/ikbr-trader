@@ -4,6 +4,7 @@ import type { Candle } from "@ikbr/shared";
 import type { BacktestRepository } from "./repository.js";
 import { BacktestSimulator, type SimulatorOptions } from "./simulator.js";
 import type { BacktestFillRecord, LoadedBacktestData } from "./types.js";
+import { CME_EQUITY_INDEX_2024_2026 } from "./cme-equity-index-calendar.js";
 
 const candle = (conid: string, iso: string, values: Partial<Candle> = {}): Candle => ({
   symbol: "ES", conid, timeframe: "1m", ts: new Date(iso),
@@ -32,7 +33,159 @@ const data = (candles1m: Candle[], candles1h: Candle[] = []): LoadedBacktestData
   candles1d: new Map(), candles1w: new Map(), candleCount1m: candles1m.length, fxRates: [],
 });
 
+type SimulatorLookupInternals = {
+  candles1mBySymbol: Map<string, Candle[]>;
+  candlesByTimeframe: Record<Candle["timeframe"], Map<string, Candle[]>>;
+  currentIndexBySymbol: Map<string, number>;
+  futuresCalendarBySymbol: Map<string, { completedAt(ts: Date, timeframe: Candle["timeframe"]): Date }>;
+  currentTime?: Date;
+  currentCandle?: Candle;
+  options: SimulatorOptions;
+};
+
+function referenceRecentCandles(
+  simulator: BacktestSimulator,
+  symbol: string,
+  timeframe: Candle["timeframe"],
+  limit: number,
+): Candle[] {
+  const state = simulator as unknown as SimulatorLookupInternals;
+  const key = symbol.toUpperCase();
+  if (timeframe === "1m") {
+    const rows = state.candles1mBySymbol.get(key) ?? [];
+    const index = state.currentIndexBySymbol.get(key) ?? -1;
+    if (index < 0) return [];
+    const currentConid = state.currentCandle?.symbol.toUpperCase() === key
+      ? state.currentCandle.conid : rows[index]?.conid;
+    return rows.slice(0, index + 1).filter((row) => row.conid === currentConid).slice(-limit);
+  }
+  const rows = state.candlesByTimeframe[timeframe].get(key) ?? [];
+  const evaluationTime = state.currentTime ?? new Date(0);
+  const durationMs = {
+    "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
+    "12h": 12 * 60 * 60_000, "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
+  }[timeframe];
+  const currentConid = state.currentCandle?.symbol.toUpperCase() === key
+    ? state.currentCandle.conid : undefined;
+  const calendar = state.futuresCalendarBySymbol.get(key);
+  return rows.filter((row) =>
+    (calendar && (state.options.deriveAllFuturesTimeframesFrom1m ||
+      timeframe === "1h" || timeframe === "4h" || timeframe === "1d")
+      ? calendar.completedAt(row.ts, timeframe).getTime()
+      : row.ts.getTime() + durationMs) <= evaluationTime.getTime() &&
+    (!currentConid || row.conid === currentConid),
+  ).slice(-limit);
+}
+
 describe("BacktestSimulator futures safety", () => {
+  it("keeps indexed lookups byte-for-byte equivalent across timeframes, rolls, symbols, limits, and backward time", async () => {
+    const es1m = [
+      candle("1", "2026-06-01T10:00:00Z", { close: 100 }),
+      candle("1", "2026-06-01T10:01:00Z", { close: 101 }),
+      candle("2", "2026-06-01T10:02:00Z", { close: 200 }),
+      candle("2", "2026-06-01T10:03:00Z", { close: 201 }),
+    ];
+    const nq1m = es1m.map((row, index) => ({
+      ...row, symbol: "NQ", conid: index < 2 ? "10" : "20", close: row.close + 1000,
+    }));
+    const timeframes = ["5m", "1h", "4h", "12h", "1d", "1w"] as const;
+    const loaded = data(es1m);
+    loaded.dataset.symbols = ["ES", "NQ"];
+    loaded.candles1m = new Map([["ES", es1m], ["NQ", nq1m]]);
+    loaded.candleCount1m = es1m.length + nq1m.length;
+    for (const [offset, timeframe] of timeframes.entries()) {
+      const rows = [
+        candle("1", "2026-05-20T00:00:00Z", { timeframe, close: 10 + offset }),
+        candle("1", "2026-05-21T00:00:00Z", { timeframe, close: 20 + offset }),
+        candle("2", "2026-05-22T00:00:00Z", { timeframe, close: 30 + offset }),
+        candle("2", "2026-05-23T00:00:00Z", { timeframe, close: 40 + offset }),
+      ];
+      loaded[`candles${timeframe}` as keyof LoadedBacktestData] = new Map([
+        ["ES", rows],
+        ["NQ", rows.map((row) => ({ ...row, symbol: "NQ", conid: `${row.conid}0` }))],
+      ]) as never;
+    }
+    const simulator = new BacktestSimulator({} as BacktestRepository, 1, loaded, options({
+      currencyBySymbol: { ES: "USD", NQ: "USD" },
+      secTypeBySymbol: { ES: "STK", NQ: "STK" },
+    }));
+    const state = simulator as unknown as SimulatorLookupInternals;
+    state.currentIndexBySymbol.set("ES", 3);
+    state.currentIndexBySymbol.set("NQ", 2);
+    state.currentCandle = es1m[3];
+
+    for (const iso of ["2026-06-01T10:03:00Z", "2026-05-22T12:00:00Z", "2026-06-01T10:03:00Z"]) {
+      state.currentTime = new Date(iso);
+      for (const symbol of ["ES", "NQ"]) {
+        for (const timeframe of ["1m", ...timeframes] as const) {
+          for (const limit of [0, 1, 99]) {
+            assert.deepEqual(
+              await simulator.getRecentCandles(symbol, timeframe, limit),
+              referenceRecentCandles(simulator, symbol, timeframe, limit),
+              `${symbol} ${timeframe} limit=${limit} at ${iso}`,
+            );
+          }
+        }
+      }
+    }
+  });
+
+  it("keeps indexed CME completion parity across DST, closure, early close, weekly completion, and roll", async () => {
+    const rows = [
+      candle("1", "2025-12-31T20:59:00Z", { close: 98 }),
+      candle("1", "2026-01-02T00:00:00Z", { close: 99 }),
+      candle("1", "2026-03-06T22:59:00Z", { close: 100 }),
+      candle("1", "2026-03-08T22:00:00Z", { close: 101 }),
+      candle("1", "2026-03-09T20:59:00Z", { close: 102 }),
+      candle("1", "2026-06-18T22:00:00Z", { close: 103 }),
+      candle("1", "2026-06-19T16:59:00Z", { close: 104 }),
+      candle("1", "2026-06-30T20:59:00Z", { close: 105 }),
+      candle("2", "2026-07-01T22:00:00Z", { close: 200 }),
+      candle("2", "2026-07-02T20:59:00Z", { close: 201 }),
+    ];
+    const spec = { tradingClass: "ES", secType: "FUT", currency: "USD", multiplier: 50,
+      tickSize: 0.25, commissionPerContractPerSide: 1, slippageTicks: 1,
+      sessionTemplate: "cme_equity_index", timezone: "America/Chicago",
+      calendarVersion: CME_EQUITY_INDEX_2024_2026.version } as const;
+    const metadata = new Map(["1", "2"].map((conid) => [conid, { conid, symbol: "ES",
+      localSymbol: `ES${conid}`, tradingClass: "ES", lastTradeAt: new Date("2026-12-18T16:00:00Z") }]));
+    const simulator = new BacktestSimulator({} as BacktestRepository, 1, data(rows), options({
+      secTypeBySymbol: { ES: "FUT" }, futuresSpecs: new Map([["ES", spec]]),
+      futuresContracts: metadata, deriveAllFuturesTimeframesFrom1m: true,
+      futuresCalendars: new Map([[CME_EQUITY_INDEX_2024_2026.version, CME_EQUITY_INDEX_2024_2026]]),
+    }));
+    const state = simulator as unknown as SimulatorLookupInternals;
+    const calendar = state.futuresCalendarBySymbol.get("ES")!;
+    state.currentIndexBySymbol.set("ES", rows.length - 1);
+
+    for (const timeframe of ["5m", "1h", "4h", "12h", "1d", "1w"] as const) {
+      const aggregated = state.candlesByTimeframe[timeframe].get("ES") ?? [];
+      assert.equal(aggregated.length > 0, true, `${timeframe} fixture must aggregate`);
+      for (const row of aggregated) {
+        state.currentCandle = [...rows].reverse().find((candidate) => candidate.conid === row.conid)!;
+        const completedAt = calendar.completedAt(row.ts, timeframe).getTime();
+        for (const at of [completedAt - 1, completedAt, completedAt + 1, completedAt - 1]) {
+          state.currentTime = new Date(at);
+          for (const limit of [0, 1, 99])
+            assert.deepEqual(
+              await simulator.getRecentCandles("ES", timeframe, limit),
+              referenceRecentCandles(simulator, "ES", timeframe, limit),
+              `${timeframe} ${row.conid} ${new Date(at).toISOString()} limit=${limit}`,
+            );
+        }
+      }
+    }
+
+    state.currentCandle = rows.at(-1);
+    state.currentTime = new Date("2026-01-01T18:00:00Z");
+    for (const timeframe of ["5m", "1h", "4h", "12h", "1d", "1w"] as const)
+      assert.deepEqual(
+        await simulator.getRecentCandles("ES", timeframe, 99),
+        referenceRecentCandles(simulator, "ES", timeframe, 99),
+        `${timeframe} full closure parity`,
+      );
+  });
+
   it("research mode rebuilds all six higher timeframes from projected 1m per conId", () => {
     const projected = [
       candle("1", "2026-06-01T22:01:00Z", { open: 100, high: 101, low: 99, close: 100, volume: 2 }),

@@ -71,6 +71,8 @@ export interface SimulatorOptions {
   strategyFactory?: () => readonly object[];
   /** Research-only: ignore stored aggregates and derive every timeframe from projected 1m futures rows. */
   deriveAllFuturesTimeframesFrom1m?: boolean;
+  /** Test-only semantic oracle for indexed candle lookup parity. */
+  recentCandleLookup?: "indexed" | "reference";
   riskLimits: {
     accountEquity: number;
     maxRiskPerTradePct: number;
@@ -203,6 +205,49 @@ interface StrategyWorkItem {
   eventCount: number;
 }
 
+type BacktestTimeframe = Candle["timeframe"];
+
+interface IndexedCandleSeries {
+  rows: Candle[];
+  visibleAt: number[];
+}
+
+interface CandleLookupIndex {
+  all: IndexedCandleSeries;
+  byConid: Map<string, IndexedCandleSeries>;
+}
+
+function appendIndexedCandle(
+  index: IndexedCandleSeries,
+  row: Candle,
+  visibleAt: number,
+): void {
+  index.rows.push(row);
+  index.visibleAt.push(visibleAt);
+}
+
+function upperBound(values: readonly number[], target: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (values[middle] <= target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function indexedTail(
+  series: IndexedCandleSeries | undefined,
+  visibleThrough: number,
+  limit: number,
+): Candle[] {
+  if (!series) return [];
+  const end = upperBound(series.visibleAt, visibleThrough);
+  if (limit <= 0) return series.rows.slice(0, end).slice(-limit);
+  return series.rows.slice(Math.max(0, end - limit), end);
+}
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -233,6 +278,10 @@ export class BacktestSimulator {
   >;
   private readonly currentIndexBySymbol = new Map<string, number>();
   private readonly futuresCalendarBySymbol = new Map<string, CmeSessionCalendar>();
+  private readonly candleLookupIndexes: Record<
+    BacktestTimeframe,
+    Map<string, CandleLookupIndex>
+  >;
   private readonly positions = new Map<string, Position>();
   private readonly pendingOrders: PendingOrder[] = [];
   private readonly strategyStates = new Map<string, StrategyState>();
@@ -293,6 +342,54 @@ export class BacktestSimulator {
         this.candlesByTimeframe[timeframe].set(symbol.toUpperCase(), aggregateCmeFuturesCandles(candles, timeframe, calendar));
       }
     }
+    this.candleLookupIndexes = this.buildCandleLookupIndexes();
+  }
+
+  private buildCandleLookupIndexes(): Record<
+    BacktestTimeframe,
+    Map<string, CandleLookupIndex>
+  > {
+    const result = Object.fromEntries(
+      (["1m", "5m", "1h", "4h", "12h", "1d", "1w"] as const)
+        .map((timeframe) => [timeframe, new Map<string, CandleLookupIndex>()]),
+    ) as Record<BacktestTimeframe, Map<string, CandleLookupIndex>>;
+    const durationsMs: Record<Exclude<BacktestTimeframe, "1m">, number> = {
+      "5m": 5 * 60_000,
+      "1h": 60 * 60_000,
+      "4h": 4 * 60 * 60_000,
+      "12h": 12 * 60 * 60_000,
+      "1d": 24 * 60 * 60_000,
+      "1w": 7 * 24 * 60 * 60_000,
+    };
+
+    for (const timeframe of ["1m", "5m", "1h", "4h", "12h", "1d", "1w"] as const) {
+      for (const [rawSymbol, rows] of this.candlesByTimeframe[timeframe]) {
+        const symbol = rawSymbol.toUpperCase();
+        const index: CandleLookupIndex = {
+          all: { rows: [], visibleAt: [] },
+          byConid: new Map(),
+        };
+        const calendar = this.futuresCalendarBySymbol.get(symbol);
+        for (let sourceIndex = 0; sourceIndex < rows.length; sourceIndex += 1) {
+          const row = rows[sourceIndex];
+          const visibleAt = timeframe === "1m"
+            ? sourceIndex
+            : calendar && (this.options.deriveAllFuturesTimeframesFrom1m ||
+                timeframe === "1h" || timeframe === "4h" || timeframe === "1d")
+              ? calendar.completedAt(row.ts, timeframe).getTime()
+              : row.ts.getTime() + durationsMs[timeframe];
+          appendIndexedCandle(index.all, row, visibleAt);
+          let contract = index.byConid.get(row.conid);
+          if (!contract) {
+            contract = { rows: [], visibleAt: [] };
+            index.byConid.set(row.conid, contract);
+          }
+          appendIndexedCandle(contract, row, visibleAt);
+        }
+        result[timeframe].set(symbol, index);
+      }
+    }
+    return result;
   }
 
   async run(progress?: RunProgressOptions): Promise<{
@@ -620,18 +717,49 @@ export class BacktestSimulator {
     limit: number,
   ): Promise<Candle[]> {
     const key = symbol.toUpperCase();
+    if (this.options.recentCandleLookup === "reference")
+      return this.getRecentCandlesReference(key, timeframe, limit);
+    if (timeframe === "1m") {
+      const index = this.currentIndexBySymbol.get(key) ?? -1;
+      if (index < 0) return [];
+      const rows = this.candles1mBySymbol.get(key) ?? [];
+      const currentConid = this.currentCandle?.symbol.toUpperCase() === key
+        ? this.currentCandle.conid : rows[index]?.conid;
+      return indexedTail(
+        this.candleLookupIndexes[timeframe].get(key)?.byConid.get(currentConid),
+        index,
+        limit,
+      );
+    }
+
+    const evaluationTime = this.currentTime ?? new Date(0);
+    const currentConid = this.currentCandle?.symbol.toUpperCase() === key
+      ? this.currentCandle.conid : undefined;
+    const lookup = this.candleLookupIndexes[timeframe].get(key);
+    return indexedTail(
+      currentConid ? lookup?.byConid.get(currentConid) : lookup?.all,
+      evaluationTime.getTime(),
+      limit,
+    );
+  }
+
+  private getRecentCandlesReference(
+    key: string,
+    timeframe: BacktestTimeframe,
+    limit: number,
+  ): Candle[] {
     if (timeframe === "1m") {
       const rows = this.candles1mBySymbol.get(key) ?? [];
       const index = this.currentIndexBySymbol.get(key) ?? -1;
       if (index < 0) return [];
       const currentConid = this.currentCandle?.symbol.toUpperCase() === key
         ? this.currentCandle.conid : rows[index]?.conid;
-      return rows.slice(0, index + 1).filter((row) => row.conid === currentConid).slice(-limit);
+      return rows.slice(0, index + 1)
+        .filter((row) => row.conid === currentConid).slice(-limit);
     }
-
     const rows = this.candlesByTimeframe[timeframe].get(key) ?? [];
     const evaluationTime = this.currentTime ?? new Date(0);
-    const durationMs: Record<Exclude<Candle["timeframe"], "1m">, number> = {
+    const durationMs: Record<Exclude<BacktestTimeframe, "1m">, number> = {
       "5m": 5 * 60_000, "1h": 60 * 60_000, "4h": 4 * 60 * 60_000,
       "12h": 12 * 60 * 60_000, "1d": 24 * 60 * 60_000, "1w": 7 * 24 * 60 * 60_000,
     };
