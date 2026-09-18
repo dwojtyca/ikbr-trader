@@ -24,5 +24,7 @@ describe("PR15.5C HTTP route guard", () => {
       researchUrl, "/backtest/research/es-compatibility"), null);
     assert.equal(protectedResearchRouteRejection(
       researchUrl, "/backtest/research/es-compatibility-v2"), null);
+    assert.equal(protectedResearchRouteRejection(
+      researchUrl, "/backtest/research/es-compatibility-v3"), null);
   });
 });

@@ -1168,6 +1168,20 @@ export class BacktestRepository {
     }
   }
 
+  async failRunningResearchScenarioRuns(
+    experimentId: string,
+    error: string,
+  ): Promise<number> {
+    const result = await this.pool.query(
+      `UPDATE backtest_runs
+       SET status='failed', finished_at=NOW(), error=$2,
+           progress_label='failed', progress_updated_at=NOW()
+       WHERE status='running' AND config_json->>'experimentId'=$1`,
+      [experimentId, error],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async finishRun(
     runId: number,
     status: "completed" | "failed",

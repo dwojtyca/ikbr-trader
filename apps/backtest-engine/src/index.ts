@@ -23,6 +23,8 @@ import { loadResearchActiveContractProjection } from "./research-active-contract
 import { runResearchEsV2Experiment } from "./research-es-v2-experiment.js";
 import { installResearchEsV2Routes } from "./research-es-v2-routes.js";
 import { REGISTERED_ES_V2_PROJECTION } from "./research-v2-run-request.js";
+import { runResearchEsV3Experiment } from "./research-es-v3-experiment.js";
+import { installResearchEsV3Routes, researchV3RuntimeCapacity } from "./research-es-v3-routes.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 installProtectedResearchRouteGuard(app, config.BACKTEST_POSTGRES_URL);
@@ -566,6 +568,20 @@ const researchV2Routes = installResearchEsV2Routes(app, {
   repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
   runExperiment: runResearchEsV2Experiment,
 });
+const researchV3Routes = installResearchEsV3Routes(app, {
+  implementationCommitSha: config.BACKTEST_RESEARCH_IMPLEMENTATION_SHA,
+  researchDatabaseUrl: config.BACKTEST_RESEARCH_POSTGRES_URL,
+  researchDatabaseExists: () => backtestDatabaseExists(
+    config.BACKTEST_POSTGRES_ADMIN_URL,
+    config.BACKTEST_RESEARCH_POSTGRES_URL,
+  ),
+  runtimeCapacity: researchV3RuntimeCapacity,
+  loadDataset: loadRegisteredResearchDataset,
+  loadProjection: (connectionString, identity) =>
+    loadResearchActiveContractProjection(connectionString, identity, REGISTERED_ES_V2_PROJECTION),
+  repositoryFactory: (connectionString) => new BacktestRepository(connectionString),
+  runExperiment: runResearchEsV3Experiment,
+});
 const recoveredResearchAttempt = await researchRoutes.recoverAbandonedAttempt();
 if (recoveredResearchAttempt) {
   app.log.warn(
@@ -580,6 +596,13 @@ if (recoveredResearchV2Attempt) {
     "recovered abandoned research v2 experiment as INCONCLUSIVE",
   );
 }
+const recoveredResearchV3Attempt = await researchV3Routes.recoverAbandonedAttempt();
+if (recoveredResearchV3Attempt) {
+  app.log.warn(
+    { experimentId: "pr15.5d3-es-momentum-breakout-long-v1" },
+    "recovered abandoned research v3 experiment as INCONCLUSIVE",
+  );
+}
 const abandonedRuns = await repo.failRunningRuns(
   "Backtest engine restarted before run completed",
 );
@@ -591,7 +614,7 @@ app.get("/health", async () => ({
   ok: true,
   historyJobRunning: Boolean(historyJob),
   runJobRunning: Boolean(runJob),
-  researchJobRunning: researchRoutes.isRunning() || researchV2Routes.isRunning(),
+  researchJobRunning: researchRoutes.isRunning() || researchV2Routes.isRunning() || researchV3Routes.isRunning(),
 }));
 
 app.get("/backtest/dataset", async () => ({

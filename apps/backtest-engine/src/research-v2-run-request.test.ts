@@ -27,7 +27,8 @@ describe("PR15.5D.1 pure research boundary", () => {
   it("preserves v1 identity and freezes the complete v2 projection", () => {
     assert.equal(RESEARCH_ES_EXPERIMENT_SPEC_SHA256,
       "4afee9646d4f8aea18f35effca741c2cc80c82195b5519f6a88161077a65dff6");
-    assert.match(RESEARCH_ES_V2_EXPERIMENT_SPEC_SHA256, /^[a-f0-9]{64}$/);
+    assert.equal(RESEARCH_ES_V2_EXPERIMENT_SPEC_SHA256,
+      "22ae7af844f549d06d3eaa64715556ca028d1dee69cbd35254f55e48d82ff85e");
     assert.notEqual(RESEARCH_ES_V2_EXPERIMENT_SPEC_SHA256, RESEARCH_ES_EXPERIMENT_SPEC_SHA256);
     assert.equal(researchFailureResultSha256({
       experimentId: "pr15.5d-es-momentum-breakout-long-v1",
