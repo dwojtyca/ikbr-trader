@@ -925,7 +925,19 @@ export class BacktestRepository {
     scenario: "primary" | "stress",
     datasetFingerprintBefore: string,
     datasetFingerprintAfter: string,
+    identity: {
+      strategyId?: string;
+      executionModelVersion?: string;
+      calendarVersion?: string;
+      multiplier?: number;
+      tickSize?: number;
+    } = {},
   ): Promise<ResearchScenarioMetrics> {
+    const strategyId = identity.strategyId ?? "momentum_breakout_long_v1";
+    const executionModelVersion = identity.executionModelVersion ?? "pr15.5b-v1";
+    const calendarVersion = identity.calendarVersion ?? "cme-equity-index-2024-2026-v1";
+    const multiplier = identity.multiplier ?? 50;
+    const tickSize = identity.tickSize ?? 0.25;
     const [fillsResult, pendingResult, stateResult, diagnosticsResult] = await Promise.all([
       this.pool.query(`SELECT quantity,entry_price,exit_price,gross_pnl,commission,net_pnl,
         slippage_cost,fills.multiplier,tick_size,entry_conid,exit_conid,execution_model_version,
@@ -942,7 +954,7 @@ export class BacktestRepository {
           (SELECT 1 FROM backtest_fills f WHERE f.order_id=backtest_orders.id)) AS unclosed
         FROM backtest_orders WHERE run_id=$1`, [runId]),
       this.pool.query(`SELECT permanently_disabled FROM backtest_strategy_state
-        WHERE run_id=$1 AND strategy_id='momentum_breakout_long_v1'`, [runId]),
+        WHERE run_id=$1 AND strategy_id=$2`, [runId, strategyId]),
       this.pool.query(`SELECT stage,reason_group,SUM(samples) AS samples
         FROM backtest_signal_diagnostics WHERE run_id=$1 AND stage IN ('rejected','rejected_detail')
         GROUP BY stage,reason_group ORDER BY stage,reason_group`, [runId]),
@@ -967,10 +979,10 @@ export class BacktestRepository {
     for (const row of rows) {
       const quantity = Number(row.quantity);
       const tick = Number(row.tick_size);
-      const onGrid = (value: unknown) => Math.abs(Number(value) / 0.25 - Math.round(Number(value) / 0.25)) < 1e-8;
       if (!Number.isSafeInteger(quantity) || quantity <= 0) invariantViolations.push("non_whole_contract_quantity");
-      if (Number(row.multiplier) !== 50 || tick !== 0.25) invariantViolations.push("invalid_es_economics");
-      if (!onGrid(row.entry_price) || !onGrid(row.exit_price)) invariantViolations.push("off_tick_fill");
+      if (Number(row.multiplier) !== multiplier || tick !== tickSize) invariantViolations.push("invalid_es_economics");
+      const onExpectedGrid = (value: unknown) => Math.abs(Number(value) / tickSize - Math.round(Number(value) / tickSize)) < 1e-8;
+      if (!onExpectedGrid(row.entry_price) || !onExpectedGrid(row.exit_price)) invariantViolations.push("off_tick_fill");
       if (!row.entry_conid || !row.exit_conid) invariantViolations.push("missing_contract_identity");
       const within = (value: unknown, from: unknown, to: unknown) =>
         Boolean(from && to) && new Date(String(value)).getTime() >= new Date(String(from)).getTime() &&
@@ -978,8 +990,8 @@ export class BacktestRepository {
       if (!within(row.entry_at, row.entry_valid_from, row.entry_valid_to) ||
         !within(row.exit_at, row.exit_valid_from, row.exit_valid_to))
         invariantViolations.push("fill_outside_contract_validity");
-      if (row.execution_model_version !== "pr15.5b-v1") invariantViolations.push("execution_model_mismatch");
-      if (row.calendar_version !== "cme-equity-index-2024-2026-v1") invariantViolations.push("calendar_mismatch");
+      if (row.execution_model_version !== executionModelVersion) invariantViolations.push("execution_model_mismatch");
+      if (row.calendar_version !== calendarVersion) invariantViolations.push("calendar_mismatch");
     }
     const sorted = [...net].sort((a, b) => a - b);
     const middle = Math.floor(sorted.length / 2);

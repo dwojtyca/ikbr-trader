@@ -646,14 +646,14 @@ export class BacktestSimulator {
           if (!Number.isInteger(priceToTicks(price, spec.tickSize)))
             throw new Error(`Futures candle ${field} for conId ${candle.conid} is off tick grid`);
         }
-        if (candle.ts.getTime() >= validated.lastTradeAt.getTime())
-          throw new Error(`Futures candle for conId ${candle.conid} is at or after last trade`);
         if (activeConid !== candle.conid) {
           if (retired.has(candle.conid))
             throw new Error(`Retired futures conId ${candle.conid} reappeared`);
           if (activeConid) retired.add(activeConid);
           activeConid = candle.conid;
         }
+        if (candle.ts.getTime() >= validated.lastTradeAt.getTime())
+          throw new Error(`Futures candle for conId ${candle.conid} is at or after last trade`);
       }
     }
   }

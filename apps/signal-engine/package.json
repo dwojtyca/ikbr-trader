@@ -40,6 +40,11 @@
       "import": "./dist/strategies/strategy-registry.js",
       "default": "./dist/strategies/strategy-registry.js"
     },
+    "./strategies/strategy.types": {
+      "types": "./dist/strategies/strategy.types.d.ts",
+      "import": "./dist/strategies/strategy.types.js",
+      "default": "./dist/strategies/strategy.types.js"
+    },
     "./repository": {
       "types": "./dist/repository.d.ts",
       "import": "./dist/repository.js",

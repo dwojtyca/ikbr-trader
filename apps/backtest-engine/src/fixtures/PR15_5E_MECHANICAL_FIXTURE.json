@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "pr15.5e-mechanical-fixture-v1",
+  "start": "2026-06-01T08:00:00.000Z",
+  "candleCount": 720,
+  "generatedCandlesSha256": "609c63846277ca4ea3b12b28e44e735f9a63fd7c7135c38ec071aa86178230d8",
+  "basePrice": 6000,
+  "contracts": [
+    { "conId": "501", "localSymbol": "ESM6", "firstIndex": 0, "lastIndex": 239, "lastTradeIndex": 250 },
+    { "conId": "502", "localSymbol": "ESU6", "firstIndex": 240, "lastIndex": 489, "lastTradeIndex": 490 },
+    { "conId": "503", "localSymbol": "ESZ6", "firstIndex": 490, "lastIndex": 719, "lastTradeIndex": 800 }
+  ],
+  "signals": [
+    { "episode": "take_profit", "index": 205, "conId": "501", "stop": 5990.25, "takeProfit": 6010 },
+    { "episode": "stop_loss", "index": 215, "conId": "501", "stop": 5990.25, "takeProfit": 6010 },
+    { "episode": "same_bar_collision", "index": 225, "conId": "501", "stop": 5990.25, "takeProfit": 6010 },
+    { "episode": "contract_roll", "index": 235, "conId": "501", "stop": 5990.25, "takeProfit": 6010 },
+    { "episode": "quantity_rejected", "index": 443, "conId": "502", "stop": 5900, "takeProfit": 6200 },
+    { "episode": "expiry", "index": 445, "conId": "502", "stop": 5990.25, "takeProfit": 6010 },
+    { "episode": "dataset_end", "index": 700, "conId": "503", "stop": 5990.25, "takeProfit": 6010 }
+  ],
+  "economics": {
+    "multiplier": 50,
+    "tickSize": 0.25,
+    "primaryCommissionPerSide": 2.5,
+    "primarySlippageTicks": 1,
+    "stressCommissionPerSide": 3.5,
+    "stressSlippageTicks": 2,
+    "accountEquity": 100000,
+    "targetRiskPerTradePct": 0.5
+  },
+  "expected": {
+    "orders": 6,
+    "fills": 6,
+    "closedTrades": 6,
+    "exitReasons": {
+      "take_profit": 1,
+      "stop": 2,
+      "contract_roll": 1,
+      "expiry": 1,
+      "dataset_end": 1
+    },
+    "primary": {
+      "totalPnl": -192.5,
+      "grossPnl": -162.5,
+      "commissions": 30,
+      "slippageCost": 137.5,
+      "wins": 4,
+      "fills": [
+        { "episode": "take_profit", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 6010, "exitFillPrice": 6010, "grossPnl": 487.5, "commission": 5, "netPnl": 482.5, "slippageCost": 12.5, "exitReason": "take_profit" },
+        { "episode": "stop_loss", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 5990.25, "exitFillPrice": 5990, "grossPnl": -512.5, "commission": 5, "netPnl": -517.5, "slippageCost": 25, "exitReason": "stop" },
+        { "episode": "same_bar_collision", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 5990.25, "exitFillPrice": 5990, "grossPnl": -512.5, "commission": 5, "netPnl": -517.5, "slippageCost": 25, "exitReason": "stop" },
+        { "episode": "contract_roll", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 6002, "exitFillPrice": 6001.75, "grossPnl": 75, "commission": 5, "netPnl": 70, "slippageCost": 25, "exitReason": "contract_roll" },
+        { "episode": "expiry", "conId": "502", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 6003, "exitFillPrice": 6002.75, "grossPnl": 125, "commission": 5, "netPnl": 120, "slippageCost": 25, "exitReason": "expiry" },
+        { "episode": "dataset_end", "conId": "503", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.25, "exitReferencePrice": 6004, "exitFillPrice": 6003.75, "grossPnl": 175, "commission": 5, "netPnl": 170, "slippageCost": 25, "exitReason": "dataset_end" }
+      ]
+    },
+    "stress": {
+      "totalPnl": -342,
+      "grossPnl": -300,
+      "commissions": 42,
+      "slippageCost": 275,
+      "wins": 4,
+      "fills": [
+        { "episode": "take_profit", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 6010, "exitFillPrice": 6010, "grossPnl": 475, "commission": 7, "netPnl": 468, "slippageCost": 25, "exitReason": "take_profit" },
+        { "episode": "stop_loss", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 5990.25, "exitFillPrice": 5989.75, "grossPnl": -537.5, "commission": 7, "netPnl": -544.5, "slippageCost": 50, "exitReason": "stop" },
+        { "episode": "same_bar_collision", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 5990.25, "exitFillPrice": 5989.75, "grossPnl": -537.5, "commission": 7, "netPnl": -544.5, "slippageCost": 50, "exitReason": "stop" },
+        { "episode": "contract_roll", "conId": "501", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 6002, "exitFillPrice": 6001.5, "grossPnl": 50, "commission": 7, "netPnl": 43, "slippageCost": 50, "exitReason": "contract_roll" },
+        { "episode": "expiry", "conId": "502", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 6003, "exitFillPrice": 6002.5, "grossPnl": 100, "commission": 7, "netPnl": 93, "slippageCost": 50, "exitReason": "expiry" },
+        { "episode": "dataset_end", "conId": "503", "quantity": 1, "entryReferencePrice": 6000, "entryFillPrice": 6000.5, "exitReferencePrice": 6004, "exitFillPrice": 6003.5, "grossPnl": 150, "commission": 7, "netPnl": 143, "slippageCost": 50, "exitReason": "dataset_end" }
+      ]
+    },
+    "primaryReproductionSha256": "1058af9983f2a25380dece42e90129b9d4c0403362deb7aa4a98289a7f2e09f5"
+  }
+}

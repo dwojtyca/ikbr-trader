@@ -34,6 +34,7 @@
 | PR15.5D.1 | Active-contract projection remediation and newly registered ES compatibility experiment | **TERMINAL `INCONCLUSIVE`: v2 was operator-aborted after 3,085 seconds without reaching the first 10,000-event checkpoint; recovery hash `4bd17e9fab5ea15150810b784da3afa4a04e959ab5511b72dae666ddd520b44c`; performance remediation required** (see [Stage B report](PR15_5D_1_STAGE_B_REPORT.md)) |
 | PR15.5D.2 | Backtest hot-path performance remediation and newly versioned ES attempt | **OWNER APPROVED / STAGE A IN PROGRESS; no v3 experiment started** (see [PR15_5D_2_PERFORMANCE_REMEDIATION_PLAN.md](PR15_5D_2_PERFORMANCE_REMEDIATION_PLAN.md)) |
 | PR15.5D.3 | Three-worker parallel execution of the registered ES scenarios | **TERMINAL `REJECTED_FOR_ES`: all three 423,300-event scenarios completed concurrently and reproducibly with zero trades; artifact `9fc53b1618a489524db1717e0b5eb812fb1d7ebdc03e9ac675f1a7198fb129d5`** (see [Stage B report](PR15_5D_3_STAGE_B_REPORT.md)) |
+| PR15.5E | Deterministic mechanical backtest E2E through signal, risk, order, fill, lifecycle, persistence, and metrics | **IMPLEMENTED / VERIFIED LOCALLY; exact 6-trade primary, stress, and reproduction paths passed in PostgreSQL and compiled Docker image** (see [plan](PR15_5E_MECHANICAL_BACKTEST_E2E_PLAN.md), [report](PR15_5E_REPORT.md)) |
 
 ## Ordering rationale
 
