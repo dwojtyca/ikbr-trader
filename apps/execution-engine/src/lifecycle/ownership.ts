@@ -11,6 +11,7 @@ export interface LifecycleLegLink {
   order_ref: string;
 }
 export interface LifecycleRun {
+  position_generation?: number | null;
   id: number;
   account_id: string;
   session_id: string;
@@ -21,6 +22,10 @@ export interface LifecycleRun {
   source_coverage: unknown;
 }
 export interface LifecycleEvidence {
+  positionSnapshot?: {
+    accountId: string; sessionId: string; generation: number; complete: boolean; observedAt: Date | string;
+    positions: Array<{ accountId: string; sessionId: string; conid: string | null; instrument: string; quantity: number; observedAt: Date | string }>;
+  } | null;
   order: ProposedOrder;
   clientOrderHash: string | null;
   review: unknown;
@@ -55,10 +60,20 @@ const nonnegative = (value: unknown): value is number => typeof value === "numbe
 const normalizeStatus = (value: unknown) => typeof value === "string" ? value.toUpperCase().replaceAll("_", "") : "";
 const active = (value: unknown) => ["SUBMITTED", "PRESUBMITTED"].includes(normalizeStatus(value));
 
-export function evaluateLifecycleOwnership(evidence: LifecycleEvidence, context: {
+export interface LifecycleContext {
   accountId: string | null; sessionId: string; nowMs: number; bound: BoundInstrument | null;
+}
+
+export function evaluateLifecycleOwnership(evidence: LifecycleEvidence, context: LifecycleContext): LifecycleOwnershipReport {
+  return evaluateLifecycleFacts(evidence, context, { requireProtection: true });
+}
+
+// Facts are shared with the close validator; only that validator may authorize a close.
+export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: LifecycleContext, options: {
+  requireProtection: boolean; closeLink?: LifecycleLegLink | null;
 }): LifecycleOwnershipReport {
-  const { order, run, links } = evidence;
+  const { order, run } = evidence;
+  const links = options.closeLink ? [...evidence.links, { ...options.closeLink, role: "CLOSE" }] : evidence.links;
   const { accountId, sessionId, nowMs, bound } = context;
   const report: LifecycleOwnershipReport = { readOnly: true, canSubmitClose: false, status: "BLOCKED", reasons: [],
     accountId, proposalId: order.id ?? null, instrumentId: order.instrumentId ?? null, conid: order.conid ?? null,
@@ -130,11 +145,13 @@ export function evaluateLifecycleOwnership(evidence: LifecycleEvidence, context:
         : object(coverage?.[name])?.count !== snapshot[name].length) ||
       object(persistedCoverage?.[name])?.count !== object(coverage?.[name])?.count) return refuse("snapshot_rows_invalid");
   }
-  if (links.length !== 3 || ["PARENT", "TP", "SL"].some(role => links.filter(link => link.role === role).length !== 1) ||
-    links.some(link => Number(link.proposed_order_id) !== order.id || link.account_id !== accountId ||
-      link.role_ordinal !== (link.role === "PARENT" ? 0 : 1) || !nonempty(link.broker_order_id) || !nonempty(link.order_ref) ||
+  if (evidence.links.length !== 3 || ["PARENT", "TP", "SL"].some(role => evidence.links.filter(link => link.role === role).length !== 1) ||
+    (options.closeLink && (options.closeLink.role !== "PARENT" || !Number.isSafeInteger(options.closeLink.proposed_order_id) ||
+      options.closeLink.proposed_order_id === order.id || options.closeLink.proposed_order_id <= 0)) ||
+    links.some(link => (link.role !== "CLOSE" && Number(link.proposed_order_id) !== order.id) || link.account_id !== accountId ||
+      link.role_ordinal !== (link.role === "PARENT" || link.role === "CLOSE" ? 0 : 1) || !nonempty(link.broker_order_id) || !nonempty(link.order_ref) ||
       (link.perm_id !== null && !nonempty(link.perm_id))) ||
-    new Set(links.map(link => link.broker_order_id)).size !== 3 || new Set(links.map(link => link.order_ref)).size !== 3 ||
+    new Set(links.map(link => link.broker_order_id)).size !== links.length || new Set(links.map(link => link.order_ref)).size !== links.length ||
     new Set(links.flatMap(link => link.perm_id ? [link.perm_id] : [])).size !== links.filter(link => link.perm_id).length)
     return refuse("durable_legs_invalid");
   report.legs = links.map(link => ({ role: link.role, brokerOrderId: link.broker_order_id!, orderRef: link.order_ref,
@@ -214,13 +231,13 @@ export function evaluateLifecycleOwnership(evidence: LifecycleEvidence, context:
   report.ownedFillNet = net;
   if (Math.abs(net - report.brokerPositionQuantity) > 1e-9) return refuse("position_fill_mismatch");
   if (net > 0) {
-    if (children.some(leg => !leg.observed || leg.remaining === null || leg.remaining < net)) return refuse("protection_missing");
+    if (options.requireProtection && children.some(leg => !leg.observed || leg.remaining === null || leg.remaining < net)) return refuse("protection_missing");
     report.status = "OWNED_POSITION";
   } else if (parent.filledQuantity === 0 && parent.observed) {
     if (parent.remaining !== order.quantity) return refuse("pending_parent_quantity_invalid");
     report.status = "PENDING_ENTRY";
   } else {
-    if (report.legs.some(leg => leg.observed)) return refuse("orphan_open_order");
+    if (options.requireProtection && report.legs.some(leg => leg.observed)) return refuse("orphan_open_order");
     report.status = "FLAT_OBSERVED";
   }
   return report;

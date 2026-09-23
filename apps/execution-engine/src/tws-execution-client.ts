@@ -62,6 +62,23 @@ interface CancelOrderResult {
   status: "CANCELLED" | "PENDING_CANCEL";
 }
 
+export interface OwnedOrderCancellation {
+  readonly brokerOrderId: string;
+  readonly orderRef: string;
+  readonly permId: string;
+  readonly accountId: string;
+  readonly conid: number;
+  readonly clientId: number;
+  readonly expectedGeneration: number;
+  readonly observedAt: string;
+}
+
+export interface OwnedOrderCancellationResult extends OwnedOrderCancellation {
+  readonly status: "CANCELLED";
+  readonly confirmedAt: string;
+  readonly connectionGeneration: number;
+}
+
 interface ResolvedContract {
   contract: ContractShape;
   minTick?: number;
@@ -245,6 +262,7 @@ function toBrokerRealizedPnl(value: unknown): number | undefined {
 export class TwsExecutionClient {
   private readonly ib: any;
   private connected = false;
+  private connectionGeneration = 0;
   private nextOrderId = 1;
   private connectPromise?: Promise<void>;
   private readonly openOrderContext = new Map<number, OpenOrderContext>();
@@ -297,6 +315,16 @@ export class TwsExecutionClient {
     return this.connected;
   }
 
+  getConnectionGeneration(): number { return this.connectionGeneration; }
+
+  getClientId(): number { return this.config.clientId; }
+
+  private assertConnectionGeneration(expected: number): void {
+    if (!this.connected || !Number.isSafeInteger(expected) || expected !== this.connectionGeneration) {
+      throw new Error("CLOSE_CONNECTION_CHANGED");
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.connected) return;
     if (this.connectPromise) {
@@ -319,6 +347,7 @@ export class TwsExecutionClient {
       };
 
       const onNextValidId = (orderId: number) => {
+        this.connectionGeneration += 1;
         this.connected = true;
         this.nextOrderId = Math.max(this.nextOrderId, Number(orderId));
         cleanup();
@@ -358,8 +387,9 @@ export class TwsExecutionClient {
 
   disconnect(): void {
     if (!this.connected) return;
-    this.ib.disconnect();
     this.connected = false;
+    this.connectionGeneration += 1;
+    this.ib.disconnect();
   }
 
   async getManagedAccounts(): Promise<string[]> {
@@ -615,10 +645,19 @@ export class TwsExecutionClient {
     );
   }
 
+  dispatchPreparedClose(
+    prepared: PreparedBrokerOrder,
+    expectedGeneration: number,
+  ): Promise<PlaceOrderResult> {
+    this.assertConnectionGeneration(expectedGeneration);
+    return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration);
+  }
+
   private dispatchPlan(
     plan: PlaceOrderPlan,
     contract: ContractShape,
     ticket: SignalTicket,
+    expectedGeneration?: number,
   ): Promise<PlaceOrderResult> {
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
@@ -760,6 +799,7 @@ export class TwsExecutionClient {
       this.ib.on("error", onError);
       try {
         for (const plannedOrder of plan.orders) {
+          if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
           this.ib.placeOrder(
             plannedOrder.orderId,
             contract,
@@ -769,6 +809,66 @@ export class TwsExecutionClient {
       } catch (error) {
         cleanup();
         reject(error as Error);
+      }
+    });
+  }
+
+  async cancelOwnedOrder(input: OwnedOrderCancellation): Promise<OwnedOrderCancellationResult> {
+    this.assertConnectionGeneration(input.expectedGeneration);
+    const orderId = Number(input.brokerOrderId);
+    const permId = Number(input.permId);
+    const observedAt = Date.parse(input.observedAt);
+    const age = Date.now() - observedAt;
+    if (!Number.isSafeInteger(orderId) || orderId <= 0 || String(orderId) !== input.brokerOrderId ||
+        !Number.isSafeInteger(permId) || permId <= 0 || String(permId) !== input.permId ||
+        !Number.isSafeInteger(input.conid) || input.conid <= 0 || !input.accountId.trim() ||
+        !input.orderRef.trim() || input.clientId !== this.config.clientId ||
+        !Number.isFinite(age) || age < 0 || age > 10_000) {
+      throw new Error("CLOSE_CANCEL_IDENTITY_INVALID");
+    }
+    return new Promise<OwnedOrderCancellationResult>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.ib.off("orderStatus", onStatus);
+        this.ib.off("error", onError);
+        this.ib.off("disconnected", onDisconnect);
+        this.ib.off("connected", onDisconnect);
+      };
+      const fail = (message: string) => { cleanup(); reject(new Error(message)); };
+      const onDisconnect = () => fail("CLOSE_CONNECTION_CHANGED");
+      const onStatus = (id: number, status: string, _filled: number, _remaining: number,
+        _average: number, incomingPermId: number, _parent: number, _last: number, clientId: number) => {
+        if (id !== orderId) return;
+        if (!this.connected || this.connectionGeneration !== input.expectedGeneration) return onDisconnect();
+        if (incomingPermId !== permId || clientId !== input.clientId) return fail("CLOSE_CANCEL_ACK_IDENTITY_MISMATCH");
+        const normalized = String(status).toUpperCase();
+        if (normalized === "CANCELLED" || normalized === "APICANCELLED") {
+          cleanup();
+          resolve({ ...input, status: "CANCELLED", confirmedAt: new Date().toISOString(),
+            connectionGeneration: this.connectionGeneration });
+        } else if (normalized === "INACTIVE" || normalized === "FILLED") {
+          fail(`CLOSE_CANCEL_UNCONFIRMED:${normalized}`);
+        }
+      };
+      const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+        const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+        if (parsed.reqId !== undefined && Number(parsed.reqId) !== orderId && Number(parsed.reqId) !== -1) return;
+        // Farm-status notifications are not order failures; order-scoped errors always are.
+        if ((parsed.reqId === undefined || Number(parsed.reqId) === -1) &&
+            [2104, 2106, 2107, 2108, 2158].includes(Number(parsed.code))) return;
+        fail(`CLOSE_CANCEL_UNCONFIRMED:code=${parsed.code ?? "unknown"}`);
+      };
+      const timeout = setTimeout(() => fail("CLOSE_CANCEL_UNCONFIRMED:timeout"), this.config.orderTimeoutMs);
+      this.ib.on("orderStatus", onStatus);
+      this.ib.on("error", onError);
+      this.ib.on("disconnected", onDisconnect);
+      this.ib.on("connected", onDisconnect);
+      try {
+        this.assertConnectionGeneration(input.expectedGeneration);
+        this.ib.cancelOrder(orderId);
+      } catch (error) {
+        cleanup();
+        reject(error);
       }
     });
   }
@@ -2149,11 +2249,13 @@ export class TwsExecutionClient {
 
   private bindCoreListeners(): void {
     this.ib.on("connected", () => {
+      this.connectionGeneration += 1;
       this.onLog("execution socket connected event received");
     });
 
     this.ib.on("disconnected", () => {
       this.onLog("execution socket disconnected");
+      this.connectionGeneration += 1;
       this.connected = false;
       this.clearAllSubmittedAutoCancelTimers();
       this.clearAllBracketVerificationTimers();

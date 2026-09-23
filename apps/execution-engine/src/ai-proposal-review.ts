@@ -55,11 +55,19 @@ export async function expireAiProposals(db: PoolClient): Promise<void> {
 }
 
 export async function findAccountReservation(db: PoolClient, accountId: string, exceptId?: number) {
+  const close = await findCloseReservation(db, accountId);
+  if (close) return { id: Number(close.id), status: "SUBMITTED" as const, client_order_id: null };
   const result = await db.query<{ id: number; status: "PROPOSED" | "SUBMITTED"; client_order_id: string | null }>(`
     SELECT p.id,p.status,p.client_order_id FROM proposed_orders p
     LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
     WHERE p.status IN ('PROPOSED','SUBMITTED') AND ($2::bigint IS NULL OR p.id<>$2)
       AND (r.account_id=$1 OR p.execution_account_id=$1 OR r.proposed_order_id IS NULL)
     ORDER BY p.id LIMIT 1`, [accountId, exceptId ?? null]);
+  return result.rows[0];
+}
+
+export async function findCloseReservation(db: PoolClient, accountId: string) {
+  const result = await db.query<{ id: number }>(`SELECT original_proposal_id AS id FROM lifecycle_close_operations
+    WHERE account_id=$1 AND state<>'COMPLETED' LIMIT 1`, [accountId]);
   return result.rows[0];
 }

@@ -18,7 +18,7 @@ import {
 } from "./tws-execution-client.js";
 import { runMigrations } from "./migrations.js";
 import type { AiEntryRiskEvidence } from "./ai-entry-risk.js";
-import { aiApprovalFailure, expireAiProposals, findAccountReservation, readAiProposalReview } from "./ai-proposal-review.js";
+import { aiApprovalFailure, expireAiProposals, findAccountReservation, findCloseReservation, readAiProposalReview } from "./ai-proposal-review.js";
 
 export type DecisionActor = "llm-agent" | "user" | "user_override";
 
@@ -1252,6 +1252,11 @@ export class ExecutionRepository {
           "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
           [`snap:${positionGuard.accountId}`],
         );
+        const close = await findCloseReservation(client, positionGuard.accountId);
+        if (close) {
+          await client.query("ROLLBACK");
+          return { kind: "active_intent_exists", existingOrderId: Number(close.id), existingStatus: "SUBMITTED", existingClientOrderId: null };
+        }
       }
       // Transaction-scoped advisory lock on hashtext(instrument).
       // Serialises concurrent inserts for the same instrument
@@ -1504,35 +1509,110 @@ export class ExecutionRepository {
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
-  async getLifecycleEvidence(id: number, accountId: string | null): Promise<LifecycleEvidence | null> {
-    const client = await this.pool.connect();
+  async getLifecycleEvidence(
+    id: number,
+    accountId: string | null,
+    transaction?: PoolClient,
+    excludeCloseProposalId?: number | null,
+  ): Promise<LifecycleEvidence | null> {
+    const client = transaction ?? (await this.pool.connect());
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-      const proposal = await client.query<ProposedOrderRow & { client_order_hash: string | null }>(
-        "SELECT * FROM proposed_orders WHERE id=$1", [id]);
+      if (!transaction)
+        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const proposal = await client.query<
+        ProposedOrderRow & { client_order_hash: string | null }
+      >("SELECT * FROM proposed_orders WHERE id=$1", [id]);
       const row = proposal.rows[0];
-      if (!row) { await client.query("COMMIT"); return null; }
-      const review = await client.query("SELECT * FROM proposal_ai_reviews WHERE proposed_order_id=$1", [id]);
+      if (!row) {
+        if (!transaction) await client.query("COMMIT");
+        return null;
+      }
+      const review = await client.query(
+        "SELECT * FROM proposal_ai_reviews WHERE proposed_order_id=$1",
+        [id],
+      );
       const links = await client.query<LifecycleLegLink>(
-        "SELECT * FROM broker_order_links WHERE proposed_order_id=$1 ORDER BY role,role_ordinal", [id]);
-      const run = await client.query<LifecycleRun>(`SELECT * FROM reconciliation_runs
-        WHERE account_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1`, [accountId]);
+        "SELECT * FROM broker_order_links WHERE proposed_order_id=$1 ORDER BY role,role_ordinal",
+        [id],
+      );
+      const run = await client.query<LifecycleRun>(
+        `SELECT * FROM reconciliation_runs
+        WHERE account_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1`,
+        [accountId],
+      );
       const holds = await client.query<{ count: string }>(
-        "SELECT count(*) FROM reconciliation_holds WHERE account_id=$1 AND active", [accountId]);
-      const competing = await client.query<{ count: string }>(`SELECT count(*) FROM proposed_orders p
+        "SELECT count(*) FROM reconciliation_holds WHERE account_id=$1 AND active",
+        [accountId],
+      );
+      const competing = await client.query<{ count: string }>(
+        `SELECT count(*) FROM proposed_orders p
         LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
-        WHERE p.id<>$1 AND p.status IN ('PROPOSED','SUBMITTED')
+        WHERE p.id<>$1 AND ($5::bigint IS NULL OR p.id<>$5) AND p.status IN ('PROPOSED','SUBMITTED')
           AND (p.conid=$2 OR (p.conid IS NULL AND p.instrument=$3))
           AND (p.execution_account_id=$4 OR r.account_id=$4 OR
-            (p.execution_account_id IS NULL AND r.account_id IS NULL))`, [id,row.conid,row.instrument,accountId]);
-      await client.query("COMMIT");
-      return { order: this.mapRow(row), clientOrderHash: row.client_order_hash,
+            (p.execution_account_id IS NULL AND r.account_id IS NULL))`,
+        [
+          id,
+          row.conid,
+          row.instrument,
+          accountId,
+          excludeCloseProposalId ?? null,
+        ],
+      );
+      const sync = await client.query(
+        "SELECT * FROM broker_snapshot_syncs WHERE account_id=$1",
+        [accountId],
+      );
+      const positionRows = await client.query(
+        "SELECT * FROM broker_position_snapshots WHERE account_id=$1",
+        [accountId],
+      );
+      const positionSnapshot = sync.rows[0]
+        ? {
+            accountId: String(sync.rows[0].account_id),
+            sessionId: String(sync.rows[0].session_id),
+            generation: Number(sync.rows[0].generation),
+            complete: sync.rows[0].complete === true,
+            observedAt: sync.rows[0].observed_at,
+            positions: positionRows.rows.map((position) => ({
+              accountId: String(position.account_id),
+              sessionId: String(position.session_id),
+              conid: position.conid === null ? null : String(position.conid),
+              instrument: String(position.instrument),
+              quantity: Number(position.quantity),
+              observedAt: position.observed_at,
+            })),
+          }
+        : null;
+      if (!transaction) await client.query("COMMIT");
+      return {
+        order: this.mapRow(row),
+        clientOrderHash: row.client_order_hash,
         review: review.rows[0] ?? null,
-        links: links.rows.map(link => ({ ...link, proposed_order_id: Number(link.proposed_order_id) })),
-        run: run.rows[0] ? { ...run.rows[0], id: Number(run.rows[0].id) } : null,
-        activeHoldCount: Number(holds.rows[0].count), competingProposalCount: Number(competing.rows[0].count) };
-    } catch (error) { await client.query("ROLLBACK"); throw error; }
-    finally { client.release(); }
+        links: links.rows.map((link) => ({
+          ...link,
+          proposed_order_id: Number(link.proposed_order_id),
+        })),
+        run: run.rows[0]
+          ? {
+              ...run.rows[0],
+              id: Number(run.rows[0].id),
+              position_generation:
+                run.rows[0].position_generation == null
+                  ? null
+                  : Number(run.rows[0].position_generation),
+            }
+          : null,
+        positionSnapshot,
+        activeHoldCount: Number(holds.rows[0].count),
+        competingProposalCount: Number(competing.rows[0].count),
+      };
+    } catch (error) {
+      if (!transaction) await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      if (!transaction) client.release();
+    }
   }
 
   async getAiProposalReview(id: number) { return readAiProposalReview(this.pool, id); }
@@ -1971,6 +2051,10 @@ export class ExecutionRepository {
           "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
           [`snap:${input.positionGuard.accountId}`],
         );
+        if (await findCloseReservation(client, input.positionGuard.accountId)) {
+          await client.query("ROLLBACK");
+          return { kind: "not_claimed" };
+        }
       }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
         input.instrument,
@@ -2183,6 +2267,10 @@ export class ExecutionRepository {
           "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
           [`snap:${input.positionGuard.accountId}`],
         );
+        if (await findCloseReservation(client, input.positionGuard.accountId)) {
+          await client.query("ROLLBACK");
+          return { kind: "submission_identity_mismatch", reason: "account_close_reserved" };
+        }
       }
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",

@@ -1,3 +1,10 @@
+import { shouldInvalidateExecutionFill } from "./execution-fill-invalidation.js";
+import { registerFullCloseRoutes } from "./lifecycle/close-routes.js";
+import { CloseConflict, CloseRepository } from "./lifecycle/close-repository.js";
+import { FullCloseService } from "./lifecycle/close-service.js";
+import { evaluateCloseEvidence } from "./lifecycle/close-evidence.js";
+import { assessCloseRisk, validatePersistedClosePrepared } from "./lifecycle/close-risk.js";
+import type { PreparedBrokerOrder } from "./tws-execution-client.js";
 import { registerLifecycleRoutes } from "./lifecycle/routes.js";
 import { registerCancelProposedRoute } from "./lifecycle/cancel-route.js";
 import Fastify, { type FastifyReply } from "fastify";
@@ -231,7 +238,9 @@ const tws = new TwsExecutionClient(
             "fill callback: account mismatch — skipping snapshot invalidation for the current active account",
           );
         }
-        if (shouldApply && lastActiveAccountId !== null) {
+        // Historical reqExecutions repeats known fills. Only exact persisted exposure duplicates may keep the generation.
+        const invalidatesExposure = shouldApply && await shouldInvalidateExecutionFill(pool, fill).catch(() => true);
+        if (invalidatesExposure && lastActiveAccountId !== null) {
           const { generation } = await repo.invalidatePositionSnapshot({
             accountId: lastActiveAccountId,
             sessionId: EXECUTION_PROCESS_OWNER_ID,
@@ -240,7 +249,7 @@ const tws = new TwsExecutionClient(
           markSnapshotInvalidated(lastActiveAccountId, generation);
         }
         await repo.upsertBrokerExecutionFill(fill);
-        if (shouldApply && lastActiveAccountId !== null) {
+        if (invalidatesExposure && lastActiveAccountId !== null) {
           void refreshBrokerPositionSnapshot(lastActiveAccountId).catch(() => {
             /* logged inside refreshBrokerPositionSnapshot */
           });
@@ -1535,6 +1544,55 @@ registerCancelProposedRoute(app, {
   repository: repo, broker: tws,
   requestReconciliation: () => reconScheduler.triggerNow(),
 });
+
+const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
+  context: (instrumentId) => lastActiveAccountId && tws.isConnected() ? {
+    accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
+    clientId: tws.getClientId(), generation: tws.getConnectionGeneration(), nowMs: Date.now(),
+    bound: instrumentBindingAuthority?.getBoundInstrument(instrumentId) ?? null,
+  } : null,
+  refresh: async () => {
+    if (!lastActiveAccountId) throw new CloseConflict("close_account_unavailable");
+    await refreshBrokerPositionSnapshot(lastActiveAccountId);
+    if (!await reconScheduler.triggerFresh()) throw new CloseConflict("close_fresh_capture_unavailable");
+  },
+  evaluate: evaluateCloseEvidence,
+  assessRisk: async (ticket, bound, context) => {
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
+      { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new CloseConflict("close_quote_unavailable");
+    return assessCloseRisk(ticket, bound, { ...context, nowMs: Date.now() }, await response.json());
+  },
+  prepare: async (ticket, clientOrderId, originalProposalId) => {
+    // Preparation is read-only at IBKR; the close proposal and marker commit before dispatch.
+    const prepared = await tws.prepareBrokerOrderPlan(ticket, lastActiveAccountId!, "DAY",
+      { proposedOrderId: originalProposalId, clientOrderId });
+    return { normalizedTicket: prepared.normalizedTicket, payload: prepared,
+      persistence: { clientOrderId, clientOrderHash: computeClientOrderHash(ticket), instrument: ticket.instrument,
+        instrumentId: ticket.instrumentId, conid: ticket.conid ?? null, legs: prepared.legs } };
+  },
+  validatePrepared: (prepared, ticket, context) => {
+    const failure = validatePersistedClosePrepared(prepared, ticket, context);
+    if (failure) throw new CloseConflict(failure);
+  },
+  cancel: async (leg, context) => {
+    if (!leg.permId) throw new CloseConflict("close_cancel_perm_missing");
+    const terminal = await tws.cancelOwnedOrder({ ...leg, conid: Number(leg.conid), permId: leg.permId,
+      expectedGeneration: context.generation, observedAt: leg.observedAt });
+    return { ...leg, status: "CANCELLED", confirmedAt: terminal.confirmedAt,
+      generation: terminal.connectionGeneration, sessionId: context.sessionId };
+  },
+  dispatch: async (prepared, _operation, context) => {
+    await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation);
+  },
+  alert: async (operation, reason) => {
+    await alerts.record({ severity: "CRITICAL", kind: "system",
+      message: `Close operation ${operation.id} requires attention: ${reason}`,
+      payload: { operationId: operation.id, originalProposalId: operation.originalProposalId, state: operation.state,
+        accountId: operation.accountId, conid: operation.conid } });
+  },
+});
+registerFullCloseRoutes(app, fullCloseService);
 
 registerLifecycleRoutes(app, {
   repository: repo,

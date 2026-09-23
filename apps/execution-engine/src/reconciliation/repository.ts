@@ -184,8 +184,8 @@ export class ReconciliationRepository {
         [input.accountId, input.sessionId, input.runTimeoutMs],
       );
       const inserted = await client.query<{ id: number }>(
-        `INSERT INTO reconciliation_runs (account_id, session_id, status)
-         VALUES ($1, $2, 'RUNNING') RETURNING id`,
+        `INSERT INTO reconciliation_runs (account_id, session_id, status, position_generation)
+         VALUES ($1, $2, 'RUNNING', (SELECT generation FROM broker_snapshot_syncs WHERE account_id=$1)) RETURNING id`,
         [input.accountId, input.sessionId],
       );
       await client.query("COMMIT");

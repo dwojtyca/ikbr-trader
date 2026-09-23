@@ -88,6 +88,12 @@ export class ReconciliationScheduler {
     return this.#tick();
   }
 
+  async triggerFresh(): Promise<RunReport | null> {
+    // Await the old capture rather than treating its completion as a new observation.
+    while (this.#inflight) await this.#inflight;
+    return this.#tick();
+  }
+
   lastRun(): RunReport | null {
     return this.#lastRun;
   }
