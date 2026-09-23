@@ -130,6 +130,37 @@ describe("mandatory AI gate through production submission service + PostgreSQL",
     } finally { await f.close(); }
   });
 
+  it("a delayed risk refusal cannot overwrite evidence committed by a concurrent submission", async () => {
+    const f = await fixture();
+    const gate = await f.pool.connect();
+    let pending: Promise<void> | undefined;
+    try {
+      const id = await f.create(); await f.approve(id);
+      await gate.query("BEGIN");
+      await gate.query("SELECT id FROM proposed_orders WHERE id=$1 FOR UPDATE", [id]);
+      await gate.query("SELECT proposed_order_id FROM proposal_ai_reviews WHERE proposed_order_id=$1 FOR UPDATE", [id]);
+      const pid = (await gate.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      pending = f.repo.recordAiRisk(id, { ok: false, reason: "late_assessment" });
+      let blocked = false;
+      for (let i=0; i<100; i++) {
+        const waiters = await gate.query(`SELECT 1 FROM pg_stat_activity
+          WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))`, [pid]);
+        if (waiters.rowCount) { blocked = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.equal(blocked, true, "risk recorder must overlap the submission transaction");
+      await gate.query("UPDATE proposed_orders SET execution_attempted_at=clock_timestamp(),status='SUBMITTED' WHERE id=$1", [id]);
+      await gate.query("UPDATE proposal_ai_reviews SET risk_evidence=$2 WHERE proposed_order_id=$1", [id, JSON.stringify({accountId,notional:100})]);
+      await gate.query("COMMIT");
+      await pending;
+      const result = (await f.pool.query("SELECT risk_evidence FROM proposal_ai_reviews WHERE proposed_order_id=$1", [id])).rows[0];
+      assert.deepEqual(result.risk_evidence, {accountId,notional:100});
+    } finally {
+      await gate.query("ROLLBACK"); gate.release();
+      await pending; await f.close();
+    }
+  });
+
   for (const scenario of ["missing", "pending", "rejected", "expired", "hash", "account", "session", "conid", "nonpass", "close"] as const) {
     it(`dispatch fails closed for ${scenario}`, async () => {
       const f = await fixture();

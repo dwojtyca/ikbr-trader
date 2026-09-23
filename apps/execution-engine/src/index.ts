@@ -1,3 +1,5 @@
+import { registerLifecycleRoutes } from "./lifecycle/routes.js";
+import { registerCancelProposedRoute } from "./lifecycle/cancel-route.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -72,6 +74,7 @@ const tws = new TwsExecutionClient(
     exchange: config.IB_EXCHANGE,
     primaryExchange: config.IB_PRIMARY_EXCHANGE,
     currency: config.IB_CURRENCY,
+    executionTimeZone: config.EXECUTION_BROKER_TIME_ZONE,
     orderTimeoutMs: config.EXECUTION_ORDER_TIMEOUT_MS,
     submittedAutoCancelMs: config.EXECUTION_SUBMITTED_AUTO_CANCEL_MS,
     retryAsMktOnCode110: config.executionRetryAsMktOnCode110,
@@ -1528,59 +1531,16 @@ app.post("/execution/reject-proposed/:id", async (request, reply) => {
   return { order: fresh };
 });
 
-app.post("/execution/cancel-proposed/:id", async (request, reply) => {
-  const params = z
-    .object({ id: z.coerce.number().int().positive() })
-    .parse(request.params ?? {});
+registerCancelProposedRoute(app, {
+  repository: repo, broker: tws,
+  requestReconciliation: () => reconScheduler.triggerNow(),
+});
 
-  const order = await repo.getProposedOrderById(params.id);
-  if (!order) {
-    return reply
-      .code(404)
-      .send({ error: `proposed order id=${params.id} not found` });
-  }
-
-  if (order.status !== "SUBMITTED") {
-    return reply.code(409).send({
-      error: `order id=${params.id} cannot be cancelled (current=${order.status})`,
-    });
-  }
-
-  if (!order.brokerOrderId) {
-    return reply
-      .code(400)
-      .send({ error: `order id=${params.id} has no brokerOrderId to cancel` });
-  }
-
-  try {
-    const result = await tws.cancelBrokerOrder(order.brokerOrderId);
-    const fresh = await repo.getProposedOrderById(params.id);
-    return {
-      order: fresh,
-      cancel: result,
-    };
-  } catch (error) {
-    const message = (error as Error).message;
-
-    // IB code=10147 means order is no longer active/not found in broker open orders.
-    // Treat as terminal from UI perspective and close local SUBMITTED row.
-    if (message.includes("code=10147")) {
-      await repo.markCancelled(
-        params.id,
-        `Broker reports order not found (code=10147); marked as CANCELLED locally. Original error: ${message}`,
-      );
-      const fresh = await repo.getProposedOrderById(params.id);
-      return {
-        order: fresh,
-        cancel: {
-          brokerOrderId: order.brokerOrderId,
-          status: "NOT_FOUND_ASSUMED_CANCELLED",
-        },
-      };
-    }
-
-    return reply.code(400).send({ error: message });
-  }
+registerLifecycleRoutes(app, {
+  repository: repo,
+  currentAccountId: () => lastActiveAccountId,
+  currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
+  boundInstrument: (id) => instrumentBindingAuthority?.getBoundInstrument(id) ?? null,
 });
 
 app.post("/execution/execute-ticket", async (request, reply) => {

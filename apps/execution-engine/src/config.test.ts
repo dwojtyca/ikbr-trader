@@ -342,3 +342,17 @@ describe("execution-engine config (Phase 1 / PR1)", () => {
     }
   });
 });
+
+describe("broker execution timestamp timezone declaration", () => {
+  it("does not infer UTC when unset or empty", () => {
+    assert.equal(buildExecutionConfig(paperBase).EXECUTION_BROKER_TIME_ZONE, undefined);
+    assert.equal(buildExecutionConfig({ ...paperBase, EXECUTION_BROKER_TIME_ZONE: "" }).EXECUTION_BROKER_TIME_ZONE, undefined);
+  });
+  it("accepts an explicit UTC declaration", () => {
+    assert.equal(buildExecutionConfig({ ...paperBase, EXECUTION_BROKER_TIME_ZONE: "UTC" }).EXECUTION_BROKER_TIME_ZONE, "UTC");
+  });
+  it("rejects unsupported timezone assumptions", () => {
+    for (const zone of ["America/New_York", "local", "GMT", "utc"])
+      assert.throws(() => buildExecutionConfig({ ...paperBase, EXECUTION_BROKER_TIME_ZONE: zone }), ZodError);
+  });
+});

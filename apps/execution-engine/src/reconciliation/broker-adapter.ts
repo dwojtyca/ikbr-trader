@@ -48,6 +48,7 @@ export interface BrokerPositionRow {
 }
 
 export interface BrokerOrderRow {
+  readonly accountId?: string | null;
   readonly brokerOrderId: string;
   readonly permId?: string | null;
   readonly parentPermId?: string | null;

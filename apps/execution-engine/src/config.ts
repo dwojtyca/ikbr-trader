@@ -17,6 +17,8 @@ const optionalTrimmedString = z.preprocess(
 // and logged at startup. Runtime enforcement lands in PR2..PR5.
 // -----------------------------------------------------------------------
 const rawSchema = z.object({
+  EXECUTION_BROKER_TIME_ZONE: z.preprocess(
+    value => value === "" ? undefined : value, z.literal("UTC").optional()),
   EXECUTION_INGESTION_BASE_URL: z.string().url().default("http://ingestion:3101"),
   EXECUTION_AI_MAX_NOTIONAL_PCT: z.coerce.number().positive().max(100).default(10),
   EXECUTION_AI_MAX_STOP_RISK_PCT: z.coerce.number().positive().max(100).default(0.5),

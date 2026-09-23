@@ -15,6 +15,7 @@ interface TwsExecutionConfig {
   primaryExchange?: string;
   currency: string;
   orderTimeoutMs: number;
+  executionTimeZone?: "UTC";
   submittedAutoCancelMs?: number;
   retryAsMktOnCode110?: boolean;
   fractionalSymbols?: Set<string>;
@@ -802,8 +803,7 @@ export class TwsExecutionClient {
         const normalized = String(status || "").toUpperCase();
         if (
           normalized === "CANCELLED" ||
-          normalized === "APICANCELLED" ||
-          normalized === "INACTIVE"
+          normalized === "APICANCELLED"
         ) {
           cleanup();
           resolve({ brokerOrderId: String(orderId), status: "CANCELLED" });
@@ -2212,18 +2212,6 @@ export class TwsExecutionClient {
           this.onLog(
             `execution auto-cancel locate-held failed orderId=${reqId}: ${message}`,
           );
-
-          // If broker reports "not found", treat as terminal and close local record.
-          if (message.includes("code=10147")) {
-            this.onBrokerOrderStatus?.({
-              brokerOrderId: String(reqId),
-              status: "CANCELLED",
-              message: this.buildCancelMessage(
-                reqId,
-                `Auto-cancel locate-held: broker reports order not found (code=10147). Original error: ${message}`,
-              ),
-            });
-          }
         });
     });
 
@@ -2457,18 +2445,6 @@ export class TwsExecutionClient {
           this.onLog(
             `execution submitted-timeout auto-cancel failed orderId=${orderId}: ${message}`,
           );
-
-          // If broker reports "not found", close local record as cancelled.
-          if (message.includes("code=10147")) {
-            this.onBrokerOrderStatus?.({
-              brokerOrderId: String(orderId),
-              status: "CANCELLED",
-              message: this.buildCancelMessage(
-                orderId,
-                `Auto-cancel submitted-timeout: broker reports order not found (code=10147). Original error: ${message}`,
-              ),
-            });
-          }
         });
     }, timeoutMs);
 
@@ -2733,6 +2709,7 @@ export class TwsExecutionClient {
     endObserved: boolean;
     rows: Array<{
       brokerOrderId: string;
+      accountId?: string;
       permId?: string;
       clientId?: number;
       orderRef?: string;
@@ -2754,6 +2731,7 @@ export class TwsExecutionClient {
         number,
         {
           brokerOrderId: string;
+          accountId?: string;
           permId?: string;
           clientId?: number;
           orderRef?: string;
@@ -2787,6 +2765,7 @@ export class TwsExecutionClient {
         };
         byOrderId.set(orderId, {
           ...existing,
+          accountId: typeof order?.account === "string" ? order.account : undefined,
           permId: order?.permId != null ? String(order.permId) : existing.permId,
           clientId:
             order?.clientId != null ? Number(order.clientId) : existing.clientId,
@@ -2937,7 +2916,7 @@ export class TwsExecutionClient {
         const conid = toNum(contract.conId);
         const timeStr =
           typeof execution?.time === "string" ? execution.time : "";
-        const executedAt = parseIbExecutionTime(timeStr) ?? new Date();
+        const executedAt = parseIbExecutionTime(timeStr, this.config.executionTimeZone) ?? new Date(NaN);
         rows.push({
           execId: String(execution?.execId ?? ""),
           brokerOrderId: String(execution?.orderId ?? ""),
@@ -2947,7 +2926,7 @@ export class TwsExecutionClient {
             typeof execution?.orderRef === "string" && execution.orderRef.length > 0
               ? execution.orderRef
               : undefined,
-          accountId: String(execution?.acctNumber ?? opts.accountId),
+          accountId: String(execution?.acctNumber ?? ""),
           symbol:
             typeof contract.symbol === "string" ? contract.symbol : undefined,
           conId: conid ? String(conid) : undefined,
@@ -3021,21 +3000,17 @@ export class TwsExecutionClient {
   }
 }
 
-function parseIbExecutionTime(raw: string): Date | null {
-  // IB format: "yyyyMMdd  HH:mm:ss" (double space between date and
-  // time). Fall back to now() when unparseable.
-  if (!raw) return null;
-  const m = raw.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
-  if (!m) return null;
-  const [, y, mo, d, hh, mm, ss] = m;
-  return new Date(
-    Date.UTC(
-      Number(y),
-      Number(mo) - 1,
-      Number(d),
-      Number(hh),
-      Number(mm),
-      Number(ss),
-    ),
-  );
+function parseIbExecutionTime(raw: string, configuredTimeZone?: "UTC"): Date | null {
+  // Bare times require an explicit operator assertion of the Gateway timezone.
+  const normalized = configuredTimeZone === "UTC" && /^\d{8}\s+\d{2}:\d{2}:\d{2}$/.test(raw)
+    ? `${raw} UTC` : raw;
+  const match = normalized.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2}) (?:UTC|GMT)$/);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match;
+  const parts = [year, month, day, hour, minute, second].map(Number);
+  const parsed = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5]));
+  if (parsed.getUTCFullYear() !== parts[0] || parsed.getUTCMonth() + 1 !== parts[1] ||
+    parsed.getUTCDate() !== parts[2] || parsed.getUTCHours() !== parts[3] ||
+    parsed.getUTCMinutes() !== parts[4] || parsed.getUTCSeconds() !== parts[5]) return null;
+  return parsed;
 }

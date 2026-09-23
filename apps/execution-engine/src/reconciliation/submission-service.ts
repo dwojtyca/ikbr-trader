@@ -441,8 +441,10 @@ export function buildSubmissionApplicationService(
       let assessed: Awaited<ReturnType<NonNullable<SubmissionServiceDeps["assessAiRisk"]>>>;
       try { assessed = await deps.assessAiRisk(validatedOrder, binding.bound, accountId, guard.sessionId); }
       catch { assessed = { ok: false, reason: "fresh_ai_risk_unavailable" }; }
-      await deps.repo.recordAiRisk(validatedOrder.id!, assessed);
-      if (!assessed.ok) return { kind: "risk_rejected", reason: assessed.reason };
+      if (!assessed.ok) {
+        await deps.repo.recordAiRisk(validatedOrder.id!, assessed);
+        return { kind: "risk_rejected", reason: assessed.reason };
+      }
       aiRiskEvidence = assessed.evidence;
     }
     // Phase A — pure prepare. Any exception surfaces to caller

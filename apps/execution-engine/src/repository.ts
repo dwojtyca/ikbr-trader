@@ -1,3 +1,4 @@
+import type { LifecycleEvidence, LifecycleLegLink, LifecycleRun } from "./lifecycle/ownership.js";
 import { Pool, type PoolClient } from "pg";
 import {
   AiDecision,
@@ -1503,13 +1504,53 @@ export class ExecutionRepository {
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
+  async getLifecycleEvidence(id: number, accountId: string | null): Promise<LifecycleEvidence | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const proposal = await client.query<ProposedOrderRow & { client_order_hash: string | null }>(
+        "SELECT * FROM proposed_orders WHERE id=$1", [id]);
+      const row = proposal.rows[0];
+      if (!row) { await client.query("COMMIT"); return null; }
+      const review = await client.query("SELECT * FROM proposal_ai_reviews WHERE proposed_order_id=$1", [id]);
+      const links = await client.query<LifecycleLegLink>(
+        "SELECT * FROM broker_order_links WHERE proposed_order_id=$1 ORDER BY role,role_ordinal", [id]);
+      const run = await client.query<LifecycleRun>(`SELECT * FROM reconciliation_runs
+        WHERE account_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1`, [accountId]);
+      const holds = await client.query<{ count: string }>(
+        "SELECT count(*) FROM reconciliation_holds WHERE account_id=$1 AND active", [accountId]);
+      const competing = await client.query<{ count: string }>(`SELECT count(*) FROM proposed_orders p
+        LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
+        WHERE p.id<>$1 AND p.status IN ('PROPOSED','SUBMITTED')
+          AND (p.conid=$2 OR (p.conid IS NULL AND p.instrument=$3))
+          AND (p.execution_account_id=$4 OR r.account_id=$4 OR
+            (p.execution_account_id IS NULL AND r.account_id IS NULL))`, [id,row.conid,row.instrument,accountId]);
+      await client.query("COMMIT");
+      return { order: this.mapRow(row), clientOrderHash: row.client_order_hash,
+        review: review.rows[0] ?? null,
+        links: links.rows.map(link => ({ ...link, proposed_order_id: Number(link.proposed_order_id) })),
+        run: run.rows[0] ? { ...run.rows[0], id: Number(run.rows[0].id) } : null,
+        activeHoldCount: Number(holds.rows[0].count), competingProposalCount: Number(competing.rows[0].count) };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  }
+
   async getAiProposalReview(id: number) { return readAiProposalReview(this.pool, id); }
 
   async recordAiRisk(id: number, evidence: unknown): Promise<void> {
-    await this.pool.query(`UPDATE proposal_ai_reviews SET risk_evidence=$2
-      WHERE proposed_order_id=$1 AND status='APPROVED' AND EXISTS
-      (SELECT 1 FROM proposed_orders p WHERE p.id=$1 AND p.execution_attempted_at IS NULL
-       AND p.broker_order_id IS NULL AND p.status='PROPOSED')`, [id, JSON.stringify(evidence)]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const row = await client.query(`SELECT status,execution_attempted_at,broker_order_id
+        FROM proposed_orders WHERE id=$1 FOR UPDATE`, [id]);
+      const proposal = row.rows[0];
+      if (proposal?.status === "PROPOSED" && proposal.execution_attempted_at === null && proposal.broker_order_id === null) {
+        await client.query(`UPDATE proposal_ai_reviews SET risk_evidence=$2
+          WHERE proposed_order_id=$1 AND status='APPROVED'`, [id, JSON.stringify(evidence)]);
+      }
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   }
 
   async rejectPendingProposal(id: number, reason: string, metadata?: OrderDecisionMetadata): Promise<boolean> {
@@ -2944,7 +2985,6 @@ export class ExecutionRepository {
     }
 
     if (
-      status === "INACTIVE" ||
       status === "CANCELLED" ||
       status === "APICANCELLED"
     ) {

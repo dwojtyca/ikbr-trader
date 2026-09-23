@@ -4,9 +4,10 @@
 
 Current delivery priority: validate a complete Paper round trip on one instrument
 before tuning strategies. See [Paper mechanics delivery](phase2/PAPER_MECHANICS_DELIVERY.md).
-The next implementation is [PR15.6: mandatory AI entry gate](phase2/PR15_6_AI_PROPOSAL_GATE_PLAN.md);
-close ownership and a controlled Paper run follow it. No instrument is enabled
-by this PR.
+The mandatory [AI entry gate](phase2/PR15_6_AI_PROPOSAL_GATE_REPORT.md) is implemented.
+[PR16A](phase3/PR16A_OWNERSHIP_PLAN.md) adds read-only ownership evidence and
+cancellation uncertainty handling; PR16B full close and a controlled Paper run
+follow it. No instrument is enabled by these changes.
 
 ## Phase 0 - Architecture Baseline
 Goal:

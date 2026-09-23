@@ -149,7 +149,7 @@ export class IbBrokerReconciliationAdapter
     const positions = posResult.rows
       .filter((r) => !r.accountId || r.accountId === req.accountId)
       .map((r) => ({
-        accountId: r.accountId || req.accountId,
+        accountId: r.accountId,
         symbol: r.symbol,
         conId: r.conId ?? null,
         secType: r.secType ?? null,
@@ -160,6 +160,7 @@ export class IbBrokerReconciliationAdapter
       }));
 
     const openOrders = openResult.rows.map((r) => ({
+      accountId: r.accountId ?? null,
       brokerOrderId: r.brokerOrderId,
       permId: r.permId ?? null,
       parentPermId: null,

@@ -237,7 +237,8 @@ export class ReconciliationRepository {
                matches = $7,
                mismatches_count = $8,
                error = $9,
-               report = $10::jsonb
+               report = $10::jsonb,
+               broker_snapshot = $12::jsonb
          WHERE id = $11`,
         [
           input.finalStatus,
@@ -253,6 +254,7 @@ export class ReconciliationRepository {
           input.error,
           JSON.stringify(input.report ?? {}),
           input.runId,
+          input.snapshot ? JSON.stringify(input.snapshot) : null,
         ],
       );
       for (const insert of input.holdInserts) {
