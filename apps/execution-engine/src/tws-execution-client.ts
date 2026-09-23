@@ -1,5 +1,6 @@
+import { isWseBound, validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import IB from "ib";
-import { SignalTicket } from "@ikbr/shared";
+import { SignalTicket, type BoundInstrument, defaultInstrumentRegistry } from "@ikbr/shared";
 import { assertClientDirectTicketAllowed } from "./direct-ticket-guard.js";
 import {
   deriveChildOrderRef,
@@ -86,7 +87,7 @@ interface ResolvedContract {
 
 interface EffectiveTick {
   tick?: number;
-  source: "none" | "minTick" | "wse_ladder" | "us_sec612";
+  source: "none" | "minTick" | "us_sec612";
 }
 
 interface PlannedOrder {
@@ -302,7 +303,11 @@ export class TwsExecutionClient {
     private readonly onBrokerCommissionReport?: (
       report: BrokerCommissionReport,
     ) => void,
-    dependencies: { ib?: unknown } = {},
+    private readonly dependencies: {
+      ib?: unknown;
+      resolveBoundInstrument?: (id: string) => BoundInstrument | undefined;
+      loadWseMetadata?: (bound: BoundInstrument, accountId: string) => Promise<WseMarketMetadata>;
+    } = {},
   ) {
     this.ib = dependencies.ib ?? new IB({
       host: config.host,
@@ -311,6 +316,44 @@ export class TwsExecutionClient {
     });
 
     this.bindCoreListeners();
+  }
+
+  private readonly wsePreparations = new WeakMap<PreparedBrokerOrder, {
+    bound: BoundInstrument; metadata: WseMarketMetadata; generation: number; accountId: string; fingerprint: string;
+  }>();
+
+  private isKnownWseTicket(ticket: SignalTicket): boolean {
+    const bound = ticket.instrumentId ? this.dependencies.resolveBoundInstrument?.(ticket.instrumentId) : undefined;
+    return !!(bound && (bound.exchange === "WSE" || bound.currency === "PLN")) ||
+      defaultInstrumentRegistry.listAll().some(i => i.exchange === "WSE" &&
+        (i.id === ticket.instrumentId || (i.conId !== undefined && String(i.conId) === ticket.conid)));
+  }
+
+  private assertWseDispatch(prepared: PreparedBrokerOrder): void {
+    const saved = this.wsePreparations.get(prepared);
+    if (!saved && !this.isWseContract(prepared.contract) && prepared.contract.currency !== "PLN" &&
+      !this.isKnownWseTicket(prepared.normalizedTicket)) return;
+    if (!saved) throw new Error("WSE_PREPARATION_REQUIRED");
+    this.assertConnectionGeneration(saved.generation);
+    if (JSON.stringify([prepared, [...prepared.plan.relatedOrderIds]]) !== saved.fingerprint) throw new Error("WSE_PREPARED_PLAN_CHANGED");
+    const result = validateWseOrder(saved.metadata, saved.bound, saved.accountId, prepared.normalizedTicket, Date.now());
+    if (!result.ok) throw new Error(result.reason);
+    const c = prepared.contract;
+    if (c.conId !== saved.bound.conId || c.symbol !== saved.bound.brokerSymbol || c.secType !== "STK" ||
+      c.exchange !== "WSE" || c.currency !== "PLN") throw new Error("WSE_PREPARED_CONTRACT_CHANGED");
+    const ticket = prepared.normalizedTicket;
+    const expected = ticket.positionEffect === "CLOSE_OR_REDUCE"
+      ? [["SELL", "LMT", ticket.entry]]
+      : [["BUY", "LMT", ticket.entry], ["SELL", "LMT", ticket.takeProfit], ["SELL", "STP", ticket.stop]];
+    if (prepared.plan.orders.length !== expected.length) throw new Error("WSE_PREPARED_LEGS_CHANGED");
+    for (const [index, planned] of prepared.plan.orders.entries()) {
+      const wire = planned.order;
+      const [side, type, price] = expected[index];
+      if (wire.action !== side || wire.orderType !== type || wire.totalQuantity !== 1 || wire.account !== saved.accountId ||
+        wire.tif !== "DAY" || wire.outsideRth === true ||
+        (type === "STP" ? wire.auxPrice : wire.lmtPrice) !== price)
+        throw new Error("WSE_PREPARED_PRICE_OR_WIRE_CHANGED");
+    }
   }
 
   isConnected(): boolean {
@@ -452,8 +495,10 @@ export class TwsExecutionClient {
 
     await this.connect();
 
+    if (this.isKnownWseTicket(ticket)) throw new Error("WSE_BOUND_PREPARATION_REQUIRED");
     const resolvedContract = await this.resolveContract(ticket);
     const contract = resolvedContract.contract;
+    if (this.isWseContract(contract) || contract.currency === "PLN") throw new Error("WSE_BOUND_PREPARATION_REQUIRED");
 
     // Defense-in-depth: floor non-integer qty for symbols outside the
     // fractional whitelist. Signal-engine should already do this via
@@ -559,26 +604,30 @@ export class TwsExecutionClient {
       allowDirectTicket: this.config.allowDirectTicket === true,
     });
     await this.connect();
-    const resolvedContract = await this.resolveContract(ticket);
-    const contract = resolvedContract.contract;
-    const guardedTicket = this.enforceIntegerQuantityIfNeeded(ticket);
-    this.assertUsRthAllows(contract, guardedTicket);
-    const effectiveTick = this.determineEffectiveTick(
-      contract,
-      guardedTicket,
-      resolvedContract.minTick,
-    );
-    const normalizedTicket = this.normalizeTicketPrices(
-      guardedTicket,
-      effectiveTick.tick,
-    );
-    if (
-      effectiveTick.tick &&
-      this.wasTicketNormalized(guardedTicket, normalizedTicket)
-    ) {
-      this.onLog(
-        `execution price normalization conid=${guardedTicket.conid ?? "n/a"} source=${effectiveTick.source} rawMinTick=${resolvedContract.minTick ?? "n/a"} effectiveTick=${effectiveTick.tick} entry=${guardedTicket.entry ?? "n/a"}->${normalizedTicket.entry ?? "n/a"} stop=${guardedTicket.stop ?? "n/a"}->${normalizedTicket.stop ?? "n/a"} tp=${guardedTicket.takeProfit ?? "n/a"}->${normalizedTicket.takeProfit ?? "n/a"}`,
-      );
+    const generation = this.connectionGeneration;
+    const bound = ticket.instrumentId ? this.dependencies.resolveBoundInstrument?.(ticket.instrumentId) : undefined;
+    let metadata: WseMarketMetadata | undefined;
+    let contract: ContractShape;
+    let normalizedTicket: SignalTicket;
+    if (this.isKnownWseTicket(ticket)) {
+      if (!bound || !isWseBound(bound) || !this.dependencies.loadWseMetadata)
+        throw new Error("WSE_METADATA_BINDING_REQUIRED");
+      metadata = await this.dependencies.loadWseMetadata(bound, accountId);
+      this.assertConnectionGeneration(generation);
+      const result = validateWseOrder(metadata, bound, accountId, ticket, Date.now());
+      if (!result.ok) throw new Error(result.reason);
+      metadata = result.metadata;
+      if (tif !== "DAY") throw new Error("WSE_DAY_REQUIRED");
+      contract = { conId: bound.conId, symbol: bound.brokerSymbol, secType: "STK", exchange: "WSE", currency: "PLN" };
+      normalizedTicket = { ...ticket };
+    } else {
+      const resolvedContract = await this.resolveContract(ticket);
+      contract = resolvedContract.contract;
+      if (this.isWseContract(contract) || contract.currency === "PLN") throw new Error("WSE_METADATA_BINDING_REQUIRED");
+      const guardedTicket = this.enforceIntegerQuantityIfNeeded(ticket);
+      this.assertUsRthAllows(contract, guardedTicket);
+      const effectiveTick = this.determineEffectiveTick(contract, guardedTicket, resolvedContract.minTick);
+      normalizedTicket = this.normalizeTicketPrices(guardedTicket, effectiveTick.tick);
     }
     const plan = this.buildOrderPlan(
       normalizedTicket,
@@ -626,7 +675,12 @@ export class TwsExecutionClient {
         });
       });
     }
-    return { contract, normalizedTicket, plan, legs };
+    const prepared = { contract, normalizedTicket, plan, legs };
+    if (metadata && bound) {
+      this.wsePreparations.set(prepared, { bound, metadata, generation, accountId, fingerprint: JSON.stringify([prepared, [...prepared.plan.relatedOrderIds]]) });
+      this.assertWseDispatch(prepared);
+    }
+    return prepared;
   }
 
   /**
@@ -640,6 +694,7 @@ export class TwsExecutionClient {
     prepared: PreparedBrokerOrder,
   ): Promise<PlaceOrderResult> {
     await this.connect();
+    this.assertWseDispatch(prepared);
     return this.dispatchPlan(
       prepared.plan,
       prepared.contract,
@@ -652,6 +707,7 @@ export class TwsExecutionClient {
     expectedGeneration: number,
   ): Promise<PlaceOrderResult> {
     this.assertConnectionGeneration(expectedGeneration);
+    this.assertWseDispatch(prepared);
     return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration);
   }
 
@@ -1558,6 +1614,8 @@ export class TwsExecutionClient {
       try {
         return await this.resolveContractByConid(conId, ticket.instrument);
       } catch (error) {
+        if (ticket.instrumentId || this.isKnownWseTicket(ticket) || this.config.exchange === "WSE" ||
+          this.config.contractFallbackByConid?.[String(conId)]?.exchange === "WSE") throw error;
         this.onLog(
           `execution contractDetails fallback for conid=${conId}: ${(error as Error).message}`,
         );
@@ -1790,17 +1848,7 @@ export class TwsExecutionClient {
         ? fallbackRefPrice
         : undefined;
 
-    if (
-      this.isWseContract(contract) &&
-      refPrice !== undefined &&
-      refPrice > 0
-    ) {
-      const ladderTick = this.wseTickForPrice(refPrice);
-      if (validMinTick === undefined || validMinTick < ladderTick) {
-        return { tick: ladderTick, source: "wse_ladder" };
-      }
-      return { tick: validMinTick, source: "minTick" };
-    }
+    if (this.isWseContract(contract)) throw new Error("WSE_MARKET_RULE_REQUIRED");
 
     // SEC Rule 612 (sub-penny rule): US-listed stocks priced >= $1.00
     // must trade in $0.01 increments for LIMIT orders, even though
@@ -1900,17 +1948,6 @@ export class TwsExecutionClient {
       (value) =>
         value === "WSE" || value.includes("WARSAW") || value.includes("GPW"),
     );
-  }
-
-  private wseTickForPrice(price: number): number {
-    if (price < 50) return 0.01;
-    if (price < 100) return 0.02;
-    // CDR-like names in this band are rejected by broker on 0.05 stop ticks (code=110),
-    // so use a coarser 0.1 ladder step for 100-500 PLN.
-    if (price < 500) return 0.1;
-    if (price < 1000) return 0.1;
-    if (price < 2000) return 0.5;
-    return 1;
   }
 
   private wasTicketNormalized(

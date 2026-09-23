@@ -135,3 +135,18 @@ sessions. The installed ib@0.2.9 does not expose reqMarketRule; its approximate
 WSE ladder is not adequate evidence. GPW3 then completes strategy propagation,
 bounded-run readiness and operational evidence. Do not infer launch readiness
 from the passing GPW2A fake-broker lifecycle tests.
+
+## GPW2B completion — 2026-09-24
+
+[GPW2B](../phase3/GPW2B_MARKET_RULES_REPORT.md) replaces the approximate WSE
+price ladder with an isolated read-only broker metadata connection. Entry and
+full close validate each price against its own market-rule band and intersect
+broker liquidHours with 09:05–16:45 Europe/Warsaw. Full close checks these
+conditions before protective cancellations. PKO has a pinned, disabled registry
+entry; configuration cannot replace its contract identity. The plan and
+implementation have separate independent ACCEPT reviews.
+
+GPW3 is the next bounded implementation: strategy-price propagation, history
+warmup, one-round-trip budget, honest AI context coverage, currency-labelled
+P&L/fees and supervised exit/reconciliation/abort readiness. No trading has been
+activated and no Paper round trip has yet been proved.

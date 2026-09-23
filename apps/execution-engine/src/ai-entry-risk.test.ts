@@ -1,3 +1,4 @@
+import { wseMetadataFixture } from "./wse-market-rules.fixture.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
@@ -110,7 +111,7 @@ function plnFixture() {
   } };
   f.snapshot.riskEvidence!.exchangeRatesToBase = { USD: 1, PLN: .25 };
   f.snapshot.riskEvidence!.cashByCurrency = { PLN: 500 };
-  return { ...f, limits: { ...f.limits, pln: { maxNotional: 500, maxStopRisk: 5, feeReserve: 30 } } };
+  return { ...f, wseMetadata: wseMetadataFixture(f.bound, f.accountId, f.nowMs), limits: { ...f.limits, pln: { maxNotional: 500, maxStopRisk: 5, feeReserve: 30 } } };
 }
 
 test("PLN risk compares buffered USD valuation and preserves raw PLN evidence", () => {
@@ -192,4 +193,15 @@ test("finite account values cannot overflow percentage caps before division", ()
   f.limits.maxExposurePct = 100;
   f.limits.pln.maxStopRisk = 99; f.order.stop = 1;
   assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_stop_loss_exceeded" });
+});
+
+for (const failure of ["missing", "stale", "foreign", "closed", "off-band"]) test(`PLN entry metadata ${failure} fails closed`, () => {
+  const f = plnFixture();
+  if (failure === "stale") f.wseMetadata.requestStartedAtMs -= 60000;
+  if (failure === "foreign") f.wseMetadata.conId++;
+  if (failure === "closed") f.wseMetadata.liquidHours = "20260923:CLOSED";
+  if (failure === "off-band") f.wseMetadata.priceIncrements = [{ lowEdge: 0, increment: 3 }];
+  const result = assessAiEntryRisk({ ...f, wseMetadata: failure === "missing" ? undefined : f.wseMetadata });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /^wse_/);
 });

@@ -1,3 +1,4 @@
+import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -159,6 +160,7 @@ async function createFixture(currency: "USD" | "PLN") {
       [`entry-${role}`, id, role],
     );
   const state = {
+    wseFailure: "" as string,
     generation: 1,
     working: ["TP", "SL"],
     position: 1,
@@ -439,7 +441,15 @@ async function createFixture(currency: "USD" | "PLN") {
             positions: [],
           });
       }
-      const risk = assessCloseRisk(t, b, c, {
+      const wallNow = c.nowMs;
+      // Pure market validation uses an open-session fixture clock; only the risk
+      // expiry duration crosses into the real DB/service clock in this fake adapter.
+      const riskNow = currency === "PLN" ? Date.parse("2026-09-24T10:00:00Z") : wallNow;
+      const metadata = currency === "PLN" ? wseMetadataFixture(b, c.accountId, riskNow) : undefined;
+      if (metadata && state.wseFailure === "closed") metadata.liquidHours = "20260924:CLOSED";
+      if (metadata && state.wseFailure === "stale") metadata.requestStartedAtMs -= 60000;
+      if (metadata && state.wseFailure === "band") metadata.priceIncrements = [{ lowEdge: 0, increment: 3 }];
+      const risk = assessCloseRisk(t, b, { ...c, nowMs: riskNow }, {
         connected: true,
         watchlist: [
           {
@@ -451,12 +461,16 @@ async function createFixture(currency: "USD" | "PLN") {
               marketDataType: 1,
               bid: 100,
               ask: 100.01,
-              bidObservedAt: new Date(c.nowMs - 1).toISOString(),
-              askObservedAt: new Date(c.nowMs - 1).toISOString(),
+              bidObservedAt: new Date(riskNow - 1).toISOString(),
+              askObservedAt: new Date(riskNow - 1).toISOString(),
             },
           },
         ],
-      });
+      }, metadata);
+      if (risk.ok) {
+        risk.expiresAt = new Date(Date.parse(risk.expiresAt) + wallNow - riskNow).toISOString();
+        (risk.evidence as { expiresAt: string }).expiresAt = risk.expiresAt;
+      }
       if (state.invalidRiskIdentity)
         (risk.evidence as { accountId: string }).accountId = "FOREIGN";
       if (state.expiredRisk) risk.expiresAt = new Date(0).toISOString();
@@ -554,6 +568,7 @@ async function createFixture(currency: "USD" | "PLN") {
       assert.equal((p.payload as { contract: { exchange: string } }).contract.exchange, exchange);
       const riskRow = await pool.query("SELECT risk_evidence FROM lifecycle_close_operations WHERE id=$1", [op.id]);
       assert.equal(riskRow.rows[0].risk_evidence.quoteCurrency, currency);
+      if (currency === "PLN") assert.equal(riskRow.rows[0].risk_evidence.wseMetadata.marketRuleId, 1);
       state.dispatches++;
       state.closeRef = p.persistence.legs[0].orderRef;
       state.closeWorking = true;
@@ -589,6 +604,18 @@ for (const currency of ["USD", "PLN"] as const) describe(
   { skip: !connection },
   () => {
     const fixture = () => createFixture(currency);
+    if (currency === "PLN") for (const failure of ["closed", "stale", "band"]) it(`WSE preflight ${failure} preserves protective orders`, async () => {
+      const f = await fixture();
+      try {
+        f.state.wseFailure = failure;
+        const op = await f.service.request(f.id, randomUUID(), 100, "test");
+        assert.equal(op.state, "BLOCKED");
+        assert.match(op.failureReason ?? "", /wse_/);
+        assert.deepEqual(f.state.cancels, []);
+        assert.equal(f.state.prepares, 0);
+        assert.equal(f.state.dispatches, 0);
+      } finally { await f.close(); }
+    });
     it("persists cancellations then exact plan before one dispatch; replay is read-only; full fill completes", async () => {
       const f = await fixture();
       try {

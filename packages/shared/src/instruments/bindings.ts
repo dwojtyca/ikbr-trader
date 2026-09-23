@@ -362,6 +362,15 @@ export function parseInstrumentBindings(
       continue;
     }
 
+    if (instrument.conId !== undefined && conId !== instrument.conId) {
+      errors.push({ index, instrumentId, message: "conId does not match pinned registry conId" });
+      continue;
+    }
+    if (instrument.localSymbol !== undefined && localSymbol !== instrument.localSymbol) {
+      errors.push({ index, instrumentId, message: "localSymbol does not match pinned registry localSymbol" });
+      continue;
+    }
+
     if (seenIds.has(instrumentId)) {
       errors.push({
         index,
@@ -527,6 +536,12 @@ export class InstrumentBindingAuthority {
         throw new Error(
           `InstrumentBindingAuthority: tradingClass "${tradingClass}" for "${binding.instrumentId}" does not match registry tradingClass "${instrument.tradingClass}"`,
         );
+      }
+      if (instrument.conId !== undefined && binding.conId !== instrument.conId) {
+        throw new Error("InstrumentBindingAuthority: conId does not match pinned registry conId");
+      }
+      if (instrument.localSymbol !== undefined && localSymbol !== instrument.localSymbol) {
+        throw new Error("InstrumentBindingAuthority: localSymbol does not match pinned registry localSymbol");
       }
       // ---- duplicate id / conId ----
       if (byId.has(binding.instrumentId)) {

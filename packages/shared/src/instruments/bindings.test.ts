@@ -606,3 +606,23 @@ describe("mapAssetClassToIbkrSecType (PR15.2 hostile-review round-3)", () => {
     }
   });
 });
+
+const PINNED_PKO_BINDING = { instrumentId: "pko_wse", conId: 35146360,
+  localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN", minTick: 0.0001 };
+
+describe("pinned stock registry identity", () => {
+  it("accepts exact identity without activating the stock", () => {
+    const result = buildInstrumentBindingAuthority([PINNED_PKO_BINDING], defaultInstrumentRegistry);
+    assert.equal(result.ok, true);
+    if (result.ok) assert.equal(result.authority.getBoundInstrument("pko_wse")?.instrument.trading.executionEnabled, false);
+  });
+  for (const [field, value] of [["conId", 35146361], ["localSymbol", "OTHER"]] as const) {
+    it(`parser and direct authority reject replacement ${field}`, () => {
+      const binding = { ...PINNED_PKO_BINDING, [field]: value };
+      const parsed = parseInstrumentBindings([binding], defaultInstrumentRegistry);
+      assert.equal(parsed.ok, false);
+      if (!parsed.ok) assert.match(parsed.errors[0].message, new RegExp(`${field} does not match pinned`));
+      assert.throws(() => new InstrumentBindingAuthority(defaultInstrumentRegistry, [binding]), new RegExp(`${field} does not match pinned`));
+    });
+  }
+});

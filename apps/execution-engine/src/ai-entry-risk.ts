@@ -1,3 +1,4 @@
+import { validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import type { AccountSnapshot } from "./tws-execution-client.js";
 
@@ -36,6 +37,7 @@ export interface AiEntryRiskEvidence {
   quoteFeeReserve?: number;
   fxSource: "same_currency" | "ib_account_exchange_rate";
   limits: AiEntryRiskLimits;
+  wseMetadata?: WseMarketMetadata;
 }
 
 const MAX_AGE_MS = 10_000;
@@ -56,6 +58,7 @@ export function assessAiEntryRisk(input: {
   watchlist: unknown;
   limits: AiEntryRiskLimits;
   nowMs: number;
+  wseMetadata?: unknown;
 }): { ok: true; evidence: AiEntryRiskEvidence } | { ok: false; reason: string } {
   const { order, bound, accountId, sessionId, snapshot, limits, nowMs } = input;
   const reject = (reason: string) => ({ ok: false as const, reason });
@@ -146,9 +149,13 @@ export function assessAiEntryRisk(input: {
   if (stopRisk > netLiquidation * (limits.maxStopRiskPct / 100)) return reject("risk_stop_loss_exceeded");
   if (grossPositionValue + notional > netLiquidation * (limits.maxExposurePct / 100))
     return reject("risk_exposure_exceeded");
+  const wse = isPln ? validateWseOrder(input.wseMetadata, bound, accountId, order, nowMs) : undefined;
+  if (wse && !wse.ok) return reject(wse.reason);
   return { ok: true, evidence: {
     accountId, sessionId, instrumentId: bound.instrumentId, conid: order.conid,
-    assessedAtMs: nowMs, validUntilMs: Math.min(started, completed, bidTime, askTime) + MAX_AGE_MS,
+    assessedAtMs: nowMs, validUntilMs: Math.min(Math.min(started, completed, bidTime, askTime) + MAX_AGE_MS,
+      wse?.ok ? wse.expiresAtMs : Infinity),
+    ...(wse?.ok ? { wseMetadata: wse.metadata } : {}),
     accountRequestStartedAt: account.requestStartedAt, accountCompletedAt: account.completedAt,
     bidObservedAt: quote.bidObservedAt as string, askObservedAt: quote.askObservedAt as string,
     bid, ask, netLiquidation, availableFunds, grossPositionValue, notional, stopRisk,

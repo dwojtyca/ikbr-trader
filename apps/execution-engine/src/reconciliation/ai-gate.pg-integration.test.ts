@@ -1,3 +1,4 @@
+import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -52,24 +53,34 @@ async function fixture(currency: "USD" | "PLN" = "USD") {
   ]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,
     alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false,
+    wseFailure: "" as string,
     session: sessionId, account: accountId };
   const service = buildSubmissionApplicationService({ repo, bindingAuthority: authority,
     ensureBrokerSession: async () => ({ accountId: state.account }),
     buildPositionGuard: () => ({ kind: "available", accountId: state.account, sessionId: state.session, maxSnapshotAgeMs: 60000 }),
     reconciliationGate: () => async () => null,
     assessAiRisk: async (order, bound, account, session) => {
-      const now = Date.now();
+      const wallNow = Date.now();
+      // The fake risk adapter evaluates the real assessor in a deterministic open
+      // Warsaw session, then maps its expiry duration onto the DB clock domain.
+      const now = currency === "PLN" ? Date.parse("2026-09-24T10:00:00Z") : wallNow;
+      const metadata = currency === "PLN" ? wseMetadataFixture(bound, account, now) : undefined;
+      if (metadata && state.wseFailure === "closed") metadata.liquidHours = "20260924:CLOSED";
+      if (metadata && state.wseFailure === "stale") metadata.requestStartedAtMs -= 60000;
+      if (metadata && state.wseFailure === "band") metadata.priceIncrements = [{ lowEdge: 0, increment: 3 }];
       const quoteTime = new Date(now - (state.staleQuote ? 11000 : state.ageDuringPrepare ? 9900 : 1)).toISOString();
       const snapshot: AccountSnapshot = { accountId: account, retrievedAt: new Date(now).toISOString(), metrics: {}, positions: [],
         totals: { positionsCount: 0, longExposure: 0, shortExposure: 0, grossExposure: 0, netExposure: 0, unrealizedPnL: 0, realizedPnL: 0 },
         riskEvidence: { requestStartedAt: new Date(now - 1).toISOString(), completedAt: new Date(now).toISOString(),
           complete: true, configuredBaseCurrency: "USD",
           exchangeRatesToBase: state.missingPlnEvidence ? {} : { USD: 1, PLN: .25 }, cashByCurrency: { PLN: 500 }, usdMetrics: { netLiquidation: 10000, availableFunds: 5000, grossPositionValue: 0 } } };
-      return assessAiEntryRisk({ order, bound, accountId: account, sessionId: session, nowMs: now, snapshot,
+      const assessed = assessAiEntryRisk({ order, bound, wseMetadata: metadata, accountId: account, sessionId: session, nowMs: now, snapshot,
         limits: { maxNotionalPct: 10, maxStopRiskPct: 0.5, maxExposurePct: 25,
           pln: { maxNotional: 500, maxStopRisk: 5, feeReserve: 30 } },
         watchlist: { connected: true, watchlist: [{ instrumentId: order.instrumentId, conid: order.conid, subscribed: true,
           marketState: { conid: order.conid, bid: 99.5, ask: 100, marketDataType: 1, bidObservedAt: quoteTime, askObservedAt: quoteTime } }] } });
+      if (assessed.ok) assessed.evidence.validUntilMs += wallNow - now;
+      return assessed;
     },
     prepareBrokerPlan: async ({ order, clientOrderId }) => {
       state.prepares++;
@@ -283,6 +294,8 @@ describe("GPW1 PLN valuation through production submission service (fake broker)
       assert.equal(evidence.fxToUsd, .25); assert.equal(evidence.fxValuationBuffer, 1.02);
       assert.equal(evidence.quoteCashBalance, 500); assert.equal(evidence.quoteFeeReserve, 30);
       assert.equal(evidence.limits.pln.maxNotional, 500);
+      assert.equal(evidence.wseMetadata.marketRuleId, 1);
+      assert.deepEqual(evidence.wseMetadata.priceIncrements, [{ lowEdge: 0, increment: .01 }]);
     } finally { await f.close(); }
   });
   it("missing currency evidence after AI approval prevents all preparation and dispatch", async () => {
@@ -291,6 +304,19 @@ describe("GPW1 PLN valuation through production submission service (fake broker)
       const id = await f.create(); await f.approve(id); f.state.missingPlnEvidence = true;
       const result = await f.execute(id);
       assert.deepEqual(result, { kind: "risk_rejected", reason: "risk_pln_fx_missing_or_invalid" });
+      assert.equal(f.state.prepares, 0); assert.equal(f.state.dispatches, 0);
+      assert.equal((await f.repo.getProposedOrderById(id))?.executionAttemptedAt, undefined);
+    } finally { await f.close(); }
+  });
+});
+
+describe("GPW2B metadata gate through production submission service", { skip: !connection }, () => {
+  for (const failure of ["closed", "stale", "band"]) it(`WSE ${failure} refuses before prepare/claim/dispatch`, async () => {
+    const f = await fixture("PLN");
+    try {
+      const id = await f.create(); await f.approve(id); f.state.wseFailure = failure;
+      const result = await f.execute(id);
+      assert.equal(result.kind, "risk_rejected");
       assert.equal(f.state.prepares, 0); assert.equal(f.state.dispatches, 0);
       assert.equal((await f.repo.getProposedOrderById(id))?.executionAttemptedAt, undefined);
     } finally { await f.close(); }

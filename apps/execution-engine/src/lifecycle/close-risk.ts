@@ -1,3 +1,4 @@
+import { isWseBound, validateWseOrder } from "../wse-market-rules.js";
 import type { SignalTicket, BoundInstrument } from "@ikbr/shared";
 import type { CloseContext, ClosePrepared, CloseRisk } from "./close-types.js";
 import type { PreparedBrokerOrder } from "../tws-execution-client.js";
@@ -9,7 +10,7 @@ const record = (value: unknown): Record<string, unknown> | null =>
 const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
 const nonnegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
 
-export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | null, context: CloseContext, watchlist: unknown): CloseRisk {
+export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | null, context: CloseContext, watchlist: unknown, wseMetadata?: unknown): CloseRisk {
   const fail = (reason: string): CloseRisk => ({ ok: false, reasons: [reason], evidence: null, expiresAt: "" });
   const policy = bound?.instrument.executionPolicy;
   if (!bound || !policy || !bound.instrument.trading.executionEnabled || bound.instrument.assetClass !== "stock" ||
@@ -27,8 +28,8 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
     !positive(policy.maxQuantity) || policy.maxQuantity < 1 || !positive(bound.instrument.risk.maxQuantity) || bound.instrument.risk.maxQuantity < 1)
     return fail("close_risk_policy_mismatch");
   const tick = policy.priceTickSize;
-  if (!positive(tick) || !positive(bound.minTick) || Math.abs(tick - bound.minTick) > 1e-10 ||
-    Math.abs(order.entry / tick - Math.round(order.entry / tick)) > 1e-7) return fail("close_risk_tick_invalid");
+  if (!isWseBound(bound) && (!positive(tick) || !positive(bound.minTick) || Math.abs(tick - bound.minTick) > 1e-10 ||
+    Math.abs(order.entry / tick - Math.round(order.entry / tick)) > 1e-7)) return fail("close_risk_tick_invalid");
   if (!context.accountId || !context.sessionId || !Number.isFinite(context.nowMs)) return fail("close_risk_context_invalid");
   const body = record(watchlist);
   if (body?.connected !== true || !Array.isArray(body.watchlist)) return fail("close_risk_market_disconnected");
@@ -49,8 +50,12 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
   if (!nonnegative(bound.instrument.risk.maxSpread) || !nonnegative(bound.instrument.risk.maxSlippage) ||
     ask - bid > bound.instrument.risk.maxSpread || Math.abs(order.entry - bid) > bound.instrument.risk.maxSlippage)
     return fail("close_risk_spread_or_slippage");
-  const expiresAt = new Date(Math.min(bidTime, askTime) + 10_000).toISOString();
+  const wse = isWseBound(bound) ? validateWseOrder(wseMetadata, bound, context.accountId, order, context.nowMs) : undefined;
+  if (wse && !wse.ok) return fail(wse.reason);
+  const expiresAt = new Date(Math.min(Math.min(bidTime, askTime) + 10_000,
+    wse?.ok ? wse.expiresAtMs : Infinity)).toISOString();
   return { ok: true, reasons: [], expiresAt, evidence: { accountId: context.accountId, sessionId: context.sessionId,
+    ...(wse?.ok ? { wseMetadata: wse.metadata } : {}),
     clientId: context.clientId, generation: context.generation, instrumentId: bound.instrumentId, conid: order.conid,
     orderHash: computeClientOrderHash(order), quoteCurrency: bound.currency, bid, ask, bidObservedAt: quote.bidObservedAt, askObservedAt: quote.askObservedAt,
     assessedAt: new Date(context.nowMs).toISOString(), expiresAt } };

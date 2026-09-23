@@ -1,3 +1,4 @@
+import { isWseBound } from "../wse-market-rules.js";
 /**
  * PR15 r7 §1 — production submission application service.
  *
@@ -1030,7 +1031,7 @@ function resolveBoundIdentity(
   // divergence means either the seed is out of date with the
   // dated contract, or the operator misconfigured the binding
   // — either way, refuse to build a ticket.
-  if (!tickSizesEqual(policy.priceTickSize, bound.minTick)) {
+  if (!isWseBound(bound) && !tickSizesEqual(policy.priceTickSize, bound.minTick)) {
     return {
       kind: "reject",
       outcome: {

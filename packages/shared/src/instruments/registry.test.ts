@@ -483,7 +483,7 @@ describe("InstrumentRegistry — list filters", () => {
 });
 
 describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
-  it("contains all six seed instruments", () => {
+  it("contains six futures and disabled PKO stock", () => {
     const ids = defaultInstrumentRegistry.listAll().map((i) => i.id);
     assert.deepEqual(ids, [
       "si_front",
@@ -492,11 +492,12 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
       "hg_front",
       "es_front",
       "nq_front",
+      "pko_wse",
     ]);
   });
 
   it("exposes each seed via getByBrokerSymbol('ibkr', ...)", () => {
-    for (const symbol of ["SI", "GC", "PL", "HG", "ES", "NQ"]) {
+    for (const symbol of ["SI", "GC", "PL", "HG", "ES", "NQ", "PKO"]) {
       const matches = defaultInstrumentRegistry.getByBrokerSymbol(
         "ibkr",
         symbol,
@@ -520,8 +521,8 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
     assert.equal(defaultInstrumentRegistry.listExecutionEnabled().length, 0);
   });
 
-  it("classifies every seed as a future with a roll policy", () => {
-    for (const instrument of defaultInstrumentRegistry.listAll()) {
+  it("keeps original futures roll policies", () => {
+    for (const instrument of defaultInstrumentRegistry.listAll().filter(i => i.assetClass === "future")) {
       assert.equal(instrument.assetClass, "future");
       assert.ok(
         instrument.roll,
@@ -532,8 +533,8 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
     }
   });
 
-  it("sizes every seed in contracts (integer counts, not notional)", () => {
-    for (const instrument of defaultInstrumentRegistry.listAll()) {
+  it("sizes futures in contracts (integer counts, not notional)", () => {
+    for (const instrument of defaultInstrumentRegistry.listAll().filter(i => i.assetClass === "future")) {
       assert.equal(instrument.risk.quantityUnit, "contracts");
       assert.ok(
         Number.isInteger(instrument.risk.maxQuantity),
@@ -546,8 +547,8 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
     }
   });
 
-  it("enables signal + AI + monitoring by default (execution stays off)", () => {
-    for (const instrument of defaultInstrumentRegistry.listAll()) {
+  it("keeps existing futures signal + AI + monitoring flags", () => {
+    for (const instrument of defaultInstrumentRegistry.listAll().filter(i => i.assetClass === "future")) {
       assert.equal(instrument.trading.signalGenerationEnabled, true);
       assert.equal(instrument.trading.aiAnalysisEnabled, true);
       assert.equal(instrument.trading.monitoringEnabled, true);

@@ -1,3 +1,5 @@
+import { WseMetadataClient } from "./wse-metadata-client.js";
+import { isWseBound } from "./wse-market-rules.js";
 import { shouldInvalidateExecutionFill } from "./execution-fill-invalidation.js";
 import { registerFullCloseRoutes } from "./lifecycle/close-routes.js";
 import { CloseConflict, CloseRepository } from "./lifecycle/close-repository.js";
@@ -72,6 +74,8 @@ const EXECUTION_PROCESS_OWNER_ID = `execution-engine:${hostname()}:${randomUUID(
 // windowStart baseline. Wall-clock capture at boot; safe to reuse
 // for the entire process lifetime.
 const EXECUTION_SESSION_STARTED_AT = new Date();
+const wseMetadata = new WseMetadataClient({ host: config.IB_SOCKET_HOST,
+  port: config.IB_SOCKET_PORT, clientId: config.IB_METADATA_CLIENT_ID });
 const tws = new TwsExecutionClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -267,6 +271,8 @@ const tws = new TwsExecutionClient(
       );
     });
   },
+  { resolveBoundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
+    loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
 
 // PR15 — production reconciliation wiring. Uses the REAL
@@ -890,13 +896,14 @@ app.log.info(
 const submissionService = buildSubmissionApplicationService({
   repo,
   assessAiRisk: async (order, bound, accountId, sessionId) => {
-    const [snapshot, response] = await Promise.all([
+    const [snapshot, response, metadata] = await Promise.all([
       tws.getAccountSnapshot(accountId),
       fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
         { signal: AbortSignal.timeout(5000) }),
+      isWseBound(bound) ? wseMetadata.load(bound, accountId) : Promise.resolve(undefined),
     ]);
     if (!response.ok) return { ok: false, reason: "ingestion_unavailable" };
-    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot,
+    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot, wseMetadata: metadata,
       watchlist: await response.json(), nowMs: Date.now(), limits: {
         maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
         maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,
@@ -1566,7 +1573,8 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
     const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
       { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new CloseConflict("close_quote_unavailable");
-    return assessCloseRisk(ticket, bound, { ...context, nowMs: Date.now() }, await response.json());
+    const metadata = isWseBound(bound) ? await wseMetadata.load(bound, context.accountId) : undefined;
+    return assessCloseRisk(ticket, bound, { ...context, nowMs: Date.now() }, await response.json(), metadata);
   },
   prepare: async (ticket, clientOrderId, originalProposalId) => {
     // Preparation is read-only at IBKR; the close proposal and marker commit before dispatch.

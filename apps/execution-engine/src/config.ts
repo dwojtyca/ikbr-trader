@@ -34,6 +34,10 @@ const rawSchema = z.object({
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   EXECUTION_CLIENT_ID: z.coerce.number().default(102),
+  IB_METADATA_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(119),
+  INGESTION_CLIENT_ID: z.coerce.number().default(101),
+  BACKTEST_INGESTION_CLIENT_ID: z.coerce.number().default(104),
+  IBKR_ES_ACQUISITION_CLIENT_ID: z.coerce.number().optional(),
   IB_EXCHANGE: z.string().default("SMART"),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default("USD"),
@@ -218,6 +222,12 @@ function validateExecutionSecurity(
   data: RawExecutionEnv,
   ctx: z.RefinementCtx,
 ): void {
+  for (const key of ["EXECUTION_CLIENT_ID", "INGESTION_CLIENT_ID", "BACKTEST_INGESTION_CLIENT_ID", "IBKR_ES_ACQUISITION_CLIENT_ID"] as const) {
+    if (data.IB_METADATA_CLIENT_ID === data[key]) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["IB_METADATA_CLIENT_ID"],
+        message: `IB_METADATA_CLIENT_ID must differ from ${key}` });
+    }
+  }
   const tradingEnabled = parseBoolFlag(data.TRADING_ENABLED);
   const isLive = data.IBKR_ENVIRONMENT === "live";
 

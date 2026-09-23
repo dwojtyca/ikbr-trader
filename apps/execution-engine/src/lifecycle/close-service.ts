@@ -1,3 +1,4 @@
+import { isWseBound } from "../wse-market-rules.js";
 import type { BoundInstrument, SignalTicket } from "@ikbr/shared";
 import {
   CloseConflict,
@@ -150,6 +151,24 @@ export class FullCloseService {
     if (!reserved.created || op.state === "COMPLETED") return op;
     let cancellationInFlight = false;
     try {
+      const ticket: SignalTicket = {
+        instrument: original.order.instrument,
+        instrumentId: op.instrumentId,
+        conid: op.conid,
+        side: "SELL",
+        positionEffect: "CLOSE_OR_REDUCE",
+        orderType: "LMT",
+        quantity: 1,
+        entry: op.limitPrice,
+        reason: `Full close of proposal ${id}; operation ${op.id}`,
+        confidence: 1,
+        riskCheckStatus: "PASS",
+        timestamp: new Date().toISOString(),
+      };
+      if (isWseBound(fresh.bound!)) {
+        const preflight = await this.deps.assessRisk(ticket, fresh.bound!, this.unchanged(op));
+        if (!preflight.ok) throw new CloseConflict(preflight.reasons.join(","));
+      }
       for (const role of ["PARENT", "TP", "SL"] as const) {
         const c = this.unchanged(op);
         const evidence = await this.repo.evidence(op);
@@ -196,20 +215,6 @@ export class FullCloseService {
         throw new CloseConflict(
           report.reasons.join(",") || "close_not_authorized",
         );
-      const ticket: SignalTicket = {
-        instrument: evidence.order.instrument,
-        instrumentId: op.instrumentId,
-        conid: op.conid,
-        side: "SELL",
-        positionEffect: "CLOSE_OR_REDUCE",
-        orderType: "LMT",
-        quantity: 1,
-        entry: op.limitPrice,
-        reason: `Full close of proposal ${id}; operation ${op.id}`,
-        confidence: 1,
-        riskCheckStatus: "PASS",
-        timestamp: new Date().toISOString(),
-      };
       const firstRisk = await this.deps.assessRisk(ticket, c.bound!, c);
       if (!firstRisk.ok) throw new CloseConflict(firstRisk.reasons.join(","));
       const prepared = await this.deps.prepare(

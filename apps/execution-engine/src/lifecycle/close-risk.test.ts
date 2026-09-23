@@ -1,3 +1,4 @@
+import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { SignalTicket } from "@ikbr/shared";
@@ -19,7 +20,8 @@ function setup() {
   const exchange = currency === "PLN" ? "WSE" : "SMART";
   Object.assign(bound, { currency, exchange });
   Object.assign(bound.instrument, { currency, exchange });
-  const assess = () => assessCloseRisk(ticket, bound, context, watchlist);
+  const metadata = currency === "PLN" ? wseMetadataFixture(bound, context.accountId, nowMs) : undefined;
+  const assess = () => assessCloseRisk(ticket, bound, context, watchlist, metadata);
   const ref = deriveParentOrderRef("close-test");
   const prepared: PreparedBrokerOrder = { contract: { symbol: "TEST", conId: 123, secType: "STK", currency, exchange },
     normalizedTicket: { ...ticket }, legs: [{ role: "PARENT", roleOrdinal: 0, brokerOrderId: "200", orderRef: ref }],
@@ -45,7 +47,7 @@ for (const [name, mutate] of [
   ["bracket", f => { f.ticket.stop = 99; }],
   ["entry effect", f => { f.ticket.positionEffect = "OPEN_OR_ADD"; }],
   ["off tick", f => { f.ticket.entry = 100.001; }],
-  ["tick mismatch", f => { Object.assign(f.bound, { minTick: .05 }); }],
+  ...(currency === "USD" ? [["tick mismatch", (f: ReturnType<typeof setup>) => { Object.assign(f.bound, { minTick: .05 }); }]] : []),
   ["wrong quote conid", f => { f.quote.conid = "99"; }],
   ["delayed", f => { f.quote.marketDataType = 3; }],
   ["stale", f => { f.quote.bidObservedAt = new Date(nowMs - 10000).toISOString(); }],

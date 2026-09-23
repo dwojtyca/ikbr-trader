@@ -373,3 +373,24 @@ describe("GPW1 server-owned PLN risk limits", () => {
     }
   }
 });
+
+describe("read-only broker metadata client ID", () => {
+  it("defaults to a dedicated ID", () => {
+    assert.equal(buildExecutionConfig({}).IB_METADATA_CLIENT_ID, 119);
+  });
+  for (const value of ["0", "-1", "1.5", "NaN", "Infinity", "2147483648", ""]) {
+    it(`rejects invalid metadata ID ${JSON.stringify(value)}`, () => {
+      assert.throws(() => buildExecutionConfig({ IB_METADATA_CLIENT_ID: value }), ZodError);
+    });
+  }
+  for (const key of ["EXECUTION_CLIENT_ID", "INGESTION_CLIENT_ID", "BACKTEST_INGESTION_CLIENT_ID", "IBKR_ES_ACQUISITION_CLIENT_ID"]) {
+    it(`rejects collision with ${key}`, () => {
+      assert.throws(() => buildExecutionConfig({ IB_METADATA_CLIENT_ID: "119", [key]: "119" }), /must differ/);
+    });
+  }
+  for (const id of ["101", "102", "104"]) {
+    it(`rejects collision with default service ID ${id}`, () => {
+      assert.throws(() => buildExecutionConfig({ IB_METADATA_CLIENT_ID: id }), /must differ/);
+    });
+  }
+});

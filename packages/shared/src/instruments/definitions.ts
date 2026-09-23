@@ -2,7 +2,7 @@ import { InstrumentRegistry } from "./registry.js";
 import type { Instrument } from "./types.js";
 
 /**
- * Curated seed catalogue for Phase 1. Six IBKR futures — four precious /
+ * Curated seed catalogue. Disabled PKO/WSE stock plus six IBKR futures — four precious /
  * industrial metals on COMEX/NYMEX plus the two flagship US equity-index
  * e-minis on CME. These are the front-month contracts; the actual
  * expiration is resolved by the futures roll adapter (calendar strategy,
@@ -260,6 +260,37 @@ export const INSTRUMENT_DEFINITIONS: readonly Instrument[] = [
       sector: "equity_index",
       description: "E-mini Nasdaq 100 futures, CME front-month.",
     },
+  },
+  {
+    id: "pko_wse",
+    displayName: "PKO Bank Polski",
+    assetClass: "stock",
+    broker: "ibkr",
+    brokerSymbol: "PKO",
+    conId: 35146360,
+    localSymbol: "PKO",
+    exchange: "WSE",
+    currency: "PLN",
+    trading: {
+      executionEnabled: false,
+      signalGenerationEnabled: false,
+      aiAnalysisEnabled: false,
+      monitoringEnabled: false,
+    },
+    risk: {
+      maxQuantity: 1,
+      quantityUnit: "shares",
+      maxLeverage: 1,
+      allowOvernight: false,
+      maxSpread: 0.05,
+      maxSlippage: 0.05,
+    },
+    session: {
+      useRegularTradingHours: true,
+      timezone: "Europe/Warsaw",
+      sessionTemplate: "wse_stock_rth",
+    },
+    metadata: { tags: ["equity", "poland"], sector: "financials" },
   },
 ];
 

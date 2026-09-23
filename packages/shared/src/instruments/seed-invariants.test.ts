@@ -37,10 +37,11 @@ const EXPECTED_IDS: readonly string[] = [
   "hg_front",
   "es_front",
   "nq_front",
+  "pko_wse",
 ];
 
 describe("Instrument seed catalogue — PR15.3 r2 invariants (activation rolled back)", () => {
-  it("all six seed IDs are present (rollback must not drop any)", () => {
+  it("all original six futures and disabled PKO seed are present", () => {
     const actual = INSTRUMENT_DEFINITIONS.map((i) => i.id).sort();
     assert.deepEqual(actual, EXPECTED_IDS.slice().sort());
   });
@@ -81,3 +82,18 @@ describe("Instrument seed catalogue — PR15.3 r2 invariants (activation rolled 
     assert.equal(es!.executionPolicy, undefined);
   });
 });
+
+ it("PKO is pinned, entirely inactive and conservatively sized", () => {
+   const pko = defaultInstrumentRegistry.getInstrument("pko_wse")!;
+   assert.equal(pko.assetClass, "stock");
+   assert.equal(pko.conId, 35146360);
+   assert.equal(pko.localSymbol, "PKO");
+   assert.equal(pko.exchange, "WSE");
+   assert.equal(pko.currency, "PLN");
+   assert.ok(Object.values(pko.trading).every(value => value === false));
+   assert.deepEqual(pko.risk, { maxQuantity: 1, quantityUnit: "shares", maxLeverage: 1,
+     allowOvernight: false, maxSpread: 0.05, maxSlippage: 0.05 });
+   assert.deepEqual(pko.session, { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" });
+   assert.equal(pko.roll, undefined);
+   assert.equal(pko.executionPolicy, undefined);
+ });
