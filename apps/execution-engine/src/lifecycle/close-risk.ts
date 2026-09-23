@@ -13,7 +13,9 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
   const fail = (reason: string): CloseRisk => ({ ok: false, reasons: [reason], evidence: null, expiresAt: "" });
   const policy = bound?.instrument.executionPolicy;
   if (!bound || !policy || !bound.instrument.trading.executionEnabled || bound.instrument.assetClass !== "stock" ||
-    bound.currency !== "USD" || bound.instrument.currency !== "USD" || order.instrumentId !== bound.instrumentId ||
+    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
+      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
+        bound.exchange === "WSE" && bound.instrument.exchange === "WSE")) || order.instrumentId !== bound.instrumentId ||
     order.conid !== String(bound.conId) || order.instrument !== bound.brokerSymbol)
     return fail("close_risk_binding_mismatch");
   if (order.side !== "SELL" || order.positionEffect !== "CLOSE_OR_REDUCE" || order.quantity !== 1 || order.orderType !== "LMT" ||
@@ -50,7 +52,7 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
   const expiresAt = new Date(Math.min(bidTime, askTime) + 10_000).toISOString();
   return { ok: true, reasons: [], expiresAt, evidence: { accountId: context.accountId, sessionId: context.sessionId,
     clientId: context.clientId, generation: context.generation, instrumentId: bound.instrumentId, conid: order.conid,
-    orderHash: computeClientOrderHash(order), bid, ask, bidObservedAt: quote.bidObservedAt, askObservedAt: quote.askObservedAt,
+    orderHash: computeClientOrderHash(order), quoteCurrency: bound.currency, bid, ask, bidObservedAt: quote.bidObservedAt, askObservedAt: quote.askObservedAt,
     assessedAt: new Date(context.nowMs).toISOString(), expiresAt } };
 }
 
@@ -58,9 +60,13 @@ export function validatePreparedClose(prepared: PreparedBrokerOrder, order: Sign
   clientOrderId: string, bound: BoundInstrument): string | null {
   if (computeClientOrderHash(prepared.normalizedTicket) !== computeClientOrderHash(order) ||
     prepared.normalizedTicket.instrumentId !== order.instrumentId) return "close_prepared_ticket_changed";
+  if (!bound.instrument.trading.executionEnabled || bound.instrument.assetClass !== "stock" ||
+    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
+      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
+        bound.exchange === "WSE" && bound.instrument.exchange === "WSE"))) return "close_prepared_binding_unsupported";
   const contract = prepared.contract;
   if (contract.conId !== bound.conId || contract.symbol !== bound.brokerSymbol || contract.secType !== "STK" ||
-    contract.currency !== "USD" || contract.exchange !== bound.exchange) return "close_prepared_contract_changed";
+    contract.currency !== bound.currency || contract.exchange !== bound.exchange) return "close_prepared_contract_changed";
   const { plan, legs } = prepared;
   if (legs.length !== 1 || plan.orders.length !== 1 || plan.bracket || (plan.bracketLegs?.length ?? 0) !== 0 ||
     plan.relatedOrderIds.size !== 1 || !plan.relatedOrderIds.has(plan.parentOrderId)) return "close_prepared_extra_orders";

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import type { SignalTicket } from "@ikbr/shared";
 import type { PreparedBrokerOrder } from "../tws-execution-client.js";
 import { deriveParentOrderRef } from "../reconciliation/order-ref.js";
 import { fixture, nowMs } from "./close-test-fixture.js";
 import { assessCloseRisk, validatePreparedClose } from "./close-risk.js";
+for (const currency of ["USD", "PLN"] as const) describe(`close risk ${currency}`, () => {
 function setup() {
   const f = fixture();
   const context = { ...f.context, accountId: "DU_TEST", clientId: 7, generation: 1 };
@@ -15,9 +16,12 @@ function setup() {
     bidObservedAt: new Date(nowMs - 100).toISOString(), askObservedAt: new Date(nowMs - 100).toISOString() };
   const watchlist = { connected: true, watchlist: [{ instrumentId: "test", conid: "123", subscribed: true, marketState: quote }] };
   const bound = f.context.bound!;
+  const exchange = currency === "PLN" ? "WSE" : "SMART";
+  Object.assign(bound, { currency, exchange });
+  Object.assign(bound.instrument, { currency, exchange });
   const assess = () => assessCloseRisk(ticket, bound, context, watchlist);
   const ref = deriveParentOrderRef("close-test");
-  const prepared: PreparedBrokerOrder = { contract: { symbol: "TEST", conId: 123, secType: "STK", currency: "USD", exchange: "SMART" },
+  const prepared: PreparedBrokerOrder = { contract: { symbol: "TEST", conId: 123, secType: "STK", currency, exchange },
     normalizedTicket: { ...ticket }, legs: [{ role: "PARENT", roleOrdinal: 0, brokerOrderId: "200", orderRef: ref }],
     plan: { parentOrderId: 200, relatedOrderIds: new Set([200]), orders: [{ orderId: 200, order: {
       action: "SELL", totalQuantity: 1, orderType: "LMT", lmtPrice: 100, tif: "DAY", account: "DU_TEST", transmit: true, orderRef: ref } }] } };
@@ -27,8 +31,13 @@ function setup() {
 test("SELL risk uses live bid and persists immutable identity plus quote expiry", () => {
   const f = setup(), risk = f.assess(); assert.equal(risk.ok, true); assert.equal(risk.expiresAt, new Date(nowMs + 9900).toISOString());
   assert.equal(f.validate(), null);
+  assert.equal((risk.evidence as { quoteCurrency: string }).quoteCurrency, currency);
 });
 for (const [name, mutate] of [
+  ["currency mismatch", (f: ReturnType<typeof setup>) => { Object.assign(f.bound, { currency: "EUR" }); }],
+  ["registry currency mismatch", f => { Object.assign(f.bound.instrument, { currency: "EUR" }); }],
+  ["disabled", f => { Object.assign(f.bound.instrument.trading, { executionEnabled: false }); }],
+  ["non-stock", f => { Object.assign(f.bound.instrument, { assetClass: "future" }); }],
   ["BUY", (f: ReturnType<typeof setup>) => { f.ticket.side = "BUY"; }],
   ["market", f => { f.ticket.orderType = "MKT"; }],
   ["fraction", f => { f.ticket.quantity = .5; }],
@@ -51,6 +60,10 @@ for (const [name, mutate] of [
   const f = setup(); mutate(f); assert.equal(f.assess().ok, false);
 });
 for (const [name, mutate] of [
+  ["wrong currency", (f: ReturnType<typeof setup>) => { f.prepared.contract.currency = "EUR"; }],
+  ["wrong exchange", f => { f.prepared.contract.exchange = "OTHER"; }],
+  ["unsupported bound", f => { Object.assign(f.bound, { currency: "EUR" }); }],
+  ["disabled bound", f => { Object.assign(f.bound.instrument.trading, { executionEnabled: false }); }],
   ["normalized price", (f: ReturnType<typeof setup>) => { f.prepared.normalizedTicket.entry = 99; }],
   ["normalized instrumentId", f => { f.prepared.normalizedTicket.instrumentId = "other"; }],
   ["contract", f => { f.prepared.contract.conId = 999; }],
@@ -68,4 +81,19 @@ for (const [name, mutate] of [
   ["wire orderId", f => { f.prepared.plan.orders[0].orderId = 201; }],
 ] as Array<[string, (f: ReturnType<typeof setup>) => void]>) test(`prepared close rejects ${name}`, () => {
   const f = setup(); mutate(f); assert.notEqual(f.validate(), null);
+});
+
+if (currency === "PLN") {
+  test("owned PLN close needs no account cash or FX valuation evidence", () => {
+    const f = setup();
+    assert.equal("snapshot" in f.context, false);
+    assert.equal(f.assess().ok, true);
+  });
+  for (const target of ["bound", "registry"] as const) test(`PLN rejects non-WSE ${target}`, () => {
+    const f = setup();
+    Object.assign(target === "bound" ? f.bound : f.bound.instrument, { exchange: "SMART" });
+    assert.equal(f.assess().ok, false);
+    assert.equal(f.validate(), "close_prepared_binding_unsupported");
+  });
+}
 });

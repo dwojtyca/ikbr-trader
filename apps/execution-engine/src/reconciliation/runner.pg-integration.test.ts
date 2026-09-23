@@ -341,39 +341,36 @@ suite("Reconciliation runner + repository (PG integration)", () => {
       const reconRepo = new ReconciliationRepository(pool);
       const adapter1 = new FakeBrokerReconciliationAdapter();
       const adapter2 = new FakeBrokerReconciliationAdapter();
-      // Slow the first runner's broker read so the second lands
-      // while the lock is still held.
-      let slowFirstResolve: () => void = () => {};
+      let release!: () => void;
+      let entered!: () => void;
+      const held = new Promise<void>(resolve => { release = resolve; });
+      const captureEntered = new Promise<void>(resolve => { entered = resolve; });
       const originalCapture = adapter1.capture.bind(adapter1);
       adapter1.capture = async (req) => {
-        await new Promise<void>((r) => (slowFirstResolve = r));
+        entered();
+        await held;
         return originalCapture(req);
       };
       const runner1 = new ReconciliationRunner(pool, repo, reconRepo, adapter1);
       const runner2 = new ReconciliationRunner(pool, repo, reconRepo, adapter2);
-
-      const [reportOrRun1, reportOrRun2] = await Promise.all([
-        (async () => {
-          const p = runner1.runOnce(
-            { accountId: ACCOUNT_ID, sessionId: SESSION_A, sessionStartedAt: new Date() },
-            { runTimeoutMs: 5_000, sourceTimeoutMs: 1_000, executionSafetyMarginMs: 60_000 },
-          );
-          // Let the second runner get a chance to try the lock first.
-          await new Promise((r) => setTimeout(r, 50));
-          slowFirstResolve();
-          return p;
-        })(),
-        (async () => {
-          await new Promise((r) => setTimeout(r, 25));
-          return runner2.runOnce(
-            { accountId: ACCOUNT_ID, sessionId: SESSION_A, sessionStartedAt: new Date() },
-            { runTimeoutMs: 5_000, sourceTimeoutMs: 1_000, executionSafetyMarginMs: 60_000 },
-          );
-        })(),
-      ]);
-      // Exactly one wins the lock; the other returns null.
-      const winners = [reportOrRun1, reportOrRun2].filter(Boolean);
-      assert.equal(winners.length, 1);
+      const first = runner1.runOnce(
+        { accountId: ACCOUNT_ID, sessionId: SESSION_A, sessionStartedAt: new Date() },
+        { runTimeoutMs: 5_000, sourceTimeoutMs: 1_000, executionSafetyMarginMs: 60_000 },
+      );
+      try {
+        await Promise.race([
+          captureEntered,
+          first.then(() => { throw new Error("first runner completed before capture barrier"); }),
+        ]);
+        const second = await runner2.runOnce(
+          { accountId: ACCOUNT_ID, sessionId: SESSION_A, sessionStartedAt: new Date() },
+          { runTimeoutMs: 5_000, sourceTimeoutMs: 1_000, executionSafetyMarginMs: 60_000 },
+        );
+        assert.equal(second, null);
+      } finally {
+        release();
+        assert.ok(await first, "first runner owns the advisory lock");
+      }
     } finally {
       await drop(pool, dbName);
     }

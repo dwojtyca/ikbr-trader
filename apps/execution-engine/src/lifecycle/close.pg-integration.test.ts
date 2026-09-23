@@ -71,7 +71,10 @@ const instrument: Instrument = {
     priceRoundingMode: "nearest",
   },
 };
-async function fixture() {
+async function createFixture(currency: "USD" | "PLN") {
+  const exchange = currency === "PLN" ? "WSE" : "SMART";
+  const selectedInstrument: Instrument = { ...instrument, currency, exchange,
+    session: currency === "PLN" ? { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } : instrument.session };
   const database = `close_${randomUUID().replaceAll("-", "")}`,
     url = new URL(connection!);
   url.pathname = "/postgres";
@@ -84,15 +87,15 @@ async function fixture() {
     repo = new CloseRepository(pool, execution),
     reconciliation = new ReconciliationRepository(pool);
   const authority = new InstrumentBindingAuthority(
-    new InstrumentRegistry([instrument]),
+    new InstrumentRegistry([selectedInstrument]),
     [
       {
         instrumentId: "test",
         conId: 123,
         localSymbol: "TEST",
         tradingClass: "TEST",
-        exchange: "SMART",
-        currency: "USD",
+        exchange,
+        currency,
         minTick: 0.01,
       },
     ],
@@ -356,7 +359,7 @@ async function fixture() {
             accountId,
             conid: "123",
             symbol: "TEST",
-            currency: "USD",
+            currency,
             side: fill.side === "BOT" ? "BUY" : "SELL",
             shares: fill.shares,
             price: fill.price,
@@ -481,8 +484,8 @@ async function fixture() {
           conId: 123,
           symbol: "TEST",
           secType: "STK",
-          currency: "USD",
-          exchange: "SMART",
+          currency,
+          exchange,
         },
         normalizedTicket,
         legs: [leg],
@@ -547,6 +550,10 @@ async function fixture() {
       };
     },
     dispatch: async (p, op) => {
+      assert.equal(p.payload && (p.payload as { contract: { currency: string; exchange: string } }).contract.currency, currency);
+      assert.equal((p.payload as { contract: { exchange: string } }).contract.exchange, exchange);
+      const riskRow = await pool.query("SELECT risk_evidence FROM lifecycle_close_operations WHERE id=$1", [op.id]);
+      assert.equal(riskRow.rows[0].risk_evidence.quoteCurrency, currency);
       state.dispatches++;
       state.closeRef = p.persistence.legs[0].orderRef;
       state.closeWorking = true;
@@ -577,10 +584,11 @@ async function fixture() {
     },
   };
 }
-describe(
-  "durable full close production service + PostgreSQL",
+for (const currency of ["USD", "PLN"] as const) describe(
+  `durable full close production service + PostgreSQL (${currency})`,
   { skip: !connection },
   () => {
+    const fixture = () => createFixture(currency);
     it("persists cancellations then exact plan before one dispatch; replay is read-only; full fill completes", async () => {
       const f = await fixture();
       try {

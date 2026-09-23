@@ -234,3 +234,27 @@ test("open order and execution permIds must agree for the same leg", () => {
   f.snapshot.positions[0].position = 0.75; counts(f);
   assert.deepEqual(evaluate(f).reasons, ["broker_identity_conflict"]);
 });
+
+function plnFixture() {
+  const f = fixture();
+  Object.assign(f.context.bound!, { currency: "PLN", exchange: "WSE" });
+  Object.assign(f.context.bound!.instrument, { currency: "PLN", exchange: "WSE" });
+  return f;
+}
+test("WSE PLN ownership retains broker position and exact owned fills", () => {
+  const result = evaluate(plnFixture());
+  assert.equal(result.status, "OWNED_POSITION");
+  assert.equal(result.ownedFillNet, 1);
+  assert.equal(result.brokerPositionQuantity, 1);
+});
+for (const [name, mutate] of [
+  ["bound currency", (f: Fixture) => { Object.assign(f.context.bound!, { currency: "USD" }); }],
+  ["registry currency", f => { Object.assign(f.context.bound!.instrument, { currency: "USD" }); }],
+  ["bound exchange", f => { Object.assign(f.context.bound!, { exchange: "SMART" }); }],
+  ["registry exchange", f => { Object.assign(f.context.bound!.instrument, { exchange: "SMART" }); }],
+  ["asset class", f => { Object.assign(f.context.bound!.instrument, { assetClass: "forex" }); }],
+  ["unsupported currency", f => { Object.assign(f.context.bound!, { currency: "EUR" }); Object.assign(f.context.bound!.instrument, { currency: "EUR" }); }],
+] as Array<[string, (f: Fixture) => void]>) test(`PLN ownership rejects ${name}`, () => {
+  const f = plnFixture(); mutate(f);
+  assert.deepEqual(evaluate(f).reasons, ["binding_mismatch"]);
+});

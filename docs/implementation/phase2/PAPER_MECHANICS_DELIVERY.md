@@ -123,3 +123,15 @@ followed by authoritative GPW price/session rules and PLN lifecycle, then
 strategy-price propagation and controlled-window readiness. This sequence does
 not enable a stock or replace the minimum monitoring/abort acceptance gates.
 No signal/AI decision is forced to meet a proposed test date.
+
+## GPW2 split — 2026-09-24
+
+The next bounded lifecycle foundation is
+[GPW2A PLN full close](../phase3/GPW2A_PLN_LIFECYCLE_PLAN.md).
+It extends ownership and full close to exact WSE/PLN while keeping production
+instruments disabled. GPW2B remains mandatory before activation: authoritative
+price-band rules for every leg, strict contract metadata and Warsaw/broker
+sessions. The installed ib@0.2.9 does not expose reqMarketRule; its approximate
+WSE ladder is not adequate evidence. GPW3 then completes strategy propagation,
+bounded-run readiness and operational evidence. Do not infer launch readiness
+from the passing GPW2A fake-broker lifecycle tests.

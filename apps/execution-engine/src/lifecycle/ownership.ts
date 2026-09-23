@@ -87,7 +87,10 @@ export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: Lif
   if (!identity.ok) return refuse(`proposal_${identity.reason}`);
   if (!bound || bound.instrumentId !== order.instrumentId || String(bound.conId) !== order.conid ||
     bound.brokerSymbol !== order.instrument || !bound.instrument.trading.executionEnabled ||
-    bound.instrument.assetClass !== "stock" || bound.currency !== "USD" || bound.instrument.currency !== "USD")
+    bound.instrument.assetClass !== "stock" ||
+    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
+      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
+        bound.exchange === "WSE" && bound.instrument.exchange === "WSE")))
     return refuse("binding_mismatch");
   const policy = bound.instrument.executionPolicy;
   if (!policy || policy.strategyId !== order.strategy || policy.expectedDirection !== "LONG" ||
