@@ -901,6 +901,11 @@ const submissionService = buildSubmissionApplicationService({
         maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
         maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,
         maxExposurePct: config.EXECUTION_AI_MAX_EXPOSURE_PCT,
+        pln: {
+          maxNotional: config.EXECUTION_AI_MAX_NOTIONAL_PLN,
+          maxStopRisk: config.EXECUTION_AI_MAX_STOP_RISK_PLN,
+          feeReserve: config.EXECUTION_AI_FEE_RESERVE_PLN,
+        },
       } });
   },
   ensureBrokerSession: async () => {

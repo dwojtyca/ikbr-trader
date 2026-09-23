@@ -101,3 +101,95 @@ test("risk rejects untrusted malformed HTTP values without throwing", () => {
   for (const watchlist of [null, undefined, [], {}, "bad", { connected: true, watchlist: [null, 1] }])
     assert.equal(assessAiEntryRisk({ ...fixture(), watchlist }).ok, false);
 });
+
+function plnFixture() {
+  const f = fixture();
+  f.bound = { ...f.bound, currency: "PLN", exchange: "WSE", instrument: {
+    ...f.bound.instrument, currency: "PLN", exchange: "WSE",
+    session: { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" },
+  } };
+  f.snapshot.riskEvidence!.exchangeRatesToBase = { USD: 1, PLN: .25 };
+  f.snapshot.riskEvidence!.cashByCurrency = { PLN: 500 };
+  return { ...f, limits: { ...f.limits, pln: { maxNotional: 500, maxStopRisk: 5, feeReserve: 30 } } };
+}
+
+test("PLN risk compares buffered USD valuation and preserves raw PLN evidence", () => {
+  const f = plnFixture(); const result = assessAiEntryRisk(f);
+  assert.equal(result.ok, true); if (!result.ok) return;
+  assert.equal(result.evidence.quoteCurrency, "PLN");
+  assert.equal(result.evidence.valuationCurrency, "USD");
+  assert.equal(result.evidence.quoteNotional, 100);
+  assert.equal(result.evidence.quoteStopRisk, 1);
+  assert.equal(result.evidence.notional, 25.5);
+  assert.equal(result.evidence.stopRisk, .255);
+  assert.equal(result.evidence.fxToUsd, .25);
+  assert.equal(result.evidence.fxValuationBuffer, 1.02);
+  assert.equal(result.evidence.quoteFeeReserve, 30);
+  assert.equal(result.evidence.quoteCashBalance, 500);
+  assert.equal(result.evidence.fxSource, "ib_account_exchange_rate");
+  f.limits.pln.maxNotional = 900;
+  assert.equal(result.evidence.limits.pln?.maxNotional, 500);
+});
+
+type PlnFixture = ReturnType<typeof plnFixture>;
+const plnCases: Array<[string, (f: PlnFixture) => void, string]> = [
+  ["foreign venue", f => { f.bound = { ...f.bound, exchange: "SMART" }; }, "risk_unsupported_shape"],
+  ["wrong registry currency", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, currency: "USD" } }; }, "risk_unsupported_shape"],
+  ["wrong registry venue", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, exchange: "SMART" } }; }, "risk_unsupported_shape"],
+  ["missing rates", f => { delete f.snapshot.riskEvidence!.exchangeRatesToBase; }, "risk_pln_fx_missing_or_invalid"],
+  ["missing USD parity", f => { delete f.snapshot.riskEvidence!.exchangeRatesToBase!.USD; }, "risk_pln_fx_missing_or_invalid"],
+  ["non USD base", f => { f.snapshot.riskEvidence!.configuredBaseCurrency = "PLN"; }, "risk_account_incomplete"],
+  ["USD not base", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.USD = 4; }, "risk_pln_fx_missing_or_invalid"],
+  ["missing PLN rate", f => { delete f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN; }, "risk_pln_fx_missing_or_invalid"],
+  ["zero FX", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = 0; }, "risk_pln_fx_missing_or_invalid"],
+  ["negative FX", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = -.25; }, "risk_pln_fx_missing_or_invalid"],
+  ["NaN FX", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = NaN; }, "risk_pln_fx_missing_or_invalid"],
+  ["infinite FX", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = Infinity; }, "risk_pln_fx_missing_or_invalid"],
+  ["cash absent", f => { delete f.snapshot.riskEvidence!.cashByCurrency; }, "risk_pln_cash_insufficient"],
+  ["no PLN cash", f => { f.snapshot.riskEvidence!.cashByCurrency = { USD: 10000 }; }, "risk_pln_cash_insufficient"],
+  ["cash negative", f => { f.snapshot.riskEvidence!.cashByCurrency!.PLN = -1; }, "risk_pln_cash_insufficient"],
+  ["cash excludes fee reserve", f => { f.snapshot.riskEvidence!.cashByCurrency!.PLN = 129.99; }, "risk_pln_cash_insufficient"],
+  ["infinite cash", f => { f.snapshot.riskEvidence!.cashByCurrency!.PLN = Infinity; }, "risk_pln_cash_insufficient"],
+  ["quote notional cap", f => { f.limits.pln.maxNotional = 99; }, "risk_pln_notional_exceeded"],
+  ["quote stop cap", f => { f.limits.pln.maxStopRisk = .99; }, "risk_pln_stop_loss_exceeded"],
+  ["invalid cap", f => { f.limits.pln.maxNotional = Infinity; }, "risk_pln_limits_invalid"],
+  ["zero fee reserve", f => { f.limits.pln.feeReserve = 0; }, "risk_pln_limits_invalid"],
+  ["overflow", f => { f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = 1e308; }, "risk_valuation_invalid"],
+  ["USD available funds", f => { f.snapshot.riskEvidence!.usdMetrics.availableFunds = 25.49; }, "risk_available_funds_exceeded"],
+  ["USD notional cap", f => { f.limits.maxNotionalPct = .2549; }, "risk_notional_exceeded"],
+  ["USD stop cap", f => { f.limits.maxStopRiskPct = .002549; }, "risk_stop_loss_exceeded"],
+  ["USD exposure cap", f => { f.snapshot.riskEvidence!.usdMetrics.grossPositionValue = 2474.51; }, "risk_exposure_exceeded"],
+  ["stale account", f => { f.snapshot.riskEvidence!.requestStartedAt = stamp(-10000); }, "risk_account_stale"],
+  ["stale BBO", f => { f.watchlist.watchlist[0].marketState.bidObservedAt = stamp(-10000); }, "risk_quote_stale"],
+];
+for (const [name, modify, reason] of plnCases) test(`PLN rejects ${name}`, () => {
+  const f = plnFixture(); modify(f);
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason });
+});
+
+test("PLN requires explicit server caps; same-currency USD never requires FX or PLN cash", () => {
+  const f = plnFixture();
+  assert.deepEqual(assessAiEntryRisk({ ...f, limits: fixture().limits }), { ok: false, reason: "risk_pln_limits_invalid" });
+  const usd = assessAiEntryRisk(fixture()); assert.equal(usd.ok, true);
+  if (usd.ok) { assert.equal(usd.evidence.fxToUsd, 1); assert.equal(usd.evidence.fxSource, "same_currency"); }
+});
+
+test("PLN cash and absolute caps accept their exact boundary", () => {
+  const f = plnFixture(); f.snapshot.riskEvidence!.cashByCurrency!.PLN = 130;
+  f.limits.pln.maxNotional = 100; f.limits.pln.maxStopRisk = 1;
+  assert.equal(assessAiEntryRisk(f).ok, true);
+});
+
+
+test("finite account values cannot overflow percentage caps before division", () => {
+  const f = plnFixture();
+  f.snapshot.riskEvidence!.usdMetrics = { netLiquidation: 9e306, availableFunds: 9e306, grossPositionValue: 0 };
+  f.snapshot.riskEvidence!.exchangeRatesToBase!.PLN = 5e304;
+  f.limits.maxNotionalPct = 25; f.limits.maxStopRiskPct = 25; f.limits.maxExposurePct = 25;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_notional_exceeded" });
+  f.limits.maxNotionalPct = 100;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_exposure_exceeded" });
+  f.limits.maxExposurePct = 100;
+  f.limits.pln.maxStopRisk = 99; f.order.stop = 1;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_stop_loss_exceeded" });
+});

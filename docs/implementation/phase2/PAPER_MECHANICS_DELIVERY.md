@@ -112,3 +112,14 @@ authorization covers this engineering cycle, not automatic broker activation.
 
 Preserve unfinished PR15.5F work separately and keep the terminal ES experiment
 immutable. Its diagnostics and tuning are not on this milestone's critical path.
+
+## GPW scope decision — 2026-09-23
+
+The owner selected GPW rather than AAPL for the first supervised Paper test.
+PKO BP was resolved through the Paper Gateway (WSE/PLN, conId 35146360).
+The current account reports its main risk metrics in USD. Therefore the next
+bounded implementation is [GPW1 currency risk](../phase3/GPW1_CURRENCY_RISK_PLAN.md),
+followed by authoritative GPW price/session rules and PLN lifecycle, then
+strategy-price propagation and controlled-window readiness. This sequence does
+not enable a stock or replace the minimum monitoring/abort acceptance gates.
+No signal/AI decision is forced to meet a proposed test date.

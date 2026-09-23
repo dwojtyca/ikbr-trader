@@ -221,6 +221,8 @@ export interface AccountSnapshot {
     completedAt: string;
     complete: true;
     configuredBaseCurrency: string;
+    exchangeRatesToBase?: Record<string, number>;
+    cashByCurrency?: Record<string, number>;
     usdMetrics: {
       netLiquidation?: number;
       availableFunds?: number;
@@ -1059,6 +1061,17 @@ export class TwsExecutionClient {
           return Number.isFinite(value) && Math.abs(value) < IBKR_UNSET_DOUBLE_THRESHOLD
             ? value : undefined;
         };
+        const explicitCurrencyValues = (key: string): Record<string, number> => {
+          const values: Record<string, number> = {};
+          for (const [currency, raw] of valuesByKey.get(key) ?? []) {
+            if (!/^[A-Z]{3}$/.test(currency)) continue;
+            const text = raw.trim();
+            if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) continue;
+            const value = Number(text);
+            if (Number.isFinite(value) && Math.abs(value) < IBKR_UNSET_DOUBLE_THRESHOLD) values[currency] = value;
+          }
+          return values;
+        };
         resolve({
           ...this.buildAccountSnapshot(accountId, valuesByKey, positionsByKey, accountTime),
           riskEvidence: {
@@ -1066,6 +1079,8 @@ export class TwsExecutionClient {
             completedAt: new Date().toISOString(),
             complete: true,
             configuredBaseCurrency: this.config.currency.trim().toUpperCase(),
+            exchangeRatesToBase: explicitCurrencyValues("ExchangeRate"),
+            cashByCurrency: explicitCurrencyValues("CashBalance"),
             usdMetrics: {
               netLiquidation: explicitUsdMetric("NetLiquidation"),
               availableFunds: explicitUsdMetric("AvailableFunds"),

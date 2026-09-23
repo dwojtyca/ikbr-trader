@@ -60,3 +60,38 @@ test("BASE, missing, empty and IB unset values cannot become execution USD evide
     });
   }
 });
+
+test("currency evidence preserves explicit raw FX direction and matching-account cash only", async () => {
+  const ib = new FakeIb(); const client = makeClient(ib);
+  const pending = client.getAccountSnapshot("PAPER_TEST"); await turn();
+  for (const [key, value, currency] of [
+    ["ExchangeRate", "1", "USD"], ["ExchangeRate", "0.25", "PLN"],
+    ["ExchangeRate", "1.2", "EUR"], ["CashBalance", "500", "PLN"],
+    ["CashBalance", "-10", "GBP"], ["ExchangeRate", "1", "BASE"],
+    ["CashBalance", "999999", ""],
+  ]) ib.emit("updateAccountValue", key, value, currency, "PAPER_TEST");
+  ib.emit("updateAccountValue", "CashBalance", "999999", "PLN", "FOREIGN");
+  ib.emit("accountDownloadEnd", "PAPER_TEST");
+  const evidence = (await pending).riskEvidence!;
+  assert.deepEqual(evidence.exchangeRatesToBase, { USD: 1, PLN: .25, EUR: 1.2 });
+  assert.deepEqual(evidence.cashByCurrency, { PLN: 500, GBP: -10 });
+  const next = client.getAccountSnapshot("PAPER_TEST"); await turn();
+  ib.emit("accountDownloadEnd", "PAPER_TEST");
+  assert.deepEqual((await next).riskEvidence?.exchangeRatesToBase, {});
+  assert.deepEqual((await next).riskEvidence?.cashByCurrency, {});
+});
+
+test("invalid latest currency data cannot preserve an earlier valid value", async () => {
+  const ib = new FakeIb(); const client = makeClient(ib);
+  for (const invalid of ["", " ", "NaN", "Infinity", "1.7976931348623157e308", "0x20", "1_000", "1,2"]) {
+    const pending = client.getAccountSnapshot("PAPER_TEST"); await turn();
+    for (const key of ["ExchangeRate", "CashBalance"]) {
+      ib.emit("updateAccountValue", key, "100", "PLN", "PAPER_TEST");
+      ib.emit("updateAccountValue", key, invalid, "PLN", "PAPER_TEST");
+    }
+    ib.emit("accountDownloadEnd", "PAPER_TEST");
+    const evidence = (await pending).riskEvidence!;
+    assert.deepEqual(evidence.exchangeRatesToBase, {}, invalid);
+    assert.deepEqual(evidence.cashByCurrency, {}, invalid);
+  }
+});

@@ -33,7 +33,8 @@ function ticket(overrides: Partial<SignalTicket> = {}): SignalTicket {
     timestamp: new Date().toISOString(), riskCheckStatus: "PASS", ...overrides };
 }
 
-async function fixture() {
+async function fixture(currency: "USD" | "PLN" = "USD") {
+  const exchange = currency === "PLN" ? "WSE" : "SMART";
   const database = `ikbr_ai_service_${randomUUID().replaceAll('-', '')}`;
   const url = new URL(connection!); url.pathname = "/postgres";
   const admin = new Pool({ connectionString: url.toString() });
@@ -44,12 +45,13 @@ async function fixture() {
   const repo = new ExecutionRepository(pool);
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
-  const authority = new InstrumentBindingAuthority(new InstrumentRegistry([instrument(), instrument("other", "OTHER")]), [
-    { instrumentId: "test", conId: 123, localSymbol: "TEST", tradingClass: "TEST", exchange: "SMART", currency: "USD", minTick: 0.01 },
+  const selectedInstrument = { ...instrument(), currency, exchange };
+  const authority = new InstrumentBindingAuthority(new InstrumentRegistry([selectedInstrument, instrument("other", "OTHER")]), [
+    { instrumentId: "test", conId: 123, localSymbol: "TEST", tradingClass: "TEST", exchange, currency, minTick: 0.01 },
     { instrumentId: "other", conId: 456, localSymbol: "OTHER", tradingClass: "OTHER", exchange: "SMART", currency: "USD", minTick: 0.01 },
   ]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,
-    alteredPreparedPrice: false, rejectDuringPrepare: false,
+    alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false,
     session: sessionId, account: accountId };
   const service = buildSubmissionApplicationService({ repo, bindingAuthority: authority,
     ensureBrokerSession: async () => ({ accountId: state.account }),
@@ -61,9 +63,11 @@ async function fixture() {
       const snapshot: AccountSnapshot = { accountId: account, retrievedAt: new Date(now).toISOString(), metrics: {}, positions: [],
         totals: { positionsCount: 0, longExposure: 0, shortExposure: 0, grossExposure: 0, netExposure: 0, unrealizedPnL: 0, realizedPnL: 0 },
         riskEvidence: { requestStartedAt: new Date(now - 1).toISOString(), completedAt: new Date(now).toISOString(),
-          complete: true, configuredBaseCurrency: "USD", usdMetrics: { netLiquidation: 10000, availableFunds: 5000, grossPositionValue: 0 } } };
+          complete: true, configuredBaseCurrency: "USD",
+          exchangeRatesToBase: state.missingPlnEvidence ? {} : { USD: 1, PLN: .25 }, cashByCurrency: { PLN: 500 }, usdMetrics: { netLiquidation: 10000, availableFunds: 5000, grossPositionValue: 0 } } };
       return assessAiEntryRisk({ order, bound, accountId: account, sessionId: session, nowMs: now, snapshot,
-        limits: { maxNotionalPct: 10, maxStopRiskPct: 0.5, maxExposurePct: 25 },
+        limits: { maxNotionalPct: 10, maxStopRiskPct: 0.5, maxExposurePct: 25,
+          pln: { maxNotional: 500, maxStopRisk: 5, feeReserve: 30 } },
         watchlist: { connected: true, watchlist: [{ instrumentId: order.instrumentId, conid: order.conid, subscribed: true,
           marketState: { conid: order.conid, bid: 99.5, ask: 100, marketDataType: 1, bidObservedAt: quoteTime, askObservedAt: quoteTime } }] } });
     },
@@ -72,7 +76,7 @@ async function fixture() {
       if (state.ageDuringPrepare) await pool.query("SELECT pg_sleep(0.15)");
       if (state.rejectDuringPrepare) await repo.rejectPendingProposal(order.id!, "concurrent rejection");
       const base = 10000 + state.prepares * 10;
-      return { contract: { symbol: order.instrument, conId: Number(order.conid), secType: "STK", currency: "USD", exchange: "SMART" },
+      return { contract: { symbol: order.instrument, conId: Number(order.conid), secType: "STK", currency, exchange },
         normalizedTicket: state.alteredPreparedPrice ? { ...order, entry: 101 } : order, plan: { parentOrderId: base, orders: [], relatedOrderIds: new Set([base, base + 1, base + 2]) },
         legs: [ { role: "PARENT", roleOrdinal: 0, brokerOrderId: String(base), orderRef: deriveParentOrderRef(clientOrderId) },
           { role: "TP", roleOrdinal: 1, brokerOrderId: String(base + 1), orderRef: deriveChildOrderRef(clientOrderId, { role: "TP", ordinal: 1 }) },
@@ -255,6 +259,40 @@ describe("mandatory AI gate through production submission service + PostgreSQL",
       assert.equal(f.state.dispatches, 1);
       const stored = await f.repo.getProposedOrderById(id);
       assert.equal(stored?.status, "PROPOSED"); assert.ok(stored?.executionAttemptedAt);
+    } finally { await f.close(); }
+  });
+});
+
+
+describe("GPW1 PLN valuation through production submission service (fake broker)", { skip: !connection }, () => {
+  it("persists currency-labelled risk only on approved exactly-once dispatch", async () => {
+    const f = await fixture("PLN");
+    try {
+      const id = await f.create();
+      await f.execute(id);
+      assert.equal(f.state.prepares, 0); assert.equal(f.state.dispatches, 0);
+      await f.approve(id);
+      await f.execute(id); await f.execute(id);
+      assert.equal(f.state.prepares, 1); assert.equal(f.state.dispatches, 1);
+      const evidence = (await f.pool.query("SELECT risk_evidence FROM proposal_ai_reviews WHERE proposed_order_id=$1", [id])).rows[0].risk_evidence;
+      assert.equal(evidence.accountId, accountId);
+      assert.equal(evidence.quoteCurrency, "PLN"); assert.equal(evidence.valuationCurrency, "USD");
+      assert.equal(evidence.quoteNotional, 100); assert.equal(evidence.notional, 25.5);
+      assert.equal(evidence.quoteStopRisk, 1); assert.equal(evidence.stopRisk, .255);
+      assert.equal(evidence.fxSource, "ib_account_exchange_rate");
+      assert.equal(evidence.fxToUsd, .25); assert.equal(evidence.fxValuationBuffer, 1.02);
+      assert.equal(evidence.quoteCashBalance, 500); assert.equal(evidence.quoteFeeReserve, 30);
+      assert.equal(evidence.limits.pln.maxNotional, 500);
+    } finally { await f.close(); }
+  });
+  it("missing currency evidence after AI approval prevents all preparation and dispatch", async () => {
+    const f = await fixture("PLN");
+    try {
+      const id = await f.create(); await f.approve(id); f.state.missingPlnEvidence = true;
+      const result = await f.execute(id);
+      assert.deepEqual(result, { kind: "risk_rejected", reason: "risk_pln_fx_missing_or_invalid" });
+      assert.equal(f.state.prepares, 0); assert.equal(f.state.dispatches, 0);
+      assert.equal((await f.repo.getProposedOrderById(id))?.executionAttemptedAt, undefined);
     } finally { await f.close(); }
   });
 });

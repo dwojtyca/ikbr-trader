@@ -356,3 +356,20 @@ describe("broker execution timestamp timezone declaration", () => {
       assert.throws(() => buildExecutionConfig({ ...paperBase, EXECUTION_BROKER_TIME_ZONE: zone }), ZodError);
   });
 });
+
+describe("GPW1 server-owned PLN risk limits", () => {
+  it("provides conservative defaults without enabling trading", () => {
+    const config = buildExecutionConfig(paperBase);
+    assert.equal(config.EXECUTION_AI_MAX_NOTIONAL_PLN, 500);
+    assert.equal(config.EXECUTION_AI_MAX_STOP_RISK_PLN, 5);
+    assert.equal(config.EXECUTION_AI_FEE_RESERVE_PLN, 30);
+    assert.equal(config.tradingEnabled, false);
+  });
+  for (const key of ["EXECUTION_AI_MAX_NOTIONAL_PLN", "EXECUTION_AI_MAX_STOP_RISK_PLN", "EXECUTION_AI_FEE_RESERVE_PLN"]) {
+    for (const value of ["0", "-1", "NaN", "Infinity", "", " "]) {
+      it(`rejects ${key}=${JSON.stringify(value)}`, () => {
+        assert.throws(() => buildExecutionConfig({ ...paperBase, [key]: value }), ZodError);
+      });
+    }
+  }
+});

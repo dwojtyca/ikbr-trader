@@ -5,6 +5,7 @@ export interface AiEntryRiskLimits {
   maxNotionalPct: number;
   maxStopRiskPct: number;
   maxExposurePct: number;
+  pln?: { maxNotional: number; maxStopRisk: number; feeReserve: number };
 }
 
 export interface AiEntryRiskEvidence {
@@ -25,6 +26,15 @@ export interface AiEntryRiskEvidence {
   grossPositionValue: number;
   notional: number;
   stopRisk: number;
+  quoteCurrency: "USD" | "PLN";
+  valuationCurrency: "USD";
+  quoteNotional: number;
+  quoteStopRisk: number;
+  fxToUsd: number;
+  fxValuationBuffer: number;
+  quoteCashBalance?: number;
+  quoteFeeReserve?: number;
+  fxSource: "same_currency" | "ib_account_exchange_rate";
   limits: AiEntryRiskLimits;
 }
 
@@ -50,15 +60,17 @@ export function assessAiEntryRisk(input: {
   const { order, bound, accountId, sessionId, snapshot, limits, nowMs } = input;
   const reject = (reason: string) => ({ ok: false as const, reason });
   if (!accountId || !sessionId || !Number.isFinite(nowMs)) return reject("risk_identity_missing");
-  if (!Object.values(limits).every(value => positive(value) && value <= 100) ||
-      !positive(limits.maxNotionalPct) || !positive(limits.maxStopRiskPct) || !positive(limits.maxExposurePct))
+  if (![limits.maxNotionalPct, limits.maxStopRiskPct, limits.maxExposurePct]
+      .every(value => positive(value) && value <= 100))
     return reject("risk_limits_invalid");
   const instrument = bound.instrument;
   const policy = instrument.executionPolicy;
   if (order.instrumentId !== bound.instrumentId || order.conid !== String(bound.conId) ||
       order.instrument !== bound.brokerSymbol || !instrument.trading.executionEnabled)
     return reject("risk_binding_mismatch");
-  if (instrument.assetClass !== "stock" || bound.currency !== "USD" || instrument.currency !== "USD" ||
+  const isPln = bound.currency === "PLN" && instrument.currency === "PLN" &&
+    bound.exchange === "WSE" && instrument.exchange === "WSE";
+  if (instrument.assetClass !== "stock" || !(isPln || (bound.currency === "USD" && instrument.currency === "USD")) ||
       order.side !== "BUY" || order.orderType !== "LMT" ||
       (order.positionEffect !== undefined && order.positionEffect !== "OPEN_OR_ADD"))
     return reject("risk_unsupported_shape");
@@ -105,18 +117,44 @@ export function assessAiEntryRisk(input: {
   if (!nonnegative(instrument.risk.maxSpread) || !nonnegative(instrument.risk.maxSlippage) ||
       ask - bid > instrument.risk.maxSpread || Math.abs(order.entry - ask) > instrument.risk.maxSlippage)
     return reject("risk_spread_or_slippage_exceeded");
-  const notional = order.entry * order.quantity;
-  const stopRisk = (order.entry - order.stop) * order.quantity;
+  const quoteNotional = order.entry * order.quantity;
+  const quoteStopRisk = (order.entry - order.stop) * order.quantity;
+  let fxToUsd = 1;
+  const fxValuationBuffer = isPln ? 1.02 : 1;
+  let quoteCashBalance: number | undefined;
+  let quoteFeeReserve: number | undefined;
+  if (isPln) {
+    const caps = limits.pln;
+    if (!caps || ![caps.maxNotional, caps.maxStopRisk, caps.feeReserve].every(positive))
+      return reject("risk_pln_limits_invalid");
+    if (account.exchangeRatesToBase?.USD !== 1 || !positive(account.exchangeRatesToBase?.PLN))
+      return reject("risk_pln_fx_missing_or_invalid");
+    fxToUsd = account.exchangeRatesToBase.PLN;
+    quoteCashBalance = account.cashByCurrency?.PLN;
+    quoteFeeReserve = caps.feeReserve;
+    if (!nonnegative(quoteCashBalance) || !Number.isFinite(quoteNotional + quoteFeeReserve) ||
+        quoteNotional + quoteFeeReserve > quoteCashBalance) return reject("risk_pln_cash_insufficient");
+    if (quoteNotional > caps.maxNotional) return reject("risk_pln_notional_exceeded");
+    if (quoteStopRisk > caps.maxStopRisk) return reject("risk_pln_stop_loss_exceeded");
+  }
+  const notional = quoteNotional * fxToUsd * fxValuationBuffer;
+  const stopRisk = quoteStopRisk * fxToUsd * fxValuationBuffer;
+  if (!positive(notional) || !positive(stopRisk) || !Number.isFinite(grossPositionValue + notional))
+    return reject("risk_valuation_invalid");
   if (notional > availableFunds) return reject("risk_available_funds_exceeded");
-  if (notional > netLiquidation * limits.maxNotionalPct / 100) return reject("risk_notional_exceeded");
-  if (stopRisk > netLiquidation * limits.maxStopRiskPct / 100) return reject("risk_stop_loss_exceeded");
-  if (grossPositionValue + notional > netLiquidation * limits.maxExposurePct / 100)
+  if (notional > netLiquidation * (limits.maxNotionalPct / 100)) return reject("risk_notional_exceeded");
+  if (stopRisk > netLiquidation * (limits.maxStopRiskPct / 100)) return reject("risk_stop_loss_exceeded");
+  if (grossPositionValue + notional > netLiquidation * (limits.maxExposurePct / 100))
     return reject("risk_exposure_exceeded");
   return { ok: true, evidence: {
     accountId, sessionId, instrumentId: bound.instrumentId, conid: order.conid,
     assessedAtMs: nowMs, validUntilMs: Math.min(started, completed, bidTime, askTime) + MAX_AGE_MS,
     accountRequestStartedAt: account.requestStartedAt, accountCompletedAt: account.completedAt,
     bidObservedAt: quote.bidObservedAt as string, askObservedAt: quote.askObservedAt as string,
-    bid, ask, netLiquidation, availableFunds, grossPositionValue, notional, stopRisk, limits: { ...limits },
+    bid, ask, netLiquidation, availableFunds, grossPositionValue, notional, stopRisk,
+    quoteCurrency: isPln ? "PLN" : "USD", valuationCurrency: "USD", quoteNotional, quoteStopRisk,
+    fxToUsd, fxValuationBuffer, quoteCashBalance, quoteFeeReserve,
+    fxSource: isPln ? "ib_account_exchange_rate" : "same_currency",
+    limits: { ...limits, ...(limits.pln ? { pln: { ...limits.pln } } : {}) },
   } };
 }
