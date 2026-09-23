@@ -105,3 +105,48 @@ account values must replace rather than preserve earlier valid values; reject
 arithmetic overflow. Read-only account stream confirmed explicit USD rate=1 and
 PLN-to-USD rate, but no positive PLN cash. GPW2/3 must not activate trading until
 all run prerequisites pass. No virtual funds were converted.
+
+## CI follow-up — duplicate close requests (ACCEPTED)
+
+Independent gpw1_plan_review accepted this correction on 2026-09-23.
+
+CI run 35921020165 failed the existing `parallel same-key requests dispatch once`
+PostgreSQL test. Reproduced against a clean copy of fdebe6e by staggering the
+second initial refresh: both callers returned BLOCKED with
+`close_position_generation_unusable`, zero cancellations/preparations/dispatches.
+Both requests can read no existing operation before either reserves it; each
+then refreshes broker state. The duplicate's refresh invalidates the first
+request's evidence. The safety rejection is correct; duplicate request work is
+unnecessary. This is a lifecycle concurrency fix, not a PLN valuation change.
+
+Proposed narrowly scoped correction:
+- Coalesce in-flight requests per original proposal inside FullCloseService.
+  Register synchronously before the first asynchronous lookup. Same request UUID
+  and price await the existing operation promise; different UUID/price conflict.
+- Remove the in-process entry on success or failure. After settlement, retain
+  existing durable read-only replay behavior. Never re-drive an unknown close.
+  Preserve database reservations, account locks, snapshot/connection generation
+  fences and exact plan checks unchanged; cross-process contention remains
+  conservatively fail-closed. No distributed liveness guarantee is introduced.
+- PostgreSQL regression uses a barrier on the first repository lookup (no timing
+  sleeps): concurrent identical requests perform one initial lookup and produce
+  one shared submitted operation/one cancel per leg/one prepare/one dispatch.
+  Test conflicting key/price while blocked; verify read-only replay after
+  settlement and cleanup after an initial refresh failure before reservation.
+- Keep and rerun existing invalidation, unknown-result and concurrency tests.
+  Obtain independent plan acceptance, implement, obtain independent implementation
+  acceptance, then rerun full local gates, commit/push main and check fresh CI.
+
+Additional test-fixture correction ACCEPTED by gpw1_plan_review: a full close-suite run exposed
+`snapshot_time_invalid` in the fake broker's production-runner test. That fake
+uses host `new Date()` for capture while run start/completion use PostgreSQL's
+clock. Align the fake capture with a `SELECT clock_timestamp()` from the test DB
+and, before returning fixture refresh, wait only until the persisted completion
+instant is no longer in the host's future. This coordinates test clock domains;
+it does not relax production timestamp validation or retry the operation. Keep
+bounded waiting and descriptive failure if test clocks differ materially.
+
+Clock-domain mismatch is the likely explanation, not a deterministically
+reproduced root cause. The wait targets the specific completed run with a
+100ms maximum clock difference; no close/reconciliation retries are allowed.
+Production clock consistency remains a required operational condition.

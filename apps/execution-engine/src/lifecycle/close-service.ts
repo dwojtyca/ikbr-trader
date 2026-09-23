@@ -44,6 +44,11 @@ export interface FullCloseDependencies {
   alert(operation: CloseOperation, reason: string): Promise<void>;
 }
 export class FullCloseService {
+  private readonly inFlightRequests = new Map<number, {
+    requestId: string;
+    limitPrice: number;
+    result: Promise<CloseOperation>;
+  }>();
   constructor(
     readonly repo: CloseRepository,
     readonly deps: FullCloseDependencies,
@@ -89,6 +94,26 @@ export class FullCloseService {
     return this.observeAndAlert(op);
   }
   async request(
+    id: number,
+    requestId: string,
+    limitPrice: number,
+    actor: string,
+  ): Promise<CloseOperation> {
+    const active = this.inFlightRequests.get(id);
+    if (active) {
+      if (active.requestId !== requestId || active.limitPrice !== limitPrice)
+        throw new CloseConflict("close_request_conflict");
+      return active.result;
+    }
+    // Register before the first lookup so duplicate requests cannot refresh
+    // the position generation while the owning request is closing it.
+    const result = Promise.resolve()
+      .then(() => this.requestOnce(id, requestId, limitPrice, actor))
+      .finally(() => { this.inFlightRequests.delete(id); });
+    this.inFlightRequests.set(id, { requestId, limitPrice, result });
+    return result;
+  }
+  private async requestOnce(
     id: number,
     requestId: string,
     limitPrice: number,

@@ -347,6 +347,7 @@ async function fixture() {
         holdInserts: [],
         holdResolves: [],
       });
+      let completedRunId = runId;
       if (state.useRunner) {
         for (const fill of executions)
           await execution.upsertBrokerExecutionFill({
@@ -367,7 +368,7 @@ async function fixture() {
           reconciliation,
           {
             capture: async () => {
-              const now = new Date();
+              const now = (await db.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
               return {
                 ...snapshot,
                 capturedAt: now,
@@ -390,7 +391,7 @@ async function fixture() {
           },
           { info: () => {}, warn: () => {}, error: () => {} },
         );
-        await runner.runOnce(
+        const completedRun = await runner.runOnce(
           { accountId, sessionId, sessionStartedAt: attempt },
           {
             runTimeoutMs: 1000,
@@ -398,7 +399,16 @@ async function fixture() {
             executionSafetyMarginMs: 1000,
           },
         );
+        assert.ok(completedRun, "fixture reconciliation must produce a run");
+        completedRunId = completedRun.runId;
       }
+      const completed = (await db.query<{ completed_at: Date }>(
+        "SELECT completed_at FROM reconciliation_runs WHERE id=$1", [completedRunId],
+      )).rows[0].completed_at.getTime();
+      const waitMs = completed - Date.now();
+      assert.ok(waitMs <= 100, "fixture DB completion is more than 100ms ahead of the host clock");
+      if (waitMs >= 0) await new Promise(resolve => setTimeout(resolve, waitMs + 1));
+      assert.ok(completed <= Date.now(), "fixture host clock has not reached the completed run");
     } finally {
       db.release();
     }
@@ -646,16 +656,69 @@ describe(
       const f = await fixture();
       try {
         const key = randomUUID();
+        const originalGet = f.repo.get.bind(f.repo);
+        let release!: () => void;
+        let entered!: () => void;
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const firstLookup = new Promise<void>(resolve => { entered = resolve; });
+        let holding = true;
+        let initialLookups = 0;
+        f.repo.get = async (id) => {
+          if (holding) {
+            initialLookups++;
+            entered();
+            await gate;
+          }
+          return originalGet(id);
+        };
+        const first = f.service.request(f.id, key, 100, "a");
+        await firstLookup;
+        const duplicate = f.service.request(f.id, key, 100, "b");
+        const pending = Promise.allSettled([first, duplicate]);
+        try {
+          assert.equal(initialLookups, 1, "duplicate must not start another lookup/refresh");
+          await assert.rejects(f.service.request(f.id, randomUUID(), 100, "c"), /close_request_conflict/);
+          await assert.rejects(f.service.request(f.id, key, 99, "c"), /close_request_conflict/);
+        } finally {
+          holding = false;
+          release();
+          await pending;
+        }
+        const results = await pending;
+        assert.ok(results.every(result => result.status === "fulfilled"), JSON.stringify(results));
+        if (results[0].status === "fulfilled" && results[1].status === "fulfilled") {
+          assert.equal(results[0].value.state, "SUBMITTED", JSON.stringify(results));
+          assert.deepEqual(results[0].value, results[1].value);
+        }
+        assert.deepEqual(f.state.cancels, ["TP", "SL"]);
+        assert.equal(f.state.dispatches, 1);
+        assert.equal(f.state.prepares, 1);
+        f.state.closeWorking = false; f.state.closeFilled = true; f.state.position = 0;
+        await f.service.reconcile(f.id);
+        assert.equal((await f.service.request(f.id, key, 100, "replay")).state, "COMPLETED");
+        assert.equal(f.state.dispatches, 1);
+      } finally {
+        await f.close();
+      }
+    });
+    it("failed initial refresh releases the in-flight request without persisting a close", async () => {
+      const f = await fixture();
+      try {
+        const refresh = f.service.deps.refresh;
+        f.service.deps.refresh = async () => { throw new Error("fixture_initial_refresh_failure"); };
+        const key = randomUUID();
         const results = await Promise.allSettled([
           f.service.request(f.id, key, 100, "a"),
           f.service.request(f.id, key, 100, "b"),
         ]);
-        assert.ok(results.some((result) => result.status === "fulfilled"));
+        assert.ok(results.every(result => result.status === "rejected" &&
+          String(result.reason).includes("fixture_initial_refresh_failure")));
+        assert.equal(await f.service.get(f.id), null);
+        assert.equal(f.state.cancels.length, 0); assert.equal(f.state.dispatches, 0);
+        f.service.deps.refresh = refresh;
+        assert.equal((await f.service.request(f.id, key, 100, "retry_before_reservation")).state, "SUBMITTED");
         assert.equal(f.state.dispatches, 1);
-        assert.equal(f.state.prepares, 1);
-      } finally {
-        await f.close();
-      }
+      } finally { await f.close(); }
     });
     it("flat original full round trip completes without cancellation or prepare", async () => {
       const f = await fixture();

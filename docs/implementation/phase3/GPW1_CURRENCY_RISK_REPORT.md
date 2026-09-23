@@ -65,3 +65,29 @@ by the passing currency tests. No full Paper round trip has been proven.
 Implementation review caught intermediate overflow in percentage comparisons.
 All three caps now divide percentages before multiplication; a regression
 checks notional, stop-risk and exposure caps with finite large inputs.
+
+## CI follow-up
+
+Initial commit `fdebe6e` failed CI run 35921020165 on the pre-existing parallel
+full-close test. A clean-copy reproduction with staggered initial refreshes
+returned `close_position_generation_unusable` for both callers, with zero broker
+writes. Duplicate requests were invalidating the owning request's evidence.
+
+FullCloseService now registers an in-process operation before its first lookup.
+Same original/key/price callers share the pending result; changed key/price
+conflicts. Settlement removes the in-memory entry, leaving durable replay and
+all database/snapshot-generation/unknown-submission safeguards authoritative.
+Cross-process contention may still fail closed; no distributed retry is added.
+The deterministic first-lookup barrier regression fails on the old service
+(two initial lookups instead of one) and passes on the corrected service.
+
+A separate intermittent fixture `snapshot_time_invalid` failure likely came
+from mixing host capture time and DB run times; that exact clock failure was
+not reproduced deterministically. The fake broker now captures on the test DB
+clock and waits, bounded to a 100ms clock difference, for the specific completed
+run to no longer be in the host's future. Production clock checks are unchanged.
+
+Both follow-up plans and their implementation received independent ACCEPT.
+All 25 targeted full-close PostgreSQL tests pass. Final full gates also passed:
+1742 local tests, 824 tests in the full integration command, lint (three
+pre-existing warnings), typecheck and build. Fresh CI is verified after push.
