@@ -32,6 +32,9 @@ interface TickerState {
   ask?: number;
   size?: number;
   close?: number;
+  bidObservedAt?: string;
+  askObservedAt?: string;
+  marketDataType?: number;
 }
 
 type ContractShape = Record<string, unknown>;
@@ -1017,6 +1020,11 @@ export class TwsClient {
     this.ib.on("disconnected", () => {
       this.onLog("TWS socket disconnected");
       this.connected = false;
+      for (const state of this.tickerStates.values()) {
+        state.bidObservedAt = undefined;
+        state.askObservedAt = undefined;
+        state.marketDataType = undefined;
+      }
     });
 
     this.ib.on("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
@@ -1028,15 +1036,39 @@ export class TwsClient {
       );
     });
 
+    this.ib.on("marketDataType", (tickerId: number, type: number) => {
+      const state = this.tickerStates.get(tickerId);
+      if (!state) return;
+      if (state.marketDataType !== type) {
+        state.bidObservedAt = undefined;
+        state.askObservedAt = undefined;
+      }
+      state.marketDataType = type;
+      this.emitTick(state);
+    });
+
     this.ib.on(
       "tickPrice",
       (tickerId: number, field: number, price: number) => {
         const state = this.tickerStates.get(tickerId);
-        if (!state || !Number.isFinite(price)) return;
+        if (!state) return;
+        if (!Number.isFinite(price)) {
+          if (field === 1 || field === 66) state.bidObservedAt = undefined;
+          if (field === 2 || field === 67) state.askObservedAt = undefined;
+          this.emitTick(state);
+          return;
+        }
 
         // Live: 1/2/4, Delayed: 66/67/68, Close fallback: 9/75
-        if (field === 1 || field === 66) state.bid = price;
-        else if (field === 2 || field === 67) state.ask = price;
+        if (field === 1 || field === 66) {
+          state.bid = price;
+          state.bidObservedAt = field === 1 && state.marketDataType === 1
+            ? new Date(this.dependencies.now?.() ?? Date.now()).toISOString() : undefined;
+        } else if (field === 2 || field === 67) {
+          state.ask = price;
+          state.askObservedAt = field === 2 && state.marketDataType === 1
+            ? new Date(this.dependencies.now?.() ?? Date.now()).toISOString() : undefined;
+        }
         else if (field === 4 || field === 68) state.price = price;
         else if (field === 9 || field === 75) state.close = price;
 
@@ -1096,6 +1128,9 @@ export class TwsClient {
       price,
       bid: state.bid,
       ask: state.ask,
+      bidObservedAt: state.bidObservedAt,
+      askObservedAt: state.askObservedAt,
+      marketDataType: state.marketDataType,
       size: state.size,
       ts: new Date(),
     });

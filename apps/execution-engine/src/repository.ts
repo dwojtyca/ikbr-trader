@@ -16,6 +16,8 @@ import {
   BrokerOrderStatusUpdate,
 } from "./tws-execution-client.js";
 import { runMigrations } from "./migrations.js";
+import type { AiEntryRiskEvidence } from "./ai-entry-risk.js";
+import { aiApprovalFailure, expireAiProposals, findAccountReservation, readAiProposalReview } from "./ai-proposal-review.js";
 
 export type DecisionActor = "llm-agent" | "user" | "user_override";
 
@@ -1230,6 +1232,10 @@ export class ExecutionRepository {
     if (validationError) {
       return { kind: "invalid_ticket_shape", reason: validationError };
     }
+    if (ticket.instrumentId && ticket.positionEffect === "CLOSE_OR_REDUCE")
+      return { kind: "invalid_ticket_shape", reason: "bound_close_requires_lifecycle_flow" };
+    if (ticket.riskCheckStatus !== "PASS")
+      return { kind: "invalid_ticket_shape", reason: "risk_check_not_pass" };
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -1290,6 +1296,17 @@ export class ExecutionRepository {
             kind: "reconciliation_unavailable",
             reason: reconOutcome.reason,
           };
+        }
+      }
+
+      await expireAiProposals(client);
+      if (ticket.instrumentId && positionGuard.kind === "available") {
+        const same = idempotency ? await client.query("SELECT id FROM proposed_orders WHERE client_order_id=$1", [idempotency.clientOrderId]) : undefined;
+        const reservation = await findAccountReservation(client, positionGuard.accountId, same?.rows[0]?.id);
+        if (reservation) {
+          await client.query("ROLLBACK");
+          return { kind: "active_intent_exists", existingOrderId: Number(reservation.id),
+            existingStatus: reservation.status, existingClientOrderId: reservation.client_order_id };
         }
       }
 
@@ -1402,6 +1419,14 @@ export class ExecutionRepository {
         ],
       );
 
+      if (ticket.instrumentId) {
+        if (positionGuard.kind !== "available" || !idempotency || !ticket.conid)
+          throw new Error("Bound AI proposal requires guarded account and complete identity");
+        await client.query(`INSERT INTO proposal_ai_reviews
+          (proposed_order_id,client_order_hash,instrument_id,conid,account_id,session_id)
+          VALUES ($1,$2,$3,$4,$5,$6)`, [result.rows[0].id, idempotency.clientOrderHash,
+          ticket.instrumentId,ticket.conid,positionGuard.accountId,positionGuard.sessionId]);
+      }
       await client.query("COMMIT");
       return { kind: "inserted", id: Number(result.rows[0].id) };
     } catch (error) {
@@ -1476,6 +1501,38 @@ export class ExecutionRepository {
 
     if (!result.rows[0]) return null;
     return this.mapRow(result.rows[0] as ProposedOrderRow);
+  }
+
+  async getAiProposalReview(id: number) { return readAiProposalReview(this.pool, id); }
+
+  async recordAiRisk(id: number, evidence: unknown): Promise<void> {
+    await this.pool.query(`UPDATE proposal_ai_reviews SET risk_evidence=$2
+      WHERE proposed_order_id=$1 AND status='APPROVED' AND EXISTS
+      (SELECT 1 FROM proposed_orders p WHERE p.id=$1 AND p.execution_attempted_at IS NULL
+       AND p.broker_order_id IS NULL AND p.status='PROPOSED')`, [id, JSON.stringify(evidence)]);
+  }
+
+  async rejectPendingProposal(id: number, reason: string, metadata?: OrderDecisionMetadata): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const changed = await client.query(`UPDATE proposed_orders SET status='REJECTED',
+        last_error=$2,execution_message=$2,processing_owner=NULL,processing_claimed_at=NULL,
+        decision_source=COALESCE($3,decision_source),decision_actor=COALESCE($4,decision_actor),
+        ai_decision=COALESCE($5,ai_decision),ai_reason=COALESCE($6,ai_reason),
+        ai_model=COALESCE($7,ai_model),ai_decision_confidence=COALESCE($8,ai_decision_confidence),
+        llm_decision_id=COALESCE($9,llm_decision_id),source_error=COALESCE($10,source_error)
+        WHERE id=$1 AND status='PROPOSED' AND execution_attempted_at IS NULL
+          AND broker_order_id IS NULL RETURNING id`, [id, reason, metadata?.decisionSource ?? null,
+          metadata?.decisionActor ?? null,metadata?.aiDecision ?? null,metadata?.aiReason ?? null,
+          metadata?.aiModel ?? null,metadata?.aiDecisionConfidence ?? null,
+          metadata?.llmDecisionId ?? null,metadata?.sourceError ?? null]);
+      if (changed.rowCount === 1) await client.query(`UPDATE proposal_ai_reviews
+        SET status='REJECTED' WHERE proposed_order_id=$1 AND status IN ('PENDING','APPROVED')`, [id]);
+      await client.query("COMMIT");
+      return changed.rowCount === 1;
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   }
 
   /**
@@ -1984,6 +2041,7 @@ export class ExecutionRepository {
     readonly prepared: PlanPersistenceInput;
     readonly accountId: string;
     readonly metadata?: OrderDecisionMetadata;
+    readonly aiRiskEvidence?: AiEntryRiskEvidence;
   }): Promise<
     | { readonly kind: "claimed_with_persisted_plan" }
     | { readonly kind: "not_claimed" }
@@ -2141,25 +2199,8 @@ export class ExecutionRepository {
       // client_order_id, client_order_hash, instrument, conid.
       // Any mismatch → `submission_identity_mismatch` and full
       // ROLLBACK. Marker is NEVER set on a mismatched row.
-      const identity = await client.query<{
-        id: string;
-        client_order_id: string | null;
-        client_order_hash: string | null;
-        instrument: string;
-        instrument_id: string | null;
-        conid: string | null;
-        status: string;
-        execution_attempted_at: Date | null;
-        broker_order_id: string | null;
-      }>(
-        `SELECT id::text AS id, client_order_id, client_order_hash,
-                instrument, instrument_id, conid, status,
-                execution_attempted_at, broker_order_id
-           FROM proposed_orders
-          WHERE id = $1
-          FOR UPDATE`,
-        [input.id],
-      );
+      const identity = await client.query<ProposedOrderRow & {client_order_id: string | null; client_order_hash: string | null}>(
+        `SELECT * FROM proposed_orders WHERE id=$1 FOR UPDATE`, [input.id]);
       if ((identity.rowCount ?? 0) === 0) {
         await client.query("ROLLBACK");
         return {
@@ -2234,6 +2275,34 @@ export class ExecutionRepository {
       if (row.broker_order_id !== null) {
         await client.query("ROLLBACK");
         return { kind: "not_claimed" };
+      }
+
+      if (row.risk_check_status !== "PASS") {
+        await client.query("ROLLBACK");
+        return { kind: "submission_identity_mismatch", reason: "risk_check_not_pass" };
+      }
+      if (row.instrument_id !== null) {
+        const order = this.mapRow(row);
+        const verified = validatePersistedOrderIdentity(order, row.client_order_hash);
+        const review = await readAiProposalReview(client, input.id, true);
+        const failure = !verified.ok ? "persisted_identity_changed" :
+          row.position_effect === "CLOSE_OR_REDUCE" ? "bound_close_requires_lifecycle_flow" :
+          aiApprovalFailure(review, order, row.client_order_hash!, input.accountId,
+            input.positionGuard.kind === "available" ? input.positionGuard.sessionId : "");
+        const risk = input.aiRiskEvidence;
+        if (failure || !risk || !Number.isFinite(risk.validUntilMs) ||
+          risk.validUntilMs <= (review?.database_now.getTime() ?? Date.now()) ||
+          risk.accountId !== input.accountId || risk.sessionId !== review?.session_id ||
+          risk.instrumentId !== row.instrument_id || risk.conid !== row.conid) {
+          await client.query("ROLLBACK");
+          return { kind: "submission_identity_mismatch", reason: failure ?? "fresh_ai_risk_missing_or_stale" };
+        }
+        if (await findAccountReservation(client, input.accountId, input.id)) {
+          await client.query("ROLLBACK");
+          return { kind: "submission_identity_mismatch", reason: "account_active_intent_exists" };
+        }
+        await client.query("UPDATE proposal_ai_reviews SET risk_evidence=$2 WHERE proposed_order_id=$1",
+          [input.id, JSON.stringify(risk)]);
       }
 
       // Atomic claim + metadata + account write. Same fencing as
@@ -2928,7 +2997,7 @@ export class ExecutionRepository {
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
 
     const out: ProposedOrder = {
-      id: row.id,
+      id: Number(row.id),
       instrument: row.instrument,
       // PR15.2 — logical registry id, optional on the wire and
       // NULL for legacy rows written before the migration or

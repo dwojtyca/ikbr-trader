@@ -1096,6 +1096,8 @@ export class TradingLoopService {
         return { kind: "SUBMITTED", instrumentId, idempotencyKey, runtime };
       case "DUPLICATE":
         return { kind: "DUPLICATE", instrumentId, idempotencyKey, runtime };
+      case "AWAITING_AI":
+        return { kind: "AWAITING_AI", instrumentId, idempotencyKey, runtime };
       case "PENDING":
         return { kind: "PENDING", instrumentId, idempotencyKey, runtime };
       case "CONFLICT":
@@ -1143,6 +1145,7 @@ export class TradingLoopService {
       case "SUBMITTED":
       case "DUPLICATE":
       case "PENDING":
+      case "AWAITING_AI":
       case "CONFLICT":
       case "UNKNOWN":
         this.#logger.info(

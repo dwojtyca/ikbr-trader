@@ -2,6 +2,12 @@
 
 # AI Trading Platform Roadmap
 
+Current delivery priority: validate a complete Paper round trip on one instrument
+before tuning strategies. See [Paper mechanics delivery](phase2/PAPER_MECHANICS_DELIVERY.md).
+The next implementation is [PR15.6: mandatory AI entry gate](phase2/PR15_6_AI_PROPOSAL_GATE_PLAN.md);
+close ownership and a controlled Paper run follow it. No instrument is enabled
+by this PR.
+
 ## Phase 0 - Architecture Baseline
 Goal:
 - Audit current architecture

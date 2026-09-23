@@ -959,3 +959,16 @@ describe("ExecutionRuntime.executePrepared — PR15.4 strategy attribution", () 
     assert.equal(submitter.calls[0].strategy, "s1");
   });
 });
+
+describe("ExecutionRuntime — AI approval wait", () => {
+  it("preserves proposal and idempotency identity without UNKNOWN classification or internal retry", async () => {
+    const order = { id: 77, status: "PROPOSED", instrumentId: INSTRUMENT.id, conid: "123" };
+    const submitter = trackingSubmitter({ kind: "awaiting_ai", response: { outcome: "AWAITING_AI", order } });
+    const runtime = new ExecutionRuntime({ dryRun: buildDryRun(buildSuccessPipeline()), paperGuard: paperOkGuard(), submitter });
+    const result = await runtime.execute({ instrumentId: INSTRUMENT.id, policy: POLICY, idempotencyKey: "await-ai-key" });
+    assert.deepEqual(result, { outcome: "AWAITING_AI", previousOrder: order, idempotencyKey: "await-ai-key" });
+    assert.equal(submitter.calls.length, 1);
+    assert.equal(submitter.calls[0].clientOrderId, "await-ai-key");
+    assert.equal(submitter.calls[0].clientOrderHash.length, 64);
+  });
+});

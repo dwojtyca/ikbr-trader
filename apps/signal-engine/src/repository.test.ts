@@ -228,3 +228,40 @@ describe("SignalRepository.syncStrategyRuntimeStates — mutex serialization", (
     assert.equal(call, 2);
   });
 });
+
+describe("SignalRepository — bound AI review lifecycle isolation", () => {
+  it("legacy supersede cannot terminate a bound, attempted or broker-associated proposal", async () => {
+    const pool = makeFakePool(async () => ({ rows: [] }));
+    await buildRepo(pool).supersedePendingSignalsForInstrument("TEST", 77);
+    assert.equal(pool.calls.length, 1);
+    const where = pool.calls[0].sql.split("WHERE")[1];
+    assert.match(where, /instrument_id IS NULL/);
+    assert.match(where, /execution_attempted_at IS NULL/);
+    assert.match(where, /broker_order_id IS NULL/);
+    assert.match(where, /processing_owner IS NULL/);
+    assert.match(where, /status = 'PROPOSED'/);
+    assert.doesNotMatch(where, /\bOR\b/);
+    assert.deepEqual(pool.calls[0].params, ["TEST", 77]);
+  });
+  it("legacy expiry cannot terminate a bound, attempted or broker-associated proposal", async () => {
+    const pool = makeFakePool(async () => ({ rows: [] }));
+    await buildRepo(pool).expireStalePendingSignals(60000);
+    assert.equal(pool.calls.length, 1);
+    const where = pool.calls[0].sql.split("WHERE")[1];
+    assert.match(where, /instrument_id IS NULL/);
+    assert.match(where, /execution_attempted_at IS NULL/);
+    assert.match(where, /broker_order_id IS NULL/);
+    assert.match(where, /processing_owner IS NULL/);
+    assert.match(where, /status = 'PROPOSED'/);
+    assert.doesNotMatch(where, /\bOR\b/);
+    assert.deepEqual(pool.calls[0].params, [60000]);
+  });
+  it("legacy retention cannot delete bound proposals or their retained AI audit", async () => {
+    const pool = makeFakePool(async () => ({ rows: [] }));
+    await buildRepo(pool).cleanupExpiredProposals(30);
+    assert.equal(pool.calls.length, 1);
+    assert.match(pool.calls[0].sql, /DELETE FROM proposed_orders\s+WHERE instrument_id IS NULL\s+AND/);
+    assert.doesNotMatch(pool.calls[0].sql, /\bOR\b/);
+    assert.deepEqual(pool.calls[0].params, [30]);
+  });
+});

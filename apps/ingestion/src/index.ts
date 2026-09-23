@@ -159,6 +159,9 @@ const twsClient = new TwsClient(
       lastPrice: tick.price,
       bid: tick.bid,
       ask: tick.ask,
+      bidObservedAt: tick.bidObservedAt,
+      askObservedAt: tick.askObservedAt,
+      marketDataType: tick.marketDataType,
       spread,
       ts: tick.ts,
     });

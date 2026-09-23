@@ -198,6 +198,17 @@ export interface AccountSnapshot {
   accountId: string;
   retrievedAt: string;
   accountTime?: string;
+  riskEvidence?: {
+    requestStartedAt: string;
+    completedAt: string;
+    complete: true;
+    configuredBaseCurrency: string;
+    usdMetrics: {
+      netLiquidation?: number;
+      availableFunds?: number;
+      grossPositionValue?: number;
+    };
+  };
   fxToBaseByCurrency?: Record<string, number>;
   metrics: AccountMetricSet;
   totals: {
@@ -256,6 +267,7 @@ export class TwsExecutionClient {
   >();
   private readonly brokerOrderWarnings = new Map<number, string[]>();
   private nextRequestId = 1_000_000;
+  private accountSnapshotInFlight = false;
 
   constructor(
     private readonly config: TwsExecutionConfig,
@@ -269,8 +281,9 @@ export class TwsExecutionClient {
     private readonly onBrokerCommissionReport?: (
       report: BrokerCommissionReport,
     ) => void,
+    dependencies: { ib?: unknown } = {},
   ) {
-    this.ib = new IB({
+    this.ib = dependencies.ib ?? new IB({
       host: config.host,
       port: config.port,
       clientId: config.clientId,
@@ -847,8 +860,11 @@ export class TwsExecutionClient {
 
   async getAccountSnapshot(accountId: string): Promise<AccountSnapshot> {
     await this.connect();
+    if (this.accountSnapshotInFlight) throw new Error("Account snapshot request already in flight");
+    this.accountSnapshotInFlight = true;
 
     return new Promise<AccountSnapshot>((resolve, reject) => {
+      const requestStartedAt = new Date().toISOString();
       const valuesByKey = new Map<string, Map<string, string>>();
       const positionsByKey = new Map<string, AccountPositionSnapshot>();
       let accountTime: string | undefined;
@@ -865,6 +881,7 @@ export class TwsExecutionClient {
         this.ib.off("updateAccountTime", onUpdateAccountTime);
         this.ib.off("accountDownloadEnd", onAccountDownloadEnd);
         this.ib.off("error", onError);
+        this.accountSnapshotInFlight = false;
         try {
           this.ib.reqAccountUpdates(false, accountId);
         } catch {
@@ -935,14 +952,27 @@ export class TwsExecutionClient {
       const onAccountDownloadEnd = (accountName: string) => {
         if (accountName !== accountId) return;
         cleanup();
-        resolve(
-          this.buildAccountSnapshot(
-            accountId,
-            valuesByKey,
-            positionsByKey,
-            accountTime,
-          ),
-        );
+        const explicitUsdMetric = (key: string): number | undefined => {
+          const raw = valuesByKey.get(key)?.get("USD");
+          if (raw === undefined || raw.trim() === "") return undefined;
+          const value = Number(raw);
+          return Number.isFinite(value) && Math.abs(value) < IBKR_UNSET_DOUBLE_THRESHOLD
+            ? value : undefined;
+        };
+        resolve({
+          ...this.buildAccountSnapshot(accountId, valuesByKey, positionsByKey, accountTime),
+          riskEvidence: {
+            requestStartedAt,
+            completedAt: new Date().toISOString(),
+            complete: true,
+            configuredBaseCurrency: this.config.currency.trim().toUpperCase(),
+            usdMetrics: {
+              netLiquidation: explicitUsdMetric("NetLiquidation"),
+              availableFunds: explicitUsdMetric("AvailableFunds"),
+              grossPositionValue: explicitUsdMetric("GrossPositionValue"),
+            },
+          },
+        });
       };
 
       const onError = (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
@@ -966,7 +996,12 @@ export class TwsExecutionClient {
       this.ib.on("updateAccountTime", onUpdateAccountTime);
       this.ib.on("accountDownloadEnd", onAccountDownloadEnd);
       this.ib.on("error", onError);
-      this.ib.reqAccountUpdates(true, accountId);
+      try {
+        this.ib.reqAccountUpdates(true, accountId);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
     });
   }
 

@@ -352,3 +352,23 @@ describe("HttpExecutionTicketSubmitter.submit — outcome mapping (PR13 discrimi
     assert.match(result.reason, /timed out/);
   });
 });
+
+describe("HttpExecutionTicketSubmitter — bound AI proposal pending", () => {
+  it("preserves AWAITING_AI order and bound identity in one HTTP request without retry", async () => {
+    const order = { id: 77, status: "PROPOSED", instrumentId: "test_bound", conid: "123" };
+    const { fetch, calls } = fakeFetch(() => new Response(JSON.stringify({ outcome: "AWAITING_AI", order }), {
+      status: 200, headers: { "content-type": "application/json" },
+    }));
+    const submitter = new HttpExecutionTicketSubmitter({
+      engineUrl: "http://execution.test", bearerToken: "test", requestTimeoutMs: 1000, fetchImpl: fetch,
+    });
+    const result = await submitter.submit({ ...INPUT, ticket: { ...TICKET, instrumentId: "test_bound", conid: "123" } });
+    assert.deepEqual(result, { kind: "awaiting_ai", response: { outcome: "AWAITING_AI", order } });
+    assert.equal(calls.length, 1);
+    const body = JSON.parse(String(calls[0].init.body));
+    assert.equal(body.ticket.instrumentId, "test_bound");
+    assert.equal(body.ticket.conid, "123");
+    assert.equal(body.clientOrderId, INPUT.clientOrderId);
+    assert.equal(body.clientOrderHash, INPUT.clientOrderHash);
+  });
+});

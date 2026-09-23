@@ -13,7 +13,7 @@
     "pretypecheck": "pnpm --filter @ikbr/shared build && pnpm --filter @ikbr/signal-engine build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
-    "test:integration": "pnpm --filter @ikbr/execution-engine test && pnpm --filter @ikbr/backtest-engine test:integration",
+    "test:integration": "pnpm --filter @ikbr/execution-engine test && pnpm --filter @ikbr/backtest-engine test:integration && pnpm --filter @ikbr/llm-agent test:integration",
     "lint": "eslint .",
     "paper:verify-stack": "pnpm --filter @ikbr/paper-verify-stack start",
     "paper:verify-stack:fixture": "pnpm --filter @ikbr/paper-verify-stack verify:fixture",

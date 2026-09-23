@@ -240,8 +240,8 @@ suite("PR15.2 instrument_id persistence + resume identity mismatch (PG)", () => 
         clientOrderId: "cid-persist",
         clientOrderHash: hash,
       });
-      assert.equal(outcome.kind, "submitted");
-      assert.equal(dispatchCount(), 1);
+      assert.equal(outcome.kind, "awaiting_ai");
+      assert.equal(dispatchCount(), 0);
       const row = await pool.query<{
         instrument_id: string | null;
         instrument: string;
@@ -252,6 +252,10 @@ suite("PR15.2 instrument_id persistence + resume identity mismatch (PG)", () => 
       assert.equal(row.rows.length, 1);
       assert.equal(row.rows[0].instrument_id, "es_front");
       assert.equal(row.rows[0].instrument, "ES");
+      const review = await pool.query(`SELECT r.status,p.execution_attempted_at,p.broker_order_id
+        FROM proposal_ai_reviews r JOIN proposed_orders p ON p.id=r.proposed_order_id
+        WHERE p.client_order_id=$1`, ["cid-persist"]);
+      assert.deepEqual(review.rows, [{ status: "PENDING", execution_attempted_at: null, broker_order_id: null }]);
     } finally {
       await drop(pool, dbName);
     }
@@ -272,7 +276,8 @@ suite("PR15.2 instrument_id persistence + resume identity mismatch (PG)", () => 
         clientOrderId: "cid-resume",
         clientOrderHash: hash,
       });
-      assert.equal(first.kind, "submitted");
+      assert.equal(first.kind, "awaiting_ai");
+      assert.equal(dispatchCount(), 0);
       const beforeDispatches = dispatchCount();
       // Second submit with SAME clientOrderId but a DIFFERENT
       // logical instrumentId — even though the payload
@@ -283,9 +288,8 @@ suite("PR15.2 instrument_id persistence + resume identity mismatch (PG)", () => 
       // To make the payload's hash valid for the wire schema we
       // point it at a second (non-registered / disabled) id — the
       // binding check refuses before the identity comparison.
-      // The stored row remains SUBMITTED so a replay attempt
-      // would ordinarily surface as DUPLICATE_SUBMITTED under
-      // matching identity.
+      // The stored row remains PROPOSED awaiting AI; a matching
+      // replay must remain proposal-only.
       const swapped = {
         ...ticket,
         instrumentId: "gc_front",

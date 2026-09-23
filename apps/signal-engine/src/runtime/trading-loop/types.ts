@@ -90,6 +90,7 @@ export type TradingLoopInstrumentOutcome =
         | "SUBMITTED"
         | "DUPLICATE"
         | "PENDING"
+        | "AWAITING_AI"
         | "CONFLICT"
         | "UNKNOWN";
       readonly instrumentId: string;

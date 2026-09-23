@@ -87,7 +87,7 @@ export class MarketAuxClient {
       if (Array.isArray(obj.news)) return obj.news as MarketAuxRawNews[];
     }
 
-    return [];
+    throw new Error("Malformed Marketaux news response");
   }
 
   private mapNews(item: MarketAuxRawNews, symbol: string): MarketNewsItem | null {

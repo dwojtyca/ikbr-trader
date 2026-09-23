@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { IndicatorSnapshot, ProposedOrder, Side } from "@ikbr/shared";
 
-interface ClaimedOrderRow {
+export interface ClaimedOrderRow {
   id: number;
   instrument: string;
   conid: string | null;
@@ -150,6 +150,7 @@ export class LlmAgentRepository {
         FROM proposed_orders
         WHERE status = 'PROPOSED'
           AND decision_source = 'signal'
+          AND instrument_id IS NULL
           AND (
             processing_claimed_at IS NULL
             OR processing_claimed_at < NOW() - (($2::BIGINT || ' milliseconds')::interval)
@@ -281,14 +282,14 @@ export class LlmAgentRepository {
     return Boolean(result.rows[0]);
   }
 
-  private mapClaimedOrder(row: ClaimedOrderRow): ClaimedOrder {
+  mapClaimedOrder(row: ClaimedOrderRow): ClaimedOrder {
     const createdAt =
       row.created_at instanceof Date
         ? row.created_at
         : new Date(row.created_at);
 
     return {
-      id: row.id,
+      id: Number(row.id),
       instrument: row.instrument,
       conid: row.conid ?? undefined,
       side: row.side,

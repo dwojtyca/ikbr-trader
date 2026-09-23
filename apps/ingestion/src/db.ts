@@ -152,6 +152,9 @@ export class MarketRepository {
         bid?: number;
         ask?: number;
         spread?: number;
+        bidObservedAt?: string;
+        askObservedAt?: string;
+        marketDataType?: number;
         ts: string;
       };
 
@@ -161,6 +164,9 @@ export class MarketRepository {
         lastPrice: Number(parsed.lastPrice),
         bid: parsed.bid,
         ask: parsed.ask,
+        bidObservedAt: parsed.bidObservedAt,
+        askObservedAt: parsed.askObservedAt,
+        marketDataType: parsed.marketDataType,
         spread: parsed.spread,
         ts: new Date(parsed.ts),
       };

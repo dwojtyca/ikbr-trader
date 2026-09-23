@@ -6,6 +6,9 @@ export interface TickEvent {
   price: number;
   bid?: number;
   ask?: number;
+  bidObservedAt?: string;
+  askObservedAt?: string;
+  marketDataType?: number;
   size?: number;
   ts: Date;
 }

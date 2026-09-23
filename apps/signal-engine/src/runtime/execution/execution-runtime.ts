@@ -106,6 +106,7 @@ export type NotSubmittedReason =
 export type PendingReason = "ambiguous_attempt" | "claim_held_by_other";
 
 export type ExecutionRuntimeOutcome =
+  | { readonly outcome: "AWAITING_AI"; readonly previousOrder: unknown; readonly idempotencyKey: string }
   | {
       readonly outcome: "SUBMITTED";
       readonly pipeline: TradingPipelineResult;
@@ -446,6 +447,8 @@ export class ExecutionRuntime {
           reason: "ambiguous_attempt",
           idempotencyKey,
         };
+      case "awaiting_ai":
+        return { outcome: "AWAITING_AI", previousOrder: submission.response.order, idempotencyKey };
       case "pending_claimed":
         return {
           outcome: "PENDING",

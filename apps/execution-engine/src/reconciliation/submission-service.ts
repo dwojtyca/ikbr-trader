@@ -30,6 +30,8 @@ import type {
   SignalTicket,
 } from "@ikbr/shared";
 import { tickSizesEqual } from "@ikbr/shared";
+import { aiApprovalFailure } from "../ai-proposal-review.js";
+import type { AiEntryRiskEvidence } from "../ai-entry-risk.js";
 
 import type {
   ExecutionRepository,
@@ -85,6 +87,7 @@ export type BrokerPlanPreparer = (input: {
 }) => Promise<PreparedBrokerOrder>;
 
 export interface SubmissionServiceDeps {
+  readonly assessAiRisk?: (order: ProposedOrder, bound: BoundInstrument, accountId: string, sessionId: string) => Promise<{ok:true; evidence: AiEntryRiskEvidence} | {ok:false; reason:string}>;
   readonly repo: ExecutionRepository;
   readonly ensureBrokerSession: () => Promise<{ accountId: string }>;
   readonly buildPositionGuard: PositionGuardProvider;
@@ -130,6 +133,9 @@ export interface SubmissionServiceDeps {
  * route handler; this module is transport-agnostic.
  */
 export type SubmissionOutcome =
+  | { readonly kind: "awaiting_ai"; readonly order: ProposedOrder }
+  | { readonly kind: "ai_review_required"; readonly reason: string }
+  | { readonly kind: "risk_rejected"; readonly reason: string }
   | { readonly kind: "submitted"; readonly order: ProposedOrder; readonly execution: {
       readonly orderId: number;
       readonly accountId: string;
@@ -330,6 +336,7 @@ export function buildSubmissionApplicationService(
     readonly clientOrderHash: string;
     readonly metadata: OrderDecisionMetadata;
     readonly resumed: boolean;
+    readonly allowAiDispatch?: boolean;
     /**
      * PR15.2 — server-resolved cross-contract exposure policy
      * for this specific submission. For bound tickets it comes
@@ -345,10 +352,11 @@ export function buildSubmissionApplicationService(
       order,
       clientOrderId,
       clientOrderHash,
-      metadata,
       resumed,
       allowCrossContractExposure,
     } = input;
+    let metadata = input.metadata;
+    let aiRiskEvidence: AiEntryRiskEvidence | undefined;
     // PR15 r8 §2 — every prepare/claim/dispatch MUST be preceded
     // by a recompute of computeClientOrderHash from the persisted
     // row and a comparison to the stored hash. We re-fetch inside
@@ -392,6 +400,23 @@ export function buildSubmissionApplicationService(
     const validatedOrder: ProposedOrder = {
       ...identity.order,
     };
+    if (validatedOrder.riskCheckStatus !== "PASS") return { kind: "risk_rejected", reason: "risk_check_not_pass" };
+    if (validatedOrder.instrumentId !== undefined) {
+      if (validatedOrder.positionEffect === "CLOSE_OR_REDUCE")
+        return { kind: "ai_review_required", reason: "bound_close_requires_lifecycle_flow" };
+      const review = await deps.repo.getAiProposalReview(validatedOrder.id!);
+      if (!review) return { kind: "ai_review_required", reason: "ai_review_missing" };
+      if (!input.allowAiDispatch) {
+        if (review.expires_at.getTime() <= review.database_now.getTime() || review.status === "EXPIRED" || review.status === "REJECTED")
+          return { kind: "ai_review_required", reason: "ai_review_not_pending" };
+        return { kind: "awaiting_ai", order: validatedOrder };
+      }
+      const failure = aiApprovalFailure(review, validatedOrder, identity.clientOrderHash!);
+      if (failure) return { kind: "ai_review_required", reason: failure };
+      const decision = review.decision_json!;
+      metadata = { decisionActor: "llm-agent", decisionSource: "llm", aiDecision: "EXECUTE",
+        aiReason: decision.reason, aiModel: decision.model, aiDecisionConfidence: decision.confidence };
+    }
     // Kill-switch gate before any broker contact.
     try {
       await deps.assertKillSwitchOk({
@@ -402,6 +427,24 @@ export function buildSubmissionApplicationService(
       return { kind: "kill_switch_triggered", message: (err as Error).message };
     }
     const { accountId } = await deps.ensureBrokerSession();
+    if (validatedOrder.instrumentId !== undefined) {
+      const guard = await deps.buildPositionGuard();
+      if (guard.kind !== "available" || guard.accountId !== accountId)
+        return { kind: "risk_rejected", reason: "account_context_unavailable" };
+      const review = await deps.repo.getAiProposalReview(validatedOrder.id!);
+      const failure = aiApprovalFailure(review, validatedOrder, identity.clientOrderHash!, accountId, guard.sessionId);
+      if (failure) return { kind: "ai_review_required", reason: failure };
+      const binding = resolveBoundIdentity(deps.bindingAuthority, { instrumentId: validatedOrder.instrumentId,
+        instrument: validatedOrder.instrument, conid: validatedOrder.conid ?? null, orderType: validatedOrder.orderType });
+      if (binding.kind !== "ok") return binding.outcome;
+      if (!deps.assessAiRisk) return { kind: "risk_rejected", reason: "fresh_ai_risk_unavailable" };
+      let assessed: Awaited<ReturnType<NonNullable<SubmissionServiceDeps["assessAiRisk"]>>>;
+      try { assessed = await deps.assessAiRisk(validatedOrder, binding.bound, accountId, guard.sessionId); }
+      catch { assessed = { ok: false, reason: "fresh_ai_risk_unavailable" }; }
+      await deps.repo.recordAiRisk(validatedOrder.id!, assessed);
+      if (!assessed.ok) return { kind: "risk_rejected", reason: assessed.reason };
+      aiRiskEvidence = assessed.evidence;
+    }
     // Phase A — pure prepare. Any exception surfaces to caller
     // as execution_error (contract resolution / RTH / tick).
     let prepared: PreparedBrokerOrder;
@@ -418,6 +461,11 @@ export function buildSubmissionApplicationService(
         message: (err as Error).message,
         resumed,
       };
+    }
+    if (validatedOrder.instrumentId !== undefined &&
+        (prepared.normalizedTicket.instrumentId !== validatedOrder.instrumentId ||
+         computeClientOrderHash(prepared.normalizedTicket) !== identity.clientOrderHash)) {
+      return { kind: "risk_rejected", reason: "prepared_ticket_differs_from_ai_approval" };
     }
     // Phase B — atomic claim + full plan persistence + identity
     // binding under the same tx.
@@ -440,6 +488,7 @@ export function buildSubmissionApplicationService(
       },
       accountId,
       metadata,
+      aiRiskEvidence,
     });
     switch (claim.kind) {
       case "claimed_with_persisted_plan":
@@ -529,6 +578,9 @@ export function buildSubmissionApplicationService(
 
   return {
     async submitTicket(input) {
+      if (input.ticket.riskCheckStatus !== "PASS") return { kind: "risk_rejected", reason: "risk_check_not_pass" };
+      if (input.ticket.instrumentId && input.ticket.positionEffect === "CLOSE_OR_REDUCE")
+        return { kind: "ai_review_required", reason: "bound_close_requires_lifecycle_flow" };
       // §1 identity mandatory.
       if (
         typeof input.clientOrderId !== "string" ||
@@ -833,6 +885,7 @@ export function buildSubmissionApplicationService(
         clientOrderHash: cHash,
         metadata,
         resumed: true,
+        allowAiDispatch: true,
         allowCrossContractExposure,
       });
     },

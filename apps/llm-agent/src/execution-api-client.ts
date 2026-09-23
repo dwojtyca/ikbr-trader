@@ -1,3 +1,5 @@
+import type { DeliveryOutcome } from "./bound-review-repository.js";
+
 export interface AccountSummary {
   source: 'cache' | 'live';
   accountId: string;
@@ -81,6 +83,29 @@ export class ExecutionApiClient {
       method: 'POST',
       body: payload
     });
+  }
+
+  async executeBoundProposed(orderId: number): Promise<DeliveryOutcome> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const response = await fetch(`${this.baseUrl}/execution/execute-proposed/${orderId}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${this.bearerToken}` },
+        body: JSON.stringify({ actor: 'llm-agent' }),
+        signal: controller.signal,
+      });
+      if (response.status >= 500) return 'UNKNOWN';
+      if (response.status >= 400 && response.status < 500) return 'REFUSED';
+      if (!response.ok) return 'UNKNOWN';
+      const body: unknown = await response.json();
+      if (!body || typeof body !== 'object') return 'UNKNOWN';
+      const data = body as { outcome?: unknown; order?: { id?: unknown; status?: unknown } };
+      if (['SUBMITTED', 'RESUMED', 'DUPLICATE_SUBMITTED'].includes(String(data.outcome)) &&
+          Number(data.order?.id) === orderId && data.order?.status === 'SUBMITTED') return 'SUBMITTED';
+      return 'UNKNOWN';
+    } catch { return 'UNKNOWN'; }
+    finally { clearTimeout(timeout); }
   }
 
   async rejectProposed(orderId: number, payload: RejectProposedPayload): Promise<void> {

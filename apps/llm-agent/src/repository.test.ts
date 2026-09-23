@@ -58,6 +58,7 @@ describe("LlmAgentRepository.claimNextProposed — PR15.3 isolation", () => {
       /decision_source\s*=\s*'signal'/,
       "claim query MUST filter decision_source = 'signal' so Phase 2 execute-ticket rows (decision_source='user') stay isolated",
     );
+    assert.match(sql, /instrument_id IS NULL/);
     assert.match(sql, /status\s*=\s*'PROPOSED'/);
     assert.match(sql, /FOR UPDATE SKIP LOCKED/);
     assert.deepEqual(queries[0].values, ["worker-x", 60_000]);

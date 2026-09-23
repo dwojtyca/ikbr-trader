@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { legacyProducerOwnsSymbol } from "./runtime/legacy-producer-scope.js";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
@@ -114,6 +115,7 @@ async function runAndPersist(
     config.EXECUTION_API_TOKEN ?? "",
   );
   for (const symbol of symbols) {
+    if (!legacyProducerOwnsSymbol(defaultInstrumentRegistry.listAll(), symbol)) continue;
     let order: ProposedOrder;
     try {
       order = await engine.runForSymbol(

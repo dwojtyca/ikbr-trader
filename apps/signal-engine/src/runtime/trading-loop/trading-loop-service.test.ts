@@ -2165,3 +2165,32 @@ describe("TradingLoopService — PR15.4 callback safety", () => {
     assert.equal(outcome.reason, "STRATEGY_EVALUATION_ERROR");
   });
 });
+
+describe("TradingLoopService — AI approval wait", () => {
+  it("reports pending AI approval with bound proposal identity and no second dispatch", async () => {
+    const order = { id: 77, status: "PROPOSED", instrumentId: AAPL_INSTRUMENT.id, conid: String(AAPL_BOUND.conId) };
+    const exposure = { ...CLEAR_EXPOSURE };
+    const env = makeIntegrationSvc({ exposure, runtimeOutcome: input => ({
+      outcome: "AWAITING_AI", previousOrder: order, idempotencyKey: input.idempotencyKey,
+    }) });
+    const report = await env.svc.runOnce();
+    const outcome = report.reports[0].outcome;
+    assert.equal(outcome.kind, "AWAITING_AI");
+    if (outcome.kind !== "AWAITING_AI") return;
+    assert.equal(outcome.instrumentId, AAPL_INSTRUMENT.id);
+    assert.equal(outcome.runtime.outcome, "AWAITING_AI");
+    if (outcome.runtime.outcome !== "AWAITING_AI") return;
+    assert.deepEqual(outcome.runtime.previousOrder, order);
+    assert.equal(outcome.runtime.idempotencyKey, outcome.idempotencyKey);
+    assert.equal(env.executionRuntime.preparedCalls.length, 1);
+    assert.equal(env.executionRuntime.preparedCalls[0].idempotencyKey, outcome.idempotencyKey);
+    assert.deepEqual(env.executionRuntime.preparedCalls[0].bound, AAPL_BOUND);
+    assert.equal(env.svc.status().lastOutcomes[AAPL_INSTRUMENT.id].outcome.kind, "AWAITING_AI");
+    exposure.hasPendingProposal = true;
+    const repeat = await env.svc.runOnce();
+    assert.equal(repeat.reports[0].outcome.kind, "SKIPPED");
+    if (repeat.reports[0].outcome.kind === "SKIPPED")
+      assert.equal(repeat.reports[0].outcome.reason, "EXPOSURE_BLOCKED");
+    assert.equal(env.executionRuntime.preparedCalls.length, 1);
+  });
+});

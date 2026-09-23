@@ -1,3 +1,5 @@
+import { BoundReviewRepository } from "./bound-review-repository.js";
+import { BoundReviewWorker } from "./bound-review-worker.js";
 import { IndicatorSnapshot } from "@ikbr/shared";
 import { Pool } from "pg";
 import { config } from "./config.js";
@@ -25,6 +27,14 @@ const decider = new OpenAiDecider({
   timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS,
   promptVersion: config.LLM_AGENT_PROMPT_VERSION,
   maxOpenNotionalPct: config.MAX_NOTIONAL_PER_TRADE_PCT,
+});
+
+const boundWorker = new BoundReviewWorker({
+  repository: new BoundReviewRepository(pool), execution: executionApi,
+  news: marketaux, decider, model: config.LLM_AGENT_MODEL,
+  promptVersion: config.LLM_AGENT_PROMPT_VERSION,
+  newsWindowHours: config.LLM_AGENT_NEWS_WINDOW_HOURS,
+  maxNewsItems: config.LLM_AGENT_MAX_NEWS_ITEMS,
 });
 
 const workerId = `llm-agent-${process.pid}`;
@@ -446,6 +456,7 @@ async function processOrder(order: ClaimedOrder): Promise<void> {
 }
 
 async function pollOnce(): Promise<void> {
+  if (await boundWorker.pollOnce()) return;
   const claimed = await repo.claimNextProposed(
     workerId,
     config.LLM_AGENT_CLAIM_STALE_MS,

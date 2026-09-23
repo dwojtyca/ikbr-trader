@@ -41,6 +41,7 @@ import { ReconciliationRunner, type RunnerContext } from "./reconciliation/runne
 import { ReconciliationScheduler } from "./reconciliation/scheduler.js";
 import { registerReconciliationRoutes } from "./reconciliation/routes.js";
 import { buildReconciliationSubmissionGate } from "./reconciliation/submission-gate.js";
+import { assessAiEntryRisk } from "./ai-entry-risk.js";
 import { buildSubmissionApplicationService, type SubmissionOutcome } from "./reconciliation/submission-service.js";
 import { classifyReadiness as classifyReconciliationReadiness } from "./reconciliation/gate.js";
 import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapter.js";
@@ -876,6 +877,20 @@ app.log.info(
  */
 const submissionService = buildSubmissionApplicationService({
   repo,
+  assessAiRisk: async (order, bound, accountId, sessionId) => {
+    const [snapshot, response] = await Promise.all([
+      tws.getAccountSnapshot(accountId),
+      fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
+        { signal: AbortSignal.timeout(5000) }),
+    ]);
+    if (!response.ok) return { ok: false, reason: "ingestion_unavailable" };
+    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot,
+      watchlist: await response.json(), nowMs: Date.now(), limits: {
+        maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
+        maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,
+        maxExposurePct: config.EXECUTION_AI_MAX_EXPOSURE_PCT,
+      } });
+  },
   ensureBrokerSession: async () => {
     const { accountId } = await ensureBrokerSession();
     return { accountId };
@@ -938,6 +953,12 @@ function sendSubmissionOutcome(
   instrument: string,
 ): FastifyReply | Record<string, unknown> {
   switch (outcome.kind) {
+    case "awaiting_ai":
+      return reply.code(200).send({ outcome: "AWAITING_AI", order: outcome.order });
+    case "ai_review_required":
+      return reply.code(409).send({ outcome: "AI_REVIEW_REQUIRED", reason: outcome.reason });
+    case "risk_rejected":
+      return reply.code(409).send({ outcome: "RISK_REJECTED", reason: outcome.reason });
     case "submitted":
       return reply.code(200).send({
         outcome: "SUBMITTED",
@@ -1499,10 +1520,10 @@ app.post("/execution/reject-proposed/:id", async (request, reply) => {
     });
   }
 
-  const metadata = normalizeDecisionMetadata(body, body.actor);
-  metadata.aiDecision = metadata.aiDecision ?? "REJECT";
-
-  await repo.markRejected(params.id, body.reason, metadata);
+  const metadata = normalizeDecisionMetadata(body, body.actor ?? "user");
+  metadata.aiDecision = "REJECT";
+  if (!await repo.rejectPendingProposal(params.id, body.reason, metadata))
+    return reply.code(409).send({ error: "proposal_no_longer_rejectable" });
   const fresh = await repo.getProposedOrderById(params.id);
   return { order: fresh };
 });

@@ -1175,6 +1175,9 @@ export class SignalRepository {
         AND status = 'PROPOSED'
         AND id <> $2
         AND processing_owner IS NULL
+        AND instrument_id IS NULL
+        AND execution_attempted_at IS NULL
+        AND broker_order_id IS NULL
       `,
       [instrument, supersededByOrderId],
     );
@@ -1190,6 +1193,9 @@ export class SignalRepository {
           lifecycle_reason = COALESCE(lifecycle_reason, 'Signal expired before execution')
       WHERE status = 'PROPOSED'
         AND processing_owner IS NULL
+        AND instrument_id IS NULL
+        AND execution_attempted_at IS NULL
+        AND broker_order_id IS NULL
         AND created_at < NOW() - (($1::BIGINT || ' milliseconds')::interval)
       `,
       [ttlMs],
@@ -1199,7 +1205,7 @@ export class SignalRepository {
   }
 
   /**
-   * Deletes proposed_orders older than `retentionDays`, regardless of status.
+   * Deletes legacy proposals older than `retentionDays`; bound AI audit rows are retained.
    * proposed_orders is treated as a rolling signal/decision log; the
    * authoritative trade history lives in broker_execution_fills which has
    * its own denormalized snapshot of strategy/reason/ai_* fields and an
@@ -1210,7 +1216,9 @@ export class SignalRepository {
     const result = await this.pool.query(
       `
       DELETE FROM proposed_orders
-      WHERE created_at < NOW() - (($1::INT || ' days')::interval)
+      WHERE instrument_id IS NULL
+        AND NOT (status IN ('PROPOSED', 'SUBMITTED') AND execution_attempted_at IS NOT NULL)
+        AND created_at < NOW() - (($1::INT || ' days')::interval)
       `,
       [Math.floor(retentionDays)],
     );

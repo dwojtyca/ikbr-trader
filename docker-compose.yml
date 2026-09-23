@@ -101,6 +101,10 @@ services:
       - .env
     environment:
       EXECUTION_PORT: 3103
+      EXECUTION_INGESTION_BASE_URL: http://ingestion:3101
+      EXECUTION_AI_MAX_NOTIONAL_PCT: ${EXECUTION_AI_MAX_NOTIONAL_PCT:-10}
+      EXECUTION_AI_MAX_STOP_RISK_PCT: ${EXECUTION_AI_MAX_STOP_RISK_PCT:-0.5}
+      EXECUTION_AI_MAX_EXPOSURE_PCT: ${EXECUTION_AI_MAX_EXPOSURE_PCT:-25}
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       IB_SOCKET_HOST: host.docker.internal
       # Phase 1 / PR1 (schema-only). Runtime bind change lands in PR2.

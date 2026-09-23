@@ -17,6 +17,10 @@ const optionalTrimmedString = z.preprocess(
 // and logged at startup. Runtime enforcement lands in PR2..PR5.
 // -----------------------------------------------------------------------
 const rawSchema = z.object({
+  EXECUTION_INGESTION_BASE_URL: z.string().url().default("http://ingestion:3101"),
+  EXECUTION_AI_MAX_NOTIONAL_PCT: z.coerce.number().positive().max(100).default(10),
+  EXECUTION_AI_MAX_STOP_RISK_PCT: z.coerce.number().positive().max(100).default(0.5),
+  EXECUTION_AI_MAX_EXPOSURE_PCT: z.coerce.number().positive().max(100).default(25),
   EXECUTION_PORT: z.coerce.number().default(3103),
   LOG_LEVEL: z.string().default("info"),
   POSTGRES_URL: z

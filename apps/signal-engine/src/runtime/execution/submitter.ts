@@ -61,6 +61,7 @@ export interface DuplicateResponseBody {
  * public `ExecutionRuntimeOutcome` union.
  */
 export type SubmitResult =
+  | { readonly kind: "awaiting_ai"; readonly response: { readonly outcome: "AWAITING_AI"; readonly order: unknown } }
   | { readonly kind: "submitted"; readonly response: SubmittedResponseBody }
   | { readonly kind: "resumed"; readonly response: SubmittedResponseBody }
   | {
@@ -202,6 +203,8 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
         if (parsed && typeof parsed === "object") {
           const outcome = (parsed as { outcome?: unknown }).outcome;
           switch (outcome) {
+            case "AWAITING_AI":
+              return { kind: "awaiting_ai", response: parsed as { outcome: "AWAITING_AI"; order: unknown } };
             case "SUBMITTED":
               return {
                 kind: "submitted",

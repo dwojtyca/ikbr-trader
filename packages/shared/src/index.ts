@@ -61,6 +61,9 @@ export interface MarketState {
   lastPrice: number;
   bid?: number;
   ask?: number;
+  bidObservedAt?: string;
+  askObservedAt?: string;
+  marketDataType?: number;
   spread?: number;
   ts: Date;
 }
