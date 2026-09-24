@@ -49,7 +49,27 @@ test PostgreSQL aligned within approximately 1 ms after connection setup.
 The unchanged clean-copy integration rerun without concurrent build passed,
 followed by a successful `pnpm build`; the precise initial cause has not been
 established. A clean Docker build passed. All required local checks now pass.
-Exact-commit CI and disabled deployment evidence will be appended after push.
+Code commit `dd165beb1bee6f57766d5a07d81052e12e8f96ab` passed
+[GitHub CI run 36043197455](https://github.com/dwojtyca/ikbr-trader/actions/runs/36043197455),
+including PostgreSQL integration tests. The successful local integration rerun
+contained 1,997 passing tests, with zero failures or skips.
+
+## Disabled deployment verification
+
+The reviewed image `ikbr-trader-gpw:dd165be`, digest
+`sha256:bb7f87caf8a20b02fc3e1d4d384dfdcc5ef9d602898de557dc918b6f8f070466`,
+was deployed to ingestion, signal-engine and execution-engine. All three are
+running on that exact image; llm-agent was recreated on the same image and remains
+stopped (Docker state `created`). No entry window was opened.
+
+After restart, ingestion bootstrap returned HTTP 200 and subscribed AAPL/265598.
+At 2026-09-24 18:49:36 UTC, reconciliation completed CLEAN, `/ready` returned
+HTTP 200 with `ready=true`, no failure reasons and `tradingEnabled=false`.
+The read-only stack verifier subsequently returned HEALTHY, exit 0, with
+12 healthy and two intentionally disabled checks. It observed fresh AAPL ticks
+and a healthy registered runtime. Writes and the trading loop remain disabled.
+This verifies the disabled deployment, not an executed Paper entry/exit or
+complete fundamental research coverage.
 
 Paper writes and loop remain disabled; AI worker remains stopped outside the
 isolated diagnostic.
