@@ -62,7 +62,10 @@ records observed blockers; recheck them against current IBKR evidence. Passing
 tests, `/ready` or history counts alone does not prove launch readiness. In
 particular, the preflight found unavailable completed-order coverage in the
 production reconciliation adapter, competing-session quote failures and unrelated
-account exposure. Do not weaken checks to label these conditions ready.
+account exposure. The [instrument-scoped acceptance plan](docs/implementation/phase3/GPW_INSTRUMENT_SCOPE_PLAN.md)
+allows known other-contract positions/orders to remain; account-wide risk,
+reconciliation and identity checks still apply. This does not resolve missing
+completed-order coverage or unavailable quotes.
 
 ## Strategy registry
 

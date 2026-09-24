@@ -19,6 +19,7 @@ const record = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
 const time = (v: unknown) => v instanceof Date ? v.getTime() : typeof v === "string" ? Date.parse(v) : NaN;
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && Math.abs(v) < 1e100;
+const contractId = (v: unknown): v is string => typeof v === "string" && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v));
 const side = (v: string) => ["BUY", "BOT"].includes(v) ? "BUY" : ["SELL", "SLD"].includes(v) ? "SELL" : null;
 
 export function evaluateRoundTrip(evidence: RoundTripEvidence, context: LifecycleContext) {
@@ -28,6 +29,9 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     readOnly: true as const, canSubmit: false as const, status: "NOT_PROVEN" as "NOT_PROVEN" | "COMPLETED",
     reasons: [] as string[], proposalId: lifecycle.order.id ?? null, instrumentId: lifecycle.order.instrumentId ?? null,
     accountId: context.accountId, conid: lifecycle.order.conid ?? null, sessionId: context.sessionId,
+    completionScope: "INSTRUMENT" as const,
+    outsideScope: null as null | { positionObservedAt: string; ordersObservedAt: string;
+      positions: Array<{ conid: string; instrument: string; quantity: number }>; workingOrderCount: number },
     reconciliationRunId: lifecycle.run?.id ?? null, gpwWindowRunId: evidence.window?.runId ?? null,
     window: evidence.window, capturedAt: null as string | null,
     ai: decision ? { decision: decision.decision, model: decision.model, promptVersion: decision.promptVersion,
@@ -54,15 +58,27 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
   if (lifecycle.run?.status !== "CLEAN" || facts.status !== "FLAT_OBSERVED" || facts.ownedFillNet !== 0 ||
     facts.brokerPositionQuantity !== 0 || facts.legs.some(leg => leg.observed)) return refuse("final_flat_reconciliation_not_proven");
   const snapshot = record(lifecycle.run.broker_snapshot)!;
-  if ((snapshot.openOrders as Record<string, unknown>[]).some(row => row.accountId === context.accountId))
-    return refuse("account_working_orders_remain");
+  for (const name of ["positions", "openOrders", "executions"] as const) {
+    const rows = (snapshot[name] as Record<string, unknown>[]).filter(row => row.accountId === context.accountId);
+    if (rows.some(row => !contractId(row.conId) || (name === "positions" && !finite(row.position))))
+      return refuse("snapshot_contract_identity_or_quantity_invalid");
+  }
+  const workingOrders = (snapshot.openOrders as Record<string, unknown>[]).filter(row => row.accountId === context.accountId);
+  if (workingOrders.some(row => row.conId === lifecycle.order.conid)) return refuse("instrument_working_orders_remain");
   const sync = lifecycle.positionSnapshot;
   if (!sync || sync.accountId !== context.accountId || sync.sessionId !== context.sessionId || !sync.complete ||
     sync.generation !== lifecycle.run.position_generation || !Number.isSafeInteger(sync.generation) || sync.generation < 1 ||
     !Number.isFinite(time(sync.observedAt)) || context.nowMs - time(sync.observedAt) >= 10_000 ||
     time(sync.observedAt) > time(lifecycle.run.started_at) || sync.positions.some(p =>
-      p.accountId !== context.accountId || p.sessionId !== context.sessionId || !p.conid || !finite(p.quantity) ||
-      time(p.observedAt) !== time(sync.observedAt) || p.quantity !== 0)) return refuse("final_position_snapshot_not_proven");
+      p.accountId !== context.accountId || p.sessionId !== context.sessionId || !contractId(p.conid) || !finite(p.quantity) ||
+      time(p.observedAt) !== time(sync.observedAt) || (p.conid === lifecycle.order.conid && p.quantity !== 0)) ||
+    new Set(sync.positions.map(p => p.conid)).size !== sync.positions.length) return refuse("final_position_snapshot_not_proven");
+  report.outsideScope = {
+    positionObservedAt: new Date(time(sync.observedAt)).toISOString(), ordersObservedAt: facts.capturedAt!,
+    positions: sync.positions.filter(p => p.conid !== lifecycle.order.conid && p.quantity !== 0)
+      .map(p => ({ conid: p.conid!, instrument: p.instrument, quantity: p.quantity })),
+    workingOrderCount: workingOrders.length,
+  };
   const attempted = time(lifecycle.order.executionAttemptedAt);
   const window = evidence.window;
   if (!window || !window.runId || window.accountId !== context.accountId || window.consumedProposalId !== lifecycle.order.id ||

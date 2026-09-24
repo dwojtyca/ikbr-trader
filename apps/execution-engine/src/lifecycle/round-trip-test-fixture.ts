@@ -21,3 +21,18 @@ export function roundTrip() {
   })) };
   return { ...f, evidence };
 }
+
+export function roundTripWithSmr() {
+  const f = roundTrip();
+  f.snapshot.positions.push({ accountId: "DU_TEST", conId: "559289446", position: 4172 });
+  f.coverage.positions.count = 1;
+  f.evidence.lifecycle.positionSnapshot!.positions.push({ accountId: "DU_TEST", sessionId: "current",
+    conid: "559289446", instrument: "SMR", quantity: 4172, observedAt: f.evidence.lifecycle.positionSnapshot!.observedAt });
+  f.snapshot.openOrders.push({ accountId: "DU_TEST", conId: "559289446", brokerOrderId: "999", orderRef: "manual-smr",
+    permId: "9999", clientId: 0, status: "Submitted", remaining: 4172, filled: 0, action: "SELL" });
+  f.coverage.openOrders.count = 1;
+  f.snapshot.executions.push({ ...f.snapshot.executions[0], conId: "559289446", brokerOrderId: "998", orderRef: "old-smr",
+    permId: "9998", execId: "smr-entry", shares: 4172, price: 14 });
+  f.coverage.executions.count = 3;
+  return f;
+}

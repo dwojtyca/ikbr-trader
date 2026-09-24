@@ -49,3 +49,11 @@ Preflight outcome: BLOCKED, not ready for an entry. Remaining requirements:
 restore real-time quotes/session, resolve unrelated account exposure, implement
 and independently validate completed-order reconciliation, verify fresh closed
 history, rerun full preflight, and then agree and configure a supervised window.
+
+## Subsequent scope change
+
+The owner subsequently authorized instrument-scoped PKO acceptance, documented
+in [the scope plan](GPW_INSTRUMENT_SCOPE_PLAN.md). The empty-account condition
+above is superseded for correctly identified unrelated positions/manual orders.
+Historical observations remain unchanged; quote/session and completed-order
+coverage blockers still require current verification or implementation.

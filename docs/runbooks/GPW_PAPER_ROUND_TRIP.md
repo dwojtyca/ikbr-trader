@@ -8,7 +8,9 @@ commit. No real Paper round trip or profitability is proven by local tests.
 
 Use only PKO BP, `pko_wse`, IB conId `35146360`, WSE, PLN, one whole share, long
 `momentum_breakout_long_v1`, LMT DAY bracket. No forced signals, shorts, partials,
-trailing exits, overnight holding or extra instruments. Keep the scheduler off;
+trailing exits, overnight holding or bot trading in extra instruments. Existing
+positions and manual orders on other verified contracts (for example SMR) may
+remain on the account; this procedure neither closes nor cancels them. Keep the scheduler off;
 an operator invokes one evaluation at a time. An AI rejection/no signal is a
 valid inconclusive result; do not alter thresholds or fabricate approval.
 
@@ -111,7 +113,12 @@ do not repeatedly restart or launch another fetcher against the shared IB budget
 Require explicit PLN cash covering maximum planned notional plus 30 PLN reserve;
 USD account caps still apply through verified FX evidence. Require current-session
 CLEAN reconciliation, complete positions/orders/executions coverage, no holds,
-foreign positions, working orders or competing proposals. Do not infer readiness
+existing PKO exposure, working PKO orders or competing bot proposals. Record
+other-contract positions and manual orders separately; validate their identities
+and the complete account snapshot. They remain subject to account-wide risk,
+cash, margin and reconciliation checks. Unknown contract identity, collisions
+with PKO ownership evidence, account holds or incomplete reconciliation still
+block the test. Do not infer readiness
 from a large account total in another currency.
 
 Confirm the AI worker is configured and its mandatory news/model providers are
@@ -178,7 +185,11 @@ The response distinguishes `gpwWindowRunId` (durable trading window) from
 match the persisted window; the report remains collectable after window expiry.
 
 `status=COMPLETED` proves the scoped one-share entry/exit, original approved AI/risk
-identity, fresh current-session flat position and absence of working account orders.
+identity, fresh current-session flat PKO position and absence of working PKO orders.
+`completionScope=INSTRUMENT` binds completion to the report account/instrumentId/
+conid. `outsideScope` reports other nonzero positions and working-order count,
+with observation timestamps; COMPLETED does not assert that the whole account
+is flat. Other-contract fills, realized P&L and commissions do not enter PKO P&L.
 Missing/partial/stale/unrelated evidence yields `NOT_PROVEN`; a flat balance alone
 is insufficient. The collector is GET-only and reads a consistent DB snapshot;
 it does not request a broker refresh. Collect promptly after reconciliation.
@@ -190,7 +201,7 @@ is retained as zero; raw broker realized P&L is not used for unverified currency
 conversion. Do not use legacy `/execution/trades` as acceptance P&L evidence.
 A loss can pass mechanics; a single profit does not establish strategy profitability.
 
-After authoritative flat/no working orders, disable master writes, leave scheduler
+After authoritative PKO flat/no working PKO orders, disable master writes, leave scheduler
 off and rerun the explicit disabled-write verifier. Save sanitized report, exact
 commit/window timestamps, proposal IDs, AI coverage, fills, commissions and any
 incomplete accounting. Mask account IDs; never publish tokens, raw .env or secrets.
@@ -204,4 +215,6 @@ Do not promise unattended flattening, bypass safeguards, automate the IBKR UI or
 retry an unknown submission. Read current broker state/reconciliation and escalate
 to the supervising operator. Any required re-enablement or further broker action
 needs an explicit incident decision; do not mark the test complete with residual
-exposure or unresolved orders.
+PKO exposure, unresolved PKO orders or ambiguous account evidence. Known
+other-contract positions/orders are reported separately and are not managed by
+this procedure.

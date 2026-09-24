@@ -132,6 +132,19 @@ test("PLN risk compares buffered USD valuation and preserves raw PLN evidence", 
   assert.equal(result.evidence.limits.pln?.maxNotional, 500);
 });
 
+test("WSE entry still counts unrelated SMR in broker account-wide exposure", () => {
+  const f = plnFixture();
+  f.snapshot.positions = [{ conid: "559289446", symbol: "SMR", secType: "STK", currency: "USD", position: 4172,
+    marketPrice: 8.5, marketValue: 35462, averageCost: 14, unrealizedPnL: -22946, realizedPnL: 0 }];
+  f.snapshot.riskEvidence!.usdMetrics!.netLiquidation = 100000;
+  f.snapshot.riskEvidence!.usdMetrics!.grossPositionValue = 35462;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_exposure_exceeded" });
+  f.snapshot.riskEvidence!.usdMetrics!.netLiquidation = 200000;
+  assert.equal(assessAiEntryRisk(f).ok, true);
+  f.snapshot.riskEvidence!.cashByCurrency!.PLN = 129;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: "risk_pln_cash_insufficient" });
+});
+
 type PlnFixture = ReturnType<typeof plnFixture>;
 const plnCases: Array<[string, (f: PlnFixture) => void, string]> = [
   ["foreign venue", f => { f.bound = { ...f.bound, exchange: "SMART" }; }, "risk_unsupported_shape"],

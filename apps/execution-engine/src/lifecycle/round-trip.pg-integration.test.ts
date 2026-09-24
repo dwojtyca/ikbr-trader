@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { runMigrations } from "../migrations.js";
 import { ExecutionRepository } from "../repository.js";
-import { roundTrip } from "./round-trip-test-fixture.js";
+import { roundTrip, roundTripWithSmr } from "./round-trip-test-fixture.js";
 import { evaluateRoundTrip } from "./round-trip-evidence.js";
 const connection = process.env.TEST_POSTGRES_URL;
 test("read-only round-trip collector uses exact persisted evidence and fill currency for position identity", {skip:!connection}, async (t) => {
@@ -40,6 +40,52 @@ test("read-only round-trip collector uses exact persisted evidence and fill curr
     const evidence=await repo.getRoundTripEvidence(42,"DU_TEST"); assert.ok(evidence);
     assert.equal(evaluateRoundTrip(evidence,f.context).status,"COMPLETED");
     assert.equal(evaluateRoundTrip(evidence,f.context).netPnlPLN,1);
+    await t.test("collector isolates WSE accounting while SMR position and manual sell remain, then fill independently", async () => {
+      const mixed = roundTripWithSmr();
+      const saveSnapshot = async () => pool.query("UPDATE reconciliation_runs SET broker_snapshot=$1,source_coverage=$2",
+        [mixed.snapshot, mixed.coverage]);
+      await saveSnapshot();
+      await pool.query(`INSERT INTO broker_position_snapshots (account_id,instrument,conid,quantity,session_id,observed_at)
+        VALUES ('DU_TEST','SMR','559289446',4172,'current',$1)`, [mixed.evidence.lifecycle.positionSnapshot!.observedAt]);
+      await pool.query(`INSERT INTO broker_execution_fills
+        (exec_id,broker_order_id,account_id,conid,symbol,currency,side,shares,price,executed_at,commission,commission_currency,realized_pnl)
+        VALUES ('smr-entry','998','DU_TEST','559289446','SMR','USD','BOT',4172,14,$1,10,'USD',0)`,
+      [mixed.snapshot.executions[2].executedAt]);
+      const readState = async () => (await pool.query(`SELECT
+        (SELECT jsonb_agg(to_jsonb(p)) FROM proposed_orders p) AS proposals,
+        (SELECT jsonb_agg(to_jsonb(p)) FROM broker_position_snapshots p) AS positions,
+        (SELECT jsonb_agg(to_jsonb(f) ORDER BY exec_id) FROM broker_execution_fills f) AS fills,
+        (SELECT jsonb_agg(to_jsonb(r)) FROM reconciliation_runs r) AS runs,
+        (SELECT jsonb_agg(to_jsonb(w)) FROM gpw_windows w) AS windows`)).rows[0];
+      const before = await readState();
+      const observed = await repo.getRoundTripEvidence(42, "DU_TEST"); assert.ok(observed);
+      assert.equal(observed.fills.length, 2);
+      const report = evaluateRoundTrip(observed, f.context);
+      assert.equal(report.status, "COMPLETED"); assert.equal(report.netPnlPLN, 1);
+      assert.deepEqual(report.commissionsByCurrency, { PLN: 1 });
+      assert.equal(report.outsideScope?.positions[0].quantity, 4172);
+      assert.equal(report.outsideScope?.workingOrderCount, 1);
+      assert.deepEqual(await readState(), before);
+
+      mixed.snapshot.positions = []; mixed.snapshot.openOrders = [];
+      mixed.coverage.positions.count = 0; mixed.coverage.openOrders.count = 0;
+      mixed.snapshot.executions.push({ ...mixed.snapshot.executions[2], execId: "smr-exit", brokerOrderId: "999",
+        orderRef: "manual-smr", permId: "9999", side: "SLD", price: 8.5 });
+      mixed.coverage.executions.count = 4;
+      await saveSnapshot();
+      await pool.query("DELETE FROM broker_position_snapshots WHERE conid='559289446'");
+      await pool.query(`INSERT INTO broker_execution_fills
+        (exec_id,broker_order_id,account_id,conid,symbol,currency,side,shares,price,executed_at,commission,commission_currency,realized_pnl)
+        VALUES ('smr-exit','999','DU_TEST','559289446','SMR','USD','SLD',4172,8.5,$1,10,'USD',-22946)`,
+      [mixed.snapshot.executions[3].executedAt]);
+      const afterSale = await repo.getRoundTripEvidence(42, "DU_TEST"); assert.ok(afterSale);
+      const final = evaluateRoundTrip(afterSale, f.context);
+      assert.equal(final.status, "COMPLETED"); assert.equal(final.netPnlPLN, 1);
+      assert.deepEqual(final.outsideScope?.positions, []); assert.equal(final.outsideScope?.workingOrderCount, 0);
+      assert.deepEqual(final.commissionsByCurrency, { PLN: 1 });
+      assert.equal((await pool.query("SELECT count(*) FROM broker_execution_fills WHERE conid='559289446'")).rows[0].count, "2");
+      await pool.query("UPDATE reconciliation_runs SET broker_snapshot=$1,source_coverage=$2", [f.snapshot,f.coverage]);
+    });
     const lifecycleRead = repo.getLifecycleEvidence.bind(repo);
     const intercepted = t.mock.method(repo,"getLifecycleEvidence",async (...args: Parameters<typeof repo.getLifecycleEvidence>) => {
       const snapshot = await lifecycleRead(...args);

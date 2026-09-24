@@ -42,3 +42,20 @@ test("round-trip GET rechecks account/session after collection and has no mutati
     account=null;
   } finally {await app.close();}
 });
+
+test("round-trip GET labels instrument completion and exposes unrelated SMR activity", async () => {
+  const { roundTripWithSmr } = await import("./round-trip-test-fixture.js");
+  const f = roundTripWithSmr(), app = Fastify();
+  registerLifecycleRoutes(app, { repository: { getLifecycleEvidence: async () => null, getRoundTripEvidence: async () => f.evidence },
+    currentAccountId: () => f.context.accountId, currentSessionId: () => f.context.sessionId,
+    boundInstrument: () => f.context.bound, now: () => f.context.nowMs });
+  try {
+    const response = await app.inject({ method: "GET", url: "/execution/lifecycle/42/round-trip" });
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.status, "COMPLETED"); assert.equal(body.completionScope, "INSTRUMENT");
+    assert.equal(body.outsideScope.positions[0].instrument, "SMR");
+    assert.equal(body.outsideScope.workingOrderCount, 1); assert.equal(body.netPnlPLN, 1);
+    assert.equal(body.canSubmit, false);
+  } finally { await app.close(); }
+});
