@@ -8,9 +8,12 @@ export function buildConfiguredInstrumentRegistry(env: Record<string, unknown>):
   const flag = env.GPW_PROFILE_ENABLED ?? 'false';
   if (flag !== 'true' && flag !== 'false') throw new Error('GPW_PROFILE_ENABLED must be true or false');
   if (profile !== 'default' && flag !== 'true') throw new Error('GPW momentum profile requires explicit GPW opt-in');
-  if (flag === 'false') return defaultInstrumentRegistry;
-  if ((env.IBKR_ENVIRONMENT ?? 'paper') !== 'paper') throw new Error('GPW profile requires paper environment');
-  return new InstrumentRegistry(defaultInstrumentRegistry.listAll().map(instrument => instrument.id === 'pko_wse' ? {
+  const aapl = env.AAPL_PROFILE_ENABLED ?? 'false';
+  if (aapl !== 'true' && aapl !== 'false') throw new Error('AAPL_PROFILE_ENABLED must be true or false');
+  if (aapl === 'true' && flag === 'true') throw new Error('AAPL and GPW profiles are mutually exclusive');
+  if (flag === 'false' && aapl === 'false') return defaultInstrumentRegistry;
+  if ((env.IBKR_ENVIRONMENT ?? 'paper') !== 'paper') throw new Error('Stock test profile requires paper environment');
+  return new InstrumentRegistry(defaultInstrumentRegistry.listAll().map(instrument => instrument.id === (aapl === 'true' ? 'aapl_nasdaq' : 'pko_wse') ? {
     ...instrument,
     trading: { monitoringEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, executionEnabled: true },
     executionPolicy: { momentumBreakoutProfile: profile as MomentumBreakoutProfile, strategyId: 'momentum_breakout_long_v1', expectedDirection: 'LONG', timeframe: '1m',

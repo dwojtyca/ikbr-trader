@@ -1,3 +1,4 @@
+import { isAaplBound } from '@ikbr/shared';
 import { validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import type { AccountSnapshot } from "./tws-execution-client.js";
@@ -6,6 +7,7 @@ export interface AiEntryRiskLimits {
   maxNotionalPct: number;
   maxStopRiskPct: number;
   maxExposurePct: number;
+  aaplUsd?: { maxNotional: number; maxStopRisk: number; feeReserve: number };
   pln?: { maxNotional: number; maxStopRisk: number; feeReserve: number };
 }
 
@@ -71,6 +73,8 @@ export function assessAiEntryRisk(input: {
   if (order.instrumentId !== bound.instrumentId || order.conid !== String(bound.conId) ||
       order.instrument !== bound.brokerSymbol || !instrument.trading.executionEnabled)
     return reject("risk_binding_mismatch");
+  if ((bound.instrumentId === "aapl_nasdaq" || bound.conId === 265598 || bound.brokerSymbol === "AAPL")
+    && !isAaplBound(bound)) return reject("risk_binding_mismatch");
   const isPln = bound.currency === "PLN" && instrument.currency === "PLN" &&
     bound.exchange === "WSE" && instrument.exchange === "WSE";
   if (instrument.assetClass !== "stock" || !(isPln || (bound.currency === "USD" && instrument.currency === "USD")) ||
@@ -140,6 +144,17 @@ export function assessAiEntryRisk(input: {
     if (quoteNotional > caps.maxNotional) return reject("risk_pln_notional_exceeded");
     if (quoteStopRisk > caps.maxStopRisk) return reject("risk_pln_stop_loss_exceeded");
   }
+  if (isAaplBound(bound)) {
+    const caps = limits.aaplUsd;
+    if (!caps || ![caps.maxNotional, caps.maxStopRisk, caps.feeReserve].every(positive))
+      return reject("risk_aapl_limits_invalid");
+    quoteCashBalance = account.cashByCurrency?.USD;
+    quoteFeeReserve = caps.feeReserve;
+    if (!nonnegative(quoteCashBalance) || !Number.isFinite(quoteNotional + quoteFeeReserve)
+      || quoteNotional + quoteFeeReserve > quoteCashBalance) return reject("risk_aapl_cash_insufficient");
+    if (quoteNotional > caps.maxNotional) return reject("risk_aapl_notional_exceeded");
+    if (quoteStopRisk > caps.maxStopRisk) return reject("risk_aapl_stop_loss_exceeded");
+  }
   const notional = quoteNotional * fxToUsd * fxValuationBuffer;
   const stopRisk = quoteStopRisk * fxToUsd * fxValuationBuffer;
   if (!positive(notional) || !positive(stopRisk) || !Number.isFinite(grossPositionValue + notional))
@@ -162,6 +177,6 @@ export function assessAiEntryRisk(input: {
     quoteCurrency: isPln ? "PLN" : "USD", valuationCurrency: "USD", quoteNotional, quoteStopRisk,
     fxToUsd, fxValuationBuffer, quoteCashBalance, quoteFeeReserve,
     fxSource: isPln ? "ib_account_exchange_rate" : "same_currency",
-    limits: { ...limits, ...(limits.pln ? { pln: { ...limits.pln } } : {}) },
+    limits: { ...limits, ...(limits.aaplUsd ? { aaplUsd: { ...limits.aaplUsd } } : {}), ...(limits.pln ? { pln: { ...limits.pln } } : {}) },
   } };
 }

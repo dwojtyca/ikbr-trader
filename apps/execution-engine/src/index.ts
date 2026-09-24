@@ -62,7 +62,7 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
-const repo = new ExecutionRepository(pool, config.gpwWindow);
+const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow);
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -904,6 +904,7 @@ const instrumentBindingAuthority = buildExecutionInstrumentBindingAuthority(
   config.INSTRUMENT_BINDINGS_JSON,
   buildConfiguredInstrumentRegistry(process.env),
 );
+app.get('/execution/aapl-window', async () => repo.getAaplWindowStatus(lastActiveAccountId));
 registerGpwRoutes(app, {
   currentAccountId: () => lastActiveAccountId,
   boundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
@@ -942,6 +943,11 @@ const submissionService = buildSubmissionApplicationService({
         maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
         maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,
         maxExposurePct: config.EXECUTION_AI_MAX_EXPOSURE_PCT,
+        aaplUsd: {
+          maxNotional: config.EXECUTION_AI_AAPL_MAX_NOTIONAL_USD,
+          maxStopRisk: config.EXECUTION_AI_AAPL_MAX_STOP_RISK_USD,
+          feeReserve: config.EXECUTION_AI_AAPL_FEE_RESERVE_USD,
+        },
         pln: {
           maxNotional: config.EXECUTION_AI_MAX_NOTIONAL_PLN,
           maxStopRisk: config.EXECUTION_AI_MAX_STOP_RISK_PLN,

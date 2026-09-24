@@ -718,3 +718,15 @@ it('PKO profile flows through loader only for exact bound stock WSE PLN identity
     const bad=await loader.load({instrument,bound:{...bound,...patch},positionQuantity:0,timeframes:['1m']});assert.equal(bad.kind,'error');
   }
 });
+
+describe('AAPL context excludes mislabeled 12h without lowering native timeframe requirements', () => {
+  it('loads the same valid context without requesting 12h only for exact AAPL', async () => {
+    const instrument: Instrument = { ...INSTRUMENT, id: 'aapl_nasdaq', exchange: 'SMART' };
+    const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, exchange: 'SMART' };
+    const repo = makeRepo({ contract: makeContract({ exchange: 'SMART' }) }); const loader = makeLoader(repo);
+    const result = await loader.load({ instrument, bound, positionQuantity: 0, timeframes: ['1m','5m','1h','4h','12h','1d','1w'] });
+    assert.equal(result.kind, 'ok');
+    assert.equal(repo.candleCalls.some(c => c.timeframe === '12h'), false);
+    for (const tf of ['1m','5m','1h','4h','1d','1w']) assert.ok(repo.candleCalls.some(c => c.timeframe === tf));
+  });
+});

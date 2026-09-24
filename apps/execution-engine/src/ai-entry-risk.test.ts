@@ -218,3 +218,43 @@ for (const failure of ["missing", "stale", "foreign", "closed", "off-band"]) tes
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.reason, /^wse_/);
 });
+
+function aaplFixture() {
+  const f = fixture();
+  f.bound = { ...f.bound, instrumentId: 'aapl_nasdaq', conId: 265598, brokerSymbol: 'AAPL', localSymbol: 'AAPL',
+    instrument: { ...f.bound.instrument, id: 'aapl_nasdaq', brokerSymbol: 'AAPL' } };
+  Object.assign(f.order, { instrumentId: 'aapl_nasdaq', conid: '265598', instrument: 'AAPL' });
+  f.snapshot.riskEvidence!.cashByCurrency = { USD: 105 };
+  Object.assign(f.watchlist.watchlist[0], { instrumentId: 'aapl_nasdaq', conid: '265598' });
+  f.watchlist.watchlist[0].marketState.conid = '265598';
+  return { ...f, limits: { ...f.limits, aaplUsd: { maxNotional: 500, maxStopRisk: 5, feeReserve: 5 } } };
+}
+test('AAPL absolute USD limits persist explicit cash evidence and accept boundary', () => {
+  const f = aaplFixture(), result = assessAiEntryRisk(f);
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.evidence.quoteCashBalance, 105); assert.equal(result.evidence.quoteFeeReserve, 5);
+    assert.equal(result.evidence.quoteCurrency, 'USD'); assert.equal(result.evidence.fxToUsd, 1);
+    assert.deepEqual(result.evidence.limits.aaplUsd, f.limits.aaplUsd);
+  }
+});
+for (const cash of [undefined, -1, 104.99, NaN, Infinity, '1000']) test(`AAPL rejects non-sufficient explicit USD cash ${cash}`, () => {
+  const f = aaplFixture(); f.snapshot.riskEvidence!.cashByCurrency = { USD: cash as number };
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: 'risk_aapl_cash_insufficient' });
+});
+for (const key of ['maxNotional', 'maxStopRisk', 'feeReserve'] as const) for (const value of [0, -1, NaN, Infinity]) test(`AAPL rejects invalid ${key} ${value}`, () => {
+  const f = aaplFixture(); f.limits.aaplUsd[key] = value;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: 'risk_aapl_limits_invalid' });
+});
+test('AAPL rejects missing caps and checks absolute caps independently of large equity', () => {
+  const f = aaplFixture();
+  assert.deepEqual(assessAiEntryRisk({ ...f, limits: { ...f.limits, aaplUsd: undefined } }), { ok: false, reason: 'risk_aapl_limits_invalid' });
+  f.limits.aaplUsd.maxNotional = 99;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: 'risk_aapl_notional_exceeded' });
+  f.limits.aaplUsd.maxNotional = 500; f.limits.aaplUsd.maxStopRisk = 0.99;
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: 'risk_aapl_stop_loss_exceeded' });
+});
+test('AAPL wrong bound identity cannot downgrade into generic USD limits', () => {
+  const f = aaplFixture(); f.bound = { ...f.bound, exchange: 'FOREIGN' };
+  assert.deepEqual(assessAiEntryRisk(f), { ok: false, reason: 'risk_binding_mismatch' });
+});

@@ -262,6 +262,14 @@ export const INSTRUMENT_DEFINITIONS: readonly Instrument[] = [
     },
   },
   {
+    id: "aapl_nasdaq", displayName: "Apple", assetClass: "stock", broker: "ibkr",
+    brokerSymbol: "AAPL", conId: 265598, localSymbol: "AAPL", exchange: "SMART", currency: "USD",
+    trading: { executionEnabled: false, signalGenerationEnabled: false, aiAnalysisEnabled: false, monitoringEnabled: false },
+    risk: { maxQuantity: 1, quantityUnit: "shares", maxLeverage: 1, allowOvernight: false, maxSpread: 0.05, maxSlippage: 0.05 },
+    session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
+    metadata: { tags: ["equity", "usa"], sector: "technology" },
+  },
+  {
     id: "pko_wse",
     displayName: "PKO Bank Polski",
     assetClass: "stock",

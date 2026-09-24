@@ -38,10 +38,11 @@ const EXPECTED_IDS: readonly string[] = [
   "es_front",
   "nq_front",
   "pko_wse",
+  "aapl_nasdaq",
 ];
 
 describe("Instrument seed catalogue — PR15.3 r2 invariants (activation rolled back)", () => {
-  it("all original six futures and disabled PKO seed are present", () => {
+  it("all original futures and disabled stock seeds are present", () => {
     const actual = INSTRUMENT_DEFINITIONS.map((i) => i.id).sort();
     assert.deepEqual(actual, EXPECTED_IDS.slice().sort());
   });

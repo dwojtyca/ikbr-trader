@@ -60,7 +60,7 @@ async function seedPO(pool: Pool, clientOrderId: string): Promise<number> {
        stop, take_profit, reason, confidence, risk_check_status,
        status, client_order_id, client_order_hash
      ) VALUES (
-       'AAPL', '123', 'BUY', 'LMT', 10, 100, 95, 110, 'test',
+       'TEST', '123', 'BUY', 'LMT', 10, 100, 95, 110, 'test',
        0.9, 'PASS', 'PROPOSED', $1, $2
      ) RETURNING id`,
     [clientOrderId, `hash-${clientOrderId}`],
@@ -128,7 +128,7 @@ suite(
         const claim = await repo.tryStartSubmissionWithPlan({
           id: po,
           owner: "test-owner",
-          instrument: "AAPL",
+          instrument: "TEST",
           conid: "123",
           allowCrossContractExposure: false,
           positionGuard: {
@@ -137,7 +137,7 @@ suite(
             sessionId: "sess-1",
             maxSnapshotAgeMs: 60_000,
           },
-          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "AAPL", conid: "123", legs: legsFor(cid) },
+          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "TEST", conid: "123", legs: legsFor(cid) },
           accountId: "DU-1",
         });
         assert.equal(claim.kind, "claimed_with_persisted_plan");
@@ -176,7 +176,7 @@ suite(
         const claimA = await repo.tryStartSubmissionWithPlan({
           id: poA,
           owner: "test-A",
-          instrument: "AAPL",
+          instrument: "TEST",
           conid: "123",
           allowCrossContractExposure: false,
           positionGuard: {
@@ -185,7 +185,7 @@ suite(
             sessionId: "sess-1",
             maxSnapshotAgeMs: 60_000,
           },
-          prepared: { clientOrderId: cidA, clientOrderHash: "hash-"+cidA, instrument: "AAPL", conid: "123", legs: legsFor(cidA) },
+          prepared: { clientOrderId: cidA, clientOrderHash: "hash-"+cidA, instrument: "TEST", conid: "123", legs: legsFor(cidA) },
           accountId: "DU-1",
         });
         assert.equal(claimA.kind, "claimed_with_persisted_plan");
@@ -208,7 +208,7 @@ suite(
             sessionId: "sess-1",
             maxSnapshotAgeMs: 60_000,
           },
-          prepared: { clientOrderId: cidB, clientOrderHash: "hash-"+cidB, instrument: "AAPL", conid: "123", legs: collide },
+          prepared: { clientOrderId: cidB, clientOrderHash: "hash-"+cidB, instrument: "TEST", conid: "123", legs: collide },
           accountId: "DU-1",
         });
         assert.equal(claimB.kind, "plan_collision");
@@ -245,7 +245,7 @@ suite(
         const first = await repo.tryStartSubmissionWithPlan({
           id: po,
           owner: "first",
-          instrument: "AAPL",
+          instrument: "TEST",
           conid: "123",
           allowCrossContractExposure: false,
           positionGuard: {
@@ -254,7 +254,7 @@ suite(
             sessionId: "sess-1",
             maxSnapshotAgeMs: 60_000,
           },
-          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "AAPL", conid: "123", legs: legsFor(cid) },
+          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "TEST", conid: "123", legs: legsFor(cid) },
           accountId: "DU-1",
         });
         assert.equal(first.kind, "claimed_with_persisted_plan");
@@ -265,7 +265,7 @@ suite(
         const second = await repo.tryStartSubmissionWithPlan({
           id: po,
           owner: "second",
-          instrument: "AAPL",
+          instrument: "TEST",
           conid: "123",
           allowCrossContractExposure: false,
           positionGuard: {
@@ -274,7 +274,7 @@ suite(
             sessionId: "sess-1",
             maxSnapshotAgeMs: 60_000,
           },
-          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "AAPL", conid: "123", legs: legsFor(cid) },
+          prepared: { clientOrderId: cid, clientOrderHash: "hash-"+cid, instrument: "TEST", conid: "123", legs: legsFor(cid) },
           accountId: "DU-1",
         });
         assert.equal(second.kind, "not_claimed");
@@ -324,7 +324,7 @@ suite(
         `INSERT INTO reconciliation_holds (
            account_id, instrument, identity_key, reason, severity,
            reconciliation_run_id, payload
-         ) VALUES ($1, 'AAPL', 'sym:AAPL', 'unknown_submission', 'error', $2, $3::jsonb)
+         ) VALUES ($1, 'TEST', 'sym:TEST', 'unknown_submission', 'error', $2, $3::jsonb)
          RETURNING id`,
         [accountId, runId, JSON.stringify({ proposedOrderId: poId })],
       );

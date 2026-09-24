@@ -1,3 +1,4 @@
+import { isAaplIdentity } from "../aapl-window.js";
 import { isPkoIdentity } from "../gpw-window.js";
 import { isWseBound } from "../wse-market-rules.js";
 /**
@@ -254,6 +255,11 @@ export function buildSubmissionApplicationService(
         if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
         windowDeadlineMs = window.endsAtMs;
       }
+      if (isAaplIdentity(order)) {
+        const window = await deps.repo.checkAaplEntry(order, accountId, true);
+        if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
+        windowDeadlineMs = window.endsAtMs;
+      }
       const result = await deps.dispatcher.dispatch({
         proposedOrderId: order.id!,
         accountId,
@@ -459,6 +465,10 @@ export function buildSubmissionApplicationService(
     }
     if (isPkoIdentity(validatedOrder)) {
       const window = await deps.repo.checkGpwEntry(validatedOrder, accountId);
+      if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
+    }
+    if (isAaplIdentity(validatedOrder)) {
+      const window = await deps.repo.checkAaplEntry(validatedOrder, accountId);
       if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
     }
     // Phase A — pure prepare. Any exception surfaces to caller

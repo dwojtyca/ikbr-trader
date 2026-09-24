@@ -1,3 +1,4 @@
+import { isAaplBound } from "@ikbr/shared";
 import type { LifecycleContext, LifecycleEvidence, LifecycleLegLink } from "./ownership.js";
 import { evaluateLifecycleFacts } from "./ownership.js";
 
@@ -24,6 +25,8 @@ const side = (v: string) => ["BUY", "BOT"].includes(v) ? "BUY" : ["SELL", "SLD"]
 
 export function evaluateRoundTrip(evidence: RoundTripEvidence, context: LifecycleContext) {
   const { lifecycle, close } = evidence;
+  const aapl = context.bound ? isAaplBound(context.bound) : false;
+  const quoteCurrency = aapl ? "USD" : "PLN";
   const review = record(lifecycle.review), decision = record(review?.decision_json), risk = record(review?.risk_evidence);
   const report = {
     readOnly: true as const, canSubmit: false as const, status: "NOT_PROVEN" as "NOT_PROVEN" | "COMPLETED",
@@ -32,19 +35,21 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     completionScope: "INSTRUMENT" as const,
     outsideScope: null as null | { positionObservedAt: string; ordersObservedAt: string;
       positions: Array<{ conid: string; instrument: string; quantity: number }>; workingOrderCount: number },
-    reconciliationRunId: lifecycle.run?.id ?? null, gpwWindowRunId: evidence.window?.runId ?? null,
+    reconciliationRunId: lifecycle.run?.id ?? null, gpwWindowRunId: aapl ? null : evidence.window?.runId ?? null,
+    aaplWindowRunId: aapl ? evidence.window?.runId ?? null : null,
     window: evidence.window, capturedAt: null as string | null,
     ai: decision ? { decision: decision.decision, model: decision.model, promptVersion: decision.promptVersion,
       coverage: record(decision.context)?.coverage ?? null } : null,
     fills: [] as Array<{ execId: string; role: string; quantity: number; price: number; currency: string;
       executedAt: string; commission: number | null; commissionCurrency: string | null; brokerRealizedPnl: number | null }>,
-    grossPnl: null as { currency: "PLN"; amount: number } | null,
+    grossPnl: null as { currency: "PLN" | "USD"; amount: number } | null,
     commissionsByCurrency: {} as Record<string, number>, missingCommissionExecIds: [] as string[],
     accounting: "NOT_PROVEN" as "NOT_PROVEN" | "PENDING_FEES" | "MIXED_CURRENCY" | "COMPLETE",
     netPnlPLN: null as number | null,
+    netPnlUSD: null as number | null,
   };
   const refuse = (reason: string) => { report.reasons.push(reason); return report; };
-  if (context.bound?.currency !== "PLN" || context.bound.exchange !== "WSE") return refuse("scope_not_wse_pln");
+  if (!aapl && (context.bound?.currency !== "PLN" || context.bound.exchange !== "WSE")) return refuse("scope_not_wse_pln");
   let closeLink: LifecycleLegLink | null = null;
   if (close) {
     if (close.state !== "COMPLETED" || close.accountId !== context.accountId || close.conid !== lifecycle.order.conid ||
@@ -88,7 +93,7 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     time(window.consumedAt) >= time(window.endsAt) || time(window.consumedAt) > context.nowMs)
     return refuse("consumed_window_not_proven");
   if (!risk || risk.accountId !== context.accountId || risk.conid !== lifecycle.order.conid ||
-    risk.instrumentId !== lifecycle.order.instrumentId || risk.sessionId !== review?.session_id || risk.quoteCurrency !== "PLN" ||
+    risk.instrumentId !== lifecycle.order.instrumentId || risk.sessionId !== review?.session_id || risk.quoteCurrency !== quoteCurrency ||
     !finite(risk.assessedAtMs) || !finite(risk.validUntilMs) || risk.assessedAtMs > attempted || risk.validUntilMs <= attempted)
     return refuse("entry_risk_evidence_missing");
   const executions = (snapshot.executions as Record<string, unknown>[]).filter(row =>
@@ -102,7 +107,7 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     const execution = unique.get(fill.exec_id);
     const link = links.find(leg => execution && leg.broker_order_id === execution.brokerOrderId && leg.order_ref === execution.orderRef);
     if (!execution || !link || (fill.proposed_order_id !== null && fill.proposed_order_id !== link.proposed_order_id) || fill.account_id !== context.accountId ||
-      fill.conid !== lifecycle.order.conid || fill.broker_order_id !== link.broker_order_id || fill.currency !== "PLN" ||
+      fill.conid !== lifecycle.order.conid || fill.broker_order_id !== link.broker_order_id || fill.currency !== quoteCurrency ||
       side(fill.side) !== side(String(execution.side)) || !finite(fill.shares) || fill.shares <= 0 || fill.shares !== execution.shares ||
       !finite(fill.price) || fill.price <= 0 || fill.price !== execution.price || !Number.isFinite(time(fill.executed_at)) ||
       time(fill.executed_at) !== time(execution.executedAt)) return refuse("persisted_fill_identity_or_value_mismatch");
@@ -118,14 +123,18 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
   if (Math.min(...exits.map(fill => time(fill.executedAt))) < Math.max(...entries.map(fill => time(fill.executedAt))))
     return refuse("exit_precedes_entry");
   report.status = "COMPLETED";
-  report.grossPnl = { currency: "PLN", amount: exits.reduce((sum, fill) => sum + fill.price * fill.quantity, 0) -
+  report.grossPnl = { currency: quoteCurrency, amount: exits.reduce((sum, fill) => sum + fill.price * fill.quantity, 0) -
     entries.reduce((sum, fill) => sum + fill.price * fill.quantity, 0) };
   for (const fill of report.fills) {
     if (fill.commission === null || fill.commissionCurrency === null) report.missingCommissionExecIds.push(fill.execId);
     else report.commissionsByCurrency[fill.commissionCurrency] = (report.commissionsByCurrency[fill.commissionCurrency] ?? 0) + fill.commission;
   }
   report.accounting = report.missingCommissionExecIds.length ? "PENDING_FEES" :
-    Object.keys(report.commissionsByCurrency).some(currency => currency !== "PLN") ? "MIXED_CURRENCY" : "COMPLETE";
-  if (report.accounting === "COMPLETE") report.netPnlPLN = report.grossPnl.amount - (report.commissionsByCurrency.PLN ?? 0);
+    Object.keys(report.commissionsByCurrency).some(currency => currency !== quoteCurrency) ? "MIXED_CURRENCY" : "COMPLETE";
+  if (report.accounting === "COMPLETE") {
+    const net = report.grossPnl.amount - (report.commissionsByCurrency[quoteCurrency] ?? 0);
+    if (aapl) report.netPnlUSD = net;
+    else report.netPnlPLN = net;
+  }
   return report;
 }

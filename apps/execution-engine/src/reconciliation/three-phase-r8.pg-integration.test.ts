@@ -70,8 +70,8 @@ async function seedFlatSnapshot(pool: Pool): Promise<void> {
 
 function richTicket(overrides: Partial<SignalTicket> = {}): SignalTicket {
   return {
-    instrument: "AAPL",
-    conid: "265598",
+    instrument: "TEST",
+    conid: "123456",
     side: "BUY",
     positionEffect: "OPEN_OR_ADD",
     orderType: "LMT",

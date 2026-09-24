@@ -20,3 +20,16 @@ for (const profile of ['pko_mild_v1','pko_moderate_v1']) test(`named momentum pr
   for(const i of r.listAll().filter(i=>i.id!=='pko_wse'))assert.deepEqual(i,defaultInstrumentRegistry.getInstrumentOrThrow(i.id));
 });
 test('invalid momentum profile fails startup',()=>assert.throws(()=>buildConfiguredInstrumentRegistry({GPW_PROFILE_ENABLED:'true',GPW_MOMENTUM_PROFILE:'unknown'})));
+
+test('AAPL is explicit paper-only, mutually exclusive and default strategy only', () => {
+  const r = buildConfiguredInstrumentRegistry({ AAPL_PROFILE_ENABLED: 'true', IBKR_ENVIRONMENT: 'paper' });
+  assert.deepEqual(r.listExecutionEnabled().map(i => i.id), ['aapl_nasdaq']);
+  const i = r.getInstrumentOrThrow('aapl_nasdaq');
+  assert.equal(i.conId, 265598); assert.equal(i.executionPolicy?.quantity, 1);
+  assert.equal(i.executionPolicy?.momentumBreakoutProfile, 'default');
+  assert.equal(i.executionPolicy?.outsideRth, false);
+  assert.equal(defaultInstrumentRegistry.getInstrumentOrThrow(i.id).trading.executionEnabled, false);
+  for (const env of [{ AAPL_PROFILE_ENABLED: 'TRUE' }, { AAPL_PROFILE_ENABLED: 'true', IBKR_ENVIRONMENT: 'live' },
+    { AAPL_PROFILE_ENABLED: 'true', GPW_PROFILE_ENABLED: 'true' },
+    { AAPL_PROFILE_ENABLED: 'true', GPW_MOMENTUM_PROFILE: 'pko_mild_v1' }]) assert.throws(() => buildConfiguredInstrumentRegistry(env));
+});

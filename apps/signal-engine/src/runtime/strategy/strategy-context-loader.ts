@@ -1,3 +1,4 @@
+import { isAaplBound } from '@ikbr/shared';
 /**
  * PR15.4 — Strategy context loader.
  *
@@ -174,7 +175,7 @@ export class StrategyContextLoader {
       || (profile !== "default" && (!wse || instrument.id !== "pko_wse" || instrument.brokerSymbol !== "PKO"
         || String(bound.conId) !== "35146360" || bound.currency !== "PLN" || bound.exchange !== "WSE" || instrument.assetClass !== "stock")))
       return { kind: "error", code: "STRATEGY_CONTRACT_MISMATCH", message: "momentum profile identity mismatch" };
-    const timeframes = input.timeframes.filter(tf => !(wse && tf === "12h"));
+    const timeframes = input.timeframes.filter(tf => !((wse || isAaplBound(bound)) && tf === "12h"));
     const nowMs = this.#clock().getTime();
     const symbol = instrument.brokerSymbol;
     const boundConId = String(bound.conId);

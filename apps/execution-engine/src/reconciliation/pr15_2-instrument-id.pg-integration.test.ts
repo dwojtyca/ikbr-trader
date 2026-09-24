@@ -326,8 +326,8 @@ suite("PR15.2 instrument_id persistence + resume identity mismatch (PG)", () => 
       // used to write BEFORE PR15.2: no `instrument_id`, minimal
       // idempotency identity.
       const legacyTicket = {
-        instrument: "AAPL",
-        conid: "265598",
+        instrument: "TEST",
+        conid: "123456",
         side: "BUY" as const,
         orderType: "LMT" as const,
         quantity: 5,

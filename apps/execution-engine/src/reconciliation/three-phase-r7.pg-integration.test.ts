@@ -67,8 +67,8 @@ const SESSION = "sess-r7";
 
 function baseTicket(overrides: Partial<SignalTicket> = {}): SignalTicket {
   return {
-    instrument: "AAPL",
-    conid: "265598",
+    instrument: "TEST",
+    conid: "123456",
     side: "BUY",
     positionEffect: "OPEN_OR_ADD",
     orderType: "LMT",
@@ -381,29 +381,29 @@ suite("PR15 r7 §7/C — SUBMISSION_IDENTITY_MISMATCH from tryStartSubmissionWit
   }
   it("client_order_id mismatch", async () => {
     await runIdentity(
-      { cid: "cid-DB", hash: "hashDB", instrument: "AAPL", conid: "123" },
-      { clientOrderId: "cid-PLAN", clientOrderHash: "hashDB", instrument: "AAPL", conid: "123" },
+      { cid: "cid-DB", hash: "hashDB", instrument: "TEST", conid: "123" },
+      { clientOrderId: "cid-PLAN", clientOrderHash: "hashDB", instrument: "TEST", conid: "123" },
       "client_order_id_mismatch",
     );
   });
   it("client_order_hash mismatch", async () => {
     await runIdentity(
-      { cid: "cid-X", hash: "hashDB", instrument: "AAPL", conid: "123" },
-      { clientOrderId: "cid-X", clientOrderHash: "hashPLAN", instrument: "AAPL", conid: "123" },
+      { cid: "cid-X", hash: "hashDB", instrument: "TEST", conid: "123" },
+      { clientOrderId: "cid-X", clientOrderHash: "hashPLAN", instrument: "TEST", conid: "123" },
       "client_order_hash_mismatch",
     );
   });
   it("instrument mismatch", async () => {
     await runIdentity(
-      { cid: "cid-Y", hash: "hashY", instrument: "AAPL", conid: "123" },
+      { cid: "cid-Y", hash: "hashY", instrument: "TEST", conid: "123" },
       { clientOrderId: "cid-Y", clientOrderHash: "hashY", instrument: "MSFT", conid: "123" },
       "instrument_mismatch",
     );
   });
   it("conid mismatch (null vs value)", async () => {
     await runIdentity(
-      { cid: "cid-Z", hash: "hashZ", instrument: "AAPL", conid: null },
-      { clientOrderId: "cid-Z", clientOrderHash: "hashZ", instrument: "AAPL", conid: "999" },
+      { cid: "cid-Z", hash: "hashZ", instrument: "TEST", conid: null },
+      { clientOrderId: "cid-Z", clientOrderHash: "hashZ", instrument: "TEST", conid: "999" },
       "conid_mismatch",
     );
   });
@@ -429,7 +429,7 @@ suite("PR15 r7 §7/D — LEGACY_IDEMPOTENCY_IDENTITY_MISSING", () => {
         `INSERT INTO proposed_orders (
            instrument, conid, side, order_type, quantity, entry,
            stop, take_profit, reason, confidence, risk_check_status, status
-         ) VALUES ('AAPL','123','BUY','LMT',10,100,95,110,'t',0.9,'PASS','PROPOSED')
+         ) VALUES ('TEST','123','BUY','LMT',10,100,95,110,'t',0.9,'PASS','PROPOSED')
          RETURNING id`,
       );
       const outcome = await service.executeProposed({
@@ -466,7 +466,7 @@ suite("PR15 r7 §7/E — REJECTED_ORDER_IMMUTABLE (both overrideRejected values)
              instrument, conid, side, order_type, quantity, entry,
              stop, take_profit, reason, confidence, risk_check_status, status,
              client_order_id, client_order_hash
-           ) VALUES ('AAPL','123','BUY','LMT',10,100,95,110,'t',0.9,'PASS','REJECTED','r7-E','h')
+           ) VALUES ('TEST','123','BUY','LMT',10,100,95,110,'t',0.9,'PASS','REJECTED','r7-E','h')
            RETURNING id`,
         );
         const outcome = await service.executeProposed({

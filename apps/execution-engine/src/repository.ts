@@ -1,3 +1,4 @@
+import { checkAaplWindow, bindAaplProposal, isAaplIdentity, isExactAaplIdentity, type AaplWindow } from "./aapl-window.js";
 import { checkGpwWindow, bindGpwProposal, isPkoIdentity, type GpwWindow } from "./gpw-window.js";
 import type { RoundTripEvidence, RoundTripFill } from "./lifecycle/round-trip-evidence.js";
 import type { LifecycleEvidence, LifecycleLegLink, LifecycleRun } from "./lifecycle/ownership.js";
@@ -425,7 +426,18 @@ export interface Trade {
 }
 
 export class ExecutionRepository {
-  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow) {}
+  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow) {}
+
+  async checkAaplEntry(order: ProposedOrder, accountId: string, dispatch = false) {
+    if (!isExactAaplIdentity(order)) return { ok: false as const, reason: "aapl_window_identity_mismatch" };
+    return checkAaplWindow(this.pool, this.aaplWindow, accountId, order.id, dispatch);
+  }
+
+  async getAaplWindowStatus(accountId: string | null) {
+    const check = await checkAaplWindow(this.pool, this.aaplWindow, accountId ?? "");
+    return { ...check, configured: Boolean(this.aaplWindow), runId: this.aaplWindow?.runId ?? null,
+      startsAt: this.aaplWindow?.startsAt ?? null, endsAt: this.aaplWindow?.endsAt ?? null };
+  }
 
   async checkGpwEntry(order: ProposedOrder, accountId: string, dispatch = false) {
     return checkGpwWindow(this.pool, this.gpwWindow, accountId, order.id, dispatch);
@@ -1385,6 +1397,14 @@ export class ExecutionRepository {
         const window = await checkGpwWindow(client, this.gpwWindow, positionGuard.accountId);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
       }
+      if (isAaplIdentity(ticket)) {
+        if (!isExactAaplIdentity(ticket) || positionGuard.kind !== "available") {
+          await client.query("ROLLBACK");
+          return { kind: "invalid_ticket_shape", reason: "aapl_window_identity_mismatch" };
+        }
+        const window = await checkAaplWindow(client, this.aaplWindow, positionGuard.accountId);
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
+      }
 
       const result = await client.query(
         `
@@ -1449,6 +1469,7 @@ export class ExecutionRepository {
       );
 
       if (isPkoIdentity(ticket)) await bindGpwProposal(client, this.gpwWindow!, Number(result.rows[0].id));
+      if (isAaplIdentity(ticket)) await bindAaplProposal(client, this.aaplWindow!, Number(result.rows[0].id));
 
       if (ticket.instrumentId) {
         if (positionGuard.kind !== "available" || !idempotency || !ticket.conid)
@@ -1549,8 +1570,11 @@ export class ExecutionRepository {
       const snapshot = lifecycle.run?.broker_snapshot as { executions?: Array<{execId?: string; accountId?: string; conId?: string}> } | null;
       const execIds = Array.isArray(snapshot?.executions) ? snapshot.executions.filter(fill =>
         fill.accountId === accountId && fill.conId === lifecycle.order.conid).map(fill => fill.execId).filter(Boolean) : [];
-      const window = (await client.query(`SELECT w.* FROM gpw_proposals p JOIN gpw_windows w ON w.run_id=p.run_id
-        WHERE p.proposed_order_id=$1`, [id])).rows[0];
+      const window = isAaplIdentity(lifecycle.order)
+        ? (isExactAaplIdentity(lifecycle.order) ? (await client.query(`SELECT w.* FROM aapl_proposals p JOIN aapl_windows w ON w.run_id=p.run_id
+          WHERE p.proposed_order_id=$1`, [id])).rows[0] : undefined)
+        : (await client.query(`SELECT w.* FROM gpw_proposals p JOIN gpw_windows w ON w.run_id=p.run_id
+          WHERE p.proposed_order_id=$1`, [id])).rows[0];
       const fills = await client.query<RoundTripFill>(`SELECT exec_id,broker_order_id,proposed_order_id,account_id,conid,currency,
         side,shares,price,executed_at,commission,commission_currency,realized_pnl FROM broker_execution_fills
         WHERE proposed_order_id=ANY($1::bigint[]) OR exec_id=ANY($2::text[])
@@ -2498,6 +2522,15 @@ export class ExecutionRepository {
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
         await client.query(`UPDATE gpw_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
           WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.gpwWindow!.runId, input.id]);
+      }
+      if (isAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
+        if (!isExactAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
+          await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: "aapl_window_identity_mismatch" };
+        }
+        const window = await checkAaplWindow(client, this.aaplWindow, input.accountId, input.id);
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
+        await client.query(`UPDATE aapl_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
+          WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.aaplWindow!.runId, input.id]);
       }
 
       // Atomic claim + metadata + account write. Same fencing as

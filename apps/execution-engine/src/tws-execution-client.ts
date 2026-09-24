@@ -1,3 +1,4 @@
+import { isAaplIdentity } from "./aapl-window.js";
 import { parseIbExecutionTime, type ExecutionTimeZone } from "./execution-time.js";
 import { isPkoIdentity } from "./gpw-window.js";
 import { isWseBound, validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
@@ -702,6 +703,8 @@ export class TwsExecutionClient {
     this.assertWseDispatch(prepared);
     if (isPkoIdentity(prepared.normalizedTicket) &&
       (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
+    if (isAaplIdentity(prepared.normalizedTicket) && prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE" &&
+      (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("aapl_window_dispatch_expired");
     return this.dispatchPlan(
       prepared.plan,
       prepared.contract,
@@ -868,6 +871,8 @@ export class TwsExecutionClient {
       try {
         if (isPkoIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
+        if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
+          (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("aapl_window_dispatch_expired");
         for (const plannedOrder of plan.orders) {
           if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
           this.ib.placeOrder(

@@ -416,3 +416,5 @@ export * from "./wse-market-rules.js";
 export { buildConfiguredInstrumentRegistry } from "./instruments/configured-registry.js";
 
 export * from "./wse-candles.js";
+
+export { isAaplBound } from './instruments/aapl.js';

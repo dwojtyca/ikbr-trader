@@ -18,7 +18,11 @@ build and other checks were running; an unchanged-code rerun passed. The cause o
 that transient failure is not proven. No production time guard was relaxed.
 Docker build passed with digest
 `sha256:21e1bbf7f6934ad1e03f20cee69ee004d1861d762faae37f60f9013f721cdc5e`.
-Exact-commit CI and disabled deployment are pending at this revision.
+Code commit `14544cc` passed [GitHub CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36017265927).
+The reviewed execution image was deployed with writes/loop disabled and explicit
+Warsaw Gateway timezone unchanged. The subsequent actual broker capture finished
+CLEAN with available completed-order coverage and complete exposure/recovery.
+No database status was manually repaired and no new order was submitted.
 
 The separate AAPL profile work is not included in this fix. Trading remains off.
 Private broker/account/quantity evidence is excluded from this report.

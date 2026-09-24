@@ -1,3 +1,4 @@
+import { isAaplBound } from '@ikbr/shared';
 import type { WseStrategyPriceEvidence } from "@ikbr/shared";
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 /**
@@ -767,7 +768,7 @@ export class TradingLoopService {
       instrument,
       bound,
       positionQuantity,
-      timeframes: Array.from(strategyTimeframeSet).filter(tf => !(bound && isWseBound(bound) && tf === "12h")),
+      timeframes: Array.from(strategyTimeframeSet).filter(tf => !(bound && (isWseBound(bound) || isAaplBound(bound)) && tf === "12h")),
     });
     if (contextResult.kind === "error") {
       return this.#finalize(cycleId, instrument.id, startedAt, {

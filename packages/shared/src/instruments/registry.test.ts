@@ -483,7 +483,7 @@ describe("InstrumentRegistry — list filters", () => {
 });
 
 describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
-  it("contains six futures and disabled PKO stock", () => {
+  it("contains six futures and disabled stock profiles", () => {
     const ids = defaultInstrumentRegistry.listAll().map((i) => i.id);
     assert.deepEqual(ids, [
       "si_front",
@@ -492,6 +492,7 @@ describe("defaultInstrumentRegistry — Phase 1 seed catalogue", () => {
       "hg_front",
       "es_front",
       "nq_front",
+      "aapl_nasdaq",
       "pko_wse",
     ]);
   });

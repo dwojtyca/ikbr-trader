@@ -1,3 +1,4 @@
+import { parseAaplWindow } from "./aapl-window.js";
 import { parseExternalOrders } from "./reconciliation/external-orders.js";
 import { parseGpwWindow } from "./gpw-window.js";
 import dotenv from "dotenv";
@@ -26,6 +27,9 @@ const rawSchema = z.object({
   EXECUTION_AI_MAX_NOTIONAL_PCT: z.coerce.number().positive().max(100).default(10),
   EXECUTION_AI_MAX_STOP_RISK_PCT: z.coerce.number().positive().max(100).default(0.5),
   EXECUTION_AI_MAX_EXPOSURE_PCT: z.coerce.number().positive().max(100).default(25),
+  EXECUTION_AI_AAPL_MAX_NOTIONAL_USD: z.coerce.number().finite().positive().default(500),
+  EXECUTION_AI_AAPL_MAX_STOP_RISK_USD: z.coerce.number().finite().positive().default(5),
+  EXECUTION_AI_AAPL_FEE_RESERVE_USD: z.coerce.number().finite().positive().default(5),
   EXECUTION_AI_MAX_NOTIONAL_PLN: z.coerce.number().finite().positive().default(500),
   EXECUTION_AI_MAX_STOP_RISK_PLN: z.coerce.number().finite().positive().default(5),
   EXECUTION_AI_FEE_RESERVE_PLN: z.coerce.number().finite().positive().default(30),
@@ -352,9 +356,12 @@ export function buildExecutionConfig(
 ) {
   const env = schema.parse(rawEnv);
   const gpwWindow = parseGpwWindow(rawEnv);
+  const aaplWindow = parseAaplWindow(rawEnv);
+  if (aaplWindow && env.IBKR_ENVIRONMENT !== "paper") throw new Error("AAPL window requires paper environment");
   if (gpwWindow && env.IBKR_ENVIRONMENT !== "paper") throw new Error("GPW window requires paper environment");
   return {
     gpwWindow,
+    aaplWindow,
     ...env,
     ...buildLegacyDerived(env),
     ...buildPhase1Derived(env),
