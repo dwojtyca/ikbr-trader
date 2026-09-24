@@ -78,6 +78,32 @@ weekly labels use Saturday local midnight; the shared period matcher accepts thi
 as the following-date label of the completed Friday session. Daily history had
 59 closed bars from 60 returned rows under the conservative midnight finality rule.
 
-Delivery, exact-commit CI and disabled-deployment evidence will be recorded after
-all reviews and required checks pass. No orders or paid AI requests are part of
-this implementation task.
+## Delivery and disabled deployment
+
+Implementation commit `550231519984a2a2dba1d5e16b3314e68c61824a` was pushed to
+`main`. Its [GitHub CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36063490710)
+completed successfully. The final evidence-only documentation commit receives its
+own CI verification; it does not change the tested runtime image.
+
+At 21:50 UTC on 2026-09-24, after a private operational database backup:
+
+- Migration `000015_instrument_session_schedules.sql` applied successfully.
+- Ingestion, signal-engine and execution-engine run the reviewed digest above;
+  llm-agent is created but stopped. Bootstrap subscribes only PKO/35146360.
+- Paper writes and trading loop remain disabled; no GPW run window is configured.
+- Fresh broker reconciliation is `CLEAN`, execution `/ready` is 200 with writes
+  disabled, zero positions and matching durable/in-memory reconciliation timestamps.
+- Generic `sessionWarmup` contains 230 closed 1m bars, 60 each of 5m/1h/4h,
+  59 daily and 59 weekly bars. Each latest bar matches its expected completed
+  period, including the unchanged weekly Saturday label.
+- The calendar is fresh but coverage ends at 17:05 Warsaw, so entry readiness
+  correctly remains blocked with `session_schedule_coverage_missing` after hours.
+  The read-only stack verifier reports `DEGRADED` only for stale PKO candles,
+  with no unhealthy/unreachable services or configuration errors. This is not
+  evidence of a completed morning trade or permission to activate trading.
+
+The next operational check must run during an actual session: fresh calendar
+covering now, first closed current-interval minute, real-time quote, current cash,
+CLEAN reconciliation, strategy/AI/risk approval and the authorized entry window.
+No orders or paid AI requests were made during this implementation. The isolated
+test database was removed after verification.
