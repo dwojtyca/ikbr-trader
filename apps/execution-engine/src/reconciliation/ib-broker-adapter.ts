@@ -1,25 +1,4 @@
-/**
- * PR15 — production `BrokerReconciliationAdapter` backed by the
- * existing `TwsExecutionClient`.
- *
- * Sources:
- *   * positions via `reqPositions` → `positionEnd`
- *   * open orders via `reqAllOpenOrders` → `openOrderEnd`
- *   * executions via `reqExecutions` → `execDetailsEnd`
- *   * completed orders: `ib@0.2.9` does NOT expose
- *     `reqCompletedOrders` — reported as
- *     `available=false, reason="unsupported_by_ib_module"` per
- *     PR15_PLAN §3.
- *   * session via `managedAccounts` + `isConnected()`
- *
- * Each source has an independent bounded timeout AND cooperates
- * with the run-level `AbortSignal` supplied by the runner. Every
- * `ib` listener is torn down on success, error, timeout, and
- * abort (delegated to the snapshot methods on `TwsExecutionClient`).
- * A `capture()` that races the abort signal never leaves lingering
- * subscriptions.
- */
-
+import type { CompletedOrdersClient } from "./completed-orders-client.js";
 import type { TwsExecutionClient } from "../tws-execution-client.js";
 import type {
   BrokerReconciliationAdapter,
@@ -33,7 +12,7 @@ import { deriveCompletenessFlags } from "./broker-adapter.js";
 export class IbBrokerReconciliationAdapter
   implements BrokerReconciliationAdapter
 {
-  constructor(private readonly tws: TwsExecutionClient) {}
+  constructor(private readonly tws: TwsExecutionClient, private readonly completed: Pick<CompletedOrdersClient, "load">) {}
 
   async capture(
     req: BrokerReconciliationCaptureRequest,
@@ -41,12 +20,13 @@ export class IbBrokerReconciliationAdapter
     if (req.abortSignal.aborted) throw new Error("aborted");
 
     const capturedAtStart = new Date();
+    const generation = this.tws.getConnectionGeneration();
 
     // Session probe first — used to short-circuit further requests
     // when the socket is not connected. `getManagedAccounts` is
     // bounded by the ib client's own timeout, so we wrap it in the
     // same source timeout for consistency.
-    const sessionCov = await captureSession(this.tws, {
+    let sessionCov = await captureSession(this.tws, {
       accountId: req.accountId,
       timeoutMs: req.sourceTimeoutMs,
       abortSignal: req.abortSignal,
@@ -66,10 +46,10 @@ export class IbBrokerReconciliationAdapter
         )
       : exposureStart;
 
-    // Fire all three snapshot reads in parallel — each carries its
+    // Fire all four snapshot reads in parallel — each carries its
     // own timeout + abort handling so a single slow source cannot
     // stall the run past its overall RUN_TIMEOUT.
-    const [posResult, openResult, execResult] = await Promise.all([
+    const [posResult, openResult, execResult, completedResult] = await Promise.all([
       this.tws.reqPositionsSnapshot({
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
@@ -84,7 +64,16 @@ export class IbBrokerReconciliationAdapter
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
       }),
+      this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal }),
     ]);
+
+    const finalSession = await captureSession(this.tws, {
+      accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal,
+    });
+    if (!finalSession.available || !this.tws.isConnected() || generation !== this.tws.getConnectionGeneration()) {
+      sessionCov = { available: false, boundedWindow: false, timedOut: finalSession.timedOut, count: 0,
+        reason: "execution_session_changed_during_capture" };
+    }
 
     if (req.abortSignal.aborted) throw new Error("aborted");
 
@@ -93,7 +82,7 @@ export class IbBrokerReconciliationAdapter
     // `exposureStart`. recoveryWindowComplete additionally requires
     // that the query started at or before recoveryStart.
     const executionsCov: ExecutionsCoverage = {
-      available: openResult.ok ? execResult.ok : execResult.ok,
+      available: execResult.ok,
       timedOut: !execResult.ok && execResult.error === "timeout",
       count: execResult.rows.length,
       reason: execResult.ok ? undefined : execResult.error,
@@ -128,11 +117,13 @@ export class IbBrokerReconciliationAdapter
       reason: openResult.ok ? undefined : openResult.error,
     };
     const completedOrdersCov: SourceCoverage = {
-      available: false,
-      boundedWindow: false,
-      timedOut: false,
-      count: 0,
-      reason: "unsupported_by_ib_module",
+      available: completedResult.ok,
+      boundedWindow: completedResult.ok && !req.oldestAmbiguousAttemptedAt,
+      timedOut: completedResult.error === "timeout",
+      count: completedResult.rows.length,
+      recoveryScope: "current_state_only",
+      reason: !completedResult.ok ? completedResult.error : req.oldestAmbiguousAttemptedAt
+        ? "completed_historical_window_unproven" : undefined,
     };
 
     const sourceCoverage: BrokerReconciliationSnapshot["sourceCoverage"] = {
@@ -207,7 +198,7 @@ export class IbBrokerReconciliationAdapter
       sourceCoverage,
       positions,
       openOrders,
-      completedOrders: [],
+      completedOrders: completedResult.rows,
       executions,
     };
   }
@@ -264,20 +255,15 @@ function withTimeoutAndAbort<T>(
   signal: AbortSignal,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
-    const onAbort = () => reject(new Error("aborted"));
+    const finish = (error?: Error, value?: T) => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      if (error) reject(error); else resolve(value!);
+    };
+    const onAbort = () => finish(new Error("aborted"));
+    const timer = setTimeout(() => finish(new Error("timeout")), timeoutMs);
     signal.addEventListener("abort", onAbort, { once: true });
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", onAbort);
-        reject(e);
-      },
-    );
+    if (signal.aborted) onAbort();
+    p.then(v => finish(undefined, v), e => finish(e instanceof Error ? e : new Error(String(e))));
   });
 }

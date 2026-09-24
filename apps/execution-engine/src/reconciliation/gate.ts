@@ -152,7 +152,7 @@ export function classifyReadiness(
   const executions = executionsSource(cov.executions);
   const completedOrders = source(cov.completedOrders);
   const executionsRecovery = executionsRecoveryFlag(cov.executions);
-  if (!completedOrders.available || !executionsRecovery) {
+  if (!completedOrders.available || !completedOrders.boundedWindow || !executionsRecovery) {
     return { kind: "incomplete_recovery" };
   }
   return { kind: "healthy" };

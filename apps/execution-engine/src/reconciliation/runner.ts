@@ -191,6 +191,7 @@ export class ReconciliationRunner {
 
     // Phase C — reconcile + persist.
     const plan = await this.#reconcile(context, snapshot);
+    snapshot = plan.snapshot;
     // PR15 r5 §1 — correlated broker-order observations. One row
     // per broker source record; the operator link path requires
     // all identifiers to originate from the SAME observation row.
@@ -295,6 +296,7 @@ export class ReconciliationRunner {
     context: RunnerContext,
     snapshot: BrokerReconciliationSnapshot,
   ): Promise<{
+    snapshot: BrokerReconciliationSnapshot;
     finalStatus: ReconciliationRunStatus;
     matches: number;
     mismatches: Array<{
@@ -469,6 +471,11 @@ export class ReconciliationRunner {
 
     // 3) Ambiguous PROPOSED recovery.
     const ambiguousRows = await this.#loadAmbiguousProposed(context.accountId);
+    if (snapshot.sourceCoverage.completedOrders.recoveryScope === "current_state_only" && ambiguousRows.length > 0) {
+      snapshot = { ...snapshot, recoveryComplete: false, sourceCoverage: { ...snapshot.sourceCoverage,
+        completedOrders: { ...snapshot.sourceCoverage.completedOrders, boundedWindow: false,
+          reason: "completed_historical_window_unproven" } } };
+    }
     // Load per-row (NOT global) authoritative identifiers so a
     // spoofed / mis-attributed match cannot resolve the WRONG
     // ambiguous row: row A must only be matchable against A's
@@ -603,6 +610,7 @@ export class ReconciliationRunner {
           : "CLEAN";
 
     return {
+      snapshot,
       finalStatus,
       matches,
       mismatches,
@@ -828,8 +836,10 @@ export class ReconciliationRunner {
 
 function allOrders(
   snapshot: BrokerReconciliationSnapshot,
-): readonly BrokerOrderRow[] {
-  return [...snapshot.openOrders, ...snapshot.completedOrders];
+): readonly (BrokerOrderRow & { brokerOrderId: string })[] {
+  return [...snapshot.openOrders, ...snapshot.completedOrders].filter(
+    (row): row is BrokerOrderRow & { brokerOrderId: string } => typeof row.brokerOrderId === "string" && row.brokerOrderId.length > 0,
+  );
 }
 
 interface PerOrderIdentifiers {

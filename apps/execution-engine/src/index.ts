@@ -1,3 +1,4 @@
+import { CompletedOrdersClient } from "./reconciliation/completed-orders-client.js";
 import { registerGpwRoutes } from "./gpw-routes.js";
 import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
 import { WseMetadataClient } from "./wse-metadata-client.js";
@@ -280,7 +281,9 @@ const tws = new TwsExecutionClient(
 // PR15 — production reconciliation wiring. Uses the REAL
 // `IbBrokerReconciliationAdapter` backed by the same `tws`
 // client the write path uses. Fake adapter is test-only.
-const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws);
+const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws, new CompletedOrdersClient({
+  host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT, clientId: config.IB_COMPLETED_ORDERS_CLIENT_ID,
+}));
 const reconRunner = new ReconciliationRunner(
   pool,
   repo,

@@ -23,6 +23,7 @@ export interface SourceCoverage {
   readonly timedOut: boolean;
   readonly count: number;
   readonly reason?: string;
+  readonly recoveryScope?: "current_state_only";
 }
 
 export interface ExecutionsCoverage
@@ -49,7 +50,7 @@ export interface BrokerPositionRow {
 
 export interface BrokerOrderRow {
   readonly accountId?: string | null;
-  readonly brokerOrderId: string;
+  readonly brokerOrderId: string | null;
   readonly permId?: string | null;
   readonly parentPermId?: string | null;
   readonly clientId?: number | null;

@@ -218,3 +218,23 @@ needs an explicit incident decision; do not mark the test complete with residual
 PKO exposure, unresolved PKO orders or ambiguous account evidence. Known
 other-contract positions/orders are reported separately and are not managed by
 this procedure.
+
+## Completed-order reconciliation source
+
+Execution uses a separate read-only Socket API client for `reqCompletedOrders(false)`.
+`IB_COMPLETED_ORDERS_CLIENT_ID` defaults to 120 and must differ from execution,
+ingestion, metadata, backtest and configured ES acquisition clients. The socket
+is opened for one bounded capture, verifies the managed account and disconnects.
+Keep Gateway available; no extra application login is needed.
+
+A successful end event proves receipt of the currently retained list, not an
+arbitrary historical window. With no ambiguous submission the list can complete
+current-state coverage. An ambiguous attempt present before or discovered after
+capture keeps recovery incomplete (`completed_historical_window_unproven`).
+It cannot prove an unknown order was never submitted and never authorizes retry.
+
+The installed decoder does not supply API order IDs in completed messages.
+Such records retain `brokerOrderId: null` in the diagnostic snapshot and are
+excluded from automated recovery matching and correlated order observations.
+An unavailable, malformed or timed-out source remains INCOMPLETE; do not override
+it to force CLEAN. Readiness requires both available and bounded recovery coverage.

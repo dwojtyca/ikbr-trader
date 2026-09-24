@@ -147,7 +147,7 @@ describe("lifecycle ownership through migrated PostgreSQL, real publication and 
   it(`production adapter incomplete completed-orders support: ${missingAccount ? "missing account blocks" : "positive ownership survives publication"}`,async()=>{
     const f=await fixture();try {
       const base=(await f.publish()).snapshot;
-      const fake = {isConnected:()=>true,getManagedAccounts:async()=>[accountId],
+      const fake = {getConnectionGeneration:()=>1,isConnected:()=>true,getManagedAccounts:async()=>[accountId],
         reqPositionsSnapshot:async()=>({ok:true,endObserved:true,rows:base.positions}),
         reqAllOpenOrdersSnapshot:async()=>({ok:true,endObserved:true,rows:base.openOrders.map(row=>({...row,accountId:missingAccount?undefined:row.accountId}))}),
         reqExecutionsSnapshot:async()=>({ok:true,endObserved:true,rows:base.executions}),
@@ -155,7 +155,7 @@ describe("lifecycle ownership through migrated PostgreSQL, real publication and 
       const client=await f.pool.connect();try {
         const {runId}=await f.reconciliation.publishRunning(client,{accountId,sessionId,runTimeoutMs:1000});
         await new Promise(resolve=>setTimeout(resolve,10));
-        const snapshot=await new IbBrokerReconciliationAdapter(fake).capture({accountId,sessionId,sessionStartedAt:f.attempt,
+        const snapshot=await new IbBrokerReconciliationAdapter(fake, { load: async () => ({ ok: false, rows: [], error: "unavailable" }) }).capture({accountId,sessionId,sessionStartedAt:f.attempt,
           safetyMarginMs:1,sourceTimeoutMs:100,abortSignal:new AbortController().signal});
         await new Promise(resolve=>setTimeout(resolve,10));
         await f.reconciliation.publishResult(client,{runId,accountId,finalStatus:"INCOMPLETE",snapshot,matches:1,mismatchesCount:0,
@@ -185,13 +185,13 @@ describe("lifecycle ownership through migrated PostgreSQL, real publication and 
       tws.getManagedAccounts=async()=>[accountId];
       tws.reqPositionsSnapshot=async()=>({ok:true,endObserved:true,rows:base.positions.map(row=>({accountId:row.accountId,symbol:row.symbol,position:row.position,conId:"123"}))});
       tws.reqAllOpenOrdersSnapshot=async()=>({ok:true,endObserved:true,rows:base.openOrders.map(row=>({
-        brokerOrderId:row.brokerOrderId,accountId:accountId,conId:"123",orderRef:row.orderRef!,status:row.status,
+        brokerOrderId:row.brokerOrderId!,accountId:accountId,conId:"123",orderRef:row.orderRef!,status:row.status,
         action:row.action!,filled:row.filled!,remaining:row.remaining!,
       }))});
       const client=await f.pool.connect();try {
         const {runId}=await f.reconciliation.publishRunning(client,{accountId,sessionId,runTimeoutMs:1000});
         await new Promise(resolve=>setTimeout(resolve,10));
-        const snapshot=await new IbBrokerReconciliationAdapter(tws).capture({accountId,sessionId,sessionStartedAt:f.attempt,
+        const snapshot=await new IbBrokerReconciliationAdapter(tws, { load: async () => ({ ok: false, rows: [], error: "unavailable" }) }).capture({accountId,sessionId,sessionStartedAt:f.attempt,
           safetyMarginMs:1,sourceTimeoutMs:100,abortSignal:new AbortController().signal});
         assert.ok(Number.isNaN(snapshot.executions[0].executedAt.getTime()));
         await new Promise(resolve=>setTimeout(resolve,10));

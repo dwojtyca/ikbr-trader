@@ -102,7 +102,7 @@ test("raw broker accounts survive snapshot methods and production adapter withou
   assert.deepEqual(executions.rows.map(row => row.accountId), ["PAPER", "OTHER", ""]);
   const positions = await client.reqPositionsSnapshot(options);
   assert.deepEqual(positions.rows.map(row => row.accountId), ["PAPER", "OTHER", ""]);
-  const snapshot = await new IbBrokerReconciliationAdapter(client).capture({
+  const snapshot = await new IbBrokerReconciliationAdapter(client, { load: async () => ({ ok: false, rows: [], error: "unavailable" }) }).capture({
     accountId: "PAPER", sessionId: "session", sessionStartedAt: new Date(),
     safetyMarginMs: 0, sourceTimeoutMs: 100, abortSignal: options.abortSignal,
   });
