@@ -66,3 +66,14 @@ The bound loop does not automate strategy.shouldExit: broker SL/TP and supervise
 full close are the supported exits. Stop the producer, close/reconcile while
 writes remain authorized, prove flat/no orders, then disable writes. Master-off
 is not auto-flatten. This delivery does not prove a real Paper round trip.
+
+## CI follow-up
+
+Initial commit f12d6b9 passed lint/typecheck/unit tests but CI35970122744 failed
+one PG report test with PostgreSQL57P01 (administrator termination). The fixture
+used DROP DATABASE WITH(FORCE) immediately after pg-pool.end(); the installed
+pool implementation resolves end before every client socket emits its final
+remove event. Teardown now explicitly awaits all existing client remove events
+and uses ordinary DROP DATABASE. No broker behavior, risk/freshness checks or
+error suppression changed. The fix received independent ACCEPT and all five gates passed again in a clean
+copy of f12d6b9 with only the reviewed teardown fix applied (1084 PG tests pass).

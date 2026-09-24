@@ -55,5 +55,16 @@ test("read-only round-trip collector uses exact persisted evidence and fill curr
     await pool.query("UPDATE broker_execution_fills SET account_id='OTHER' WHERE exec_id='fill-2'");
     assert.equal(evaluateRoundTrip((await repo.getRoundTripEvidence(42,"DU_TEST"))!,f.context).status,"NOT_PROVEN");
     assert.equal(await repo.getRoundTripEvidence(999,"DU_TEST"),null);
-  } finally { await pool.end(); await admin.query(`DROP DATABASE ${name} WITH (FORCE)`); await admin.end(); }
+  } finally {
+    // pg-pool's end promise can resolve before its clients emit socket end.
+    // Wait for the actual remove events before dropping this fixture database.
+    const disconnected = new Promise<void>(resolve => {
+      let remaining = pool.totalCount;
+      if (remaining === 0) return resolve();
+      pool.on("remove", () => { if (--remaining === 0) resolve(); });
+    });
+    await pool.end();
+    await disconnected;
+    try { await admin.query(`DROP DATABASE ${name}`); } finally { await admin.end(); }
+  }
 });
