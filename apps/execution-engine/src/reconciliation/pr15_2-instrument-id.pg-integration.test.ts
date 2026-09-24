@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15.2 — instrument_id persistence, resume-identity mismatch,
  * and legacy-NULL compatibility, exercised against a real
@@ -164,7 +165,7 @@ function buildService(
   dispatchCount: () => number;
 } {
   let count = 0;
-  const repo = new ExecutionRepository(pool);
+  const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
   const buildPrepared = (cid: string): PreparedBrokerOrder =>
     ({
       contract: {} as PreparedBrokerOrder["contract"],

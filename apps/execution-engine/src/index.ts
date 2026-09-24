@@ -1,3 +1,4 @@
+import { createSessionEntryGuard } from "./session-entry-guard.js";
 import { readZeroDayRows, evaluateZeroDay } from "./daily-loss-evidence.js";
 import { CompletedOrdersClient } from "./reconciliation/completed-orders-client.js";
 import { registerGpwRoutes } from "./gpw-routes.js";
@@ -62,7 +63,7 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
-const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow);
+const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)));
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines

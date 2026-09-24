@@ -44,12 +44,12 @@ clock and permits at most one attempted entry per account/Warsaw date; restartin
 or changing run ID does not replenish a consumed budget. Unknown dispatch consumes
 the budget. There is no rearm/reset endpoint.
 
-Use a 20–30 minute supervised entry window, provisionally 13:10–13:40 Warsaw,
-only after actual history readiness is green and well before 16:45. Conservative
-4h finality requires the complete four-hour interval plus the existing freshness
-limit; an early morning start may have no usable 4h bar. The strategy also retains
-its UTC 08–20 filter, so a summer 09:05 Warsaw start cannot produce an entry. Never
-relax history age/finality to force readiness. Choose an operator exit deadline at least 15 minutes
+Use a 20–30 minute supervised entry window only after actual readiness passes,
+within the Warsaw09:00–16:45 safety envelope and the actual broker session.
+The shared [session-readiness path](INSTRUMENT_SESSION_READINESS.md) permits
+evaluation after the first closed current-session1m using completed higher bars
+from prior sessions. It does not require waiting four hours after opening.
+Quantitative strategy filters and intentional waits remain. Choose an operator exit deadline at least 15 minutes
 before 16:45; a limit close is not guaranteed to fill. Entry-window expiry does
 not cancel protection or close a position.
 
@@ -102,8 +102,8 @@ with no AAPL/MSFT/XOM or other legacy subscriptions. Abort if any other producer
 pending legacy proposal or competing AI delivery remains. An empty loop allowlist
 is not proof of exclusive ownership. The disabled scheduler's `/ready` may return
 `ready:true,checks:{}`; this is not warmup evidence. Inspect `/backfill-progress`
-`wseWarmup` for all six required native closed timeframes and confirm no errors;
-the real context loader still enforces freshness/indicators at evaluation time.
+`sessionWarmup` for all six required native closed timeframes and confirm no errors;
+the real context loader still enforces calendar finality/freshness/indicators at evaluation time.
 Require exact configured/active allowlisted Paper account, no live session conflict,
 current unused window, exact PKO contract, fresh real-time bid/ask (no delayed/frozen
 feed), open broker liquidHours inside the application window, complete closed-bar

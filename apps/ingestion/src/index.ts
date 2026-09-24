@@ -1,7 +1,7 @@
-import { AaplScheduleAdapter } from "./aapl-schedule-adapter.js";
-import { AaplScheduleRefresh } from "./aapl-schedule-refresh.js";
-import { isAaplSubscription, AaplNativeRefresh } from "./aapl-native-refresh.js";
-import { isWseSubscription, WseNativeRefresh } from "./wse-native-refresh.js";
+import { SessionScheduleAdapter } from "./session-schedule-adapter.js";
+import { SessionScheduleRefresh } from "./session-schedule-refresh.js";
+import { SessionNativeRefresh, sessionKey, SESSION_POLLING_CAPACITY } from "./session-native-refresh.js";
+import { buildInstrumentSessionIdentity, type InstrumentSessionIdentity } from "@ikbr/shared";
 import Fastify from "fastify";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
@@ -61,7 +61,7 @@ async function flushBufferedCandles(): Promise<void> {
   const buffered = aggregator.flushAll();
   for (const candle of buffered) {
     const subscription = activeSubscriptions.find((entry) => entry.conid === candle.conid);
-    if (isFuturesSubscription(subscription) || isWseSubscription(subscription) || isAaplSubscription(subscription)) {
+    if (isFuturesSubscription(subscription) || Boolean(subscription?.instrumentId)) {
       app.log.info({ conid: candle.conid, ts: candle.ts }, "discarded provisional FUT candle during shutdown");
       continue;
     }
@@ -70,15 +70,15 @@ async function flushBufferedCandles(): Promise<void> {
 
   const higher = higherTimeframeAggregator.flushAll();
   for (const candle of higher) {
-    if (activeSubscriptions.some(sub => sub.conid === candle.conid && (isWseSubscription(sub) || isAaplSubscription(sub)))) continue;
+    if (activeSubscriptions.some(sub => sub.conid === candle.conid && Boolean(sub.instrumentId))) continue;
     await repo.upsertCandle(candle);
   }
 }
 
 async function stopIngestionSession(): Promise<void> {
   nativeRefreshPaused = true;
-  await aaplRefresh.idle();
-  await wseRefresh.idle();
+  await sessionRefresh.idle();
+  await Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.invalidate()));
   await flushBufferedCandles();
   twsClient.clearSubscriptions();
   twsClient.disconnect();
@@ -124,7 +124,7 @@ async function triggerSignalsForCandle(
 }
 
 async function persistCanonicalCandle(oneMinuteCandle: import("@ikbr/shared").Candle): Promise<void> {
-  if (activeSubscriptions.some(sub => sub.conid === oneMinuteCandle.conid && (isWseSubscription(sub) || isAaplSubscription(sub)))) return;
+  if (activeSubscriptions.some(sub => sub.conid === oneMinuteCandle.conid && Boolean(sub.instrumentId))) return;
   lastCandleAt = oneMinuteCandle.ts;
   await repo.upsertCandle(oneMinuteCandle);
   app.log.debug({ candle: oneMinuteCandle }, "persisted canonical candle 1m");
@@ -179,41 +179,48 @@ const twsClient = new TwsClient(
     const ready = aggregator.ingest(tick);
     for (const oneMinuteCandle of ready) {
       const subscription = activeSubscriptions.find((entry) => entry.conid === oneMinuteCandle.conid);
+      if (subscription?.instrumentId) continue;
       const persisted = await finalBarCoordinator.route(oneMinuteCandle, subscription);
       if (!persisted && isFuturesSubscription(subscription))
         app.log.warn({ conid: oneMinuteCandle.conid, ts: oneMinuteCandle.ts }, "FUT candle remained provisional; no signal triggered");
     }
   },
   (line) => app.log.info(line),
-  { onConnectionInvalidated: () => { void aaplScheduleRefresh.invalidate().catch(error => app.log.error(error, "AAPL schedule invalidation failed")); } },
+  { onConnectionInvalidated: () => { for (const coordinator of scheduleCoordinators.values()) void coordinator.invalidate().catch(error => app.log.error(error, "Session schedule invalidation failed")); } },
 );
 
-const wseRefresh = new WseNativeRefresh({
-  read: (conid, tf, limit) => repo.getNativeWseCandles(conid, tf, limit),
-  fetch: async (sub, tf, count) => (await twsClient.backfillRecentCandles([sub], tf, count))[0]?.candles ?? [],
-  write: candle => repo.upsertCandle(candle),
-});
-const aaplScheduleAdapter = new AaplScheduleAdapter({ host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT,
-  clientId: config.AAPL_SCHEDULE_CLIENT_ID, acquirePacing: () => twsClient.acquireHistoricalPacingToken() });
-const aaplScheduleRefresh = new AaplScheduleRefresh({ read: () => repo.getAaplSchedule(),
-  begin: status => repo.beginAaplSchedule(status), finish: (generation, schedule) => repo.finishAaplSchedule(generation, schedule),
-  fetch: () => aaplScheduleAdapter.fetch() });
-const aaplRefresh = new AaplNativeRefresh({
-  schedule: () => aaplScheduleRefresh.ensure(), readSchedule: () => repo.getAaplSchedule(),
-  read: (conid, tf, limit) => repo.getNativeAaplCandles(conid, tf, limit),
-  fetch: (sub, tf, count) => twsClient.fetchNativeAaplCandles(sub, tf, count),
-  write: candle => repo.upsertCandle(candle),
-});
-const aaplRefreshTimer = setInterval(() => {
-  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void aaplRefresh.run(activeSubscriptions).catch(error => app.log.error(error, "AAPL native refresh failed"));
+function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIdentity {
+  const bound = sub.instrumentId ? config.instrumentBindingAuthority.getBoundInstrument(sub.instrumentId) : undefined;
+  if (!bound || sub.conid !== String(bound.conId) || sub.symbol !== bound.brokerSymbol || sub.instrumentContract?.source !== 'ibkr')
+    throw new Error('session_bound_contract_unverified');
+  return buildInstrumentSessionIdentity(bound.instrument, bound);
+}
+const scheduleCoordinators = new Map<string, SessionScheduleRefresh>();
+const scheduleAdapter = new SessionScheduleAdapter({ host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT,
+  clientId: config.SESSION_SCHEDULE_CLIENT_ID, acquirePacing: () => twsClient.acquireHistoricalPacingToken() });
+function coordinatorFor(identity: InstrumentSessionIdentity): SessionScheduleRefresh {
+  const key = sessionKey(identity);
+  let coordinator = scheduleCoordinators.get(key);
+  if (!coordinator) {
+    coordinator = new SessionScheduleRefresh(identity, { read: () => repo.getSessionSchedule(identity),
+      begin: status => repo.beginSessionSchedule(identity, status), finish: (generation, schedule) => repo.finishSessionSchedule(identity, generation, schedule),
+      fetch: () => scheduleAdapter.fetch(identity) });
+    scheduleCoordinators.set(key, coordinator);
+  }
+  return coordinator;
+}
+const sessionRefresh = new SessionNativeRefresh({ identity: subscriptionIdentity,
+  schedule: identity => coordinatorFor(identity).ensure(), readSchedule: identity => repo.getSessionSchedule(identity),
+  invalidate: identity => coordinatorFor(identity).invalidate(),
+  read: (identity, tf, limit) => repo.getSessionCandles(identity, tf, limit),
+  fetch: (sub, identity, tf, count) => twsClient.fetchSessionCandles(sub, identity, tf, count), write: candle => repo.upsertCandle(candle) });
+const sessionRefreshTimer = setInterval(() => {
+  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected())
+    void sessionRefresh.run(activeSubscriptions).catch(error => app.log.error(error, 'Session native refresh failed'));
 }, 60000);
-aaplRefreshTimer.unref();
-app.addHook("onClose", async () => { clearInterval(aaplRefreshTimer); await aaplRefresh.idle(); await aaplScheduleRefresh.idle(); });
-const wseRefreshTimer = setInterval(() => {
-  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void wseRefresh.run(activeSubscriptions);
-}, 60000);
-wseRefreshTimer.unref();
-app.addHook("onClose", async () => { clearInterval(wseRefreshTimer); await wseRefresh.idle(); });
+sessionRefreshTimer.unref();
+app.addHook('onClose', async () => { clearInterval(sessionRefreshTimer); await sessionRefresh.idle();
+  await Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.idle())); });
 
 app.get("/health", async () => ({
   ok: true,
@@ -227,10 +234,9 @@ app.get("/health", async () => ({
 
 app.get("/backfill-progress", async () => ({
   progress: backfillProgress,
-  wseWarmup: Array.from(wseRefresh.status.values()),
-  aaplWarmup: Array.from(aaplRefresh.status.values()),
-  aaplSchedule: await repo.getAaplSchedule(),
-  aaplScheduleError: aaplScheduleRefresh.lastError,
+  sessionWarmup: Array.from(sessionRefresh.status.values()),
+  sessionPollingCapacity: SESSION_POLLING_CAPACITY,
+  sessionScheduleErrors: Array.from(scheduleCoordinators.entries(), ([key, coordinator]) => ({ key, error: coordinator.lastError })),
 }));
 
 app.get("/watchlist", async () => {
@@ -288,8 +294,7 @@ app.post("/bootstrap", async () => {
     };
   }
   bootstrapInFlight = true;
-  await wseRefresh.idle();
-  await aaplRefresh.idle();
+  await sessionRefresh.idle();
   nativeRefreshPaused = false;
   backfillProgress = {
     phase: "connecting",
@@ -353,7 +358,7 @@ app.post("/bootstrap", async () => {
       backfillProgress.totalSymbols = subscriptions.length;
     }
     const historical = await twsClient.backfillRecentCandles1m(
-      subscriptions.filter(sub => !isWseSubscription(sub) && !isAaplSubscription(sub)),
+      subscriptions.filter(sub => !sub.instrumentId),
       config.backfill1mCandles,
     );
 
@@ -449,7 +454,7 @@ app.post("/bootstrap", async () => {
       );
       const now = Date.now();
       const subsToFetch = subscriptions.filter((sub) => {
-        if (isWseSubscription(sub) || isAaplSubscription(sub)) return false;
+        if (sub.instrumentId) return false;
         const latest = latestTsByConid.get(sub.conid);
         if (!latest) return true;
         return now - latest.getTime() > freshnessThresholdMs;
@@ -541,10 +546,9 @@ app.post("/bootstrap", async () => {
 
     twsClient.clearSubscriptions();
     activeSubscriptions = [];
+    await sessionRefresh.run(subscriptions);
     twsClient.addSubscriptions(subscriptions);
     activeSubscriptions = subscriptions;
-    await wseRefresh.run(subscriptions, true);
-    await aaplRefresh.run(subscriptions, true);
     lastBootstrapAt = new Date();
 
     return {
@@ -585,6 +589,10 @@ app.post("/stop", async () => {
 
 async function main(): Promise<void> {
   await repo.init();
+  // Invalidate persisted evidence before serving requests, even before contract bootstrap creates subscriptions.
+  for (const bound of config.instrumentBindingAuthority.listBoundInstruments()) {
+    await coordinatorFor(buildInstrumentSessionIdentity(bound.instrument, bound)).invalidate();
+  }
 
   const address = await app.listen({
     port: config.ingestionPort,

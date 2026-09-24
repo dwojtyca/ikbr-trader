@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 import { executeTicketBodySchema } from "../execute-ticket-schema.js";
 import type { GpwWindow } from "../gpw-window.js";
 import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
@@ -50,7 +51,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = false) {
   // of the host hour, just as its market-risk adapter uses a fixed open session.
   const window: GpwWindow = { runId: "test-run", accountId, startsAt: new Date(Date.now()-1000).toISOString(),
     endsAt: new Date(Date.now()+60000).toISOString(), tradeDate: "2026-09-24" };
-  const repo = new ExecutionRepository(pool, pko ? window : undefined);
+  const repo = new ExecutionRepository(pool, pko ? window : undefined,undefined,focusedSubmissionTestSessionGuard);
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
   const selectedInstrument = { ...instrument(pko ? "pko_wse" : "test", pko ? "PKO" : "TEST"), currency, exchange };
@@ -357,7 +358,7 @@ describe("GPW3 durable single-entry window through production service", {skip: !
       assert.equal(f.state.dispatches,1);
       const spent=(await f.pool.query("SELECT * FROM gpw_windows")).rows[0];
       assert.equal(Number(spent.consumed_proposal_id),id);
-      const restarted=new ExecutionRepository(f.pool,f.window);
+      const restarted=new ExecutionRepository(f.pool,f.window,undefined,focusedSubmissionTestSessionGuard);
       assert.equal((await restarted.getGpwWindowStatus(accountId)).ok,false);
       await f.pool.query("UPDATE proposed_orders SET status='CANCELLED' WHERE id=$1",[id]);
       const retry=await f.submit(f.makeTicket(),"second-entry");

@@ -1,3 +1,4 @@
+import { isWithinStrategySession, hasUnknownStrategyVolume } from "./session-filter.js";
 import type { Candle, SecType } from "@ikbr/shared";
 import type {
   Strategy,
@@ -122,19 +123,6 @@ function paramsForSecType(_secType: SecType): MomentumBreakdownParams {
   };
 }
 
-function utcHour(ts: Date | string): number {
-  return new Date(ts).getUTCHours();
-}
-
-function isWithinUtcSession(
-  ts: Date | string,
-  startHour: number,
-  endHour: number,
-): boolean {
-  const hour = utcHour(ts);
-  return hour >= startHour && hour <= endHour;
-}
-
 function candleQuality(candle: Candle): {
   closeLocationPct: number;
   bodyPct: number;
@@ -178,6 +166,7 @@ export class MomentumBreakdownShortStrategy implements Strategy {
 
   generateSignal(context: StrategyContext): StrategySignal | null {
     this.lastRejectionReason = undefined;
+    if (hasUnknownStrategyVolume(context)) return this.reject("volume_evidence_unavailable");
 
     if (context.secType !== "STK" && context.secType !== "IND")
       return this.reject("sec_type_not_supported");
@@ -188,8 +177,8 @@ export class MomentumBreakdownShortStrategy implements Strategy {
 
     const params = paramsForSecType(context.secType);
     if (
-      !isWithinUtcSession(
-        context.latestCandle.ts,
+      !isWithinStrategySession(
+        context,
         params.sessionUtcStartHour,
         params.sessionUtcEndHour,
       )

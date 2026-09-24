@@ -1,3 +1,4 @@
+import { isWithinStrategySession, hasUnknownStrategyVolume } from "./session-filter.js";
 import type { Candle, SecType } from "@ikbr/shared";
 import type {
   Strategy,
@@ -62,19 +63,6 @@ function paramsForSecType(_secType: SecType): GapFadeShortParams {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
-}
-
-function utcHour(ts: Date | string): number {
-  return new Date(ts).getUTCHours();
-}
-
-function isWithinUtcSession(
-  ts: Date | string,
-  startHour: number,
-  endHour: number,
-): boolean {
-  const hour = utcHour(ts);
-  return hour >= startHour && hour <= endHour;
 }
 
 function averageVolume(
@@ -142,6 +130,7 @@ export class GapFadeShortStrategy implements Strategy {
 
   generateSignal(context: StrategyContext): StrategySignal | null {
     this.lastRejectionReason = undefined;
+    if (hasUnknownStrategyVolume(context)) return this.reject("volume_evidence_unavailable");
 
     if (
       !this.secTypes.includes(context.secType as (typeof this.secTypes)[number])
@@ -150,8 +139,8 @@ export class GapFadeShortStrategy implements Strategy {
 
     const params = paramsForSecType(context.secType);
     if (
-      !isWithinUtcSession(
-        context.latestCandle.ts,
+      !isWithinStrategySession(
+        context,
         params.sessionUtcStartHour,
         params.sessionUtcEndHour,
       )

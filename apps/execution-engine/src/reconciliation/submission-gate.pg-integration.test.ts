@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15 — authoritative submission-gate PG integration tests.
  *
@@ -132,7 +133,7 @@ suite("Authoritative reconciliation gate — submission tx (PG)", () => {
   it("active hold on identity blocks insertProposedFromTicket under the SAME advisory lock (no row inserted, no partial state)", async () => {
     const { pool, dbName } = await fresh("hold_blocks");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const reconRepo = new ReconciliationRepository(pool);
       const runId = await seedCleanRun(pool, ACCOUNT, SESSION_A);
       const identity = canonicaliseIdentity({
@@ -187,7 +188,7 @@ suite("Authoritative reconciliation gate — submission tx (PG)", () => {
   it("wrong-session latest run → reconciliation_unavailable(wrong_session), no INSERT", async () => {
     const { pool, dbName } = await fresh("wrong_session_gate");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       await seedCleanRun(pool, ACCOUNT, SESSION_B);
       await seedFreshSnapshot(pool, ACCOUNT, SESSION_A);
 
@@ -232,7 +233,7 @@ suite("Authoritative reconciliation gate — submission tx (PG)", () => {
   it("no run for current session → reconciliation_unavailable(never_ran_in_session)", async () => {
     const { pool, dbName } = await fresh("never_ran_gate");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       await seedFreshSnapshot(pool, ACCOUNT, SESSION_A);
 
       const outcome = await repo.insertProposedFromTicket(

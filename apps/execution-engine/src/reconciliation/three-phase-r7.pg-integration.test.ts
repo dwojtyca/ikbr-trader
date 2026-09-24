@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15 r7 §7 — production `SubmissionApplicationService` tests.
  *
@@ -109,7 +110,7 @@ function buildTestService(
 ): { service: SubmissionApplicationService; alerts: unknown[]; reconTriggered: () => number } {
   const alerts: unknown[] = [];
   let reconCount = 0;
-  const repo = new ExecutionRepository(pool);
+  const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
   const buildPrepared = (cid: string): PreparedBrokerOrder => ({
     // Contract / normalisedTicket / plan payloads are opaque to
     // the service; only `.legs` is inspected downstream. Cast so
@@ -332,7 +333,7 @@ suite("PR15 r7 §7/C — SUBMISSION_IDENTITY_MISMATCH from tryStartSubmissionWit
     const { pool, dbName } = await fresh("C_" + expectedReason);
     try {
       await seedFlatSnapshot(pool);
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const inserted = await pool.query<{ id: number }>(
         `INSERT INTO proposed_orders (
            instrument, conid, side, order_type, quantity, entry,

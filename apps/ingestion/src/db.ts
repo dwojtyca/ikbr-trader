@@ -1,11 +1,16 @@
 import { Pool } from "pg";
-import { AAPL_NATIVE_SOURCE, type AaplSchedule, type AaplScheduleEvidence, Candle, InstrumentContract, MarketState } from "@ikbr/shared";
+import { AAPL_NATIVE_SOURCE, sessionNativeSource, validateSessionSchedule, type InstrumentSessionIdentity, type SessionSchedule, type SessionScheduleEvidence, type AaplSchedule, type AaplScheduleEvidence, Candle, InstrumentContract, MarketState } from "@ikbr/shared";
 
 export class MarketRepository {
   constructor(private readonly pool: Pool) {}
 
   async init(): Promise<void> {
-    await this.pool.query(`CREATE TABLE IF NOT EXISTS aapl_schedule_state (
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Same lock as the execution migration runner: startup DDL must not race versioned migrations.
+      await client.query('SELECT pg_advisory_xact_lock($1)', [0x69_6b_62_72_31_34_32n.toString()]);
+    await client.query(`CREATE TABLE IF NOT EXISTS aapl_schedule_state (
   instrument_id text PRIMARY KEY CHECK (instrument_id = 'aapl_nasdaq'),
   generation bigint NOT NULL CHECK (generation > 0),
   status text NOT NULL CHECK (status IN ('READY', 'REFRESHING', 'FAILED')),
@@ -23,7 +28,7 @@ export class MarketRepository {
       "1w",
     ] as const) {
       const table = this.tableForTimeframe(timeframe);
-      await this.pool.query(`
+      await client.query(`
         CREATE TABLE IF NOT EXISTS ${table} (
           conid TEXT NOT NULL,
           symbol TEXT NOT NULL,
@@ -37,36 +42,85 @@ export class MarketRepository {
         );
       `);
 
-      await this.pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS source text`);
-      await this.pool.query(`
+      await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS source text`);
+      await client.query(`
         CREATE INDEX IF NOT EXISTS ${table}_symbol_ts_idx
         ON ${table} (symbol, ts DESC);
       `);
     }
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS instrument_contracts (
-        symbol TEXT PRIMARY KEY,
-        conid TEXT NOT NULL,
-        sec_type TEXT NOT NULL,
-        exchange TEXT,
-        primary_exchange TEXT,
-        currency TEXT,
-        local_symbol TEXT,
-        trading_class TEXT,
-        min_tick DOUBLE PRECISION,
-        display_name TEXT,
-        contract_json JSONB,
-        details_json JSONB,
-        source TEXT NOT NULL,
-        resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-    `);
+    await client.query(`CREATE TABLE IF NOT EXISTS instrument_session_schedules (
+  instrument_id text NOT NULL,
+  conid text NOT NULL,
+  use_rth boolean NOT NULL,
+  generation bigint NOT NULL CHECK (generation > 0),
+  status text NOT NULL CHECK (status IN ('READY', 'REFRESHING', 'FAILED')),
+  evidence jsonb,
+  updated_at timestamptz NOT NULL,
+  PRIMARY KEY (instrument_id, conid, use_rth)
+);
+CREATE TABLE IF NOT EXISTS instrument_contracts (
+  symbol text NOT NULL,
+  conid text PRIMARY KEY,
+  sec_type text NOT NULL,
+  exchange text,
+  primary_exchange text,
+  currency text,
+  local_symbol text,
+  trading_class text,
+  min_tick double precision,
+  display_name text,
+  contract_json jsonb,
+  details_json jsonb,
+  source text NOT NULL,
+  resolved_at timestamptz NOT NULL DEFAULT NOW()
+);
+DO $$
+DECLARE primary_name text;
+BEGIN
+  SELECT c.conname INTO primary_name FROM pg_constraint c
+    WHERE c.conrelid = 'instrument_contracts'::regclass AND c.contype = 'p'
+      AND pg_get_constraintdef(c.oid) <> 'PRIMARY KEY (conid)';
+  IF primary_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE instrument_contracts DROP CONSTRAINT %I', primary_name);
+    ALTER TABLE instrument_contracts ADD PRIMARY KEY (conid);
+  END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS instrument_contracts_symbol_idx ON instrument_contracts (symbol);
+`);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally { client.release(); }
 
-    await this.pool.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS instrument_contracts_conid_idx
-      ON instrument_contracts (conid);
-    `);
+  }
+
+  async getSessionSchedule(identity: InstrumentSessionIdentity): Promise<SessionScheduleEvidence | null> {
+    const { rows } = await this.pool.query(`SELECT generation, status, evidence, updated_at FROM instrument_session_schedules
+      WHERE instrument_id=$1 AND conid=$2 AND use_rth=$3`, [identity.instrumentId, String(identity.conId), identity.useRTH]);
+    const row = rows[0];
+    return row ? { generation: Number(row.generation), status: row.status, schedule: row.evidence, updatedAt: new Date(row.updated_at).toISOString() } : null;
+  }
+  async beginSessionSchedule(identity: InstrumentSessionIdentity, status: 'REFRESHING' | 'FAILED'): Promise<number> {
+    const { rows } = await this.pool.query(`INSERT INTO instrument_session_schedules (instrument_id, conid, use_rth, generation, status, evidence, updated_at)
+      VALUES ($1,$2,$3,1,$4,NULL,clock_timestamp()) ON CONFLICT (instrument_id,conid,use_rth) DO UPDATE
+      SET generation=instrument_session_schedules.generation+1,status=EXCLUDED.status,updated_at=clock_timestamp() RETURNING generation`,
+      [identity.instrumentId, String(identity.conId), identity.useRTH, status]);
+    return Number(rows[0].generation);
+  }
+  async finishSessionSchedule(identity: InstrumentSessionIdentity, generation: number, schedule: SessionSchedule | null): Promise<boolean> {
+    if (schedule) validateSessionSchedule(schedule, identity);
+    const result = await this.pool.query(`UPDATE instrument_session_schedules SET status=$5,evidence=COALESCE($6::jsonb,evidence),updated_at=clock_timestamp()
+      WHERE instrument_id=$1 AND conid=$2 AND use_rth=$3 AND generation=$4 AND status='REFRESHING'`,
+      [identity.instrumentId, String(identity.conId), identity.useRTH, generation, schedule ? 'READY' : 'FAILED', schedule ? JSON.stringify(schedule) : null]);
+    return result.rowCount === 1;
+  }
+  async getSessionCandles(identity: InstrumentSessionIdentity, timeframe: Candle['timeframe'], limit: number): Promise<Candle[]> {
+    const { rows } = await this.pool.query(`SELECT conid,symbol,ts,open,high,low,close,volume,source FROM ${this.tableForTimeframe(timeframe)}
+      WHERE conid=$1 AND symbol=$2 AND source=$3 ORDER BY ts DESC LIMIT $4`, [String(identity.conId), identity.symbol, sessionNativeSource(identity), limit]);
+    return rows.map(row => ({ conid: row.conid, symbol: row.symbol, timeframe, ts: new Date(row.ts), open: Number(row.open), high: Number(row.high),
+      low: Number(row.low), close: Number(row.close), volume: Number(row.volume), source: row.source })).reverse();
   }
 
   async getAaplSchedule(): Promise<AaplScheduleEvidence | null> {
@@ -98,9 +152,9 @@ export class MarketRepository {
         contract_json, details_json, source, resolved_at
       )
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
-      ON CONFLICT (symbol)
+      ON CONFLICT (conid)
       DO UPDATE SET
-        conid = EXCLUDED.conid,
+        symbol = EXCLUDED.symbol,
         sec_type = EXCLUDED.sec_type,
         exchange = EXCLUDED.exchange,
         primary_exchange = EXCLUDED.primary_exchange,
@@ -145,9 +199,10 @@ export class MarketRepository {
         low = EXCLUDED.low,
         close = EXCLUDED.close,
         volume = EXCLUDED.volume, source = EXCLUDED.source,
-        symbol = CASE WHEN EXCLUDED.source = 'ibkr_aapl_rth_native_v1' THEN EXCLUDED.symbol ELSE ${table}.symbol END
-      WHERE ${table}.source IS DISTINCT FROM 'ibkr_aapl_rth_native_v1'
-        OR EXCLUDED.source = 'ibkr_aapl_rth_native_v1';
+        symbol = CASE WHEN EXCLUDED.source IN ('ibkr_aapl_rth_native_v1', 'ibkr_session_rth_native_v1', 'ibkr_session_full_native_v1') THEN EXCLUDED.symbol ELSE ${table}.symbol END
+      WHERE (${table}.source IS NULL OR ${table}.source NOT IN ('ibkr_aapl_rth_native_v1', 'ibkr_session_rth_native_v1', 'ibkr_session_full_native_v1'))
+        OR EXCLUDED.source IN ('ibkr_session_rth_native_v1', 'ibkr_session_full_native_v1')
+        OR (${table}.source = 'ibkr_aapl_rth_native_v1' AND EXCLUDED.source = 'ibkr_aapl_rth_native_v1');
       `,
       [
         candle.conid,

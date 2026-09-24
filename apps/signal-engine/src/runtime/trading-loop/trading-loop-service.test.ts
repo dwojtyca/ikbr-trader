@@ -1,3 +1,4 @@
+import { fixtureSessionSchedule, fixtureSessionCandles } from '../strategy/session-native.fixture.js';
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -553,53 +554,10 @@ function makeMarketState(
   };
 }
 
-const TIMEFRAME_MS: Record<CandleTimeframe, number> = {
-  "1m": 60_000,
-  "5m": 300_000,
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "12h": 43_200_000,
-  "1d": 86_400_000,
-  "1w": 604_800_000,
-};
-
-function makeCandles(
-  bound: BoundInstrument,
-  timeframe: CandleTimeframe,
-  count: number,
-  endTs: number,
-): Candle[] {
-  const step = TIMEFRAME_MS[timeframe];
-  const out: Candle[] = [];
-  for (let i = 0; i < count; i += 1) {
-    const ts = new Date(endTs - (count - 1 - i) * step);
-    out.push({
-      conid: String(bound.conId),
-      symbol: bound.brokerSymbol,
-      timeframe,
-      ts,
-      open: 100 + i * 0.01,
-      high: 100 + i * 0.01 + 0.05,
-      low: 100 + i * 0.01 - 0.05,
-      close: 100 + i * 0.01,
-      volume: 1000 + i,
-    } as Candle);
-  }
-  return out;
-}
-
 function makeFullCandles(
   bound: BoundInstrument,
 ): Record<CandleTimeframe, Candle[]> {
-  return {
-    "1m": makeCandles(bound, "1m", 300, NOW_MS - 60_000),
-    "5m": makeCandles(bound, "5m", 60, NOW_MS - 300_000),
-    "1h": makeCandles(bound, "1h", 60, NOW_MS - 3_600_000),
-    "4h": makeCandles(bound, "4h", 60, NOW_MS - 14_400_000),
-    "12h": makeCandles(bound, "12h", 60, NOW_MS - 43_200_000),
-    "1d": makeCandles(bound, "1d", 60, NOW_MS - 86_400_000),
-    "1w": makeCandles(bound, "1w", 60, NOW_MS - 604_800_000),
-  };
+  return { ...fixtureSessionCandles(bound, new Date(NOW_MS)), "12h": [] };
 }
 
 interface LoaderRepoOverrides {
@@ -647,6 +605,7 @@ function makeLoaderRepo(
   const runtimeStates = overrides.runtimeStates ?? {};
 
   const spy: LoaderRepoSpy = {
+    getSessionScheduleEvidence: async (identity: import("@ikbr/shared").InstrumentSessionIdentity) => fixtureSessionSchedule(identity, new Date(NOW_MS)),
     candleCalls: [],
     contractCalls: [],
     marketStateCalls: [],
@@ -2203,7 +2162,6 @@ describe("GPW3 WSE strategy level wiring", () => {
     const instrument: Instrument = { ...makeInstrument("pko_wse", { executionPolicy: { ...AAPL_POLICY, quantity: 1, maxQuantity: 1 } }), brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" };
     const bound: BoundInstrument = { ...makeBound(instrument), brokerSymbol: "PKO", conId: 35146360, localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" };
     const candles = makeFullCandles(bound);
-    for (const tf of Object.keys(candles) as CandleTimeframe[]) candles[tf] = candles[tf].map(c => ({ ...c, source: "ibkr_wse_native_v1" }));
     const strategy = makeRealStrategy(AAPL_POLICY.strategyId);
     const original = strategy.generateSignal.bind(strategy);
     strategy.generateSignal = context => ({ ...original(context)!, suggestedEntry: 100.039, stopLoss: 99.997, takeProfit: 100.051 });
@@ -2230,7 +2188,7 @@ describe('AAPL bounded profile strategy inputs', () => {
     const instrument: Instrument = { ...makeInstrument('aapl_nasdaq', { executionPolicy: { ...AAPL_POLICY, quantity: 1, maxQuantity: 1 } }), brokerSymbol: 'AAPL', exchange: 'SMART' };
     const bound: BoundInstrument = { ...makeBound(instrument), brokerSymbol: 'AAPL', conId: 265598, localSymbol: 'AAPL', exchange: 'SMART' };
     const ticket = { ...makeTicket({ quantity: 1 }), instrumentId: instrument.id, exchange: 'SMART' };
-    const env = makeIntegrationSvc({ instruments: [instrument], bounds: [bound], loaderRepo: makeLoaderRepo(bound), runtimeBehavior: { ticket } });
+    const env = makeIntegrationSvc({ instruments: [instrument], bounds: [bound], loaderRepo: makeLoaderRepo(bound, { candles: { '1m': makeFullCandles(bound)['1m'].map(c => ({ ...c, source: undefined })) } }), runtimeBehavior: { ticket } });
     const report = await env.svc.runOnce();
     assert.equal(report.reports[0].outcome.kind, 'SKIPPED', JSON.stringify(report));
     assert.equal(env.loaderRepo.candleCalls.some(c => c.timeframe === '12h'), false);

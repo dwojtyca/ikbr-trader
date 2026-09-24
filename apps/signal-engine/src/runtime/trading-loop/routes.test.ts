@@ -1,3 +1,4 @@
+import { fixtureSessionSchedule, fixtureSessionCandles } from '../strategy/session-native.fixture.js';
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -77,52 +78,10 @@ function makeBindingAuthority(
   } as unknown as InstrumentBindingAuthority;
 }
 
-const TIMEFRAME_MS: Record<CandleTimeframe, number> = {
-  "1m": 60_000,
-  "5m": 300_000,
-  "1h": 3_600_000,
-  "4h": 14_400_000,
-  "12h": 43_200_000,
-  "1d": 86_400_000,
-  "1w": 604_800_000,
-};
-
-function makeCandles(
-  bound: BoundInstrument,
-  tf: CandleTimeframe,
-  count: number,
-  endTs: number,
-): Candle[] {
-  const step = TIMEFRAME_MS[tf];
-  const out: Candle[] = [];
-  for (let i = 0; i < count; i += 1) {
-    out.push({
-      conid: String(bound.conId),
-      symbol: bound.brokerSymbol,
-      timeframe: tf,
-      ts: new Date(endTs - (count - 1 - i) * step),
-      open: 100 + i * 0.01,
-      high: 100 + i * 0.01 + 0.05,
-      low: 100 + i * 0.01 - 0.05,
-      close: 100 + i * 0.01,
-      volume: 1000 + i,
-    } as Candle);
-  }
-  return out;
-}
-
 function makeRealLoaderRepo(
   bound: BoundInstrument,
 ): StrategyRuntimeStateRepository {
-  const candles: Record<CandleTimeframe, Candle[]> = {
-    "1m": makeCandles(bound, "1m", 300, NOW_MS - 60_000),
-    "5m": makeCandles(bound, "5m", 60, NOW_MS - 300_000),
-    "1h": makeCandles(bound, "1h", 60, NOW_MS - 3_600_000),
-    "4h": makeCandles(bound, "4h", 60, NOW_MS - 14_400_000),
-    "12h": makeCandles(bound, "12h", 60, NOW_MS - 43_200_000),
-    "1d": makeCandles(bound, "1d", 60, NOW_MS - 86_400_000),
-    "1w": makeCandles(bound, "1w", 60, NOW_MS - 604_800_000),
-  };
+  const candles: Partial<Record<CandleTimeframe, Candle[]>> = fixtureSessionCandles(bound, new Date(NOW_MS));
   const contract: InstrumentContract = {
     symbol: bound.brokerSymbol,
     conid: String(bound.conId),
@@ -144,6 +103,7 @@ function makeRealLoaderRepo(
     ts: new Date(NOW_MS - 1_000).toISOString(),
   };
   return {
+    getSessionScheduleEvidence: async (identity: import("@ikbr/shared").InstrumentSessionIdentity) => fixtureSessionSchedule(identity, new Date(NOW_MS)),
     async syncStrategyRuntimeStates() {
       return;
     },
@@ -220,6 +180,7 @@ function makeFakePortfolioManager(): StrategyPortfolioManager {
 
 function makeFakeRepo(): StrategyRuntimeStateRepository {
   return {
+    getSessionScheduleEvidence: async (identity: import("@ikbr/shared").InstrumentSessionIdentity) => fixtureSessionSchedule(identity, new Date(NOW_MS)),
     async syncStrategyRuntimeStates() {
       return;
     },

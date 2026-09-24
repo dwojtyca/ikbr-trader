@@ -1,3 +1,5 @@
+import { checkGpwWindow, parseGpwWindow } from "../gpw-window.js";
+import { createSessionEntryGuard } from "../session-entry-guard.js";
 import { executeTicketBodySchema } from "../execute-ticket-schema.js";
 import type { AaplWindow } from "../aapl-window.js";
 import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
@@ -5,7 +7,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import { newYorkMidnight, type AaplSchedule, InstrumentBindingAuthority, InstrumentRegistry, type Instrument, type SignalTicket } from "@ikbr/shared";
+import { newYorkMidnight, buildInstrumentSessionIdentity, type SessionSchedule, InstrumentBindingAuthority, InstrumentRegistry, type Instrument, type SignalTicket } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { runMigrations } from "../migrations.js";
 import { ExecutionRepository } from "../repository.js";
@@ -57,11 +59,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   const before = new Date(day); before.setUTCDate(before.getUTCDate()-20);
   // Synthetic broker calendar spans the current local day so PG tests remain
   // independent of wall-clock market hours, while all production checks run.
-  const schedule: AaplSchedule = { source:"ibkr_aapl_schedule_v1",conId:265598,symbol:"AAPL",exchange:"SMART",currency:"USD",secType:"STK",timeZone:"America/New_York",
-    coverageStart:midnight(before),coverageEnd:midnight(next),requestedAt:new Date(Date.now()-1000).toISOString(),receivedAt:new Date(Date.now()-1000).toISOString(),
-    sessions:[{date,start:midnight(day),end:midnight(next)}] };
-  await pool.query("INSERT INTO aapl_schedule_state VALUES ('aapl_nasdaq',1,'READY',$1,clock_timestamp())",[JSON.stringify(schedule)]);
-  const repo = new ExecutionRepository(pool, undefined, window);
+  const repo = new ExecutionRepository(pool, undefined, window, createSessionEntryGuard(id => authority.getBoundInstrument(id)));
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
   const selectedInstrument = { ...instrument(pko ? "aapl_nasdaq" : "test", pko ? "AAPL" : "TEST"), currency, exchange };
@@ -71,6 +69,11 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
       tradingClass: selectedInstrument.brokerSymbol, exchange, currency, minTick: 0.01 },
     { instrumentId: "other", conId: 456, localSymbol: "OTHER", tradingClass: "OTHER", exchange: "SMART", currency: "USD", minTick: 0.01 },
   ]);
+  const bound = authority.getBoundInstrument(selectedInstrument.id)!;
+  const schedule: SessionSchedule = { source:"ibkr_session_schedule_v1",identity:buildInstrumentSessionIdentity(bound.instrument,bound),
+    coverageStart:midnight(before),coverageEnd:midnight(next),requestedAt:new Date(Date.now()-1000).toISOString(),receivedAt:new Date(Date.now()-1000).toISOString(),
+    sessions:[{date,start:midnight(day),end:midnight(next)}] };
+  await pool.query("INSERT INTO instrument_session_schedules VALUES ($1,$2,true,1,'READY',$3,clock_timestamp())",[selectedInstrument.id,String(bound.conId),JSON.stringify(schedule)]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,
     alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false, expireWindowDuringPrepare: false,
     wseFailure: "" as string, invalidateScheduleDuringPrepare: false,
@@ -105,7 +108,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
     },
     prepareBrokerPlan: async ({ order, clientOrderId }) => {
       state.prepares++;
-      if (state.invalidateScheduleDuringPrepare) await pool.query("UPDATE aapl_schedule_state SET generation=generation+1,status='REFRESHING',updated_at=clock_timestamp()");
+      if (state.invalidateScheduleDuringPrepare) await pool.query("UPDATE instrument_session_schedules SET generation=generation+1,status='REFRESHING',updated_at=clock_timestamp()");
       if (state.expireWindowDuringPrepare) await pool.query("SELECT pg_sleep(2.2)");
       if (state.ageDuringPrepare) await pool.query("SELECT pg_sleep(0.15)");
       if (state.rejectDuringPrepare) await repo.rejectPendingProposal(order.id!, "concurrent rejection");
@@ -140,7 +143,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   };
   const approve = async (id: number) => pool.query(`UPDATE proposal_ai_reviews SET status='APPROVED', decision_json=$2,
     decided_at=clock_timestamp(), delivery_started_at=clock_timestamp() WHERE proposed_order_id=$1`, [id, JSON.stringify(decision)]);
-  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve, window, makeTicket, schedule,
+  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve, window, makeTicket, schedule, authority,
     close: async () => {
       const disconnected = new Promise<void>(resolve => {
         let remaining = pool.totalCount;
@@ -194,7 +197,7 @@ describe("AAPL durable single-entry window through production service", {skip: !
       assert.equal(f.state.dispatches,1);
       const spent=(await f.pool.query("SELECT * FROM aapl_windows")).rows[0];
       assert.equal(Number(spent.consumed_proposal_id),id);
-      const restarted=new ExecutionRepository(f.pool,undefined,f.window);
+      const restarted=new ExecutionRepository(f.pool,undefined,f.window,createSessionEntryGuard(id => f.authority.getBoundInstrument(id)));
       assert.equal((await restarted.getAaplWindowStatus(accountId)).ok,false);
       await f.pool.query("UPDATE proposed_orders SET status='CANCELLED' WHERE id=$1",[id]);
       const retry=await f.submit(f.makeTicket(),"second-entry");
@@ -264,15 +267,15 @@ describe("AAPL authoritative session evidence at production execution phases", {
   for (const mode of ["missing", "failed", "refreshing", "stale", "identity", "coverage", "early close"]) it(`${mode} calendar blocks insertion without a proposal`, async () => {
     const f = await fixture();
     try {
-      if (mode === "missing") await f.pool.query("DELETE FROM aapl_schedule_state");
-      else if (mode === "failed" || mode === "refreshing") await f.pool.query("UPDATE aapl_schedule_state SET status=$1,generation=generation+1",[mode.toUpperCase()]);
+      if (mode === "missing") await f.pool.query("DELETE FROM instrument_session_schedules");
+      else if (mode === "failed" || mode === "refreshing") await f.pool.query("UPDATE instrument_session_schedules SET status=$1,generation=generation+1",[mode.toUpperCase()]);
       else {
         const changed = structuredClone(f.schedule);
         if (mode === "stale") { changed.requestedAt = new Date(Date.now()-7*3600000).toISOString(); changed.receivedAt = changed.requestedAt; }
-        if (mode === "identity") changed.conId = 1 as 265598;
+        if (mode === "identity") changed.identity.conId = 1;
         if (mode === "coverage") changed.coverageStart = new Date(Date.now()-60000).toISOString();
         if (mode === "early close") changed.sessions[0].end = new Date(Date.now()+1000).toISOString();
-        await f.pool.query("UPDATE aapl_schedule_state SET evidence=$1",[JSON.stringify(changed)]);
+        await f.pool.query("UPDATE instrument_session_schedules SET evidence=$1",[JSON.stringify(changed)]);
       }
       const result = await f.submit();
       assert.notEqual(result.kind,"awaiting_ai",JSON.stringify(result));
@@ -283,7 +286,7 @@ describe("AAPL authoritative session evidence at production execution phases", {
   it("failure before prepare blocks AI-approved order without broker preparation", async () => {
     const f=await fixture();
     try { const id=await f.create();await f.approve(id);
-      await f.pool.query("UPDATE aapl_schedule_state SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
+      await f.pool.query("UPDATE instrument_session_schedules SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
       assert.equal((await f.execute(id)).kind,"risk_rejected");assert.equal(f.state.prepares,0);assert.equal(f.state.dispatches,0);
     } finally {await f.close();}
   });
@@ -298,9 +301,9 @@ describe("AAPL authoritative session evidence at production execution phases", {
   it("post-claim refresh fails the final dispatch permit and cannot replenish consumed budget", async () => {
     const f=await fixture();
     try {const id=await f.create();await f.approve(id);
-      const original=f.repo.withAaplDispatchPermit.bind(f.repo);
-      f.repo.withAaplDispatchPermit=async (order,account,send)=>{
-        await f.pool.query("UPDATE aapl_schedule_state SET status='REFRESHING',generation=generation+1,updated_at=clock_timestamp()");
+      const original=f.repo.withEntryDispatchPermit.bind(f.repo);
+      f.repo.withEntryDispatchPermit=async (order,account,send)=>{
+        await f.pool.query("UPDATE instrument_session_schedules SET status='REFRESHING',generation=generation+1,updated_at=clock_timestamp()");
         return original(order,account,send);
       };
       assert.equal((await f.execute(id)).kind,"execution_error");assert.equal(f.state.dispatches,0);
@@ -312,11 +315,87 @@ describe("AAPL authoritative session evidence at production execution phases", {
     const f=await fixture();let writer;
     try {const id=await f.create();await f.approve(id);await f.execute(id);
       writer=await f.pool.connect();await writer.query("BEGIN");
-      await writer.query("UPDATE aapl_schedule_state SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
+      await writer.query("UPDATE instrument_session_schedules SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
       let sends=0;
-      const permit=f.repo.withAaplDispatchPermit((await f.repo.getProposedOrderById(id))!,accountId,()=>{sends++;});
+      const permit=f.repo.withEntryDispatchPermit((await f.repo.getProposedOrderById(id))!,accountId,()=>{sends++;});
       const denied=assert.rejects(permit,/schedule_unavailable/);
       await writer.query("COMMIT");await denied;assert.equal(sends,0);
     } finally {writer?.release();await f.close();}
+  });
+});
+
+describe('generic production calendar guard for arbitrary bound entries', {skip:!connection}, () => {
+  it('arbitrary configured instrument follows real calendar through proposal, AI, claim and dispatch',async()=>{
+    const f=await fixture('USD',false);
+    try {const id=await f.create();await f.approve(id);const result=await f.execute(id);
+      assert.equal(result.kind,'resumed',JSON.stringify(result));assert.equal(f.state.prepares,1);assert.equal(f.state.dispatches,1);
+      assert.ok((await f.repo.getProposedOrderById(id))!.executionAttemptedAt);
+    }finally{await f.close();}
+  });
+  for(const mode of ['missing','refreshing','wrong mode','wrong contract','stale','closed'] as const)it(`${mode} generic evidence prevents proposal creation`,async()=>{
+    const f=await fixture('USD',false);
+    try {
+      if(mode==='missing')await f.pool.query('DELETE FROM instrument_session_schedules');
+      if(mode==='refreshing')await f.pool.query("UPDATE instrument_session_schedules SET status='REFRESHING',generation=generation+1");
+      if(mode==='wrong mode')await f.pool.query('UPDATE instrument_session_schedules SET use_rth=false');
+      if(mode==='wrong contract')await f.pool.query("UPDATE instrument_session_schedules SET conid='999'");
+      if(mode==='stale')await f.pool.query("UPDATE instrument_session_schedules SET updated_at=clock_timestamp()-interval '7 hours'");
+      if(mode==='closed'){const changed=structuredClone(f.schedule);changed.sessions[0].end=new Date(Date.now()-1000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET evidence=$1',[JSON.stringify(changed)]);}
+      const result=await f.submit();assert.equal(result.kind,'execution_error',JSON.stringify(result));
+      assert.equal((await f.pool.query('SELECT count(*) FROM proposed_orders')).rows[0].count,'0');assert.equal(f.state.prepares+f.state.dispatches,0);
+    }finally{await f.close();}
+  });
+  for(const phase of ['prepare','claim','dispatch'] as const)it(`calendar invalidation blocks generic ${phase} and never writes broker`,async()=>{
+    const f=await fixture('USD',false);
+    try {const id=await f.create();await f.approve(id);
+      if(phase==='prepare')await f.pool.query("UPDATE instrument_session_schedules SET status='FAILED',generation=generation+1");
+      if(phase==='claim')f.state.invalidateScheduleDuringPrepare=true;
+      if(phase==='dispatch'){const original=f.repo.withEntryDispatchPermit.bind(f.repo);f.repo.withEntryDispatchPermit=async(order,account,send)=>{
+        await f.pool.query("UPDATE instrument_session_schedules SET status='FAILED',generation=generation+1");return original(order,account,send);
+      };}
+      const result=await f.execute(id);assert.equal(result.kind,phase==='prepare'?'risk_rejected':phase==='claim'?'submission_identity_mismatch':'execution_error',JSON.stringify(result));assert.equal(f.state.dispatches,0);
+      assert.equal(Boolean((await f.repo.getProposedOrderById(id))!.executionAttemptedAt),phase==='dispatch');
+      if(phase==='dispatch'){await f.execute(id);assert.equal(f.state.dispatches,0);}
+    }finally{await f.close();}
+  });
+  it('unbound direct tickets and legacy persisted proposals fail closed, and omitted guard cannot enable entries',async()=>{
+    const f=await fixture('USD',false);
+    try {
+      const result=await f.submit(f.makeTicket({instrumentId:undefined}));assert.equal(result.kind,'execution_error');
+      assert.equal((await f.pool.query('SELECT count(*) FROM proposed_orders')).rows[0].count,'0');
+      const id=await f.create();await f.approve(id);await f.pool.query('UPDATE proposed_orders SET instrument_id=NULL WHERE id=$1',[id]);
+      const resumed=await f.execute(id);assert.deepEqual(resumed,{kind:'risk_rejected',reason:'session_entry_binding_required'});
+      assert.equal(f.state.prepares+f.state.dispatches,0);
+      assert.deepEqual(await new ExecutionRepository(f.pool).checkSessionEntry(f.makeTicket()),{ok:false,reason:'session_entry_guard_unavailable'});
+      assert.deepEqual(await createSessionEntryGuard(id=>f.authority.getBoundInstrument(id))(f.pool,{...f.makeTicket(),positionEffect:'CLOSE_OR_REDUCE'}),{ok:false,reason:'session_close_requires_lifecycle'});
+      for(const instrumentId of ['test',undefined]) { const forged=await f.submit(f.makeTicket({instrumentId,positionEffect:'CLOSE_OR_REDUCE'}),'forged-close-'+String(instrumentId)); assert.notEqual(forged.kind,'awaiting_ai');assert.notEqual(forged.kind,'resumed'); }
+      assert.equal(f.state.dispatches,0);
+    }finally{await f.close();}
+  });
+});
+
+
+describe('PKO morning window uses the same production calendar guard', {skip:!connection},()=>{
+  it('Warsaw09:01 is allowed only by a matching active session; holiday and shortened-window crossing reject',async()=>{
+    const f=await fixture('USD',false);
+    try {
+      const profile:Instrument={...instrument('pko_wse','PKO'),exchange:'WSE',currency:'PLN',session:{useRegularTradingHours:true,timezone:'Europe/Warsaw',sessionTemplate:'wse_stock_rth'}};
+      const authority=new InstrumentBindingAuthority(new InstrumentRegistry([profile]),[{instrumentId:'pko_wse',conId:35146360,localSymbol:'PKO',tradingClass:'PKO',exchange:'WSE',currency:'PLN',minTick:.01}]);
+      const bound=authority.getBoundInstrument('pko_wse')!;
+      const clock='2026-09-24T07:01:00.000Z';
+      const calendar:SessionSchedule={source:'ibkr_session_schedule_v1',identity:buildInstrumentSessionIdentity(bound.instrument,bound),coverageStart:'2026-09-01T00:00:00.000Z',coverageEnd:'2026-09-25T00:00:00.000Z',requestedAt:'2026-09-24T07:00:00.000Z',receivedAt:'2026-09-24T07:00:00.000Z',sessions:[{date:'2026-09-24',start:'2026-09-24T07:00:00.000Z',end:'2026-09-24T14:45:00.000Z'}]};
+      await f.pool.query("INSERT INTO instrument_session_schedules VALUES('pko_wse','35146360',true,1,'READY',$1,$2)",[JSON.stringify(calendar),calendar.receivedAt]);
+      // Only the clock is fixed; both production guard functions query real PG evidence.
+      const db={query:async(sql:string,values?:unknown[])=>{const result=await f.pool.query(sql,values);if(sql.includes('clock_timestamp() AS now'))for(const row of result.rows)row.now=new Date(clock);return result;}} as unknown as Pick<Pool,'query'>;
+      const window=parseGpwWindow({GPW_RUN_ID:'morning',GPW_RUN_ACCOUNT:accountId,GPW_RUN_START:'2026-09-24T07:00:00Z',GPW_RUN_END:'2026-09-24T07:30:00Z'})!;
+      const guard=createSessionEntryGuard(id=>authority.getBoundInstrument(id));
+      assert.equal((await checkGpwWindow(db,window,accountId,undefined,false,guard)).ok,true);
+      calendar.sessions[0].end='2026-09-24T07:15:00.000Z';
+      await f.pool.query("UPDATE instrument_session_schedules SET evidence=$1 WHERE instrument_id='pko_wse'",[JSON.stringify(calendar)]);
+      assert.equal((await checkGpwWindow(db,window,accountId,undefined,false,guard)).ok,false);
+      calendar.sessions=[{date:'2026-09-23',start:'2026-09-23T07:00:00.000Z',end:'2026-09-23T14:45:00.000Z'}];
+      await f.pool.query("UPDATE instrument_session_schedules SET evidence=$1 WHERE instrument_id='pko_wse'",[JSON.stringify(calendar)]);
+      assert.equal((await checkGpwWindow(db,window,accountId,undefined,false,guard)).ok,false);
+    }finally{await f.close();}
   });
 });

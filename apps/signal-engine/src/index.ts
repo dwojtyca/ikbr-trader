@@ -1,14 +1,13 @@
 import { HttpWseStrategyMetadataReader } from "./runtime/trading-loop/wse-metadata-reader.js";
 import Fastify from "fastify";
-import { legacyProducerOwnsSymbol } from "./runtime/legacy-producer-scope.js";
+import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
-import { ProposedOrder, buildConfiguredInstrumentRegistry } from "@ikbr/shared";
+import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
 import { buildInstrumentBindingAuthority } from "@ikbr/shared";
 import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
-import { SignalEngine } from "./signal-engine.js";
 import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
 import { createStrategies } from "./strategies/strategy-registry.js";
@@ -49,141 +48,8 @@ const repo = new SignalRepository(pool, redis);
 let tradingLoopService: TradingLoopService | null = null;
 const strategyToggleSchema = z.object({ enabled: z.boolean() });
 const strategies = createStrategies();
-const engine = new SignalEngine(repo, {
-  strategies,
-  minCandles: config.SIGNAL_MIN_CANDLES,
-  maxSpreadBps: config.SIGNAL_MAX_SPREAD_BPS,
-  minVolume1m: config.SIGNAL_MIN_CANDLE_VOLUME_1M,
-  volumeFilterMode: config.volumeFilterMode,
-  minConfidence: config.SIGNAL_MIN_CONFIDENCE,
-  lmtEntryMode: config.SIGNAL_LMT_ENTRY_MODE,
-  lmtEntryBufferBps: config.SIGNAL_LMT_ENTRY_BUFFER_BPS,
-  fractionalSymbols: config.fractionalSymbols,
-  fractionalQuantityStep: config.SIGNAL_FRACTIONAL_QUANTITY_STEP,
-  minStopBpsBySecType: {
-    STK: config.SIGNAL_MIN_STOP_BPS_STK,
-    IND: config.SIGNAL_MIN_STOP_BPS_IND,
-    CMDTY: config.SIGNAL_MIN_STOP_BPS_CMDTY,
-  },
-  maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
-  baseCurrency: config.baseCurrency,
-  currencyBySymbol: config.currencyBySymbol,
-  priceMultiplierBySymbol: config.priceMultiplierOverrides,
-  executionBaseUrl: config.SIGNAL_EXECUTION_BASE_URL,
-  executionApiToken: config.EXECUTION_API_TOKEN ?? "",
-  strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
-  riskLimits: {
-    accountEquity: config.SIGNAL_ACCOUNT_EQUITY,
-    maxRiskPerTradePct: config.SIGNAL_MAX_RISK_PER_TRADE_PCT,
-    targetRiskPerTradePct: config.SIGNAL_TARGET_RISK_PER_TRADE_PCT,
-    maxExposurePct: config.SIGNAL_MAX_EXPOSURE_PCT,
-    maxNotionalPerTradePct: config.MAX_NOTIONAL_PER_TRADE_PCT,
-    maxOpenPositions: config.SIGNAL_MAX_OPEN_POSITIONS,
-  },
-  onStrategyError: (strategyId, error) => {
-    app.log.error(
-      { strategyId, err: error },
-      "signal-engine: strategy evaluation threw",
-    );
-  },
-  onStrategyStateError: (strategyId, error) => {
-    app.log.error(
-      { strategyId, err: error },
-      "signal-engine: strategy runtime state read threw",
-    );
-  },
-});
-
-let lastSignalRunStartedAt: Date | null = null;
-let lastSignalRunFinishedAt: Date | null = null;
-let lastSignalRunSource: "manual" | "candle" | "startup" | null = null;
-let lastSignalRunSymbols: string[] = [];
-let lastSignalGeneratedCount = 0;
-
-async function runAndPersist(
-  symbols = config.watchlistSymbols,
-  generatedFromCandleTs?: Date,
-  source: "manual" | "candle" | "startup" = generatedFromCandleTs
-    ? "candle"
-    : "manual",
-) {
-  lastSignalRunStartedAt = new Date();
-  lastSignalRunSource = source;
-  lastSignalRunSymbols = [...symbols];
-  const results: Array<{ id: number; order: ProposedOrder }> = [];
-  await repo.expireStalePendingSignals(config.SIGNAL_PROPOSAL_TTL_MS);
-  const exposureSnapshot = await repo.getExposureSnapshot(
-    config.SIGNAL_EXECUTION_BASE_URL,
-    config.EXECUTION_API_TOKEN ?? "",
-  );
-  for (const symbol of symbols) {
-    if (!legacyProducerOwnsSymbol(defaultInstrumentRegistry.listAll(), symbol)) continue;
-    let order: ProposedOrder;
-    try {
-      order = await engine.runForSymbol(
-        symbol,
-        exposureSnapshot,
-        generatedFromCandleTs,
-      );
-    } catch (error) {
-      order = {
-        instrument: symbol,
-        side: "HOLD",
-        orderType: "LMT",
-        quantity: 0,
-        reason: `Signal engine error: ${(error as Error).message}`,
-        confidence: 0,
-        timestamp: new Date().toISOString(),
-        riskCheckStatus: "REJECT",
-        status: "REJECTED",
-        strategy: engine.strategyId,
-        generatedFromCandleTs,
-      };
-    }
-
-    const id = await repo.insertProposedOrder(order);
-    if (order.status === "PROPOSED") {
-      await repo.supersedePendingSignalsForInstrument(symbol, id);
-    }
-    results.push({ id, order });
-  }
-  lastSignalGeneratedCount = results.length;
-  lastSignalRunFinishedAt = new Date();
-  return results;
-}
-
-app.get("/health", async () => ({
-  ok: true,
-  signalEventDriven: config.signalEventDriven,
-  lastSignalRunStartedAt,
-  lastSignalRunFinishedAt,
-  lastSignalRunSource,
-  lastSignalRunSymbols,
-  lastSignalGeneratedCount,
-}));
-
-app.post("/signals/run-once", async (request) => {
-  const body = (request.body ?? {}) as { symbols?: string[] };
-  const symbols = body.symbols?.length ? body.symbols : config.watchlistSymbols;
-  const results = await runAndPersist(symbols, undefined, "manual");
-  return { generated: results.length, results };
-});
-
-app.post("/signals/on-candle", async (request) => {
-  const body = (request.body ?? {}) as { symbol?: string; candleTs?: string };
-  const symbol = body.symbol?.trim();
-  if (!symbol) {
-    throw new Error("symbol is required");
-  }
-
-  const candleTs = body.candleTs ? new Date(body.candleTs) : new Date();
-  if (Number.isNaN(candleTs.getTime())) {
-    throw new Error(`Invalid candleTs: ${body.candleTs}`);
-  }
-
-  const results = await runAndPersist([symbol], candleTs, "candle");
-  return { generated: results.length, skipped: false, results };
-});
+app.get("/health", async () => ({ ok: true, signalEventDriven: false, producer: "bound_runtime" }));
+await app.register(unavailableLegacySignalRoutes);
 
 app.get("/signals/recent", async (request) => {
   const query = (request.query ?? {}) as { limit?: string };
@@ -503,15 +369,7 @@ async function main(): Promise<void> {
     tradingLoopService.start();
   }
 
-  if (config.signalEventDriven) {
-    app.log.info(
-      "event-driven signal generation enabled; waiting for ingestion candle callbacks",
-    );
-  } else {
-    app.log.warn(
-      "signal-event-driven disabled, but interval scheduler has been removed; use /signals/run-once or enable candle callbacks",
-    );
-  }
+  app.log.info("legacy signal callbacks disabled; verified bound trading runtime is required");
 }
 
 main().catch((err) => {

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { TwsExecutionClient, type PreparedBrokerOrder } from "./tws-execution-client.js";
 
-for (const stage of ["missing", "expired", "during connect", "before first wire", "valid", "close", "permit missing", "permit rejected", "permit timeout", "permit duplicate", "permit expired", "permit commit failure", "permit disconnect"]) {
-  test(`AAPL dispatcher ${stage} preserves entry deadline and close exemption`, async t => {
+for (const symbol of ["AAPL", "ARBITRARY"]) for (const stage of ["missing", "expired", "during connect", "before first wire", "valid", "close", "permit missing", "permit rejected", "permit timeout", "permit duplicate", "permit expired", "permit commit failure", "permit disconnect"]) {
+  test(`${symbol} dispatcher ${stage} preserves entry deadline and close exemption`, async t => {
     t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-24T15:00:00Z") });
     let writes = 0, expireOnLog = false;
     class FakeIb extends EventEmitter {
@@ -18,8 +18,9 @@ for (const stage of ["missing", "expired", "during connect", "before first wire"
       undefined, undefined, undefined, { ib });
     await client.connect(); t.after(() => client.disconnect());
     const close = stage === "close";
-    const prepared: PreparedBrokerOrder = { contract: { conId: 265598, symbol: "AAPL", secType: "STK", exchange: "SMART", currency: "USD" },
-      normalizedTicket: { instrument: "AAPL", instrumentId: "aapl_nasdaq", conid: "265598", side: close ? "SELL" : "BUY",
+    const conid = symbol === "AAPL" ? "265598" : "998877";
+    const prepared: PreparedBrokerOrder = { contract: { conId: Number(conid), symbol, secType: "STK", exchange: "SMART", currency: "USD" },
+      normalizedTicket: { instrument: symbol, instrumentId: symbol === "AAPL" ? "aapl_nasdaq" : "arbitrary", conid, side: close ? "SELL" : "BUY",
         positionEffect: close ? "CLOSE_OR_REDUCE" : "OPEN_OR_ADD", quantity: 1, orderType: "LMT", entry: 100,
         reason: "fixture", confidence: 1, riskCheckStatus: "PASS", timestamp: new Date().toISOString() },
       legs: [{ role: "PARENT", roleOrdinal: 0, brokerOrderId: "20", orderRef: "fixture" }],
@@ -56,6 +57,6 @@ for (const stage of ["missing", "expired", "during connect", "before first wire"
       await assert.rejects(dispatch);
       assert.equal(writes, ["permit duplicate", "permit commit failure"].includes(stage) ? 1 : 0);
       if (lateSend) assert.throws(lateSend, /permit_inactive/);
-    } else { await assert.rejects(dispatch, /aapl_window_dispatch_expired/); assert.equal(writes, 0); }
+    } else { await assert.rejects(dispatch, /aapl_window_dispatch_expired|session_dispatch_expired/); assert.equal(writes, 0); }
   });
 }

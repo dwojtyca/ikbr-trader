@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15 r5 §4-§6 — correlated observation link path, plan
  * persistence exact-match invariants, and full production-flow
@@ -402,7 +403,7 @@ suite("PR15 r5 §5 — plan persistence exact-match (PG)", () => {
   it("preexisting link row same orderRef but DIFFERENT brokerOrderId → plan_collision, marker NULL", async () => {
     const { pool, dbName } = await fresh("pers1");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-p1";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -444,7 +445,7 @@ suite("PR15 r5 §5 — plan persistence exact-match (PG)", () => {
   it("preexisting link row DIFFERENT role/ordinal → plan_collision", async () => {
     const { pool, dbName } = await fresh("pers2");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-p2";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -481,7 +482,7 @@ suite("PR15 r5 §5 — plan persistence exact-match (PG)", () => {
   it("extra unrelated leg row for same proposedOrder → plan_collision (leg count guard)", async () => {
     const { pool, dbName } = await fresh("pers3");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-p3";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -524,7 +525,7 @@ suite("PR15 r5 §5 — plan persistence exact-match (PG)", () => {
   it("full plan already persisted with EXACT match → treated as compatible; second call returns not_claimed after marker set by first (no new IDs)", async () => {
     const { pool, dbName } = await fresh("pers4");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-p4";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -594,7 +595,7 @@ suite("PR15 r5 §6 — production flow prepare → commit → dispatch (PG)", ()
   it("dispatch runs ONLY after commit, receives EXACT persisted brokerOrderIds + orderRefs", async () => {
     const { pool, dbName } = await fresh("prod1");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-prod-ok";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -648,7 +649,7 @@ suite("PR15 r5 §6 — production flow prepare → commit → dispatch (PG)", ()
   it("crash BEFORE commit (guard blocks) → NO marker, NO plan, NO dispatch", async () => {
     const { pool, dbName } = await fresh("prod2");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-prod-nomarker";
       const po = await seedPO(pool, cid);
       // NO broker_snapshot_syncs row → position guard blocks with
@@ -695,7 +696,7 @@ suite("PR15 r5 §6 — production flow prepare → commit → dispatch (PG)", ()
   it("crash AFTER commit BEFORE dispatch → plan and marker present; retry produces not_claimed (no re-dispatch of NEW IDs)", async () => {
     const { pool, dbName } = await fresh("prod3");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-prod-crash";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -763,7 +764,7 @@ suite("PR15 r5 §6 — production flow prepare → commit → dispatch (PG)", ()
   it("partial dispatch + exception → status NOT CANCELLED, marker and plan preserved, retry produces not_claimed (no re-dispatch)", async () => {
     const { pool, dbName } = await fresh("prod4");
     try {
-      const repo = new ExecutionRepository(pool);
+      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const cid = "r5-prod-partial";
       const po = await seedPO(pool, cid);
       await seedFlatSnapshot(pool, "DU-1", "sess-1");

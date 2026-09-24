@@ -1,3 +1,4 @@
+import type { InstrumentSessionIdentity, SessionScheduleEvidence } from '@ikbr/shared';
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import {
@@ -513,14 +514,13 @@ export class SignalRepository {
              contract_json, details_json, source, resolved_at
       FROM instrument_contracts
       WHERE UPPER(symbol) = UPPER($1)
-         OR ($2::text IS NOT NULL AND conid = $2::text)
-      ORDER BY CASE WHEN UPPER(symbol) = UPPER($1) THEN 0 ELSE 1 END
-      LIMIT 1
+        AND ($2::text IS NULL OR conid = $2::text)
+      LIMIT 2
       `,
       [symbol, conid ?? null],
     );
     const row = result.rows[0];
-    if (!row) return null;
+    if (!row || result.rows.length !== 1) return null;
 
     return {
       symbol: String(row.symbol),
@@ -592,6 +592,13 @@ export class SignalRepository {
    * `conid` differs from the bound contract, even when the
    * broker symbol collides (rollovers, share-class migrations).
    */
+  async getSessionScheduleEvidence(identity: InstrumentSessionIdentity): Promise<SessionScheduleEvidence | null> {
+    const result = await this.pool.query(`SELECT generation,status,evidence,updated_at FROM instrument_session_schedules WHERE instrument_id=$1 AND conid=$2 AND use_rth=$3`, [identity.instrumentId, String(identity.conId), identity.useRTH]);
+    const row = result.rows[0];
+    return row ? { generation: Number(row.generation), status: row.status,
+      updatedAt: new Date(row.updated_at).toISOString(), schedule: row.evidence } : null;
+  }
+
   async getAaplScheduleEvidence(): Promise<AaplScheduleEvidence | null> {
     const result = await this.pool.query(`SELECT generation,status,evidence,updated_at FROM aapl_schedule_state WHERE instrument_id='aapl_nasdaq'`);
     const row = result.rows[0];

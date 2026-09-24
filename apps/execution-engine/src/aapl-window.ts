@@ -1,5 +1,5 @@
 import type { PoolClient, Pool } from 'pg';
-import { checkAaplSessionWindow, type AaplScheduleEvidence } from '@ikbr/shared';
+import { unavailableSessionEntryGuard, type SessionEntryGuard } from './session-entry-guard.js';
 
 export interface AaplWindow { runId: string; accountId: string; startsAt: string; endsAt: string; tradeDate: string }
 export function isAaplIdentity(order: { instrumentId?: string | null; instrument?: string; conid?: string | null }): boolean {
@@ -27,7 +27,7 @@ export function parseAaplWindow(env: Record<string, unknown>): AaplWindow | unde
 
 type Db = Pick<PoolClient | Pool,'query'>;
 export async function checkAaplWindow(db: Db, config: AaplWindow | undefined, accountId: string,
-  proposalId?: number, dispatch=false): Promise<{ok:true;endsAtMs:number}|{ok:false;reason:string}> {
+  proposalId?: number, dispatch=false, sessionGuard: SessionEntryGuard = unavailableSessionEntryGuard): Promise<{ok:true;endsAtMs:number}|{ok:false;reason:string}> {
   const deny=(reason:string)=>({ok:false as const,reason:`aapl_window_${reason}`});
   if (!config) return deny('unconfigured');
   if(config.accountId!==accountId) return deny('account_mismatch');
@@ -35,13 +35,10 @@ export async function checkAaplWindow(db: Db, config: AaplWindow | undefined, ac
     LEFT JOIN aapl_windows w ON w.run_id=$1`,[config.runId]);
   const row=result.rows[0];let now=new Date(row.now).getTime();
   if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
-  const calendar = await db.query("SELECT generation,status,evidence,updated_at FROM aapl_schedule_state WHERE instrument_id='aapl_nasdaq' FOR SHARE");
-  const proof = calendar.rows[0];
+  const session = await sessionGuard(db, { instrumentId: 'aapl_nasdaq', instrument: 'AAPL', conid: '265598' }, config);
+  if (!session.ok) return deny(session.reason);
   now = new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime();
   if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
-  try {
-    checkAaplSessionWindow(proof ? { generation: Number(proof.generation), status: proof.status, schedule: proof.evidence, updatedAt: new Date(proof.updated_at).toISOString() } as AaplScheduleEvidence : null, now, Date.parse(config.startsAt), Date.parse(config.endsAt));
-  } catch (error) { return deny(error instanceof Error ? error.message : 'schedule_invalid'); }
   if(row.run_id && (row.account_id!==accountId||new Date(row.starts_at).toISOString()!==config.startsAt||new Date(row.ends_at).toISOString()!==config.endsAt)) return deny('configuration_changed');
   if(proposalId!==undefined) {
     const binding=await db.query('SELECT run_id FROM aapl_proposals WHERE proposed_order_id=$1',[proposalId]);

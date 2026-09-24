@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "./session-entry-guard.fixture.js";
 /**
  * PostgreSQL integration test — atomic instrument-level guard.
  *
@@ -112,7 +113,7 @@ suite(
         await admin.query(`CREATE DATABASE ${TEST_DB}`);
       });
       pool = poolForDb(CONN_URL, TEST_DB);
-      repo = new ExecutionRepository(pool);
+      repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       await repo.init();
       // Round-6: seed a permissive flat snapshot for tests that
       // predate PositionGuardContext (round-3 / round-4).
@@ -712,8 +713,8 @@ suite(
       // same connection.
       const poolA = poolForDb(CONN_URL!, TEST_DB);
       const poolB = poolForDb(CONN_URL!, TEST_DB);
-      const repoA = new ExecutionRepository(poolA);
-      const repoB = new ExecutionRepository(poolB);
+      const repoA = new ExecutionRepository(poolA,undefined,undefined,focusedSubmissionTestSessionGuard);
+      const repoB = new ExecutionRepository(poolB,undefined,undefined,focusedSubmissionTestSessionGuard);
       try {
         const guard = {
           kind: "available" as const,
@@ -1194,8 +1195,8 @@ suite(
       // the account advisory lock inside Postgres.
       const poolA = poolForDb(CONN_URL!, TEST_DB);
       const poolB = poolForDb(CONN_URL!, TEST_DB);
-      const repoA = new ExecutionRepository(poolA);
-      const repoB = new ExecutionRepository(poolB);
+      const repoA = new ExecutionRepository(poolA,undefined,undefined,focusedSubmissionTestSessionGuard);
+      const repoB = new ExecutionRepository(poolB,undefined,undefined,focusedSubmissionTestSessionGuard);
       try {
         // Kick both off concurrently. The account advisory lock
         // enforces a total order between them.

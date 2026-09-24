@@ -1,3 +1,4 @@
+import { hasUnknownStrategyVolume } from "./session-filter.js";
 import type { Candle } from "@ikbr/shared";
 import type {
   Strategy,
@@ -124,6 +125,7 @@ export class SmallcapDonchianBreakdownShortStrategy implements Strategy {
 
   generateSignal(context: StrategyContext): StrategySignal | null {
     this.lastRejectionReason = undefined;
+    if (hasUnknownStrategyVolume(context)) return this.reject("volume_evidence_unavailable");
 
     if (context.secType !== "STK") return this.reject("sec_type_not_supported");
     if (context.directionalRegime !== "bear_trend")

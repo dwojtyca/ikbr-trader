@@ -40,8 +40,9 @@ account-wide exposure, spread/slippage, daily-loss and freshness checks remain.
   minima are1m220 and each retained higher timeframe50; counts alone are not proof
   of closed valid bars. Set bootstrap12hcount0. AAPL deliberately excludes legacy
   12h rows because that path can label IB8h bars as12h. Do not relabel data to pass.
-  Require `ibkr_aapl_rth_native_v1` provenance from the native bootstrap/refresh
-  path and inspect `aaplWarmup` at `/backfill-progress`. Intraday eligibility uses the authoritative persisted
+  Require `ibkr_session_rth_native_v1` provenance from the shared native bootstrap/refresh
+  path and inspect `sessionWarmup` at `/backfill-progress`. See
+  [instrument-independent readiness](INSTRUMENT_SESSION_READINESS.md). Intraday eligibility uses the authoritative persisted
   IBKR `SCHEDULE` response and session-clipped UTC buckets. In New York summer time
   4h buckets are09:30–12:00 and12:00–16:00; in winter they are09:30–11:00,
   11:00–15:00 and15:00–16:00. Early-close sessions clip the last bucket. Daily/weekly retain conservative
@@ -50,7 +51,7 @@ account-wide exposure, spread/slippage, daily-loss and freshness checks remain.
   Missing a newly due bar blocks after90s publication grace; a previous-session
   minute never satisfies the current-session1m requirement.
 - Pre-open: warm all six timeframes and inspect schedule generation/status,
-  coverage, received time and expected/latest slots in `aaplWarmup`. Schedule
+  coverage, received time and expected/latest slots in `sessionWarmup`. Schedule
   evidence must be READY, at most6h old, cover the current time and complete prior
   week, and survive reconnect/refresh without a newer invalidation. Pre-open
   context remains blocked until a current-session minute closes. Earliest normal

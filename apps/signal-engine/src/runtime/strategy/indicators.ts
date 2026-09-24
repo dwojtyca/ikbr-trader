@@ -1,3 +1,4 @@
+import type { VerifiedStrategySession } from "../../strategies/strategy.types.js";
 /**
  * PR15.4 — Indicator computation for `StrategyContext`.
  *
@@ -63,8 +64,9 @@ function buildTimeframeSnapshot(
   const ema200 = lastEma(closes, 200);
   const sma200 = lastSma(closes, 200);
   const macd = lastMacd(closes);
-  const cmf = lastCmf(highs, lows, closes, volumes, 20);
-  const mfi = lastMfi(highs, lows, closes, volumes, 14);
+  const volumeAvailable = volumes.every(v => v >= 0);
+  const cmf = volumeAvailable ? lastCmf(highs, lows, closes, volumes, 20) : undefined;
+  const mfi = volumeAvailable ? lastMfi(highs, lows, closes, volumes, 14) : undefined;
   const bb = lastBollinger(closes, 20);
   let trend: TimeframeIndicatorSnapshot["trend"] = "neutral";
   if (
@@ -93,10 +95,10 @@ function buildTimeframeSnapshot(
     macdHist: macd.histogram,
     macdHistPrev: macd.previousHistogram,
     macdHistPrev2: macd.previous2Histogram,
-    cmf20: cmf.value,
-    mfi14: mfi.value,
+    cmf20: cmf?.value,
+    mfi14: mfi?.value,
     bbWidthPct: bb.widthPct,
-    volume: latest.volume,
+    volume: latest.volume >= 0 ? latest.volume : undefined,
     trend,
     priceVsEma50Bps:
       ema50 !== undefined
@@ -117,6 +119,7 @@ function buildTimeframeSnapshot(
 function buildIntradaySnapshot(
   candles1m: Candle[],
   sessionGapMinutes = 60,
+  verifiedSession?: VerifiedStrategySession,
 ): IndicatorSnapshot["intraday"] {
   if (candles1m.length < 2) return undefined;
   const latest = candles1m[candles1m.length - 1];
@@ -124,6 +127,20 @@ function buildIntradaySnapshot(
   let sessionStartIndex: number | undefined;
   let prevSessionCloseIndex: number | undefined;
   const gapMs = sessionGapMinutes * 60_000;
+  if (verifiedSession) {
+    const openMs = Date.parse(verifiedSession.sessionStart);
+    const index = candles1m.findIndex(c => new Date(c.ts).getTime() === openMs);
+    if (index < 1 || !verifiedSession.previousSessionCloseTs
+      || candles1m[index - 1].ts.getTime() !== Date.parse(verifiedSession.previousSessionCloseTs)) return undefined;
+    const observed = new Set(candles1m.map(c => c.ts.getTime()));
+    for (const interval of verifiedSession.intervals) {
+      for (let ts = Date.parse(interval.start); ts < Date.parse(interval.end) && ts <= latestTs; ts += 60000) {
+        if (!observed.has(ts)) return undefined;
+      }
+    }
+    sessionStartIndex = index;
+    prevSessionCloseIndex = index - 1;
+  } else {
   for (let i = candles1m.length - 1; i > 0; i -= 1) {
     const curTs = new Date(candles1m[i].ts).getTime();
     const prevTs = new Date(candles1m[i - 1].ts).getTime();
@@ -132,6 +149,7 @@ function buildIntradaySnapshot(
       prevSessionCloseIndex = i - 1;
       break;
     }
+  }
   }
   if (sessionStartIndex === undefined) return undefined;
   const sessionOpenCandle = candles1m[sessionStartIndex];
@@ -147,8 +165,13 @@ function buildIntradaySnapshot(
     prevSessionClose > 0
       ? ((sessionOpen - prevSessionClose) / prevSessionClose) * 100
       : undefined;
-  const sessionCandles = candles1m.slice(sessionStartIndex);
-  const orWindow = sessionCandles.slice(0, 30);
+  const sessionCandles = candles1m.slice(sessionStartIndex).filter(c => !verifiedSession || verifiedSession.intervals.some(interval => {
+    const ts = new Date(c.ts).getTime();
+    return Date.parse(interval.start) <= ts && ts < Date.parse(interval.end);
+  }));
+  const orWindow = verifiedSession
+    ? sessionCandles.filter(c => new Date(c.ts).getTime() < new Date(sessionOpenTs).getTime() + 30 * 60000)
+    : sessionCandles.slice(0, 30);
   const openingRange30High =
     orWindow.length > 0 ? Math.max(...orWindow.map((c) => c.high)) : undefined;
   const openingRange30Low =
@@ -160,7 +183,8 @@ function buildIntradaySnapshot(
     cumPv += typical * c.volume;
     cumVol += c.volume;
   }
-  const vwap = cumVol > 0 ? cumPv / cumVol : undefined;
+  const sessionVolumeAvailable = sessionCandles.every(c => c.volume >= 0);
+  const vwap = sessionVolumeAvailable && cumVol > 0 ? cumPv / cumVol : undefined;
   const distanceFromVwapBps =
     vwap !== undefined && vwap > 0
       ? ((latest.close - vwap) / vwap) * 10000
@@ -175,12 +199,13 @@ function buildIntradaySnapshot(
     openingRange30Low,
     vwap,
     distanceFromVwapBps,
-    sessionVolume: cumVol > 0 ? cumVol : undefined,
+    sessionVolume: sessionVolumeAvailable && cumVol > 0 ? cumVol : undefined,
   };
 }
 
 export interface ComputeIndicatorsInput {
   readonly secType: SecType;
+  readonly verifiedSession?: VerifiedStrategySession;
   readonly candlesByTimeframe: Partial<Record<CandleTimeframe, Candle[]>>;
 }
 
@@ -212,8 +237,9 @@ export function computeIndicatorsForContext(
   const trendFrom1m = lastEma(closes, 200);
   const trendFilterValue = trendFrom1h ?? trendFrom1m;
   const macdSnapshot = lastMacd(closes);
-  const cmfSnapshot = lastCmf(highs, lows, closes, volumes, 20);
-  const mfiSnapshot = lastMfi(highs, lows, closes, volumes, 14);
+  const volumeAvailable = volumes.every(v => v >= 0);
+  const cmfSnapshot = volumeAvailable ? lastCmf(highs, lows, closes, volumes, 20) : undefined;
+  const mfiSnapshot = volumeAvailable ? lastMfi(highs, lows, closes, volumes, 14) : undefined;
   const bbSnapshot = lastBollinger(closes, 20);
   const donchianSnapshot = lastDonchian(closes, 20);
   return {
@@ -230,17 +256,17 @@ export function computeIndicatorsForContext(
     macdHist: macdSnapshot.histogram,
     macdHistPrev: macdSnapshot.previousHistogram,
     macdHistPrev2: macdSnapshot.previous2Histogram,
-    cmf20: cmfSnapshot.value,
-    cmf20Prev: cmfSnapshot.previous,
-    mfi14: mfiSnapshot.value,
-    mfi14Prev: mfiSnapshot.previous,
+    cmf20: cmfSnapshot?.value,
+    cmf20Prev: cmfSnapshot?.previous,
+    mfi14: mfiSnapshot?.value,
+    mfi14Prev: mfiSnapshot?.previous,
     bbUpper: bbSnapshot.upper,
     bbMiddle: bbSnapshot.middle,
     bbLower: bbSnapshot.lower,
     bbWidthPct: bbSnapshot.widthPct,
     dcUpper20: donchianSnapshot.upper,
     dcLower20: donchianSnapshot.lower,
-    obvSlope: lastObvSlope(closes, volumes, 8),
+    obvSlope: volumeAvailable ? lastObvSlope(closes, volumes, 8) : undefined,
     return5mPct: returnPct(closes, 5),
     return20mPct: returnPct(closes, 20),
     return60mPct: returnPct(closes, 60),
@@ -251,10 +277,10 @@ export function computeIndicatorsForContext(
       "5m": buildTimeframeSnapshot(candles5m),
       "1h": buildTimeframeSnapshot(candles1h),
       "4h": buildTimeframeSnapshot(candles4h),
-      "12h": buildTimeframeSnapshot(candles12h),
+      ...(input.candlesByTimeframe["12h"] ? { "12h": buildTimeframeSnapshot(candles12h) } : {}),
       "1d": buildTimeframeSnapshot(candles1d),
       "1w": buildTimeframeSnapshot(candles1w),
     },
-    intraday: buildIntradaySnapshot(candles),
+    intraday: buildIntradaySnapshot(candles, 60, input.verifiedSession),
   };
 }

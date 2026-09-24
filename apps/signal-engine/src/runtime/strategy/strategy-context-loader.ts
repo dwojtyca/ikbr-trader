@@ -1,4 +1,4 @@
-import { AAPL_NATIVE_SOURCE, evaluateAaplCandles, requireAaplSchedule, type AaplScheduleEvidence, isAaplBound } from '@ikbr/shared';
+import { buildInstrumentSessionIdentity, sessionNativeSource, evaluateSessionCandles, requireSessionSchedule, type SessionScheduleEvidence, type InstrumentSessionIdentity } from '@ikbr/shared';
 /**
  * PR15.4 — Strategy context loader.
  *
@@ -25,7 +25,7 @@ import type {
   InstrumentContract,
   SecType,
 } from "@ikbr/shared";
-import { isWseBound, validClosedWseCandle, wseCandleEnd, mapAssetClassToIbkrSecType } from "@ikbr/shared";
+import { isWseBound, mapAssetClassToIbkrSecType } from "@ikbr/shared";
 
 import type { StrategyContext } from "../../strategies/strategy.types.js";
 
@@ -81,7 +81,7 @@ export const MAX_CANDLE_AGE_MS: Readonly<Record<CandleTimeframe, number>> =
   });
 
 export interface StrategyContextLoaderRepo {
-  getAaplScheduleEvidence?(): Promise<AaplScheduleEvidence | null>;
+  getSessionScheduleEvidence?(identity: InstrumentSessionIdentity): Promise<SessionScheduleEvidence | null>;
   getInstrumentContractByConId(
     conId: string,
   ): Promise<InstrumentContract | null>;
@@ -172,23 +172,24 @@ export class StrategyContextLoader {
   }): Promise<StrategyContextLoadResult> {
     const { instrument, bound, positionQuantity } = input;
     const wse = isWseBound(bound);
-    const aapl = isAaplBound(bound);
+
     const profile = instrument.executionPolicy?.momentumBreakoutProfile ?? "default";
     if (!["default", "pko_mild_v1", "pko_moderate_v1"].includes(profile)
       || (profile !== "default" && (!wse || instrument.id !== "pko_wse" || instrument.brokerSymbol !== "PKO"
         || String(bound.conId) !== "35146360" || bound.currency !== "PLN" || bound.exchange !== "WSE" || instrument.assetClass !== "stock")))
       return { kind: "error", code: "STRATEGY_CONTRACT_MISMATCH", message: "momentum profile identity mismatch" };
-    const timeframes = input.timeframes.filter(tf => !((wse || isAaplBound(bound)) && tf === "12h"));
+    if (input.timeframes.includes("12h")) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: "unsupported_native_timeframe:12h" };
+    const timeframes = [...new Set(input.timeframes)];
     const nowMs = this.#clock().getTime();
-    let schedule: AaplScheduleEvidence | null = null;
-    if (aapl) {
-      try {
-        schedule = await this.#repo.getAaplScheduleEvidence?.() ?? null;
-        requireAaplSchedule(schedule, nowMs);
-      } catch (error) {
-        return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE",
-          message: error instanceof Error ? error.message : "aapl_schedule_unavailable" };
-      }
+    let identity: InstrumentSessionIdentity;
+    let schedule: SessionScheduleEvidence | null;
+    try {
+      identity = buildInstrumentSessionIdentity(instrument, bound);
+      schedule = await this.#repo.getSessionScheduleEvidence?.(identity) ?? null;
+      requireSessionSchedule(schedule, identity, nowMs);
+    } catch (error) {
+      return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE",
+        message: error instanceof Error ? error.message : "session_schedule_unavailable" };
     }
     const symbol = instrument.brokerSymbol;
     const boundConId = String(bound.conId);
@@ -200,15 +201,12 @@ export class StrategyContextLoader {
       boundConId,
       "1m",
       DEFAULT_FETCH_LIMITS["1m"],
-      wse,
-      aapl ? AAPL_NATIVE_SOURCE : undefined,
+      false,
+      sessionNativeSource(identity),
     );
-    if (wse) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
-    if (aapl) {
-      const assessed = evaluateAaplCandles(candles1m, "1m", schedule, nowMs);
-      if (assessed.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: assessed.reason };
-      candles1m = assessed.candles;
-    }
+    const assessed1m = evaluateSessionCandles(candles1m, "1m", schedule, identity, nowMs);
+    if (assessed1m.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: assessed1m.reason };
+    candles1m = assessed1m.candles;
     if (candles1m.length === 0) {
       return {
         kind: "error",
@@ -223,22 +221,6 @@ export class StrategyContextLoader {
         message: `insufficient 1m candles: ${candles1m.length} < ${MIN_CANDLES_BY_TIMEFRAME["1m"]}`,
       };
     }
-    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
-    if (Number.isNaN(latest1mTs) || latest1mTs > nowMs) {
-      return {
-        kind: "error",
-        code: "STRATEGY_CONTEXT_UNAVAILABLE",
-        message: "latest 1m candle has invalid or future timestamp",
-      };
-    }
-    if (!aapl && nowMs - latest1mTs > MAX_CANDLE_AGE_MS["1m"]) {
-      return {
-        kind: "error",
-        code: "STRATEGY_CONTEXT_UNAVAILABLE",
-        message: `latest 1m candle is stale (age ${nowMs - latest1mTs}ms)`,
-      };
-    }
-
     // Step 2 — authoritative contract by conId. Absent row =
     // MISMATCH: the operator supplied a binding for a conId with
     // no persisted contract metadata.
@@ -335,35 +317,17 @@ export class StrategyContextLoader {
         boundConId,
         tf,
         limit,
-        wse,
-        aapl ? AAPL_NATIVE_SOURCE : undefined,
+        false,
+        sessionNativeSource(identity),
       );
-      if (wse) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
-      if (aapl) {
-        const assessed = evaluateAaplCandles(fetched, tf as Exclude<CandleTimeframe, "12h">, schedule, nowMs);
-        if (assessed.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: `${tf}: ${assessed.reason}` };
-        fetched = assessed.candles;
-      }
+      const assessed = evaluateSessionCandles(fetched, tf as Exclude<CandleTimeframe, "12h">, schedule, identity, nowMs);
+      if (assessed.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: `${tf}: ${assessed.reason}` };
+      fetched = assessed.candles;
       if (fetched.length < MIN_CANDLES_BY_TIMEFRAME[tf]) {
         return {
           kind: "error",
           code: "STRATEGY_CONTEXT_UNAVAILABLE",
           message: `insufficient ${tf} candles: ${fetched.length} < ${MIN_CANDLES_BY_TIMEFRAME[tf]}`,
-        };
-      }
-      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
-      if (Number.isNaN(latestTs) || latestTs > nowMs) {
-        return {
-          kind: "error",
-          code: "STRATEGY_CONTEXT_UNAVAILABLE",
-          message: `latest ${tf} candle has invalid or future timestamp`,
-        };
-      }
-      if (!aapl && nowMs - latestTs > MAX_CANDLE_AGE_MS[tf]) {
-        return {
-          kind: "error",
-          code: "STRATEGY_CONTEXT_UNAVAILABLE",
-          message: `latest ${tf} candle is stale (age ${nowMs - latestTs}ms)`,
         };
       }
       candlesByTimeframe[tf] = fetched;
@@ -444,8 +408,9 @@ export class StrategyContextLoader {
         message: "market state spread is not a finite number",
       };
     }
+    const quoteNowMs = this.#clock().getTime();
     const marketStateTs = new Date(marketState.ts).getTime();
-    if (Number.isNaN(marketStateTs) || marketStateTs > nowMs) {
+    if (Number.isNaN(marketStateTs) || marketStateTs > quoteNowMs) {
       return {
         kind: "error",
         code: "STRATEGY_CONTEXT_UNAVAILABLE",
@@ -454,19 +419,32 @@ export class StrategyContextLoader {
     }
     if (
       this.#maxMarketStateAgeMs > 0 &&
-      nowMs - marketStateTs > this.#maxMarketStateAgeMs
+      quoteNowMs - marketStateTs > this.#maxMarketStateAgeMs
     ) {
       return {
         kind: "error",
         code: "STRATEGY_CONTEXT_UNAVAILABLE",
-        message: `market state stale (age ${nowMs - marketStateTs}ms > ${this.#maxMarketStateAgeMs}ms)`,
+        message: `market state stale (age ${quoteNowMs - marketStateTs}ms > ${this.#maxMarketStateAgeMs}ms)`,
       };
     }
+
+    const calendar = schedule!.schedule!;
+    const activeInterval = calendar.sessions.find(s => Date.parse(s.start) <= quoteNowMs && quoteNowMs < Date.parse(s.end));
+    if (!activeInterval) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: "session_interval_closed" };
+    const sessionIntervals = calendar.sessions.filter(s => s.date === activeInterval.date);
+    const previousInterval = calendar.sessions.filter(s => s.date < activeInterval.date).at(-1);
+    const verifiedSession = {
+      identity, generation: schedule!.generation, referenceDate: activeInterval.date,
+      start: activeInterval.start, end: activeInterval.end,
+      sessionStart: sessionIntervals[0].start, intervals: sessionIntervals,
+      previousSessionCloseTs: previousInterval ? new Date(Date.parse(previousInterval.end) - 60000).toISOString() : undefined,
+    };
 
     // Step 6 — indicators + regime.
     const indicatorsInput: ComputeIndicatorsInput = {
       secType,
       candlesByTimeframe,
+      verifiedSession,
     };
     const indicators = computeIndicatorsForContext(indicatorsInput);
     if (!indicators) {
@@ -491,6 +469,7 @@ export class StrategyContextLoader {
     indicators.timeframeTrendVotes = regime.timeframeTrendVotes;
 
     const context: StrategyContext = {
+      verifiedSession,
       momentumBreakoutProfile: profile,
       symbol,
       conid: boundConId,
@@ -511,20 +490,21 @@ export class StrategyContextLoader {
       },
       currentPosition: { quantity: positionQuantity },
     };
-    if (aapl) {
+    {
       try {
-        const latestSchedule = await this.#repo.getAaplScheduleEvidence?.() ?? null;
+        const latestSchedule = await this.#repo.getSessionScheduleEvidence?.(identity) ?? null;
         const finalNow = this.#clock().getTime();
-        requireAaplSchedule(latestSchedule, finalNow);
-        if (JSON.stringify(latestSchedule) !== JSON.stringify(schedule)) throw new Error("aapl_schedule_changed_during_context");
+        requireSessionSchedule(latestSchedule, identity, finalNow);
+        if (JSON.stringify(latestSchedule) !== JSON.stringify(schedule)) throw new Error("session_schedule_changed_during_context");
         for (const [tf, candles] of Object.entries(candlesByTimeframe)) {
-          const result = evaluateAaplCandles(candles!, tf as Exclude<CandleTimeframe, "12h">, latestSchedule, finalNow);
+          const result = evaluateSessionCandles(candles!, tf as Exclude<CandleTimeframe, "12h">, latestSchedule, identity, finalNow);
           if (result.reason) throw new Error(`${tf}: ${result.reason}`);
         }
+        if (marketStateTs > finalNow) throw new Error("market state future during context load");
         if (this.#maxMarketStateAgeMs > 0 && finalNow - marketStateTs > this.#maxMarketStateAgeMs) throw new Error("market state stale during context load");
       } catch (error) {
         return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE",
-          message: error instanceof Error ? error.message : "aapl_schedule_unavailable" };
+          message: error instanceof Error ? error.message : "session_schedule_unavailable" };
       }
     }
     return { kind: "ok", context };

@@ -1,3 +1,4 @@
+import { sessionNativeSource, sessionLocalMidnight, type InstrumentSessionIdentity, type SessionTimeframe } from "@ikbr/shared";
 import { AAPL_NATIVE_SOURCE, AAPL_REQUIRED_CANDLES, newYorkMidnight, type AaplTimeframe } from "@ikbr/shared";
 import { isAaplSubscription } from "./aapl-native-refresh.js";
 import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
@@ -516,6 +517,13 @@ export class TwsClient {
    *
    * Calls are sequential per symbol to respect IB pacing limits.
    */
+  async fetchSessionCandles(sub: InstrumentSubscription, identity: InstrumentSessionIdentity, timeframe: SessionTimeframe, count: number): Promise<Candle[]> {
+    if (sub.instrumentId !== identity.instrumentId || sub.conid !== String(identity.conId) || sub.symbol !== identity.symbol
+      || !['1m', '5m', '1h', '4h', '1d', '1w'].includes(timeframe) || !Number.isSafeInteger(count) || count < 1)
+      throw new Error("session_native_request_invalid");
+    return this.requestHistorical(sub, timeframe, count, { sessionIdentity: identity });
+  }
+
   async fetchNativeAaplCandles(sub: InstrumentSubscription, timeframe: AaplTimeframe, count: number): Promise<Candle[]> {
     if (!isAaplSubscription(sub) || !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe) || !Number.isSafeInteger(count) || count <= 0)
       throw new Error("aapl_native_request_invalid");
@@ -901,7 +909,7 @@ export class TwsClient {
     sub: InstrumentSubscription,
     timeframe: CandleTimeframe,
     candlesPerSymbol: number,
-    options: { progressPrefix?: string } = {},
+    options: { progressPrefix?: string; sessionIdentity?: InstrumentSessionIdentity } = {},
   ): Promise<Candle[]> {
     if (isAaplSubscription(sub) && !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe)) throw new Error("aapl_timeframe_unsupported");
     await this.acquireHistoricalPacingToken();
@@ -911,9 +919,11 @@ export class TwsClient {
       timeframe,
       candlesPerSymbol,
     );
-    const contract = this.withDefaults(
-      sub.contract ?? { symbol: sub.symbol, conId: Number(sub.conid) },
-    );
+    const identity = options.sessionIdentity;
+    const contract = identity ? { conId: identity.conId, symbol: identity.symbol, secType: identity.secType,
+      exchange: identity.exchange, currency: identity.currency, ...(identity.localSymbol ? { localSymbol: identity.localSymbol } : {}),
+      ...(identity.tradingClass ? { tradingClass: identity.tradingClass } : {}), ...(identity.primaryExchange ? { primaryExch: identity.primaryExchange } : {}) }
+      : this.withDefaults(sub.contract ?? { symbol: sub.symbol, conId: Number(sub.conid) });
 
     return new Promise<Candle[]>((resolve, reject) => {
       const bars: Candle[] = [];
@@ -931,18 +941,23 @@ export class TwsClient {
         clearTimeout(timeout);
         this.ib.off("historicalData", onHistoricalData);
         this.ib.off("error", onError);
+        if (options.sessionIdentity) { try { this.ib.cancelHistoricalData?.(reqId); } catch { /* broker may already be disconnected */ } }
       };
 
       const finalize = () => {
         cleanup();
+        if (options.sessionIdentity && bars.length === 0) { reject(new Error('session_native_history_empty')); return; }
         const uniqueByTs = new Map<number, Candle>();
         for (const candle of bars) {
+          if (options.sessionIdentity && uniqueByTs.has(candle.ts.getTime())) {
+            reject(new Error('session_native_duplicate_timestamp')); return;
+          }
           uniqueByTs.set(candle.ts.getTime(), candle);
         }
         const ordered = Array.from(uniqueByTs.values()).sort(
           (a, b) => a.ts.getTime() - b.ts.getTime(),
         );
-        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) : ordered;
+        const finalized = !options.sessionIdentity && isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) : ordered;
         const sliced = finalized.slice(
           Math.max(0, finalized.length - candlesPerSymbol),
         );
@@ -972,7 +987,18 @@ export class TwsClient {
         }
 
         let ts: Date | undefined;
-        if (isAaplSubscription(sub)) {
+        if (options.sessionIdentity) {
+          if (typeof date !== 'string') return;
+          if (timeframe === '1d' || timeframe === '1w') {
+            if (!/^\d{8}$/.test(date)) return;
+            try { ts = new Date(sessionLocalMidnight(`${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`, options.sessionIdentity.timeZone)); }
+            catch { return; }
+          } else {
+            if (!/^\d{9,10}$/.test(date)) return;
+            ts = new Date(Number(date) * 1000);
+            if (ts.getUTCFullYear() < 2000 || ts.getUTCFullYear() > 2100) return;
+          }
+        } else if (isAaplSubscription(sub)) {
           if (typeof date !== "string") return;
           if (timeframe === "1d" || timeframe === "1w") {
             if (!/^\d{8}$/.test(date)) return;
@@ -992,7 +1018,7 @@ export class TwsClient {
         if (!ts) return;
 
         bars.push({
-          ...(isWseSubscription(sub) ? { source: WSE_NATIVE_SOURCE } : isAaplSubscription(sub) ? { source: AAPL_NATIVE_SOURCE } : {}),
+          ...(options.sessionIdentity ? { source: sessionNativeSource(options.sessionIdentity) } : isWseSubscription(sub) ? { source: WSE_NATIVE_SOURCE } : isAaplSubscription(sub) ? { source: AAPL_NATIVE_SOURCE } : {}),
           conid: sub.conid,
           symbol: sub.symbol,
           timeframe,
@@ -1006,7 +1032,7 @@ export class TwsClient {
       };
 
       const onError = (err: Error, codeOrMeta?: unknown, incomingReqId?: number) => {
-        const meta = isAaplSubscription(sub) ? ibErrorMeta(codeOrMeta, incomingReqId) : { code: toNum(codeOrMeta), reqId: incomingReqId };
+        const meta = options.sessionIdentity || isAaplSubscription(sub) ? ibErrorMeta(codeOrMeta, incomingReqId) : { code: toNum(codeOrMeta), reqId: incomingReqId };
         if (meta.reqId !== reqId) return;
         const message = err?.message ?? "unknown historical data error";
         cleanup();
@@ -1025,8 +1051,8 @@ export class TwsClient {
         "",
         durationStr,
         barSize,
-        "TRADES",
-        isWseSubscription(sub) || isAaplSubscription(sub) ? 1 : 0,
+        options.sessionIdentity?.secType === "CASH" ? "MIDPOINT" : "TRADES",
+        options.sessionIdentity ? (options.sessionIdentity.useRTH ? 1 : 0) : isWseSubscription(sub) || isAaplSubscription(sub) ? 1 : 0,
         2,
         false,
       );

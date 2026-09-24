@@ -2,7 +2,10 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { buildConfiguredInstrumentRegistry, buildInstrumentBindingAuthority, wseCandleEnd,
   type Candle, type CandleTimeframe, type MomentumBreakoutProfile } from '@ikbr/shared';
-import { StrategyContextLoader } from '../runtime/strategy/strategy-context-loader.js';
+import { MIN_CANDLES_BY_TIMEFRAME, MAX_CANDLE_AGE_MS } from '../runtime/strategy/strategy-context-loader.js';
+import { computeIndicatorsForContext } from '../runtime/strategy/indicators.js';
+import { detectRegimeForContext } from '../runtime/strategy/regime.js';
+import type { StrategyContext } from '../strategies/strategy.types.js';
 import { StrategyPortfolioManager } from '../portfolio/strategy-portfolio-manager.js';
 import { MomentumBreakoutLongStrategy } from '../strategies/momentum-breakout-long.strategy.js';
 
@@ -60,17 +63,28 @@ export async function replayPkoProfiles(raw:string) {
     const now=wseCandleEnd(minute.ts,'1m');if(now>cutoff)continue;
     const date=localDay(now),m=localMinute(now);
     let session=sessions.get(date);if(!session){session={date,eligibleMinutes:[],signals:{default:0,pko_mild_v1:0,pko_moderate_v1:0},allSignals:{default:0,pko_mild_v1:0,pko_moderate_v1:0},rejections:Object.fromEntries(profiles.map(p=>[p,{}])),selectionRejections:Object.fromEntries(profiles.map(p=>[p,{}]))};sessions.set(date,session);}
-    const loader=new StrategyContextLoader({clock:()=>new Date(now),maxMarketStateAgeMs:45000,repo:{
-      getInstrumentContractByConId:async()=>({symbol:'PKO',conid:'35146360',secType:'STK',exchange:'WSE',primaryExchange:'WSE',currency:'PLN',localSymbol:'PKO',tradingClass:'PKO',source:'ibkr',resolvedAt:new Date(data.exportedAt)}),
-      getRecentCandlesForContract:async(_symbol,_conid,tf,limit)=> (candles[tf]??[]).filter(c=>wseCandleEnd(c.ts,tf)<=now).slice(-limit),
-      getMarketState:async()=>({symbol:'PKO',conid:'35146360',lastPrice:minute.close,ts:new Date(now).toISOString()}),
-    }});
-    const loaded=await loader.load({instrument,bound,positionQuantity:0,timeframes});
-    if(loaded.kind==='error'){unavailable[loaded.message]=(unavailable[loaded.message]??0)+1;continue;}
+    // Historical datasets retain their original WSE close rules and UTC strategy filters.
+    // They cannot supply production calendar proof or authorize a broker proposal.
+    const closed: Partial<Record<CandleTimeframe,Candle[]>> = {};
+    let unavailableReason: string | undefined;
+    for (const tf of timeframes) {
+      const rows = (candles[tf]??[]).filter(c=>wseCandleEnd(c.ts,tf)<=now).slice(-(tf==='1m'?1000:tf==='5m'||tf==='1h'?160:tf==='4h'?120:tf==='1d'?260:104));
+      if(rows.length<MIN_CANDLES_BY_TIMEFRAME[tf]) { unavailableReason=`insufficient ${tf} candles: ${rows.length} < ${MIN_CANDLES_BY_TIMEFRAME[tf]}`;break; }
+      const age=now-wseCandleEnd(rows.at(-1)!.ts,tf);
+      if(age>MAX_CANDLE_AGE_MS[tf]) { unavailableReason=`latest ${tf} candle is stale (age ${age}ms)`;break; }
+      closed[tf]=rows;
+    }
+    if(unavailableReason){unavailable[unavailableReason]=(unavailable[unavailableReason]??0)+1;continue;}
+    const indicators=computeIndicatorsForContext({secType:'STK',candlesByTimeframe:closed})!;
+    const latestCandle=closed['1m']!.at(-1)!;
+    const regime=detectRegimeForContext('STK',latestCandle.close,indicators);
+    Object.assign(indicators,{directionalRegime:regime.directionalRegime,volatilityRegime:regime.volatilityRegime,regimeScore:regime.score,regimeConfidence:regime.confidence,regimeReasons:regime.reasons,timeframeTrendScores:regime.timeframeTrendScores,timeframeTrendVotes:regime.timeframeTrendVotes});
+    const context:StrategyContext={symbol:instrument.brokerSymbol,conid:String(bound.conId),secType:'STK',directionalRegime:regime.directionalRegime,volatilityRegime:regime.volatilityRegime,
+      latestCandle,indicators,candlesByTimeframe:closed,marketState:{lastPrice:minute.close,ts:new Date(now).toISOString()},currentPosition:{quantity:0}};
     eligibleContexts++;if(m>=795&&m<=990)session.eligibleMinutes.push(m);
     for(const profile of profiles){
       const strategy=new MomentumBreakoutLongStrategy();
-      const result=new StrategyPortfolioManager([strategy]).run({...loaded.context,momentumBreakoutProfile:profile});
+      const result=new StrategyPortfolioManager([strategy]).run({...context,momentumBreakoutProfile:profile});
       if(result.kind==='error')throw Error('strategy evaluation failed');
       if(result.selected){signalCounts[profile]++;session.allSignals[profile]++;if(m>=795&&m<=990)session.signals[profile]++;}
       else {const reason=result.rejectionReasons.join('; ')||'no_signal';rejected[profile][reason]=(rejected[profile][reason]??0)+1;session.rejections[profile][reason]=(session.rejections[profile][reason]??0)+1;

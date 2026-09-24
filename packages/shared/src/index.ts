@@ -422,3 +422,5 @@ export { isAaplBound } from './instruments/aapl.js';
 export * from "./aapl-candles.js";
 
 export * from "./aapl-sessions.js";
+
+export * from "./instrument-sessions.js";

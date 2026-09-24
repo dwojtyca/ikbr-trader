@@ -1,3 +1,4 @@
+import { unavailableSessionEntryGuard, type SessionEntryGuard } from './session-entry-guard.js';
 import type { PoolClient, Pool } from 'pg';
 
 export interface GpwWindow { runId: string; accountId: string; startsAt: string; endsAt: string; tradeDate: string }
@@ -17,19 +18,23 @@ export function parseGpwWindow(env: Record<string, unknown>): GpwWindow | undefi
   const parts=(ms:number)=>Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/Warsaw',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',weekday:'short',hourCycle:'h23'}).formatToParts(ms).map(x=>[x.type,x.value]));
   const x=parts(a),y=parts(b);const date=(p:Record<string,string>)=>`${p.year}-${p.month}-${p.day}`;
   const seconds=(p:Record<string,string>)=>Number(p.hour)*3600+Number(p.minute)*60+Number(p.second);
-  if(date(x)!==date(y)||['Sat','Sun'].includes(x.weekday)||seconds(x)<32700||seconds(y)+(b%1000)/1000>60300) throw new Error('GPW window must fit one Warsaw weekday 09:05–16:45');
+  if(date(x)!==date(y)||['Sat','Sun'].includes(x.weekday)||seconds(x)<32400||seconds(y)+(b%1000)/1000>60300) throw new Error('GPW window must fit one Warsaw weekday 09:00–16:45');
   return Object.freeze({runId,accountId,startsAt:new Date(a).toISOString(),endsAt:new Date(b).toISOString(),tradeDate:date(x)});
 }
 
 type Db = Pick<PoolClient | Pool,'query'>;
 export async function checkGpwWindow(db: Db, config: GpwWindow | undefined, accountId: string,
-  proposalId?: number, dispatch=false): Promise<{ok:true;endsAtMs:number}|{ok:false;reason:string}> {
+  proposalId?: number, dispatch=false, sessionGuard: SessionEntryGuard = unavailableSessionEntryGuard): Promise<{ok:true;endsAtMs:number}|{ok:false;reason:string}> {
   const deny=(reason:string)=>({ok:false as const,reason:`gpw_window_${reason}`});
   if (!config) return deny('unconfigured');
   if(config.accountId!==accountId) return deny('account_mismatch');
   const result=await db.query(`SELECT clock_timestamp() AS now, w.* FROM (SELECT 1) anchor
     LEFT JOIN gpw_windows w ON w.run_id=$1`,[config.runId]);
-  const row=result.rows[0];const now=new Date(row.now).getTime();
+  const row=result.rows[0];let now=new Date(row.now).getTime();
+  if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
+  const session = await sessionGuard(db, { instrumentId: 'pko_wse', instrument: 'PKO', conid: '35146360' }, config);
+  if (!session.ok) return deny(session.reason);
+  now = new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime();
   if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
   if(row.run_id && (row.account_id!==accountId||new Date(row.starts_at).toISOString()!==config.startsAt||new Date(row.ends_at).toISOString()!==config.endsAt)) return deny('configuration_changed');
   if(proposalId!==undefined) {

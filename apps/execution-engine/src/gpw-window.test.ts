@@ -12,3 +12,7 @@ test('all known PKO identities select the budget',()=>{
  for(const order of [{instrument:'PKO'},{instrumentId:'pko_wse'},{conid:'35146360'}]) assert.ok(isPkoIdentity(order));
  assert.equal(isPkoIdentity({instrument:'AAPL',conid:'123'}),false);
 });
+test('Warsaw opening envelope admits09:00 in both daylight and standard time',()=>{
+ for(const [start,end] of [['2026-09-24T07:00:00Z','2026-09-24T07:30:00Z'],['2026-01-22T08:00:00Z','2026-01-22T08:30:00Z']])
+  assert.ok(parseGpwWindow({...config,GPW_RUN_START:start,GPW_RUN_END:end}));
+});

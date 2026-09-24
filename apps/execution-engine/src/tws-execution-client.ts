@@ -711,7 +711,7 @@ export class TwsExecutionClient {
       prepared.plan,
       prepared.contract,
       prepared.normalizedTicket,
-      isAaplIdentity(prepared.normalizedTicket) ? this.connectionGeneration : undefined,
+      this.connectionGeneration,
       windowDeadlineMs,
       sendWithEntryPermit,
     );
@@ -882,6 +882,8 @@ export class TwsExecutionClient {
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
         if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("aapl_window_dispatch_expired");
+        if (ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
+          (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("session_dispatch_expired");
         for (const plannedOrder of plan.orders) {
           if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
           this.ib.placeOrder(
@@ -892,8 +894,8 @@ export class TwsExecutionClient {
         }
       };
       try {
-        if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE") {
-          if (!sendWithEntryPermit) throw new Error("aapl_entry_permit_missing");
+        if (ticket.positionEffect !== "CLOSE_OR_REDUCE") {
+          if (!sendWithEntryPermit) throw new Error("session_entry_permit_missing");
           permitCompletion = sendWithEntryPermit(send);
           void permitCompletion.catch(error => { cleanup(); reject(error as Error); });
         } else send();

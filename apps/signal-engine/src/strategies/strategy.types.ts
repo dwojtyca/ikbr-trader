@@ -1,5 +1,6 @@
 import type {
   SecType,
+  InstrumentSessionIdentity,
   MomentumBreakoutProfile,
   Candle,
   CandleTimeframe,
@@ -45,7 +46,19 @@ export interface StrategySignal {
   generatedFromCandleTs?: Date;
 }
 
+export interface VerifiedStrategySession {
+  identity: InstrumentSessionIdentity;
+  generation: number;
+  referenceDate: string;
+  start: string;
+  end: string;
+  sessionStart: string;
+  previousSessionCloseTs?: string;
+  intervals: readonly { date: string; start: string; end: string }[];
+}
+
 export interface StrategyContext {
+  verifiedSession?: VerifiedStrategySession;
   momentumBreakoutProfile?: MomentumBreakoutProfile;
   symbol: string;
   conid: string;

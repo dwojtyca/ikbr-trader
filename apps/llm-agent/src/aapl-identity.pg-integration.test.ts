@@ -17,9 +17,6 @@ describe('AAPL identity through production PostgreSQL repository and bound worke
   url.pathname=`/${db}`;pool=new Pool({connectionString:url.toString()});
   const dir=new URL('../../../infra/sql/migrations/',import.meta.url);
   for(const file of readdirSync(dir).filter(x=>x.endsWith('.sql')).sort())await pool.query(readFileSync(new URL(file,dir),'utf8'));
-  await pool.query(`CREATE TABLE instrument_contracts (symbol TEXT PRIMARY KEY, conid TEXT NOT NULL UNIQUE, sec_type TEXT NOT NULL,
-    exchange TEXT,primary_exchange TEXT,currency TEXT,local_symbol TEXT,trading_class TEXT,min_tick DOUBLE PRECISION,
-    display_name TEXT,contract_json JSONB,details_json JSONB,source TEXT NOT NULL,resolved_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
   repo=new BoundReviewRepository(pool);
  });
  after(async()=>{await pool?.end();if(admin){await admin.query(`DROP DATABASE IF EXISTS ${db}`);await admin.end();}});

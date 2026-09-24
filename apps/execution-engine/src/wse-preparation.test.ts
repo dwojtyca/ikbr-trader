@@ -46,7 +46,7 @@ for (const close of [false, true]) test(`strict WSE ${close ? "close" : "bracket
   assert.deepEqual(p.normalizedTicket, f.ticket);
   assert.equal(f.ib.contractRequests, 0);
   if (close) await f.client.dispatchPreparedClose(p, f.client.getConnectionGeneration());
-  else await f.client.dispatchPreparedOrder(p);
+  else await f.client.dispatchPreparedOrder(p,Date.now()+10000,async send=>{send();});
   assert.deepEqual(f.ib.orders.map(x => x.order.orderType === "STP" ? x.order.auxPrice : x.order.lmtPrice), close ? [100.05] : [100.05, 102.1, 99.99]);
 });
 for (const mutation of ["entry", "stop", "tp", "fraction", "closed", "missing date", "wrong account", "stale", "foreign contract"]) {
@@ -98,12 +98,12 @@ for (const stage of ["missing", "expired", "during connect", "before first wire"
     const original=Date.now;let reads=0;
     t.mock.method(Date,"now",()=>{reads++;return original()+(reads>=3?1000:0);});
   }
-  await assert.rejects(()=>f.client.dispatchPreparedOrder(p,stage==="missing"?undefined:deadline),/gpw_window_dispatch_expired/);
+  await assert.rejects(()=>f.client.dispatchPreparedOrder(p,stage==="missing"?undefined:deadline,async send=>{send();}),/gpw_window_dispatch_expired/);
   assert.equal(f.ib.orders.length,0);
 });
 test("PKO valid entry deadline allows bracket",async t=>{
  const f=await setup(t,false,true),p=await f.prepare();
- await f.client.dispatchPreparedOrder(p,Date.now()+1000);assert.equal(f.ib.orders.length,3);
+ await f.client.dispatchPreparedOrder(p,Date.now()+1000,async send=>{send();});assert.equal(f.ib.orders.length,3);
 });
 
 test("PKO lifecycle close remains possible without an entry window",async t=>{

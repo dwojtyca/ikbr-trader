@@ -250,23 +250,25 @@ export function buildSubmissionApplicationService(
   }): Promise<SubmissionOutcome> {
     const { order, prepared, accountId, metadata, resumed } = input;
     try {
-      let windowDeadlineMs: number | undefined;
+      const session = await deps.repo.checkSessionEntry(order);
+      if (!session.ok) return { kind: "risk_rejected", reason: session.reason };
+      let windowDeadlineMs: number | undefined = session.endsAtMs;
       if (isPkoIdentity(order)) {
         const window = await deps.repo.checkGpwEntry(order, accountId, true);
         if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-        windowDeadlineMs = window.endsAtMs;
+        windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
       }
       if (isAaplIdentity(order)) {
         const window = await deps.repo.checkAaplEntry(order, accountId, true);
         if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-        windowDeadlineMs = window.endsAtMs;
+        windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
       }
       const result = await deps.dispatcher.dispatch({
         proposedOrderId: order.id!,
         accountId,
         prepared,
         windowDeadlineMs,
-        sendWithEntryPermit: isAaplIdentity(order) ? send => deps.repo.withAaplDispatchPermit(order, accountId, send) : undefined,
+        sendWithEntryPermit: send => deps.repo.withEntryDispatchPermit(order, accountId, send),
       });
       if (result.status === "FILLED") {
         // PR14 round-8 — invalidate snapshot BEFORE local FILLED
@@ -473,6 +475,8 @@ export function buildSubmissionApplicationService(
       const window = await deps.repo.checkAaplEntry(validatedOrder, accountId);
       if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
     }
+    const session = await deps.repo.checkSessionEntry(validatedOrder);
+    if (!session.ok) return { kind: "risk_rejected", reason: session.reason };
     // Phase A — pure prepare. Any exception surfaces to caller
     // as execution_error (contract resolution / RTH / tick).
     let prepared: PreparedBrokerOrder;

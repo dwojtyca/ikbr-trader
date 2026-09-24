@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15 §4 — production-flow three-phase submission tests.
  *
@@ -121,7 +122,7 @@ suite(
     it("happy path: atomic claim + full plan persistence in ONE tx", async () => {
       const { pool, dbName } = await fresh("happy");
       try {
-        const repo = new ExecutionRepository(pool);
+        const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
         const cid = "prod-happy-1";
         const po = await seedPO(pool, cid);
         await seedFlatSnapshot(pool, "DU-1", "sess-1");
@@ -166,7 +167,7 @@ suite(
     it("collision rollback: preseeded ref → plan_collision, marker NOT set, legs NOT inserted", async () => {
       const { pool, dbName } = await fresh("coll");
       try {
-        const repo = new ExecutionRepository(pool);
+        const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
         const cidA = "prod-coll-A";
         const cidB = "prod-coll-B";
         const poA = await seedPO(pool, cidA);
@@ -237,7 +238,7 @@ suite(
     it("already-claimed row → not_claimed, no state change", async () => {
       const { pool, dbName } = await fresh("nc");
       try {
-        const repo = new ExecutionRepository(pool);
+        const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
         const cid = "prod-nc-1";
         const po = await seedPO(pool, cid);
         await seedFlatSnapshot(pool, "DU-1", "sess-1");

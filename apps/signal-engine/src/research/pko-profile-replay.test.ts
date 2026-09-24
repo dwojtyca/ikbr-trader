@@ -26,7 +26,7 @@ function fixture(){
  const make=(tf:string,ms:number,count:number)=>Array.from({length:count},(_,i)=>({conid:'35146360',symbol:'PKO',timeframe:tf,ts:new Date(end-(count-i)*ms).toISOString(),open:100+i*.01,high:101+i*.01,low:99+i*.01,close:100+i*.01,volume:1000,source:'ibkr_wse_native_v1'}));
  return {instrumentId:'pko_wse',conid:'35146360',symbol:'PKO',exportedAt:'2026-09-23T12:00:00Z',candles:{'1m':make('1m',60000,240),'5m':make('5m',300000,100),'1h':make('1h',3600000,100),'4h':make('4h',14400000,100),'1d':make('1d',86400000,100),'1w':make('1w',604800000,100)}};
 }
-test('real-loader replay is deterministic and excludes unfinished higher candles',async()=>{
+test('offline historical replay is deterministic and excludes unfinished higher candles',async()=>{
  const data=fixture();data.candles['4h'].push({...data.candles['4h'][0],ts:'2026-09-23T11:00:00Z'});
  const a=await replayPkoProfiles(JSON.stringify(data));assert.ok(a.eligibleContexts>0);
  for(const profile of ['default','pko_mild_v1','pko_moderate_v1'] as const){

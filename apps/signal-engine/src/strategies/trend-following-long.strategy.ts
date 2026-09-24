@@ -1,3 +1,4 @@
+import { isWithinStrategySession, hasUnknownStrategyVolume } from "./session-filter.js";
 import type { SecType, Candle } from "@ikbr/shared";
 import type {
   Strategy,
@@ -45,10 +46,6 @@ function paramsForSecType(_secType: SecType): TrendFollowingLongParams {
   };
 }
 
-function utcHour(ts: Date | string): number {
-  return new Date(ts).getUTCHours();
-}
-
 function priorMaxHigh(candles: Candle[], lookback: number): number | undefined {
   // Exclude the most recent (current) D1 candle so the breakout level reflects
   // the *prior* `lookback` sessions, not including today.
@@ -91,6 +88,7 @@ export class TrendFollowingLongStrategy implements Strategy {
 
   generateSignal(context: StrategyContext): StrategySignal | null {
     this.lastRejectionReason = undefined;
+    if (hasUnknownStrategyVolume(context)) return this.reject("volume_evidence_unavailable");
 
     if (context.secType !== "STK" && context.secType !== "IND")
       return this.reject("sec_type_not_supported");
@@ -100,8 +98,7 @@ export class TrendFollowingLongStrategy implements Strategy {
       return this.reject("volatility_regime_low_volatility");
 
     const params = paramsForSecType(context.secType);
-    const hour = utcHour(context.latestCandle.ts);
-    if (hour < params.sessionUtcStartHour || hour > params.sessionUtcEndHour)
+    if (!isWithinStrategySession(context, params.sessionUtcStartHour, params.sessionUtcEndHour))
       return this.reject("outside_strategy_session");
 
     if (

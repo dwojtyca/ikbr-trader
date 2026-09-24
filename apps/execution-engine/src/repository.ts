@@ -1,3 +1,4 @@
+import { unavailableSessionEntryGuard, type SessionEntryGuard, type SessionEntryOrder } from "./session-entry-guard.js";
 import { CashClassificationConflict, readReconciliationFills, type ReconciliationFill } from "./reconciliation/cash-classification.js";
 import { checkAaplWindow, bindAaplProposal, isAaplIdentity, isExactAaplIdentity, type AaplWindow } from "./aapl-window.js";
 import { checkGpwWindow, bindGpwProposal, isPkoIdentity, type GpwWindow } from "./gpw-window.js";
@@ -427,21 +428,36 @@ export interface Trade {
 }
 
 export class ExecutionRepository {
-  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow) {}
+  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard) {}
 
   async checkAaplEntry(order: ProposedOrder, accountId: string, dispatch = false) {
     if (!isExactAaplIdentity(order)) return { ok: false as const, reason: "aapl_window_identity_mismatch" };
-    return checkAaplWindow(this.pool, this.aaplWindow, accountId, order.id, dispatch);
+    return checkAaplWindow(this.pool, this.aaplWindow, accountId, order.id, dispatch, this.sessionEntryGuard);
   }
 
-  async withAaplDispatchPermit(order: ProposedOrder, accountId: string, send: () => void): Promise<void> {
-    if (!isExactAaplIdentity(order)) throw new Error("aapl_window_identity_mismatch");
+  async checkSessionEntry(order: SessionEntryOrder) {
+    return this.sessionEntryGuard(this.pool, order);
+  }
+
+  async withEntryDispatchPermit(order: ProposedOrder, accountId: string, send: () => void): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const permit = await checkAaplWindow(client, this.aaplWindow, accountId, order.id, true);
-      if (!permit.ok) throw new Error(permit.reason);
-      if (Date.now() >= permit.endsAtMs) throw new Error("aapl_window_dispatch_expired");
+      const session = await this.sessionEntryGuard(client, order);
+      if (!session.ok) throw new Error(session.reason);
+      let deadline = session.endsAtMs;
+      if (isAaplIdentity(order)) {
+        if (!isExactAaplIdentity(order)) throw new Error("aapl_window_identity_mismatch");
+        const permit = await checkAaplWindow(client, this.aaplWindow, accountId, order.id, true, this.sessionEntryGuard);
+        if (!permit.ok) throw new Error(permit.reason);
+        deadline = Math.min(deadline, permit.endsAtMs);
+      }
+      if (isPkoIdentity(order)) {
+        const permit = await checkGpwWindow(client, this.gpwWindow, accountId, order.id, true, this.sessionEntryGuard);
+        if (!permit.ok) throw new Error(permit.reason);
+        deadline = Math.min(deadline, permit.endsAtMs);
+      }
+      if (Date.now() >= deadline) throw new Error("session_dispatch_expired");
       send();
       await client.query("COMMIT");
     } catch (error) {
@@ -451,17 +467,17 @@ export class ExecutionRepository {
   }
 
   async getAaplWindowStatus(accountId: string | null) {
-    const check = await checkAaplWindow(this.pool, this.aaplWindow, accountId ?? "");
+    const check = await checkAaplWindow(this.pool, this.aaplWindow, accountId ?? "", undefined, false, this.sessionEntryGuard);
     return { ...check, configured: Boolean(this.aaplWindow), runId: this.aaplWindow?.runId ?? null,
       startsAt: this.aaplWindow?.startsAt ?? null, endsAt: this.aaplWindow?.endsAt ?? null };
   }
 
   async checkGpwEntry(order: ProposedOrder, accountId: string, dispatch = false) {
-    return checkGpwWindow(this.pool, this.gpwWindow, accountId, order.id, dispatch);
+    return checkGpwWindow(this.pool, this.gpwWindow, accountId, order.id, dispatch, this.sessionEntryGuard);
   }
 
   async getGpwWindowStatus(accountId: string | null) {
-    const check = await checkGpwWindow(this.pool, this.gpwWindow, accountId ?? "");
+    const check = await checkGpwWindow(this.pool, this.gpwWindow, accountId ?? "", undefined, false, this.sessionEntryGuard);
     return { ...check, configured: Boolean(this.gpwWindow), runId: this.gpwWindow?.runId ?? null,
       startsAt: this.gpwWindow?.startsAt ?? null, endsAt: this.gpwWindow?.endsAt ?? null };
   }
@@ -1451,7 +1467,7 @@ export class ExecutionRepository {
           await client.query("ROLLBACK");
           return { kind: "invalid_ticket_shape", reason: "gpw_window_identity_mismatch" };
         }
-        const window = await checkGpwWindow(client, this.gpwWindow, positionGuard.accountId);
+        const window = await checkGpwWindow(client, this.gpwWindow, positionGuard.accountId, undefined, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
       }
       if (isAaplIdentity(ticket)) {
@@ -1459,9 +1475,12 @@ export class ExecutionRepository {
           await client.query("ROLLBACK");
           return { kind: "invalid_ticket_shape", reason: "aapl_window_identity_mismatch" };
         }
-        const window = await checkAaplWindow(client, this.aaplWindow, positionGuard.accountId);
+        const window = await checkAaplWindow(client, this.aaplWindow, positionGuard.accountId, undefined, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
       }
+
+      const calendar = await this.sessionEntryGuard(client, ticket);
+      if (!calendar.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: calendar.reason }; }
 
       const result = await client.query(
         `
@@ -2575,7 +2594,7 @@ export class ExecutionRepository {
       }
 
       if (isPkoIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
-        const window = await checkGpwWindow(client, this.gpwWindow, input.accountId, input.id);
+        const window = await checkGpwWindow(client, this.gpwWindow, input.accountId, input.id, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
         await client.query(`UPDATE gpw_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
           WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.gpwWindow!.runId, input.id]);
@@ -2584,11 +2603,14 @@ export class ExecutionRepository {
         if (!isExactAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
           await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: "aapl_window_identity_mismatch" };
         }
-        const window = await checkAaplWindow(client, this.aaplWindow, input.accountId, input.id);
+        const window = await checkAaplWindow(client, this.aaplWindow, input.accountId, input.id, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
         await client.query(`UPDATE aapl_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
           WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.aaplWindow!.runId, input.id]);
       }
+
+      const calendar = await this.sessionEntryGuard(client, this.mapRow(row));
+      if (!calendar.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: calendar.reason }; }
 
       // Atomic claim + metadata + account write. Same fencing as
       // `tryStartSubmission`; also stamps `execution_account_id`

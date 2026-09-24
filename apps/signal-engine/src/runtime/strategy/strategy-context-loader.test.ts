@@ -1,5 +1,5 @@
-import { AAPL_NATIVE_SOURCE, aaplCandleEnd } from '@ikbr/shared';
-import { AAPL_FIXTURE_NOW, nativeAaplFixture, nativeAaplSchedule } from './aapl-native.fixture.js';
+import { buildInstrumentSessionIdentity, sessionNativeSource } from '@ikbr/shared';
+import { fixtureSessionSchedule, fixtureSessionCandles, SESSION_TIMEFRAMES } from './session-native.fixture.js';
 import { computeIndicatorsForContext } from './indicators.js';
 import { detectRegimeForContext } from './regime.js';
 import { evaluateMomentumBreakoutLong } from '../../strategies/momentum-breakout-long.strategy.js';
@@ -131,7 +131,8 @@ function makeCandles(
     out.push({
       conid,
       symbol,
-      timeframe: "1m",
+      timeframe: Object.entries(TIMEFRAME_MS).find(([, ms]) => ms === timeframeMs)?.[0] as CandleTimeframe,
+      source: sessionNativeSource(buildInstrumentSessionIdentity(INSTRUMENT, BOUND)),
       ts,
       open: 100 + i * 0.01,
       high: 100 + i * 0.01 + 0.05,
@@ -154,15 +155,7 @@ const TIMEFRAME_MS: Record<CandleTimeframe, number> = {
 };
 
 function fullCandleSets(): Partial<Record<CandleTimeframe, Candle[]>> {
-  return {
-    "1m": makeCandles(300, TIMEFRAME_MS["1m"], NOW_MS - 60_000),
-    "5m": makeCandles(60, TIMEFRAME_MS["5m"], NOW_MS - 300_000),
-    "1h": makeCandles(60, TIMEFRAME_MS["1h"], NOW_MS - 3_600_000),
-    "4h": makeCandles(60, TIMEFRAME_MS["4h"], NOW_MS - 14_400_000),
-    "12h": makeCandles(60, TIMEFRAME_MS["12h"], NOW_MS - 43_200_000),
-    "1d": makeCandles(60, TIMEFRAME_MS["1d"], NOW_MS - 86_400_000),
-    "1w": makeCandles(60, TIMEFRAME_MS["1w"], NOW_MS - 604_800_000),
-  };
+  return fixtureSessionCandles(BOUND, NOW);
 }
 
 interface RepoOverrides {
@@ -186,6 +179,7 @@ function makeRepo(o: RepoOverrides = {}): StrategyContextLoaderRepo & {
 } {
   const candles = o.candles ?? fullCandleSets();
   const spy = {
+    getSessionScheduleEvidence: async (identity: import("@ikbr/shared").InstrumentSessionIdentity) => fixtureSessionSchedule(identity, NOW),
     candleCalls: [] as Array<{
       symbol: string;
       conId: string;
@@ -241,7 +235,6 @@ const ALL_TIMEFRAMES: readonly CandleTimeframe[] = [
   "5m",
   "1h",
   "4h",
-  "12h",
   "1d",
   "1w",
 ];
@@ -279,8 +272,7 @@ describe("StrategyContextLoader — happy path", () => {
     assert.equal(result.context.marketState?.lastPrice, 150.25);
     assert.equal(result.context.currentPosition?.quantity, 0);
     assert.deepEqual(repo.candleCalls.map((c) => c.timeframe).sort(), [
-      "12h",
-      "1d",
+        "1d",
       "1h",
       "1m",
       "1w",
@@ -340,7 +332,7 @@ describe("StrategyContextLoader — candle failures", () => {
     const repo = makeRepo({
       candles: {
         ...fullCandleSets(),
-        "1m": makeCandles(300, TIMEFRAME_MS["1m"], NOW_MS + 60_000),
+        "1m": [makeCandles(1, TIMEFRAME_MS["1m"], NOW_MS + 60_000)[0]],
       },
     });
     const loader = makeLoader(repo);
@@ -370,7 +362,6 @@ describe("StrategyContextLoader — candle failures", () => {
     "5m",
     "1h",
     "4h",
-    "12h",
     "1d",
     "1w",
   ];
@@ -379,7 +370,7 @@ describe("StrategyContextLoader — candle failures", () => {
       const repo = makeRepo({
         candles: {
           ...fullCandleSets(),
-          [tf]: makeCandles(49, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf]),
+          [tf]: fullCandleSets()[tf]!.slice(-49),
         },
       });
       const loader = makeLoader(repo);
@@ -393,7 +384,7 @@ describe("StrategyContextLoader — candle failures", () => {
       const repo = makeRepo({
         candles: {
           ...fullCandleSets(),
-          [tf]: makeCandles(50, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf]),
+          [tf]: fullCandleSets()[tf]!.slice(-50),
         },
       });
       const loader = makeLoader(repo);
@@ -653,163 +644,77 @@ describe("StrategyContextLoader — cross-conId query safety", () => {
   });
 });
 
-describe("GPW3 WSE native warmup", () => {
-  it("omits unsupported 12h, demands native closed bars and exposes exact missing TF", async () => {
-    const instrument: Instrument = { ...INSTRUMENT, id: "pko_wse", brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" };
-    const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, brokerSymbol: "PKO", conId: 35146360,
-      localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" };
-    const requested: string[] = [];
-    const loader = new StrategyContextLoader({ clock: () => NOW, maxMarketStateAgeMs: 60000, repo: {
-      getInstrumentContractByConId: async () => makeContract({ symbol: "PKO", conid: "35146360", exchange: "WSE", primaryExchange: "WSE", currency: "PLN", localSymbol: "PKO", tradingClass: "PKO" }),
-      getMarketState: async () => ({ conid: "35146360", symbol: "PKO", lastPrice: 60, ts: NOW.toISOString() }),
-      getRecentCandlesForContract: async (_symbol, _conid, tf, _limit, nativeOnly) => {
-        assert.equal(nativeOnly, true); requested.push(tf);
-        return Array.from({ length: tf === "1m" ? 220 : 1 }, (_, i) => ({ conid: "35146360", symbol: "PKO", timeframe: tf,
-          ts: new Date(NOW_MS - (220 - i) * 60000), open: 60, high: 61, low: 59, close: 60, volume: 100, source: "ibkr_wse_native_v1" }));
+
+describe('instrument-independent native session readiness', () => {
+  const cases = [
+    ['pko_wse','PKO',35146360,'WSE','PLN','Europe/Warsaw',540,1020,'2026-09-24T07:01:00Z'],
+    ['aapl_nasdaq','AAPL',265598,'SMART','USD','America/New_York',570,960,'2026-09-24T13:31:00Z'],
+    ['msft','MSFT',272093,'SMART','USD','America/New_York',570,960,'2026-09-24T13:31:00Z'],
+    ['london_other','OTHER',123456,'LSE','GBP','Europe/London',480,990,'2026-09-24T07:01:00Z'],
+    ['arbitrary_asia','XYZ',67890,'NSE','INR','Asia/Kolkata',555,930,'2026-09-24T03:46:00Z'],
+    ['overnight_future','FUTURE',98765,'CME','USD','America/Chicago',-360,1020,'2026-09-23T23:01:00Z'],
+    ['fx_other','EUR',12087792,'IDEALPRO','USD','UTC',0,1440,'2026-09-24T00:01:00Z'],
+  ] as const;
+  async function setup(row: typeof cases[number], patch: { now?: Date; mode?: boolean } = {}) {
+    const [id,symbol,conId,exchange,currency,timezone,open,close,instant] = row;
+    const now = patch.now ?? new Date(instant);
+    const instrument: Instrument = { ...INSTRUMENT, id, brokerSymbol:symbol, exchange, currency, assetClass: id==='overnight_future'?'future':id==='fx_other'?'forex':'stock',
+      session: { ...INSTRUMENT.session, timezone, useRegularTradingHours: patch.mode ?? (id!=='fx_other') } };
+    const bound: BoundInstrument = {...BOUND,instrument,instrumentId:id,brokerSymbol:symbol,conId,exchange,currency,localSymbol:symbol,tradingClass:symbol};
+    const identity = buildInstrumentSessionIdentity(instrument,bound);
+    const evidence = fixtureSessionSchedule(identity,now,open,close);
+    const candles = fixtureSessionCandles(bound,now,open,close);
+    const repo: StrategyContextLoaderRepo = {
+      getSessionScheduleEvidence:async()=>evidence,
+      getRecentCandlesForContract:async(s,c,tf,_limit,wseOnly,source)=>{
+        assert.equal(s,symbol);assert.equal(c,String(conId));assert.equal(wseOnly,false);assert.equal(source,sessionNativeSource(identity));
+        return candles[tf as keyof typeof candles] ?? [];
       },
-    } });
-    const result = await loader.load({ instrument, bound, positionQuantity: 0, timeframes: ["1m", "12h", "1h"] });
-    assert.deepEqual(requested, ["1m", "1h"]);
-    assert.equal(result.kind, "error");
-    if (result.kind === "error") assert.match(result.message, /insufficient 1h candles/);
+      getInstrumentContractByConId:async()=>makeContract({symbol,conid:String(conId),exchange,primaryExchange:exchange,currency,localSymbol:symbol,tradingClass:symbol,secType:identity.secType}),
+      getMarketState:async()=>makeMarketState({symbol,conid:String(conId),ts:now.toISOString()}),
+    };
+    const load = (timeframes: readonly CandleTimeframe[] = SESSION_TIMEFRAMES, clock = ()=>now) => new StrategyContextLoader({repo,clock,maxMarketStateAgeMs:60000}).load({instrument,bound,positionQuantity:0,timeframes});
+    return {load,repo,candles,evidence,now,instrument,bound};
+  }
+  for (const row of cases) it(`${row[1]} first closed minute uses previous-session higher bars and calendar strategy hours`, async()=>{
+    const {load,now,candles} = await setup(row);
+    const result = await load();assert.equal(result.kind,'ok',JSON.stringify(result));if(result.kind!=='ok')return;
+    assert.equal(result.context.latestCandle.ts.getTime(),now.getTime()-60000);
+    assert.ok(candles['4h'].at(-1)!.ts.getTime()<now.getTime()-(['overnight_future','fx_other'].includes(row[0])?1:12)*3600000);
+    const evaluation=evaluateMomentumBreakoutLong({...result.context,directionalRegime:'bull_trend',volatilityRegime:'normal_volatility'});
+    assert.notEqual(evaluation.rejectionReason,'outside_strategy_session');
+    const indicators=computeIndicatorsForContext({secType:result.context.secType,candlesByTimeframe:candles,verifiedSession:result.context.verifiedSession})!;
+    const regime=detectRegimeForContext(result.context.secType,result.context.latestCandle.close,indicators);
+    assert.equal(result.context.indicators.regimeScore,regime.score);
+    assert.equal(result.context.indicators.intraday?.minutesSinceSessionOpen,0);
   });
-});
-
-describe("GPW3 native WSE freshness measured from conservative close", () => {
-  async function evaluate(tf: "1h" | "4h", ageSinceEnd: number, wse = true) {
-    const instrument: Instrument = wse ? { ...INSTRUMENT, id: "pko_wse", brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" } : INSTRUMENT;
-    const bound: BoundInstrument = wse ? { ...BOUND, instrument, instrumentId: instrument.id, brokerSymbol: "PKO", conId: 35146360,
-      localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" } : BOUND;
-    const selected = makeCandles(50, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf] - ageSinceEnd, String(bound.conId), bound.brokerSymbol)
-      .map(c => ({ ...c, timeframe: tf, source: "ibkr_wse_native_v1" }));
-    const repo = makeRepo({
-      contract: makeContract({ symbol: bound.brokerSymbol, conid: String(bound.conId), exchange: bound.exchange, primaryExchange: bound.exchange, currency: bound.currency, localSymbol: bound.localSymbol, tradingClass: bound.tradingClass }),
-      candles: { "1m": makeCandles(220, 60000, NOW_MS - 60000, String(bound.conId), bound.brokerSymbol).map(c => ({ ...c, source: "ibkr_wse_native_v1" })), [tf]: selected },
-      marketState: makeMarketState({ symbol: bound.brokerSymbol, conid: String(bound.conId) }),
-    });
-    return makeLoader(repo).load({ instrument, bound, positionQuantity: 0, timeframes: ["1m", tf] });
-  }
-  for (const [tf, ceiling] of [["1h", 5400000], ["4h", 21600000]] as const) {
-    it(`${tf} exact end+ceiling passes; next millisecond and overnight fail`, async () => {
-      assert.equal((await evaluate(tf, ceiling)).kind, "ok");
-      const beyond = await evaluate(tf, ceiling + 1);
-      assert.equal(beyond.kind, "error");
-      if (beyond.kind === "error") assert.match(beyond.message, /stale/);
-      assert.equal((await evaluate(tf, 24 * 3600000)).kind, "error");
-    });
-    it(`${tf} unfinished latest bar cannot supply the 50th required native candle`, async () => {
-      const unfinished = await evaluate(tf, -1);
-      assert.equal(unfinished.kind, "error");
-      if (unfinished.kind === "error") assert.match(unfinished.message, /insufficient/);
-    });
-    it(`${tf} USD retains start-based freshness`, async () => {
-      const legacy = await evaluate(tf, ceiling, false);
-      assert.equal(legacy.kind, "error");
-      if (legacy.kind === "error") assert.match(legacy.message, /stale/);
-    });
-  }
-});
-
-it('PKO profile flows through loader only for exact bound stock WSE PLN identity',async()=>{
-  const instrument:Instrument={...INSTRUMENT,id:'pko_wse',brokerSymbol:'PKO',exchange:'WSE',currency:'PLN',assetClass:'stock',
-    executionPolicy:{...INSTRUMENT.executionPolicy!,momentumBreakoutProfile:'pko_mild_v1'}};
-  const bound:BoundInstrument={...BOUND,instrument,instrumentId:'pko_wse',brokerSymbol:'PKO',conId:35146360,localSymbol:'PKO',tradingClass:'PKO',exchange:'WSE',currency:'PLN'};
-  const repo=makeRepo({contract:makeContract({symbol:'PKO',conid:'35146360',exchange:'WSE',primaryExchange:'WSE',currency:'PLN',localSymbol:'PKO',tradingClass:'PKO'}),
-    candles:{'1m':makeCandles(220,60000,NOW_MS-60000,'35146360','PKO').map(c=>({...c,source:'ibkr_wse_native_v1'}))},
-    marketState:makeMarketState({symbol:'PKO',conid:'35146360'})});
-  const loader=makeLoader(repo);const result=await loader.load({instrument,bound,positionQuantity:0,timeframes:['1m']});
-  assert.equal(result.kind,'ok');if(result.kind==='ok')assert.equal(result.context.momentumBreakoutProfile,'pko_mild_v1');
-  for(const patch of [{currency:'USD'},{exchange:'SMART'},{conId:123},{brokerSymbol:'OTHER'}]){
-    const bad=await loader.load({instrument,bound:{...bound,...patch},positionQuantity:0,timeframes:['1m']});assert.equal(bad.kind,'error');
-  }
-});
-
-describe('AAPL native context and deterministic six-timeframe replay', () => {
-  const instrument: Instrument = { ...INSTRUMENT, id: 'aapl_nasdaq', exchange: 'SMART' };
-  const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, exchange: 'SMART' };
-  const original = nativeAaplFixture();
-  const timeframes: CandleTimeframe[] = ['1m','5m','1h','4h','12h','1d','1w'];
-  async function evaluate(candles = original, now = AAPL_FIXTURE_NOW, evidence = nativeAaplSchedule(now), changeGeneration = false) {
-    const requested: CandleTimeframe[] = [];
-    let reads = 0;
-    const loader = new StrategyContextLoader({ clock: () => now, maxMarketStateAgeMs: 60000, repo: {
-      getAaplScheduleEvidence: async () => ({ ...evidence, generation: evidence.generation + (changeGeneration ? reads++ : 0) }),
-      getInstrumentContractByConId: async () => makeContract({ exchange: 'SMART' }),
-      getMarketState: async () => makeMarketState({ ts: now.toISOString() }),
-      getRecentCandlesForContract: async (symbol, conid, tf, _limit, wseOnly, source) => {
-        assert.equal(symbol, 'AAPL'); assert.equal(conid, '265598');
-        assert.equal(wseOnly, false); assert.equal(source, AAPL_NATIVE_SOURCE);
-        requested.push(tf); return candles[tf as keyof typeof candles] ?? [];
-      },
-    } });
-    return { result: await loader.load({ instrument, bound, positionQuantity: 0, timeframes }), requested };
-  }
-  it('production loader matches direct closed native context and strategy result on frozen replay', async () => {
-    const { result, requested } = await evaluate();
-    assert.equal(result.kind, 'ok', JSON.stringify(result)); if (result.kind !== 'ok') return;
-    assert.deepEqual(requested, ['1m','5m','1h','4h','1d','1w']);
-    assert.deepEqual(result.context.candlesByTimeframe, original);
-    const indicators = computeIndicatorsForContext({ secType: 'STK', candlesByTimeframe: original })!;
-    const regime = detectRegimeForContext('STK', original['1m'].at(-1)!.close, indicators);
-    Object.assign(indicators, { directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime,
-      regimeScore: regime.score, regimeConfidence: regime.confidence, regimeReasons: regime.reasons,
-      timeframeTrendScores: regime.timeframeTrendScores, timeframeTrendVotes: regime.timeframeTrendVotes });
-    assert.deepEqual(result.context.indicators, indicators);
-    const direct = { ...result.context, indicators, candlesByTimeframe: original, latestCandle: original['1m'].at(-1)!,
-      directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime };
-    assert.deepEqual(evaluateMomentumBreakoutLong(result.context), evaluateMomentumBreakoutLong(direct));
-    assert.equal(evaluateMomentumBreakoutLong(result.context).signal, null);
-    assert.equal(result.context.momentumBreakoutProfile, 'default');
+  it('explicit 12h requirement fails rather than silently being omitted',async()=>{
+    const {load}=await setup(cases[0]);const result=await load(['1m','12h']);assert.equal(result.kind,'error');if(result.kind==='error')assert.match(result.message,/unsupported_native_timeframe:12h/);
   });
-  for (const tf of ['1m','5m','1h','4h','1d','1w'] as const) {
-    for (const bad of ['source','unfinished','foreign','ohlc'] as const) it(`${tf}: ${bad} cannot supply minimum history`, async () => {
-      const count = tf === '1m' ? 220 : 50;
-      const selected = original[tf].slice(-count).map(c => ({ ...c }));
-      const last = selected.at(-1)!;
-      if (bad === 'source') last.source = 'legacy';
-      if (bad === 'unfinished') last.ts = AAPL_FIXTURE_NOW;
-      if (bad === 'foreign') last.conid = '123';
-      if (bad === 'ohlc') last.low = last.high + 1;
-      const { result } = await evaluate({ ...original, [tf]: selected });
-      assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /insufficient|aapl_/);
-    });
-  }
-  for (const instant of ['2026-09-24T13:31:00Z', '2026-09-28T13:31:00Z', '2026-09-08T13:31:00Z', '2026-11-02T14:31:00Z', '2026-11-27T14:31:00Z', '2026-11-30T14:31:00Z', '2026-03-09T13:31:00Z']) {
-    it(`morning replay ${instant} uses previous closed higher bars with first current minute`, async () => {
-      const now = new Date(instant), candles = nativeAaplFixture(now);
-      const { result } = await evaluate(candles, now);
-      assert.equal(result.kind, 'ok', JSON.stringify(result));
-      if (result.kind !== 'ok') return;
-      assert.equal(result.context.latestCandle.ts.getTime(), now.getTime() - 60000);
-      assert.ok(result.context.candlesByTimeframe['4h']!.at(-1)!.ts.getTime() < now.getTime() - 12 * 3600000);
-      // The former wall-time freshness rule rejected every morning in this replay.
-      assert.ok(now.getTime() - aaplCandleEnd(candles['4h'].at(-1)!.ts, '4h') > 21600000);
-      const indicators = computeIndicatorsForContext({ secType: 'STK', candlesByTimeframe: candles })!;
-      const regime = detectRegimeForContext('STK', candles['1m'].at(-1)!.close, indicators);
-      Object.assign(indicators, { directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime,
-        regimeScore: regime.score, regimeConfidence: regime.confidence, regimeReasons: regime.reasons,
-        timeframeTrendScores: regime.timeframeTrendScores, timeframeTrendVotes: regime.timeframeTrendVotes });
-      assert.deepEqual(result.context.indicators, indicators);
-      assert.equal(evaluateMomentumBreakoutLong(result.context).signal, null);
-    });
-  }
-  it('09:30 has no closed current-session minute', async () => {
-    const now = new Date('2026-09-24T13:30:00Z');
-    const { result } = await evaluate(nativeAaplFixture(now), now);
-    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /current_session_minute/);
+  for(const mutation of ['missing','generation','mode','duplicate','source','quote_future'] as const)it(`${mutation} fails closed for arbitrary instrument`,async()=>{
+    const state=await setup(cases[4]);let reads=0;
+    if(mutation==='missing')state.repo.getSessionScheduleEvidence=async()=>null;
+    if(mutation==='generation')state.repo.getSessionScheduleEvidence=async()=>({...state.evidence,generation:1+reads++});
+    if(mutation==='mode')state.evidence.schedule!.identity.useRTH=false;
+    if(mutation==='duplicate')state.candles['1m'].push({...state.candles['1m'].at(-1)!});
+    if(mutation==='source')state.candles['1m'][0].source='ibkr_wse_native_v1';
+    if(mutation==='quote_future')state.repo.getMarketState=async()=>makeMarketState({symbol:state.bound.brokerSymbol,conid:String(state.bound.conId),ts:new Date(state.now.getTime()+1000).toISOString()});
+    const result=await state.load();assert.equal(result.kind,'error',JSON.stringify(result));
   });
-  it('a refreshed generation during asynchronous load cannot publish old context', async () => {
-    const { result } = await evaluate(original, AAPL_FIXTURE_NOW, nativeAaplSchedule(), true);
-    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /changed_during_context/);
+  it('unknown MIDPOINT volume preserves FX price context without fabricating volume indicators',async()=>{
+    const state=await setup(cases[6]);
+    for(const rows of Object.values(state.candles))for(const candle of rows)candle.volume=-1;
+    const result=await state.load();assert.equal(result.kind,'ok',JSON.stringify(result));if(result.kind!=='ok')return;
+    assert.equal(result.context.latestCandle.volume,-1);assert.ok(result.context.indicators.ema20);
+    for(const value of [result.context.indicators.cmf20,result.context.indicators.mfi14,result.context.indicators.obvSlope,result.context.indicators.timeframes?.['1h']?.cmf20,result.context.indicators.intraday?.vwap,result.context.indicators.intraday?.sessionVolume])assert.equal(value,undefined);
+    assert.equal(evaluateMomentumBreakoutLong(result.context).rejectionReason,'volume_evidence_unavailable');
   });
-  for (const status of ['REFRESHING', 'FAILED'] as const) it(`${status} schedule blocks context`, async () => {
-    const { result } = await evaluate(original, AAPL_FIXTURE_NOW, { ...nativeAaplSchedule(), status });
-    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /schedule_unavailable/);
+  it('quote arriving after context start is checked against post-fetch clock',async()=>{
+    const state=await setup(cases[0]);let current=state.now.getTime();
+    state.repo.getMarketState=async()=>{current+=100;return makeMarketState({symbol:state.bound.brokerSymbol,conid:String(state.bound.conId),ts:new Date(current).toISOString()});};
+    const result=await state.load(SESSION_TIMEFRAMES,()=>new Date(current));assert.equal(result.kind,'ok',JSON.stringify(result));
   });
-  it('missing new 4h bucket is rejected once boundary publication grace expires', async () => {
-    const before = new Date('2026-09-24T15:59:00Z'), now = new Date('2026-09-24T16:01:31Z');
-    const history = nativeAaplFixture(now); history['4h'] = nativeAaplFixture(before)['4h'];
-    const { result } = await evaluate(history, now);
-    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /4h: aapl_expected_candle_missing/);
+  it('before first minute closes prior-session minute cannot satisfy readiness',async()=>{
+    const state=await setup(cases[0],{now:new Date('2026-09-24T07:00:59Z')});const result=await state.load();assert.equal(result.kind,'error');if(result.kind==='error')assert.match(result.message,/current_interval_minute_missing/);
   });
 });

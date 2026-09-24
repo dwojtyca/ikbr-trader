@@ -1,3 +1,4 @@
+import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -84,7 +85,7 @@ async function createFixture(currency: "USD" | "PLN") {
   url.pathname = `/${database}`;
   const pool = new Pool({ connectionString: url.toString() });
   await runMigrations(pool);
-  const execution = new ExecutionRepository(pool),
+  const execution = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard),
     repo = new CloseRepository(pool, execution),
     reconciliation = new ReconciliationRepository(pool);
   const authority = new InstrumentBindingAuthority(
