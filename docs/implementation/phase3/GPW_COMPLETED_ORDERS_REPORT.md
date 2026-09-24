@@ -65,3 +65,43 @@ disabled-write deployment and repeated read-only preflight/reconciliation.
 No broker submission, cancellation, close, AI provider call or trading window is
 authorized or performed by this implementation. Post-deployment observations are
 reported separately; this report does not claim a completed Paper round trip.
+
+## Post-deployment verification — 2026-09-24 10:15 UTC
+
+Code commit `e0d3f4f176b7953988e1360704f0157c19992b81` was pushed to main.
+[Exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/35985813114)
+passed lint, typecheck, unit tests, PostgreSQL integration and build. The reviewed
+image was tagged `ikbr-trader-gpw:e0d3f4f` and deployed to execution-engine only;
+ingestion/signal retained the compatible c5e8576 image to avoid interrupting data.
+
+Explicit read-only reconciliation run74 returned `MISMATCH`, with
+`exposureComplete=true`, `recoveryComplete=true`, zero position mismatches,
+zero ambiguous proposals and one active SMR orphan-order hold. Completed-order
+source was available/bounded, zero retained rows; the unsupported-source blocker
+is resolved. No hold was cleared and SMR was not modified.
+
+Disabled-write verifier returned `UNHEALTHY` (exit30): 9 healthy, 2 intentionally
+disabled and 3 unhealthy checks. Concrete remaining issues:
+
+1. SMR manual SELL remains `orphan_broker_order`. Explicit trusted external-order
+   recognition needs design/review without weakening unknown-order/PKO identity
+   safeguards. The position itself need not be closed to support scoped PKO tests.
+2. Daily-loss diagnostics report `complete=false` with zero missing FX and zero
+   missing commissions. Read-only SQL confirmed zero fills today; current
+   `aggregateRealizedPnL` marks an empty local set incomplete. A follow-up needs
+   broker-backed evidence of an empty day, not unconditional zero-PnL acceptance
+   and not disabling the kill switch.
+3. Signal `runtime/execute/ready` fails its Paper guard because `HttpReadyProbe`
+   sends no token to execution `/ready`, while actual production auth exempts only
+   `/health`. The returned error lacks `environment`; this is an authentication
+   integration defect, not evidence of a live account. Follow-up must authenticate
+   the internal probe and retain the fail-closed response checks.
+
+PKO-only subscription and real-time feed worked; latest completed 4h history was
+still from the preceding session. Current explicit PLN cash: 5811.0746. Risk
+account evidence was complete, including explicit USD metrics and PLN FX. No entry
+window configured; TRADING_ENABLED=false and scheduler false throughout. The AI
+worker was not started and no paid provider call was made. No new user credentials,
+PLN funding or forced SMR close is needed for the next code fixes. Launch remains
+blocked until those checks pass, history is usable and a supervised window is
+explicitly authorized.
