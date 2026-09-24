@@ -32,3 +32,24 @@ test('actual /ready wires freshness and health to same durable helper without le
  assert.match(handler,/await loadDurableReadiness/);assert.match(handler,/lastReconciliationAt: durable.lastReconciliationAt/);assert.match(handler,/reconciliationRunHealth: durable.reconciliationRunHealth/);
  assert.doesNotMatch(handler,/\n\s*lastReconciliationAt,/);
 });
+
+for (const mode of ['recovery_only', 'recovery_stale', 'recovery_future', 'exposure_missing'] as const) test(`durable readiness preserves per-instrument recovery policy ${mode}`, async () => {
+ const run = readinessRun(mode === 'recovery_stale' ? { completedAt: new Date(now.getTime() - 901000) }
+  : mode === 'recovery_future' ? { completedAt: new Date(now.getTime() + 1) } : {});
+ const coverage = run.sourceCoverage as Record<string, unknown>;
+ coverage.completedOrders = { available: false, boundedWindow: false };
+ if (mode === 'exposure_missing') coverage.positions = { available: false, boundedWindow: false };
+ const evidence = await loadDurableReadiness({ sessionId: 'session', now: () => now,
+  current: () => ({ accountId: 'PAPER-TEST', generation: 1, connected: true }),
+  repository: { getReadinessEvidence: async () => ({ running: false, latest: run }) } });
+ const result = evaluateReadiness({ ...evidence, now, environment: 'paper', tradingEnabled: false,
+  brokerSocketUp: true, activeAccountId: 'PAPER-TEST', accountAllowedByEnvironment: true,
+  auditWriteAvailable: true, reconciliationMaxAgeSeconds: 900, positionSnapshotHealth: { kind: 'healthy' } });
+ assert.equal(result.statusCode, mode === 'recovery_only' ? 200 : 503);
+ if (mode === 'recovery_only') {
+  assert.equal(evidence.reconciliationRunHealth.kind, 'incomplete_recovery');
+  assert.equal(result.body.reconciliation.lastRanAt, run.completedAt!.toISOString());
+ }
+ if (mode === 'recovery_stale') assert.ok(result.body.reasons.includes('reconciliation_stale'));
+ if (mode === 'exposure_missing') assert.ok(result.body.reasons.includes('reconciliation_incomplete_exposure'));
+});

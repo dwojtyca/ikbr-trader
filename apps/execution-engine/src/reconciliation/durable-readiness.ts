@@ -16,7 +16,7 @@ export async function loadDurableReadiness(input: {
     const run = evidence.latest;
     if (run && run.accountId !== before.accountId) return deny("wrong_session");
     const health = classifyReadiness(evidence.running, run, input.sessionId);
-    if (health.kind !== "healthy") return deny(health.kind);
+    if (health.kind !== "healthy" && health.kind !== "incomplete_recovery") return deny(health.kind);
     const time = run?.completedAt?.getTime();
     if (time === undefined || !Number.isFinite(time) || time > input.now().getTime()) return deny("failed");
     return { lastReconciliationAt: new Date(time), reconciliationRunHealth: health };

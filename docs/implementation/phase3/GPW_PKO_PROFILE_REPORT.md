@@ -62,11 +62,22 @@ No account identifiers, balances, position quantities, broker order identifiers
 or private provider evidence are included in this report.
 
 Final clean-copy gates: lint PASS (three pre-existing warnings), typecheck PASS,
-`pnpm test`: 2,123 passed, 18 integration tests skipped without a DB;
-`pnpm test:integration`: 1,226 passed, none skipped; build PASS.
+`pnpm test`: 2,127 passed, 18 integration tests skipped without a DB;
+`pnpm test:integration`: 1,230 passed, none skipped; build PASS.
 The close fixture's 53 cases are included in the passing PostgreSQL run.
 Frozen replay completed successfully and was independently checked.
 Final Docker image digest:
-`sha256:0a928814f3753469ed6285f37dabaa875a008547873da875eb1b13882a3f840a`.
+`sha256:d029337600e7b8f34ce9f353139a6b09658f5672e3104ed7525f58ad58b20ee6`.
 All 29 unrelated research-file hashes and the local environment file are unchanged.
 Commit CI and post-deployment checks remain pending at this report revision.
+
+
+Pre-deployment review also caught a global-readiness regression for recovery-only
+incompleteness. The helper now retains valid same-row freshness and the unchanged
+`incomplete_recovery` classification; existing per-instrument submission gates
+remain authoritative. Fresh recovery-only evidence passes global readiness;
+stale/future evidence and incomplete exposure fail. The plan clarification and
+implementation were independently accepted; the counts above include the full
+repeat after this fix. The initial feature commit f99d8cb passed
+[GitHub CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36001295087).
+The policy correction's CI and deployment are still pending at this revision.

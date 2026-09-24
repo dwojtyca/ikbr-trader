@@ -82,8 +82,10 @@ Replace local lastReconciliationAt as /ready freshness input with completedAt fr
 the SAME latest durable reconciliation row used for health, for captured account
 and current process session. Keep legacy timestamp only if needed for legacy
 response compatibility. No startedAt, older CLEAN or recent legacy shim fallback.
-RUNNING/FAILED/ABANDONED/wrong-session/missing/incomplete records remain unhealthy
-per existing semantics. Invalid/future completedAt never establishes freshness.
+RUNNING/FAILED/ABANDONED/wrong-session/missing/incomplete-exposure records remain
+unhealthy. Recovery-only incompleteness retains the existing per-instrument policy:
+a valid completedAt from that same latest row may satisfy global freshness, while
+the health kind remains incomplete_recovery and submission gates remain unchanged. Invalid/future completedAt never establishes freshness.
 Use the existing bounded age, preserving exact boundary behavior. Capture account
 and broker connection generation before DB awaits; recheck afterwards. DB failure
 and any session/account transition fail closed. Position snapshot health and

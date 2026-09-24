@@ -16,6 +16,8 @@ test('PG latest durable result advances readiness; failed/running/foreign rows n
   const get=()=>loadDurableReadiness({repository:repo,current:()=>({accountId:'PAPER-TEST',generation:1,connected:true}),sessionId:'current',now:()=>new Date('2026-09-24T12:00:00Z')});
   await insert('CLEAN','current','2026-09-24T11:00:00Z');await insert('CLEAN','current','2026-09-24T11:59:00Z');
   assert.equal((await get()).lastReconciliationAt?.toISOString(),'2026-09-24T11:59:00.000Z');
+  await pool.query("UPDATE reconciliation_runs SET status='INCOMPLETE',source_coverage=jsonb_set(source_coverage,'{completedOrders}', '{\"available\":false,\"boundedWindow\":false}'::jsonb) WHERE started_at='2026-09-24T11:59:00Z'");
+  const recovery = await get();assert.equal(recovery.reconciliationRunHealth.kind,'incomplete_recovery');assert.equal(recovery.lastReconciliationAt?.toISOString(),'2026-09-24T11:59:00.000Z');
   await insert('FAILED','current','2026-09-24T11:59:10Z');assert.equal((await get()).reconciliationRunHealth.kind,'failed');
   await insert('RUNNING','current','2026-09-24T11:59:20Z');assert.equal((await get()).reconciliationRunHealth.kind,'running');
   await pool.query("UPDATE reconciliation_runs SET status='ABANDONED' WHERE status='RUNNING'");
