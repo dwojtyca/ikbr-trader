@@ -35,16 +35,34 @@ Apps (all run via Docker Compose, also runnable individually via
 - `apps/execution-engine` (port `3103`) — TWS socket execution, bracket orders
   (parent + TP + SL), `/execution/orders`, `/execution/trades` (FIFO-matched
   entries+exits with realized P&L), `/execution/account/summary`,
-  kill-switches.
+  kill-switches, durable proposal/AI/risk checks, reconciliation and an audited
+  full-close lifecycle for the supported one-share stock scope.
 - `apps/backtest-engine` (port `3104`) — separate Postgres DB
   `ikbr_trader_backtest`, historical fetch with token-bucket pacing +
   concurrency cap, strategy-lab worker, simulator.
-- `apps/llm-agent` — autonomous EXECUTE/REJECT gate that polls `PROPOSED`
-  orders, fetches news (Marketaux), calls OpenAI, and posts decisions to
-  execution-engine.
+- `apps/llm-agent` — mandatory EXECUTE/REJECT entry gate for bound proposals;
+  claims persisted AI reviews, fetches news (Marketaux), calls OpenAI and delivers
+  decisions to execution-engine. Provider configuration alone does not prove
+  complete research coverage or model availability.
 - `apps/ui` (port `5173`, Vite + React) — operator dashboard: account summary,
   ingestion progress, signals, orders, trades, backtest controls.
 - `packages/shared` — shared domain types and `strategy-profiles.ts`.
+- `tools/paper-verify-stack` — read-only infrastructure/preflight verifier.
+
+## Current delivery priority
+
+Prove a supervised Paper entry and exit on **one PKO share** before tuning
+strategies or enabling unattended trading. The PKO profile uses `pko_wse`, WSE,
+PLN and `momentum_breakout_long_v1`, with explicit configuration opt-in, a bounded
+entry window and a durable one-entry-attempt-per-account/day budget.
+
+Read [the GPW runbook](docs/runbooks/GPW_PAPER_ROUND_TRIP.md) before operational
+work. [The 2026-09-24 preflight report](docs/implementation/phase3/GPW_PREFLIGHT_DOCKER_REPORT.md)
+records observed blockers; recheck them against current IBKR evidence. Passing
+tests, `/ready` or history counts alone does not prove launch readiness. In
+particular, the preflight found unavailable completed-order coverage in the
+production reconciliation adapter, competing-session quote failures and unrelated
+account exposure. Do not weaken checks to label these conditions ready.
 
 ## Strategy registry
 
@@ -52,18 +70,11 @@ Implemented strategies are registered in
 `apps/signal-engine/src/strategies/strategy-registry.ts`. Profiles (incl.
 `enabledInBot` flag) are in `packages/shared/src/strategy-profiles.ts`.
 
-Currently active in bot/backtest:
-
-- `momentum_breakout_long_v1`
-- `momentum_breakdown_short_v1`
-- `gap_fade_short_v1`
-
-Implemented but disabled:
-
-- `range_reversal_v1`
-- `trend_following_long_v1`
-
-See [STRATEGIES.md](STRATEGIES.md) for the full per-strategy spec.
+Use those files as the source of truth rather than a duplicated activation list.
+`enabledInBot` is not permission to trade: instrument configuration, bindings,
+loop allowlist, risk/AI checks and environment controls also apply. The configured
+GPW profile is in `packages/shared/src/instruments/configured-registry.ts`.
+See [STRATEGIES.md](STRATEGIES.md) for strategy specifications.
 
 ---
 
@@ -87,7 +98,9 @@ See [STRATEGIES.md](STRATEGIES.md) for the full per-strategy spec.
   `proposed_orders` schema compatible unless explicitly asked.
 - Strategies must not execute orders directly. They emit `StrategySignal`s;
   routing/execution is the job of `signal-engine` → `execution-engine`.
-- Broker integration (`ib@0.2.9`) must stay outside strategy code.
+- Broker integration must stay outside strategy code. The existing execution
+  and ingestion sockets use `ib`; WSE metadata uses `@stoqey/ib`. Check the
+  installed versions and actual adapter capabilities before assuming API support.
 - Prefer TypeScript, clean architecture, testable modules. Use the Node.js
   native test runner (`pnpm test`).
 - Do not add new strategies unless asked.
@@ -135,7 +148,8 @@ Responsible for:
 - indicator calculations
 - signal generation
 
-Must NEVER communicate directly with IBKR execution.
+Must NEVER submit directly to IBKR. It may call the execution-engine API through
+the supported proposal/runtime flow.
 
 ## execution-engine
 
@@ -180,7 +194,8 @@ Signals:
     signal-engine
 
 Trade Decision:
-    decision-engine (future)
+    llm-agent entry adjudication, validated by execution-engine
+    (a separate decision-engine remains a future architecture goal)
 
 Execution:
     execution-engine
@@ -202,7 +217,10 @@ Required configuration:
   broker environment. Never inferred from `IB_SOCKET_PORT`.
 - `ALLOWED_PAPER_ACCOUNTS` — CSV whitelist of paper account IDs.
 - `ALLOWED_LIVE_ACCOUNTS` — CSV whitelist of live account IDs.
-- `TRADING_ENABLED` (`true` | `false`) — master switch for write actions.
+- `TRADING_ENABLED` (`true` | `false`) — master switch for guarded write actions.
+  The explicit cancel/reconciliation exemptions retain auth/account guards;
+  full-close currently requires writes enabled. Switching it off does not close
+  positions or cancel broker-side protective orders.
 - `EXECUTION_API_TOKEN` — Bearer for all mutating execution-engine endpoints.
   Required (≥32 chars) when `IBKR_ENVIRONMENT=live` or `TRADING_ENABLED=true`.
   In Phase 1 the same token is used by every internal client
@@ -242,24 +260,57 @@ When asked to "research a strategy" without a tighter scope:
 
 # Development Workflow
 
-For every implementation:
+Work directly on `main`, as requested by the owner. Do not create a branch or
+GitHub PR unless asked. Preserve unrelated local work; stage only the reviewed
+scope, never use blanket staging in a dirty tree.
 
-1. Read AGENTS.md.
-2. Read `docs/implementation/ROADMAP.md`.
-3. Find first unfinished phase.
-4. Create `docs/implementation/PHASE_X_PLAN.md`.
-5. Wait for approval.
-6. Implement only that phase.
-7. Run:
-   - `pnpm typecheck`
-   - `pnpm test`
-   - `pnpm build`
-   - the relevant backtest command if behavior-affecting
-8. Perform hostile review.
-9. Create `docs/implementation/PHASE_X_REPORT.md`.
-10. Stop.
+For every implementation changing repository code or versioned configuration:
 
-Note: ESLint is not required in Phase 1 (introduced in a later phase).
+1. Read this file, `docs/implementation/ROADMAP.md` and the relevant current
+   delivery documents. Follow the owner's selected next stage; do not restart
+   an unrelated unfinished roadmap phase.
+2. Create a detailed bounded plan in the relevant `docs/implementation/phase*/`
+   directory, with acceptance criteria and validation.
+3. Have an independent agent review the plan. Fix it until the reviewer accepts.
+   The owner's existing instruction to implement plus this acceptance is enough
+   to proceed; do not request the same approval again.
+4. Implement that scope. Material scope changes require an updated plan/review.
+5. Have a different independent agent review the implementation against the plan,
+   including completeness and hostile failure cases. Fix findings until accepted.
+6. Run `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:integration` against
+   isolated PostgreSQL, and `pnpm build`. Run relevant backtests for strategy or
+   simulator behavior changes. Deployment changes also require a clean Docker
+   build. Do not use the operational database for destructive test fixtures.
+7. Write the implementation report, commit and push on `main`, and verify GitHub
+   CI for that exact commit. Do not call the work complete while checks fail or
+   CI is unverified; report access limitations explicitly.
+
+Documentation-only changes still receive independent plan and document reviews;
+validate facts, links and the staged diff locally. Do not add tests or rerun
+unchanged runtime suites just for prose. Commit/push and verify CI normally.
+Read-only operational diagnostics and applying existing runbook settings during
+an authorized deployment do not require a new code implementation plan.
+
+## Operational authorization and capability
+
+- Carry forward explicit owner authorization within its scope. Read-only checks
+  and an authorized disabled-write deployment/preflight do not require repeated
+  confirmation. Do not infer trading activation from a request to implement code
+  or check readiness. Activate only within the owner's authorized Paper scope,
+  after the operational gates pass. Keep paid provider calls within that scope.
+- An owner-requested close is a risk-reducing operation, not a new strategy entry.
+  It does not need a fabricated entry signal or new entry AI approval. Use the
+  supported audited close workflow, its original ownership evidence, deterministic
+  close-risk checks, current broker quantity and idempotency controls.
+- Distinguish authorization from implementation support. A request to close an
+  old position does not add missing legacy-position ownership or quantity support.
+  State the exact unsupported capability and use an authorized implementation
+  extension or owner-operated IBKR action. Do not substitute an ad hoc broker
+  submission that bypasses proposal/risk/audit controls.
+- Deleting local rows is never evidence that an IBKR position is closed. After a
+  manual close, confirm broker position, outstanding orders and reconciliation.
+- If blocked, identify the actual code limitation or quote the applicable rule.
+  Do not present project instructions as an external platform prohibition.
 
 ---
 
