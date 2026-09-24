@@ -72,7 +72,30 @@ tests, plus the backtest/simulator and verifier suites. Existing three lint
 warnings remain; there are no lint errors. A clean Docker build passed.
 All 29 unrelated research files retain their original hashes.
 
-Exact-commit CI and disabled deployment evidence will be appended after push. No trading activation is part
+Code commit: `dfda4263924c5293bf29cb5e4e07dd0642de5f2d` on main.
+[Exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36039316601)
+completed successfully. Deployed image `ikbr-trader-gpw:dfda426`, digest
+`sha256:49b4aeb7ae277993f346f820de839fd6403b515155a0e1f3c1fa367b707c7a62`.
+
+Disabled deployment observed on 2026-09-24 at 18:13–18:15 UTC:
+
+- Ingestion, signal and execution run the same reviewed image; AI worker is
+  created but stopped. Paper writes and trading loop are false; no entry window.
+- Real Gateway schedule is READY, generation 2, fourteen sessions, received
+  18:13:30 UTC. Fresh AAPL bid/ask is marketDataType 1 with a 0.02 USD spread
+  in the sampled quote. No competing-session failure was observed.
+- All six retained timeframes pass the production loader at 18:14 UTC. The 1m
+  sample temporarily uses the immediately preceding slot within publication
+  grace; other timeframes match their expected closed slots. The current 4h
+  opening bucket has verified 13:30–16:00 UTC boundaries.
+- Existing strategy evaluates the real context and returns no candidate:
+  `hourly_momentum_too_weak`. No signal or proposal was manufactured.
+- Current-session reconciliation is CLEAN, readiness returns 200, no active holds
+  and no AAPL position. Stack verifier reports HEALTHY, 12 healthy checks and
+  two expected disabled controls, zero degraded/unhealthy/unreachable checks.
+
+This documentation-only follow-up records the validated code deployment; its
+commit does not change the running image or runtime behavior. No trading activation is part
 of this implementation. The separate AAPL AI research identity/context gap
 remains a launch gate; provider configuration alone does not resolve it.
 An actual supervised morning entry/exit has not been observed.
