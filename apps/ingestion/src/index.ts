@@ -1,3 +1,4 @@
+import { isAaplSubscription, AaplNativeRefresh } from "./aapl-native-refresh.js";
 import { isWseSubscription, WseNativeRefresh } from "./wse-native-refresh.js";
 import Fastify from "fastify";
 import { Pool } from "pg";
@@ -52,12 +53,13 @@ interface BackfillProgress {
 
 let backfillProgress: BackfillProgress | null = null;
 let bootstrapInFlight = false;
+let nativeRefreshPaused = false;
 
 async function flushBufferedCandles(): Promise<void> {
   const buffered = aggregator.flushAll();
   for (const candle of buffered) {
     const subscription = activeSubscriptions.find((entry) => entry.conid === candle.conid);
-    if (isFuturesSubscription(subscription) || isWseSubscription(subscription)) {
+    if (isFuturesSubscription(subscription) || isWseSubscription(subscription) || isAaplSubscription(subscription)) {
       app.log.info({ conid: candle.conid, ts: candle.ts }, "discarded provisional FUT candle during shutdown");
       continue;
     }
@@ -66,12 +68,15 @@ async function flushBufferedCandles(): Promise<void> {
 
   const higher = higherTimeframeAggregator.flushAll();
   for (const candle of higher) {
-    if (activeSubscriptions.some(sub => sub.conid === candle.conid && isWseSubscription(sub))) continue;
+    if (activeSubscriptions.some(sub => sub.conid === candle.conid && (isWseSubscription(sub) || isAaplSubscription(sub)))) continue;
     await repo.upsertCandle(candle);
   }
 }
 
 async function stopIngestionSession(): Promise<void> {
+  nativeRefreshPaused = true;
+  await aaplRefresh.idle();
+  await wseRefresh.idle();
   await flushBufferedCandles();
   twsClient.clearSubscriptions();
   twsClient.disconnect();
@@ -117,7 +122,7 @@ async function triggerSignalsForCandle(
 }
 
 async function persistCanonicalCandle(oneMinuteCandle: import("@ikbr/shared").Candle): Promise<void> {
-  if (activeSubscriptions.some(sub => sub.conid === oneMinuteCandle.conid && isWseSubscription(sub))) return;
+  if (activeSubscriptions.some(sub => sub.conid === oneMinuteCandle.conid && (isWseSubscription(sub) || isAaplSubscription(sub)))) return;
   lastCandleAt = oneMinuteCandle.ts;
   await repo.upsertCandle(oneMinuteCandle);
   app.log.debug({ candle: oneMinuteCandle }, "persisted canonical candle 1m");
@@ -185,8 +190,18 @@ const wseRefresh = new WseNativeRefresh({
   fetch: async (sub, tf, count) => (await twsClient.backfillRecentCandles([sub], tf, count))[0]?.candles ?? [],
   write: candle => repo.upsertCandle(candle),
 });
+const aaplRefresh = new AaplNativeRefresh({
+  read: (conid, tf, limit) => repo.getNativeAaplCandles(conid, tf, limit),
+  fetch: (sub, tf, count) => twsClient.fetchNativeAaplCandles(sub, tf, count),
+  write: candle => repo.upsertCandle(candle),
+});
+const aaplRefreshTimer = setInterval(() => {
+  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void aaplRefresh.run(activeSubscriptions);
+}, 60000);
+aaplRefreshTimer.unref();
+app.addHook("onClose", async () => { clearInterval(aaplRefreshTimer); await aaplRefresh.idle(); });
 const wseRefreshTimer = setInterval(() => {
-  if (!bootstrapInFlight && twsClient.isConnected()) void wseRefresh.run(activeSubscriptions);
+  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void wseRefresh.run(activeSubscriptions);
 }, 60000);
 wseRefreshTimer.unref();
 app.addHook("onClose", async () => { clearInterval(wseRefreshTimer); await wseRefresh.idle(); });
@@ -204,6 +219,7 @@ app.get("/health", async () => ({
 app.get("/backfill-progress", async () => ({
   progress: backfillProgress,
   wseWarmup: Array.from(wseRefresh.status.values()),
+  aaplWarmup: Array.from(aaplRefresh.status.values()),
 }));
 
 app.get("/watchlist", async () => {
@@ -262,6 +278,8 @@ app.post("/bootstrap", async () => {
   }
   bootstrapInFlight = true;
   await wseRefresh.idle();
+  await aaplRefresh.idle();
+  nativeRefreshPaused = false;
   backfillProgress = {
     phase: "connecting",
     startedAt: new Date().toISOString(),
@@ -324,7 +342,7 @@ app.post("/bootstrap", async () => {
       backfillProgress.totalSymbols = subscriptions.length;
     }
     const historical = await twsClient.backfillRecentCandles1m(
-      subscriptions.filter(sub => !isWseSubscription(sub)),
+      subscriptions.filter(sub => !isWseSubscription(sub) && !isAaplSubscription(sub)),
       config.backfill1mCandles,
     );
 
@@ -420,7 +438,7 @@ app.post("/bootstrap", async () => {
       );
       const now = Date.now();
       const subsToFetch = subscriptions.filter((sub) => {
-        if (isWseSubscription(sub)) return false;
+        if (isWseSubscription(sub) || isAaplSubscription(sub)) return false;
         const latest = latestTsByConid.get(sub.conid);
         if (!latest) return true;
         return now - latest.getTime() > freshnessThresholdMs;
@@ -515,6 +533,7 @@ app.post("/bootstrap", async () => {
     twsClient.addSubscriptions(subscriptions);
     activeSubscriptions = subscriptions;
     await wseRefresh.run(subscriptions, true);
+    await aaplRefresh.run(subscriptions, true);
     lastBootstrapAt = new Date();
 
     return {

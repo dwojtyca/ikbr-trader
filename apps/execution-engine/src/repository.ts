@@ -1,3 +1,4 @@
+import { CashClassificationConflict, readReconciliationFills, type ReconciliationFill } from "./reconciliation/cash-classification.js";
 import { checkAaplWindow, bindAaplProposal, isAaplIdentity, isExactAaplIdentity, type AaplWindow } from "./aapl-window.js";
 import { checkGpwWindow, bindGpwProposal, isPkoIdentity, type GpwWindow } from "./gpw-window.js";
 import type { RoundTripEvidence, RoundTripFill } from "./lifecycle/round-trip-evidence.js";
@@ -644,10 +645,21 @@ export class ExecutionRepository {
       }
     }
 
-    await this.pool.query(
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`fill-exec:${fill.execId}`]);
+      const existing = await client.query("SELECT account_id FROM broker_execution_fills WHERE exec_id=$1", [fill.execId]);
+      const oldAccount = existing.rows[0]?.account_id as string | null | undefined;
+      if (!oldAccount || !fill.accountId) await client.query("SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill'))");
+      for (const account of [...new Set([oldAccount, fill.accountId].filter((value): value is string => !!value))].sort()) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`snap:${account}`]);
+      }
+      await client.query(
       `
       INSERT INTO broker_execution_fills (
         exec_id,
+        sec_type,
         order_id,
         broker_order_id,
         proposed_order_id,
@@ -669,19 +681,40 @@ export class ExecutionRepository {
         updated_at
       )
       VALUES (
-        $1, $2, $3, $4, $5,
+        $1, $20, $2, $3, $4, $5,
         $6, $7, $8, $9, $10,
         $11, $12, $13, $14,
         $15, $16, $17, $18, $19, NOW()
       )
       ON CONFLICT (exec_id) DO UPDATE
-      SET order_id = COALESCE(EXCLUDED.order_id, broker_execution_fills.order_id),
+      SET sec_type_conflict = broker_execution_fills.sec_type_conflict OR
+          ((broker_execution_fills.sec_type IS NOT NULL OR EXCLUDED.sec_type IS NOT NULL) AND (
+            (broker_execution_fills.sec_type IS NOT NULL AND EXCLUDED.sec_type IS NOT NULL
+              AND broker_execution_fills.sec_type <> EXCLUDED.sec_type)
+            OR (broker_execution_fills.account_id IS NOT NULL AND EXCLUDED.account_id IS NOT NULL
+              AND broker_execution_fills.account_id <> EXCLUDED.account_id)
+            OR (broker_execution_fills.conid IS NOT NULL AND EXCLUDED.conid IS NOT NULL
+              AND broker_execution_fills.conid <> EXCLUDED.conid)
+            OR (broker_execution_fills.symbol IS NOT NULL AND broker_execution_fills.symbol <> ''
+              AND upper(broker_execution_fills.symbol) <> upper(EXCLUDED.symbol))
+            OR (broker_execution_fills.currency IS NOT NULL AND EXCLUDED.currency IS NOT NULL
+              AND upper(broker_execution_fills.currency) <> upper(EXCLUDED.currency))
+          )),
+          sec_type = COALESCE(broker_execution_fills.sec_type, EXCLUDED.sec_type),
+          order_id = COALESCE(EXCLUDED.order_id, broker_execution_fills.order_id),
           broker_order_id = COALESCE(EXCLUDED.broker_order_id, broker_execution_fills.broker_order_id),
           proposed_order_id = COALESCE(EXCLUDED.proposed_order_id, broker_execution_fills.proposed_order_id),
-          account_id = COALESCE(EXCLUDED.account_id, broker_execution_fills.account_id),
-          conid = COALESCE(EXCLUDED.conid, broker_execution_fills.conid),
-          symbol = EXCLUDED.symbol,
-          currency = COALESCE(EXCLUDED.currency, broker_execution_fills.currency),
+          account_id = CASE WHEN broker_execution_fills.sec_type IS NOT NULL OR EXCLUDED.sec_type IS NOT NULL
+            THEN COALESCE(broker_execution_fills.account_id, EXCLUDED.account_id)
+            ELSE COALESCE(EXCLUDED.account_id, broker_execution_fills.account_id) END,
+          conid = CASE WHEN broker_execution_fills.sec_type IS NOT NULL OR EXCLUDED.sec_type IS NOT NULL
+            THEN COALESCE(broker_execution_fills.conid, EXCLUDED.conid)
+            ELSE COALESCE(EXCLUDED.conid, broker_execution_fills.conid) END,
+          symbol = CASE WHEN broker_execution_fills.sec_type IS NOT NULL OR EXCLUDED.sec_type IS NOT NULL
+            THEN COALESCE(NULLIF(broker_execution_fills.symbol, ''), EXCLUDED.symbol) ELSE EXCLUDED.symbol END,
+          currency = CASE WHEN broker_execution_fills.sec_type IS NOT NULL OR EXCLUDED.sec_type IS NOT NULL
+            THEN COALESCE(broker_execution_fills.currency, EXCLUDED.currency)
+            ELSE COALESCE(EXCLUDED.currency, broker_execution_fills.currency) END,
           exchange = COALESCE(EXCLUDED.exchange, broker_execution_fills.exchange),
           side = EXCLUDED.side,
           shares = EXCLUDED.shares,
@@ -715,8 +748,15 @@ export class ExecutionRepository {
         snapshot?.ai_reason ?? null,
         snapshot?.ai_decision ?? null,
         snapshot?.decision_source ?? null,
+        typeof fill.secType === "string" ? fill.secType.trim().toUpperCase() || null : null,
       ],
     );
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
 
     if (proposedOrderId !== null) {
       await this.reconcileFilledOrdersFromBrokerFills(proposedOrderId);
@@ -769,6 +809,7 @@ export class ExecutionRepository {
   ): Promise<void> {
     await this.pool.query(
       `
+      WITH fill_lock AS MATERIALIZED (SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill')))
       INSERT INTO broker_execution_fills (
         exec_id,
         commission,
@@ -776,7 +817,7 @@ export class ExecutionRepository {
         realized_pnl,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, NOW())
+      SELECT $1, $2, $3, $4, NOW() FROM fill_lock
       ON CONFLICT (exec_id) DO UPDATE
       SET commission = COALESCE(EXCLUDED.commission, broker_execution_fills.commission),
           commission_currency = COALESCE(EXCLUDED.commission_currency, broker_execution_fills.commission_currency),
@@ -3862,8 +3903,13 @@ export class ExecutionRepository {
    * caller MUST classify them as `identity_ambiguous` and NEVER
    * aggregate them across accounts.
    */
+  async getReconciliationFills(accountId: string): Promise<ReconciliationFill[]> {
+    return readReconciliationFills(this.pool, accountId);
+  }
+
   async computeExpectedNetPositionsWithIdentity(
     accountId?: string,
+    excludedCashFills: readonly ReconciliationFill[] = [],
   ): Promise<ExpectedNetPositionIdentity[]> {
     const params: unknown[] = [];
     const where: string[] = ["symbol IS NOT NULL", "symbol <> ''"];
@@ -3871,6 +3917,15 @@ export class ExecutionRepository {
       params.push(accountId);
       where.push(`(account_id = $${params.length} OR account_id IS NULL)`);
     }
+    const conflict = await this.pool.query(`SELECT 1 FROM broker_execution_fills
+      WHERE sec_type_conflict=true AND ($1::text IS NULL OR account_id=$1 OR account_id IS NULL) LIMIT 1`, [accountId ?? null]);
+    if (conflict.rowCount) throw new CashClassificationConflict();
+    params.push(JSON.stringify(excludedCashFills));
+    where.push(`NOT EXISTS (SELECT 1 FROM jsonb_array_elements($${params.length}::jsonb) proof
+      WHERE proof->>'execId'=exec_id AND proof->>'accountId'=account_id
+        AND proof->>'conId'=conid AND proof->>'symbol'=symbol AND proof->>'currency'=currency
+        AND proof->>'side'=side AND (proof->>'shares')::numeric=shares
+        AND (proof->>'secType') IS NOT DISTINCT FROM sec_type AND NOT sec_type_conflict)`);
     const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const result = await this.pool.query(
       `
@@ -3880,7 +3935,7 @@ export class ExecutionRepository {
         conid AS conid,
         NULLIF(upper(currency), '') AS currency,
         NULLIF(upper(exchange), '') AS exchange,
-        NULL::text AS sec_type,
+        NULLIF(upper(sec_type), '') AS sec_type,
         SUM(
           CASE
             WHEN upper(side) IN ('BUY', 'BOT') THEN COALESCE(shares, 0)
@@ -3898,7 +3953,7 @@ export class ExecutionRepository {
         MAX(COALESCE(executed_at, created_at)) AS last_fill_at
       FROM broker_execution_fills
       ${whereClause}
-      GROUP BY account_id, upper(symbol), conid,
+      GROUP BY account_id, upper(symbol), conid, NULLIF(upper(sec_type), ''),
                NULLIF(upper(currency), ''),
                NULLIF(upper(exchange), '')
       HAVING ABS(SUM(

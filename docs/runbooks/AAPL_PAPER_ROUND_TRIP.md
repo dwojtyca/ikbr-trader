@@ -40,6 +40,12 @@ account-wide exposure, spread/slippage, daily-loss and freshness checks remain.
   minima are1m220 and each retained higher timeframe50; counts alone are not proof
   of closed valid bars. Set bootstrap12hcount0. AAPL deliberately excludes legacy
   12h rows because that path can label IB8h bars as12h. Do not relabel data to pass.
+  Require `ibkr_aapl_rth_native_v1` provenance from the native bootstrap/refresh
+  path and inspect `aaplWarmup` at `/backfill-progress`. Intraday eligibility uses
+  the full nominal bar duration; daily/weekly eligibility uses conservative New
+  York calendar ends. The first 09:30 ET four-hour bar is eligible at 13:30 ET;
+  preceding-session bars can remain stale before then. Do not relax this gate to
+  force an earlier test. Quote availability alone does not make history ready.
 - AI provider/worker readiness, no competing pending reviews. Missing research or
   rejected AI decision remains a valid refusal.
 

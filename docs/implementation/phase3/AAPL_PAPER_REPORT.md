@@ -40,10 +40,19 @@ isolated integration tests passed with zero skipped; build PASS. An initial unit
 run found a stale expected seed catalogue list, which was corrected and reviewed.
 Docker build PASS, image digest
 `sha256:f7a05e6cf5f302287f86a8a3925bc2e5d31e6b5cd43dded78b78a959f4d7b26e`.
-Exact-commit CI and disabled AAPL deployment remain pending at this revision.
+Exact-commit CI for `b9ca5d8043ecaf496787ca19ef518a5ac3be8243` passed
+([run 36018385456](https://github.com/dwojtyca/ikbr-trader/actions/runs/36018385456)).
+The reviewed image was deployed with writes and loop disabled; the AI worker
+remained stopped.
 
-Read-only AAPL preflight currently reports broker error10089 for missing realtime
-API data entitlement and insufficient explicit USD cash for the configured test.
-No delayed-data fallback or borrowing bypass was enabled. Actual closed history,
-final bindings, window eligibility and AI readiness must pass before activation.
-No new AAPL order or supervised trading window has been started.
+The initial disabled preflight observed unavailable realtime API data and
+insufficient USD cash. Subsequent fresh broker evidence confirmed marketDataType1
+quotes and sufficient explicit USD cash. No delayed-data fallback or borrowing
+bypass was enabled. Two separate code defects then blocked activation: FX CASH
+fills were compared as securities positions, and recent incomplete aggregate
+history suppressed native higher-timeframe downloads. Follow the
+[CASH classification plan](CASH_RECONCILIATION_PLAN.md) and
+[native history plan](AAPL_NATIVE_HISTORY_PLAN.md) for the bounded corrections.
+The earlier CLEAN reconciliation preceded the currency conversion; it is not
+proof of current readiness. No new AAPL order or supervised trading window has
+been started.

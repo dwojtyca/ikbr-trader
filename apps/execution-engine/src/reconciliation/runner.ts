@@ -1,3 +1,4 @@
+import { classifyCashFills, CashClassificationConflict, type ReconciliationFill } from "./cash-classification.js";
 import { recognizeExternalOrders, type ExternalOrderPolicy } from "./external-orders.js";
 /**
  * PR15 — reconciliation runner (Phase A / Phase B / Phase C).
@@ -270,6 +271,7 @@ export class ReconciliationRunner {
         holdResolves: plan.holdResolves,
         pendingLifecycle: plan.pendingLifecycle,
         brokerOrderObservations,
+        cashFillState: plan.cashFillState,
       });
       return {
         runId,
@@ -284,7 +286,8 @@ export class ReconciliationRunner {
       };
     } catch (error) {
       const reason = error instanceof InvalidSnapshotTimestampError
-        ? "invalid_snapshot_timestamp" : "reconciliation_phase_c_failed";
+        ? "invalid_snapshot_timestamp" : error instanceof CashClassificationConflict
+          ? "reconciliation_security_type_conflict" : "reconciliation_phase_c_failed";
       const finalized = await this.reconRepo.failRunningRun(client, {
         runId,
         accountId: context.accountId,
@@ -324,6 +327,7 @@ export class ReconciliationRunner {
     snapshot: BrokerReconciliationSnapshot,
   ): Promise<{
     externalOrders: Record<string, unknown>[];
+    cashFillState?: readonly ReconciliationFill[];
     snapshot: BrokerReconciliationSnapshot;
     finalStatus: ReconciliationRunStatus;
     matches: number;
@@ -342,8 +346,10 @@ export class ReconciliationRunner {
     pendingLifecycle: LifecycleWriteback[];
   }> {
     // 1) Position diff, identity-keyed.
+    const cashFillState = await this.repo.getReconciliationFills(context.accountId);
+    const cash = classifyCashFills(cashFillState, snapshot, context);
     const expected = await this.repo.computeExpectedNetPositionsWithIdentity(
-      context.accountId,
+      context.accountId, cash.excluded,
     );
     const expectedByKey = new Map<
       string,
@@ -374,6 +380,7 @@ export class ReconciliationRunner {
       { identity: CanonicalIdentity; net: number }
     >();
     for (const pos of snapshot.positions) {
+      if (pos.secType?.trim().toUpperCase() === "CASH") continue;
       const identity = canonicaliseIdentity({
         accountId: pos.accountId,
         conId: pos.conId,
@@ -662,6 +669,17 @@ export class ReconciliationRunner {
       }
     }
 
+    if (snapshot.exposureComplete && snapshot.recoveryComplete && ambiguousRows.length === 0) {
+      for (const hold of activeHolds) {
+        if (hold.accountId !== context.accountId || hold.reason !== "position_mismatch"
+          || !cash.resolvableKeys.has(hold.identityKey) || expectedByKey.has(hold.identityKey)
+          || brokerByKey.has(hold.identityKey) || holdInserts.some(row => row.identityKey === hold.identityKey)
+          || activeHolds.some(other => other.identityKey === hold.identityKey && other.reason !== "position_mismatch")) continue;
+        holdResolves.push({ holdId: hold.id, resolvedBy: "system", resolvedKind: "auto_snapshot_clean",
+          cashClassification: true,
+          resolutionNote: "current complete broker evidence classifies exact identity as CASH; excluded from securities comparison" });
+      }
+    }
     const finalStatus: ReconciliationRunStatus = !snapshot.exposureComplete
       ? "INCOMPLETE"
       : !snapshot.recoveryComplete
@@ -672,6 +690,7 @@ export class ReconciliationRunner {
 
     return {
       externalOrders,
+      cashFillState: cash.excluded.length || cash.resolvableKeys.size ? cashFillState : undefined,
       snapshot,
       finalStatus,
       matches,

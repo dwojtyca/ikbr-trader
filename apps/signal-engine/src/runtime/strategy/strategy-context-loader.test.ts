@@ -1,3 +1,8 @@
+import { AAPL_NATIVE_SOURCE } from '@ikbr/shared';
+import { AAPL_FIXTURE_NOW, nativeAaplFixture } from './aapl-native.fixture.js';
+import { computeIndicatorsForContext } from './indicators.js';
+import { detectRegimeForContext } from './regime.js';
+import { evaluateMomentumBreakoutLong } from '../../strategies/momentum-breakout-long.strategy.js';
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -719,14 +724,57 @@ it('PKO profile flows through loader only for exact bound stock WSE PLN identity
   }
 });
 
-describe('AAPL context excludes mislabeled 12h without lowering native timeframe requirements', () => {
-  it('loads the same valid context without requesting 12h only for exact AAPL', async () => {
-    const instrument: Instrument = { ...INSTRUMENT, id: 'aapl_nasdaq', exchange: 'SMART' };
-    const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, exchange: 'SMART' };
-    const repo = makeRepo({ contract: makeContract({ exchange: 'SMART' }) }); const loader = makeLoader(repo);
-    const result = await loader.load({ instrument, bound, positionQuantity: 0, timeframes: ['1m','5m','1h','4h','12h','1d','1w'] });
-    assert.equal(result.kind, 'ok');
-    assert.equal(repo.candleCalls.some(c => c.timeframe === '12h'), false);
-    for (const tf of ['1m','5m','1h','4h','1d','1w']) assert.ok(repo.candleCalls.some(c => c.timeframe === tf));
+describe('AAPL native context and deterministic six-timeframe replay', () => {
+  const instrument: Instrument = { ...INSTRUMENT, id: 'aapl_nasdaq', exchange: 'SMART' };
+  const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, exchange: 'SMART' };
+  const original = nativeAaplFixture();
+  const timeframes: CandleTimeframe[] = ['1m','5m','1h','4h','12h','1d','1w'];
+  async function evaluate(candles = original, now = AAPL_FIXTURE_NOW) {
+    const requested: CandleTimeframe[] = [];
+    const loader = new StrategyContextLoader({ clock: () => now, maxMarketStateAgeMs: 60000, repo: {
+      getInstrumentContractByConId: async () => makeContract({ exchange: 'SMART' }),
+      getMarketState: async () => makeMarketState({ ts: now.toISOString() }),
+      getRecentCandlesForContract: async (symbol, conid, tf, _limit, wseOnly, source) => {
+        assert.equal(symbol, 'AAPL'); assert.equal(conid, '265598');
+        assert.equal(wseOnly, false); assert.equal(source, AAPL_NATIVE_SOURCE);
+        requested.push(tf); return candles[tf as keyof typeof candles] ?? [];
+      },
+    } });
+    return { result: await loader.load({ instrument, bound, positionQuantity: 0, timeframes }), requested };
+  }
+  it('production loader matches direct closed native context and strategy result on frozen replay', async () => {
+    const { result, requested } = await evaluate();
+    assert.equal(result.kind, 'ok', JSON.stringify(result)); if (result.kind !== 'ok') return;
+    assert.deepEqual(requested, ['1m','5m','1h','4h','1d','1w']);
+    assert.deepEqual(result.context.candlesByTimeframe, original);
+    const indicators = computeIndicatorsForContext({ secType: 'STK', candlesByTimeframe: original })!;
+    const regime = detectRegimeForContext('STK', original['1m'].at(-1)!.close, indicators);
+    Object.assign(indicators, { directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime,
+      regimeScore: regime.score, regimeConfidence: regime.confidence, regimeReasons: regime.reasons,
+      timeframeTrendScores: regime.timeframeTrendScores, timeframeTrendVotes: regime.timeframeTrendVotes });
+    assert.deepEqual(result.context.indicators, indicators);
+    const direct = { ...result.context, indicators, candlesByTimeframe: original, latestCandle: original['1m'].at(-1)!,
+      directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime };
+    assert.deepEqual(evaluateMomentumBreakoutLong(result.context), evaluateMomentumBreakoutLong(direct));
+    assert.equal(evaluateMomentumBreakoutLong(result.context).signal, null);
+    assert.equal(result.context.momentumBreakoutProfile, 'default');
+  });
+  for (const tf of ['1m','5m','1h','4h','1d','1w'] as const) {
+    for (const bad of ['source','unfinished','foreign','ohlc'] as const) it(`${tf}: ${bad} cannot supply minimum history`, async () => {
+      const count = tf === '1m' ? 220 : 50;
+      const selected = original[tf].slice(-count).map(c => ({ ...c }));
+      const last = selected.at(-1)!;
+      if (bad === 'source') last.source = 'legacy';
+      if (bad === 'unfinished') last.ts = AAPL_FIXTURE_NOW;
+      if (bad === 'foreign') last.conid = '123';
+      if (bad === 'ohlc') last.low = last.high + 1;
+      const { result } = await evaluate({ ...original, [tf]: selected });
+      assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /insufficient/);
+    });
+  }
+  it('before 13:30 ET unfinished first four-hour bar cannot make overnight history fresh', async () => {
+    const now = new Date('2026-09-24T16:00:00Z');
+    const { result } = await evaluate(nativeAaplFixture(now), now);
+    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /stale 4h|4h.*stale/);
   });
 });

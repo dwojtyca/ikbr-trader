@@ -8,6 +8,8 @@
  */
 
 import type { Pool, PoolClient } from "pg";
+import { readReconciliationFills, type ReconciliationFill } from "./cash-classification.js";
+import { deriveCompletenessFlags } from "./broker-adapter.js";
 import type {
   BrokerReconciliationSnapshot,
 } from "./broker-adapter.js";
@@ -201,6 +203,7 @@ export class ReconciliationRepository {
     client: PoolClient,
     input: {
       readonly runId: number;
+      readonly cashFillState?: readonly ReconciliationFill[];
       readonly accountId: string;
       readonly finalStatus: ReconciliationRunStatus;
       readonly snapshot: BrokerReconciliationSnapshot | null;
@@ -224,7 +227,21 @@ export class ReconciliationRepository {
   ): Promise<void> {
     await client.query("BEGIN");
     try {
+      if (input.cashFillState) await client.query("SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill'))");
       await acquireSnapLock(client, input.accountId);
+      if (input.cashFillState && JSON.stringify(await readReconciliationFills(client, input.accountId)) !== JSON.stringify(input.cashFillState)) {
+        throw new Error("cash_classification_evidence_changed");
+      }
+      if (input.holdResolves.some(resolve => resolve.cashClassification)) {
+        const coverage = input.snapshot && deriveCompletenessFlags(input.snapshot.sourceCoverage);
+        if (!input.snapshot?.exposureComplete || !input.snapshot.recoveryComplete
+          || !coverage?.exposureComplete || !coverage.recoveryComplete) throw new Error("cash_resolution_incomplete");
+        const ambiguous = await client.query(`SELECT 1 FROM proposed_orders
+          WHERE status='PROPOSED' AND execution_attempted_at IS NOT NULL AND executed_at IS NULL
+            AND (execution_account_id=$1 OR execution_account_id IS NULL) LIMIT 1`, [input.accountId]);
+        if (ambiguous.rowCount) throw new Error("cash_resolution_ambiguous_submission");
+      }
+
       await client.query(
         `UPDATE reconciliation_runs
            SET status = $1,
@@ -1112,6 +1129,7 @@ export interface HoldResolve {
   readonly resolvedBy: string;
   readonly resolvedKind: ResolvedKind;
   readonly resolutionNote: string;
+  readonly cashClassification?: boolean;
 }
 
 /**

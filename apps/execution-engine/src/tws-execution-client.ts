@@ -158,6 +158,7 @@ interface OpenOrderContext {
 
 export interface BrokerExecutionFill {
   execId: string;
+  secType?: string;
   orderId?: number;
   accountId?: string;
   conid?: string;
@@ -2463,6 +2464,7 @@ export class TwsExecutionClient {
 
         this.onBrokerExecutionFill?.({
           execId,
+          secType: typeof contract.secType === "string" ? contract.secType.trim().toUpperCase() || undefined : undefined,
           orderId: toNum(exec.orderId),
           accountId:
             typeof exec.acctNumber === "string" ? exec.acctNumber : undefined,

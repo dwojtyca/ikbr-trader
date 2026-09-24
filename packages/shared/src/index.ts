@@ -418,3 +418,5 @@ export { buildConfiguredInstrumentRegistry } from "./instruments/configured-regi
 export * from "./wse-candles.js";
 
 export { isAaplBound } from './instruments/aapl.js';
+
+export * from "./aapl-candles.js";

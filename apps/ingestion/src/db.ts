@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import { Candle, InstrumentContract, MarketState } from "@ikbr/shared";
+import { AAPL_NATIVE_SOURCE, Candle, InstrumentContract, MarketState } from "@ikbr/shared";
 
 export class MarketRepository {
   constructor(private readonly pool: Pool) {}
@@ -116,7 +116,10 @@ export class MarketRepository {
         high = EXCLUDED.high,
         low = EXCLUDED.low,
         close = EXCLUDED.close,
-        volume = EXCLUDED.volume, source = EXCLUDED.source;
+        volume = EXCLUDED.volume, source = EXCLUDED.source,
+        symbol = CASE WHEN EXCLUDED.source = 'ibkr_aapl_rth_native_v1' THEN EXCLUDED.symbol ELSE ${table}.symbol END
+      WHERE ${table}.source IS DISTINCT FROM 'ibkr_aapl_rth_native_v1'
+        OR EXCLUDED.source = 'ibkr_aapl_rth_native_v1';
       `,
       [
         candle.conid,
@@ -183,6 +186,13 @@ export class MarketRepository {
    * (symbol, timeframe) pairs that already have fresh data in the DB,
    * staying under IBKR's 60-historical-requests/10-minute pacing cap.
    */
+  async getNativeAaplCandles(conid: string, timeframe: Candle["timeframe"], limit: number): Promise<Candle[]> {
+    const rows = await this.pool.query(`SELECT conid, symbol, ts, open, high, low, close, volume, source
+      FROM ${this.tableForTimeframe(timeframe)} WHERE conid=$1 AND source=$2 ORDER BY ts DESC LIMIT $3`, [conid, AAPL_NATIVE_SOURCE, limit]);
+    return rows.rows.map(row => ({ conid: row.conid, symbol: row.symbol, timeframe, ts: new Date(row.ts),
+      open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close), volume: Number(row.volume), source: row.source })).reverse();
+  }
+
   async getNativeWseCandles(conid: string, timeframe: Candle["timeframe"], limit: number): Promise<Candle[]> {
     const rows = await this.pool.query(`SELECT conid, symbol, ts, open, high, low, close, volume, source
       FROM ${this.tableForTimeframe(timeframe)} WHERE conid=$1 AND source='ibkr_wse_native_v1' ORDER BY ts DESC LIMIT $2`, [conid, limit]);

@@ -1,3 +1,5 @@
+import { AAPL_NATIVE_SOURCE, AAPL_REQUIRED_CANDLES, validClosedAaplCandle, newYorkMidnight, type AaplTimeframe } from "@ikbr/shared";
+import { isAaplSubscription } from "./aapl-native-refresh.js";
 import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
 import { isWseSubscription } from "./wse-native-refresh.js";
 import IB from "ib";
@@ -513,6 +515,12 @@ export class TwsClient {
    *
    * Calls are sequential per symbol to respect IB pacing limits.
    */
+  async fetchNativeAaplCandles(sub: InstrumentSubscription, timeframe: AaplTimeframe, count: number): Promise<Candle[]> {
+    if (!isAaplSubscription(sub) || !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe) || !Number.isSafeInteger(count) || count <= 0)
+      throw new Error("aapl_native_request_invalid");
+    return this.requestHistorical(sub, timeframe, count);
+  }
+
   async backfillRecentCandles(
     subscriptions: InstrumentSubscription[],
     timeframe: CandleTimeframe,
@@ -894,6 +902,7 @@ export class TwsClient {
     candlesPerSymbol: number,
     options: { progressPrefix?: string } = {},
   ): Promise<Candle[]> {
+    if (isAaplSubscription(sub) && !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe)) throw new Error("aapl_timeframe_unsupported");
     await this.acquireFinalBarPacingToken();
     const reqId = this.allocReqId();
     if (isWseSubscription(sub) && timeframe === "12h") throw new Error("wse_12h_unsupported");
@@ -932,7 +941,8 @@ export class TwsClient {
         const ordered = Array.from(uniqueByTs.values()).sort(
           (a, b) => a.ts.getTime() - b.ts.getTime(),
         );
-        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) : ordered;
+        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) :
+          isAaplSubscription(sub) ? ordered.filter(c => validClosedAaplCandle(c, Date.now())) : ordered;
         const sliced = finalized.slice(
           Math.max(0, finalized.length - candlesPerSymbol),
         );
@@ -962,7 +972,18 @@ export class TwsClient {
         }
 
         let ts: Date | undefined;
-        if (isWseSubscription(sub) && /^\d{8}$/.test(date)) {
+        if (isAaplSubscription(sub)) {
+          if (typeof date !== "string") return;
+          if (timeframe === "1d" || timeframe === "1w") {
+            if (!/^\d{8}$/.test(date)) return;
+            try { ts = newYorkMidnight(+date.slice(0, 4), +date.slice(4, 6), +date.slice(6, 8)); }
+            catch { return; }
+          } else {
+            if (!/^\d{9,10}$/.test(date)) return;
+            ts = new Date(Number(date) * 1000);
+            if (ts.getUTCFullYear() < 2000 || ts.getUTCFullYear() > 2100) return;
+          }
+        } else if (isWseSubscription(sub) && /^\d{8}$/.test(date)) {
           const year = +date.slice(0, 4), month = +date.slice(4, 6), day = +date.slice(6, 8);
           const check = new Date(Date.UTC(year, month - 1, day));
           if (year < 2000 || year > 2100 || check.getUTCMonth() + 1 !== month || check.getUTCDate() !== day) return;
@@ -971,7 +992,7 @@ export class TwsClient {
         if (!ts) return;
 
         bars.push({
-          ...(isWseSubscription(sub) ? { source: WSE_NATIVE_SOURCE } : {}),
+          ...(isWseSubscription(sub) ? { source: WSE_NATIVE_SOURCE } : isAaplSubscription(sub) ? { source: AAPL_NATIVE_SOURCE } : {}),
           conid: sub.conid,
           symbol: sub.symbol,
           timeframe,
@@ -984,13 +1005,14 @@ export class TwsClient {
         });
       };
 
-      const onError = (err: Error, code?: number, incomingReqId?: number) => {
-        if (incomingReqId !== reqId) return;
+      const onError = (err: Error, codeOrMeta?: unknown, incomingReqId?: number) => {
+        const meta = isAaplSubscription(sub) ? ibErrorMeta(codeOrMeta, incomingReqId) : { code: toNum(codeOrMeta), reqId: incomingReqId };
+        if (meta.reqId !== reqId) return;
         const message = err?.message ?? "unknown historical data error";
         cleanup();
         reject(
           new Error(
-            `historicalData error ${code ?? "unknown"} for ${sub.symbol}: ${message}`,
+            `historicalData error ${meta.code ?? "unknown"} for ${sub.symbol}: ${message}`,
           ),
         );
       };
@@ -1004,7 +1026,7 @@ export class TwsClient {
         durationStr,
         barSize,
         "TRADES",
-        isWseSubscription(sub) ? 1 : 0,
+        isWseSubscription(sub) || isAaplSubscription(sub) ? 1 : 0,
         2,
         false,
       );

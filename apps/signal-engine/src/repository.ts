@@ -597,6 +597,7 @@ export class SignalRepository {
     timeframe: CandleTimeframe,
     limit: number,
     nativeWseOnly = false,
+    sourceFilter?: string,
   ): Promise<Candle[]> {
     const table = this.tableForTimeframe(timeframe);
     const result = await this.pool.query(
@@ -606,10 +607,11 @@ export class SignalRepository {
       WHERE UPPER(symbol) = UPPER($1)
         AND conid = $2
         AND ($4::boolean = false OR source = 'ibkr_wse_native_v1')
+        ${sourceFilter ? 'AND source = $5' : ''}
       ORDER BY ts DESC
       LIMIT $3;
       `,
-      [symbol, conId, limit, nativeWseOnly],
+      sourceFilter ? [symbol, conId, limit, nativeWseOnly, sourceFilter] : [symbol, conId, limit, nativeWseOnly],
     );
 
     return result.rows

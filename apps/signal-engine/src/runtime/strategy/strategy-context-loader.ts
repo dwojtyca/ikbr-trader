@@ -1,4 +1,4 @@
-import { isAaplBound } from '@ikbr/shared';
+import { AAPL_NATIVE_SOURCE, aaplCandleEnd, validClosedAaplCandle, isAaplBound } from '@ikbr/shared';
 /**
  * PR15.4 — Strategy context loader.
  *
@@ -90,6 +90,7 @@ export interface StrategyContextLoaderRepo {
     timeframe: CandleTimeframe,
     limit: number,
     nativeWseOnly?: boolean,
+    sourceFilter?: string,
   ): Promise<Candle[]>;
   getMarketState(conid: string): Promise<{
     conid: string;
@@ -170,6 +171,7 @@ export class StrategyContextLoader {
   }): Promise<StrategyContextLoadResult> {
     const { instrument, bound, positionQuantity } = input;
     const wse = isWseBound(bound);
+    const aapl = isAaplBound(bound);
     const profile = instrument.executionPolicy?.momentumBreakoutProfile ?? "default";
     if (!["default", "pko_mild_v1", "pko_moderate_v1"].includes(profile)
       || (profile !== "default" && (!wse || instrument.id !== "pko_wse" || instrument.brokerSymbol !== "PKO"
@@ -188,8 +190,10 @@ export class StrategyContextLoader {
       "1m",
       DEFAULT_FETCH_LIMITS["1m"],
       wse,
+      aapl ? AAPL_NATIVE_SOURCE : undefined,
     );
     if (wse) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
+    if (aapl) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedAaplCandle(c, nowMs));
     if (candles1m.length === 0) {
       return {
         kind: "error",
@@ -204,7 +208,7 @@ export class StrategyContextLoader {
         message: `insufficient 1m candles: ${candles1m.length} < ${MIN_CANDLES_BY_TIMEFRAME["1m"]}`,
       };
     }
-    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
+    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : aapl ? aaplCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
     if (Number.isNaN(latest1mTs) || latest1mTs > nowMs) {
       return {
         kind: "error",
@@ -317,8 +321,10 @@ export class StrategyContextLoader {
         tf,
         limit,
         wse,
+        aapl ? AAPL_NATIVE_SOURCE : undefined,
       );
       if (wse) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
+      if (aapl) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedAaplCandle(c, nowMs));
       if (fetched.length < MIN_CANDLES_BY_TIMEFRAME[tf]) {
         return {
           kind: "error",
@@ -326,7 +332,7 @@ export class StrategyContextLoader {
           message: `insufficient ${tf} candles: ${fetched.length} < ${MIN_CANDLES_BY_TIMEFRAME[tf]}`,
         };
       }
-      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
+      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : aapl ? aaplCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
       if (Number.isNaN(latestTs) || latestTs > nowMs) {
         return {
           kind: "error",

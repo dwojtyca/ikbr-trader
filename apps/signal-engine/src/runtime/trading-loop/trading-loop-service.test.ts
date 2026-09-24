@@ -2226,14 +2226,15 @@ describe("GPW3 WSE strategy level wiring", () => {
 });
 
 describe('AAPL bounded profile strategy inputs', () => {
-  it('routes real strategy through portfolio without requesting mislabeled 12h', async () => {
+  it('legacy unsourced AAPL history cannot reach the proposal runtime', async () => {
     const instrument: Instrument = { ...makeInstrument('aapl_nasdaq', { executionPolicy: { ...AAPL_POLICY, quantity: 1, maxQuantity: 1 } }), brokerSymbol: 'AAPL', exchange: 'SMART' };
     const bound: BoundInstrument = { ...makeBound(instrument), brokerSymbol: 'AAPL', conId: 265598, localSymbol: 'AAPL', exchange: 'SMART' };
     const ticket = { ...makeTicket({ quantity: 1 }), instrumentId: instrument.id, exchange: 'SMART' };
     const env = makeIntegrationSvc({ instruments: [instrument], bounds: [bound], loaderRepo: makeLoaderRepo(bound), runtimeBehavior: { ticket } });
     const report = await env.svc.runOnce();
-    assert.equal(report.reports[0].outcome.kind, 'SUBMITTED', JSON.stringify(report));
+    assert.equal(report.reports[0].outcome.kind, 'SKIPPED', JSON.stringify(report));
     assert.equal(env.loaderRepo.candleCalls.some(c => c.timeframe === '12h'), false);
-    assert.equal(env.marketDataRuntime.calls.length, 1);
+    assert.equal(env.marketDataRuntime.calls.length, 0);
+    assert.equal(env.executionRuntime.preparedCalls.length, 0);
   });
 });
