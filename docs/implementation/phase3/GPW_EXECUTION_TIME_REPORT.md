@@ -36,12 +36,31 @@ and the real TWS callback-to-repository path, including eight timestamp cases.
 Parser/TWS tests cover summer/winter, leap dates, bounds, DST gaps/folds,
 unsupported suffixes, malformed data and explicit timezone requirements.
 
-Full clean-copy gates, Docker, exact-commit CI and disabled deployment results
-will be recorded after completion. The 29 unrelated research files are preserved;
+The 29 unrelated research files are preserved;
 private broker records, accounts, quantities and identifiers are excluded here.
 
 Clean-copy checks: lint PASS (three existing warnings), typecheck PASS,
 unit suite 2,156 passed/19 skipped without DB, isolated PostgreSQL integration
 1,269 passed/zero skipped, build PASS. Docker build PASS, image digest
 `sha256:810571ed81c7d5f942402d82891bf75bbba574c405e1450fec3f3d07cf3c8705`.
-Exact-commit CI and disabled deployment remain pending at this report revision.
+
+## CI and disabled deployment
+
+Code commit `fad351e90f90c9bfed5c265104c55739cf8995da` passed
+[GitHub CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36011009435).
+The reviewed image was deployed to execution-engine only, with explicit
+`EXECUTION_BROKER_TIME_ZONE=Europe/Warsaw`. Execution writes and the signal loop
+remain disabled; the AI worker remains stopped and monitoring remains paused.
+
+Actual broker executions now persist with finite UTC times matching the inspected
+Gateway local-time evidence. Two explicit post-deployment reconciliation captures
+finished durably rather than remaining RUNNING. No invalid-timestamp persistence
+error or reconciliation tick failure appeared in the inspected deployment log.
+No old database status or snapshot was manually rewritten.
+
+The current result is **INCOMPLETE**, not launch-ready: completed-order coverage
+reports `completed_record_invalid`. This is a separate adapter validation blocker
+that must be diagnosed before another supervised entry window. Exposure coverage
+is complete, but recovery coverage is not. `/ready` returns HTTP 200 with writes
+disabled; that alone is not acceptance for trading. The disabled stack verifier
+reports UNHEALTHY, so no new Paper test was activated.
