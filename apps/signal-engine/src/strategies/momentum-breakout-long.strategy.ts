@@ -83,6 +83,12 @@ function consolidationDriftPct(
   return ((lastClose - firstClose) / firstClose) * 100;
 }
 
+export const MOMENTUM_PROFILE_THRESHOLDS = Object.freeze({
+  default: Object.freeze({ dailyReturn20MinPct: 8, h1Return4MinPct: 1, return60MinPct: 0.2 }),
+  pko_mild_v1: Object.freeze({ dailyReturn20MinPct: 5, h1Return4MinPct: 0.5, return60MinPct: 0.15 }),
+  pko_moderate_v1: Object.freeze({ dailyReturn20MinPct: 3, h1Return4MinPct: 0.3, return60MinPct: 0.1 }),
+});
+
 function paramsForSecType(secType: SecType): MomentumBreakoutParams {
   return {
     dailyReturn20MinPct: 8,
@@ -199,7 +205,11 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     if (context.volatilityRegime === "low_volatility")
       return this.reject("volatility_regime_low_volatility");
 
-    const params = paramsForSecType(context.secType);
+    const profile = context.momentumBreakoutProfile ?? "default";
+    if (!["default", "pko_mild_v1", "pko_moderate_v1"].includes(profile)) return this.reject("invalid_momentum_profile");
+    if (profile !== "default" && (context.symbol !== "PKO" || context.conid !== "35146360" || context.secType !== "STK"))
+      return this.reject("momentum_profile_identity_mismatch");
+    const params = { ...paramsForSecType(context.secType), ...MOMENTUM_PROFILE_THRESHOLDS[profile] };
     if (
       !isWithinUtcSession(
         context.latestCandle.ts,
@@ -373,6 +383,7 @@ export class MomentumBreakoutLongStrategy implements Strategy {
       //   { fraction: 0.33, price: close + riskPerShare * 2 }, // +2R
       // ],
       metadata: {
+        ...(profile !== "default" ? { momentumBreakoutProfile: profile } : {}),
         ema20,
         ema50,
         ema200,

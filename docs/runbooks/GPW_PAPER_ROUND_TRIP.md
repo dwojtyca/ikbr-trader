@@ -268,3 +268,24 @@ The empty-day check may request one readonly reconciliation refresh when account
 refresh changed the position generation. It then rereads all evidence; an in-flight
 or failed refresh remains incomplete, and account/session/fill changes invalidate
 the result. It never refreshes account data in a loop or enables trading.
+
+## Optional PKO momentum comparison
+
+`GPW_MOMENTUM_PROFILE=default` preserves all current momentum thresholds.
+`pko_mild_v1` (daily20/hourly4/minute60 minima5%/0.5%/0.15%) and
+`pko_moderate_v1` (3%/0.3%/0.1%) are explicit PKO-only candidate profiles of the
+same strategy. They require the existing GPW Paper opt-in and exact bound identity;
+all other strategy filters, protective prices, AI and risk controls remain.
+Do not enable either from a single observed rejection.
+
+Run `pnpm --filter @ikbr/signal-engine gpw:profile-replay /absolute/private/history.json`
+on a frozen native candle export. This read-only command compares historical
+closed-candle signals and rejection reasons, not fills or profitability. Selection
+requires at least four completed dates with qualified13:15–16:30 Warsaw window
+coverage, then signals in both chronological development and holdout partitions.
+Partial/current/gapped dates cannot qualify. INSUFFICIENT_EVIDENCE and NO_CANDIDATE
+mean leave the default profile and collect more history, not lower more thresholds.
+
+Execution `/ready` uses the latest durable account/session result for both status
+and completedAt freshness. Periodic and explicit captures can advance readiness
+without restarting the service; failures and session changes remain fail-closed.

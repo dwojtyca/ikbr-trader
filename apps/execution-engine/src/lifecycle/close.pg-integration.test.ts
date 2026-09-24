@@ -198,21 +198,23 @@ async function createFixture(currency: "USD" | "PLN") {
     bound,
   });
   const refresh = async () => {
+    const observedAt = (await pool.query<{ now: Date }>(
+      "SELECT clock_timestamp() AS now",
+    )).rows[0].now;
     const { generation } = await execution.beginPositionSnapshotRefresh({
       accountId,
       sessionId,
-      observedAt: new Date(),
+      observedAt,
     });
     await execution.completePositionSnapshotRefresh({
       accountId,
       sessionId,
       generation,
-      observedAt: new Date(),
+      observedAt,
       positions: state.position
         ? [{ instrument: "TEST", conid: "123", quantity: state.position }]
         : [],
     });
-    await new Promise((r) => setTimeout(r, 3));
     const db = await pool.connect();
     try {
       const { runId } = await reconciliation.publishRunning(db, {
@@ -751,7 +753,8 @@ for (const currency of ["USD", "PLN"] as const) describe(
         assert.equal(await f.service.get(f.id), null);
         assert.equal(f.state.cancels.length, 0); assert.equal(f.state.dispatches, 0);
         f.service.deps.refresh = refresh;
-        assert.equal((await f.service.request(f.id, key, 100, "retry_before_reservation")).state, "SUBMITTED");
+        const retry = await f.service.request(f.id, key, 100, "retry_before_reservation");
+        assert.equal(retry.state, "SUBMITTED", JSON.stringify(retry));
         assert.equal(f.state.dispatches, 1);
       } finally { await f.close(); }
     });

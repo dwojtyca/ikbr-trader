@@ -704,3 +704,17 @@ describe("GPW3 native WSE freshness measured from conservative close", () => {
     });
   }
 });
+
+it('PKO profile flows through loader only for exact bound stock WSE PLN identity',async()=>{
+  const instrument:Instrument={...INSTRUMENT,id:'pko_wse',brokerSymbol:'PKO',exchange:'WSE',currency:'PLN',assetClass:'stock',
+    executionPolicy:{...INSTRUMENT.executionPolicy!,momentumBreakoutProfile:'pko_mild_v1'}};
+  const bound:BoundInstrument={...BOUND,instrument,instrumentId:'pko_wse',brokerSymbol:'PKO',conId:35146360,localSymbol:'PKO',tradingClass:'PKO',exchange:'WSE',currency:'PLN'};
+  const repo=makeRepo({contract:makeContract({symbol:'PKO',conid:'35146360',exchange:'WSE',primaryExchange:'WSE',currency:'PLN',localSymbol:'PKO',tradingClass:'PKO'}),
+    candles:{'1m':makeCandles(220,60000,NOW_MS-60000,'35146360','PKO').map(c=>({...c,source:'ibkr_wse_native_v1'}))},
+    marketState:makeMarketState({symbol:'PKO',conid:'35146360'})});
+  const loader=makeLoader(repo);const result=await loader.load({instrument,bound,positionQuantity:0,timeframes:['1m']});
+  assert.equal(result.kind,'ok');if(result.kind==='ok')assert.equal(result.context.momentumBreakoutProfile,'pko_mild_v1');
+  for(const patch of [{currency:'USD'},{exchange:'SMART'},{conId:123},{brokerSymbol:'OTHER'}]){
+    const bad=await loader.load({instrument,bound:{...bound,...patch},positionQuantity:0,timeframes:['1m']});assert.equal(bad.kind,'error');
+  }
+});

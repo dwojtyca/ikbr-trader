@@ -450,6 +450,16 @@ export class ReconciliationRepository {
     return res.rowCount === 0 ? null : mapRun(res.rows[0]);
   }
 
+  async getReadinessEvidence(accountId: string, sessionId: string): Promise<{
+    running: boolean; latest: ReconciliationRunRow | null;
+  }> {
+    const result = await this.pool.query(`SELECT
+      EXISTS(SELECT 1 FROM reconciliation_runs WHERE account_id=$1 AND session_id=$2 AND status='RUNNING') AS running,
+      (SELECT row_to_json(r) FROM reconciliation_runs r WHERE account_id=$1 ORDER BY started_at DESC, id DESC LIMIT 1) AS latest`,
+    [accountId, sessionId]);
+    return { running: result.rows[0].running, latest: result.rows[0].latest ? mapRun(result.rows[0].latest) : null };
+  }
+
   async getLatestRunOverall(
     accountId: string,
   ): Promise<ReconciliationRunRow | null> {

@@ -341,3 +341,34 @@ test('GPW3 real momentum strategy WSE levels survive normalization builder and m
   assert.equal(context.indicators.timeframes?.['12h'], undefined);
   assert.equal(new MomentumBreakoutLongStrategy().generateSignal({ ...context, directionalRegime: 'range' }), null);
 });
+
+for (const [profile,daily,hourly,intraday] of [["pko_mild_v1",5,.5,.15],["pko_moderate_v1",3,.3,.1]] as const) {
+  test(`PKO ${profile} threshold boundaries and unchanged protective levels`,()=>{
+    const base=baseContext({symbol:'PKO',conid:'35146360'});
+    const original=evaluateMomentumBreakoutLong(base).signal!;
+    const ctx=structuredClone(base);ctx.momentumBreakoutProfile=profile;
+    ctx.indicators.timeframes!['1d']!.return20Pct=daily;
+    ctx.indicators.timeframes!['1h']!.return4Pct=hourly;
+    ctx.indicators.return60mPct=intraday;
+    const signal=evaluateMomentumBreakoutLong(ctx).signal;
+    assert.ok(signal);assert.equal(signal.stopLoss,original.stopLoss);assert.equal(signal.takeProfit,original.takeProfit);
+    assert.equal(signal.metadata?.momentumBreakoutProfile,profile);
+    for(const field of ['daily','hourly','intraday'] as const){
+      const bad=structuredClone(ctx);
+      if(field==='daily')bad.indicators.timeframes!['1d']!.return20Pct=daily-.001;
+      if(field==='hourly')bad.indicators.timeframes!['1h']!.return4Pct=hourly-.001;
+      if(field==='intraday')bad.indicators.return60mPct=intraday-.001;
+      assert.equal(evaluateMomentumBreakoutLong(bad).signal,null);
+    }
+    const weakVolume=structuredClone(ctx);weakVolume.latestCandle.volume=1;
+    assert.equal(evaluateMomentumBreakoutLong(weakVolume).rejectionReason,'volume_not_confirmed');
+    const noBreak=structuredClone(ctx);noBreak.latestCandle.close=103;
+    assert.equal(evaluateMomentumBreakoutLong(noBreak).signal,null);
+    assert.equal(evaluateMomentumBreakoutLong({...ctx,symbol:'AAPL'}).rejectionReason,'momentum_profile_identity_mismatch');
+    assert.equal(evaluateMomentumBreakoutLong({...ctx,conid:'123'}).signal,null);
+  });
+}
+test('explicit default preserves baseline complete signal and malformed profile fails closed',()=>{
+  const ctx=baseContext();assert.deepEqual(evaluateMomentumBreakoutLong(ctx),evaluateMomentumBreakoutLong({...ctx,momentumBreakoutProfile:'default'}));
+  assert.equal(evaluateMomentumBreakoutLong({...ctx,momentumBreakoutProfile:'unknown' as never}).rejectionReason,'invalid_momentum_profile');
+});

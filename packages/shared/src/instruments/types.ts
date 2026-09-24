@@ -210,7 +210,10 @@ export interface Instrument {
  *   - `strategyId` + `timeframe` are consumed by the trigger
  *     identity builder (`v4` idempotency key).
  */
+export type MomentumBreakoutProfile = "default" | "pko_mild_v1" | "pko_moderate_v1";
+
 export interface InstrumentExecutionPolicy {
+  readonly momentumBreakoutProfile?: MomentumBreakoutProfile;
   readonly strategyId: string;
   readonly timeframe: string;
   readonly quantity: number;

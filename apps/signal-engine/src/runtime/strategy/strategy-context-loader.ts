@@ -169,6 +169,11 @@ export class StrategyContextLoader {
   }): Promise<StrategyContextLoadResult> {
     const { instrument, bound, positionQuantity } = input;
     const wse = isWseBound(bound);
+    const profile = instrument.executionPolicy?.momentumBreakoutProfile ?? "default";
+    if (!["default", "pko_mild_v1", "pko_moderate_v1"].includes(profile)
+      || (profile !== "default" && (!wse || instrument.id !== "pko_wse" || instrument.brokerSymbol !== "PKO"
+        || String(bound.conId) !== "35146360" || bound.currency !== "PLN" || bound.exchange !== "WSE" || instrument.assetClass !== "stock")))
+      return { kind: "error", code: "STRATEGY_CONTRACT_MISMATCH", message: "momentum profile identity mismatch" };
     const timeframes = input.timeframes.filter(tf => !(wse && tf === "12h"));
     const nowMs = this.#clock().getTime();
     const symbol = instrument.brokerSymbol;
@@ -460,6 +465,7 @@ export class StrategyContextLoader {
     indicators.timeframeTrendVotes = regime.timeframeTrendVotes;
 
     const context: StrategyContext = {
+      momentumBreakoutProfile: profile,
       symbol,
       conid: boundConId,
       secType,

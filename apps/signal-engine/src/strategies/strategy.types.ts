@@ -1,5 +1,6 @@
 import type {
   SecType,
+  MomentumBreakoutProfile,
   Candle,
   CandleTimeframe,
   DirectionalRegime,
@@ -45,6 +46,7 @@ export interface StrategySignal {
 }
 
 export interface StrategyContext {
+  momentumBreakoutProfile?: MomentumBreakoutProfile;
   symbol: string;
   conid: string;
   secType: SecType;

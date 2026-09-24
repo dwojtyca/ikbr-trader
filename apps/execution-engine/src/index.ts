@@ -47,7 +47,6 @@ import { isWriteGuardExempt } from "./write-guard-exemptions.js";
 import {
   evaluateReadiness,
   type PositionSnapshotHealthInput,
-  type ReconciliationRunHealthInput,
 } from "./readiness.js";
 import { RefreshCoordinator } from "./refresh-coordinator.js";
 import { planDirectTicketDispatch } from "./direct-ticket-guard.js";
@@ -58,7 +57,7 @@ import { registerReconciliationRoutes } from "./reconciliation/routes.js";
 import { buildReconciliationSubmissionGate } from "./reconciliation/submission-gate.js";
 import { assessAiEntryRisk } from "./ai-entry-risk.js";
 import { buildSubmissionApplicationService, type SubmissionOutcome } from "./reconciliation/submission-service.js";
-import { classifyReadiness as classifyReconciliationReadiness } from "./reconciliation/gate.js";
+import { loadDurableReadiness } from "./reconciliation/durable-readiness.js";
 import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapter.js";
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
@@ -1244,21 +1243,10 @@ app.get("/ready", async (request, reply) => {
   const accountAllowed =
     lastActiveAccountId !== null && whitelist.includes(lastActiveAccountId);
 
-  // PR15 — reconciliation run health for the active account.
-  let reconciliationRunHealth: ReconciliationRunHealthInput | undefined;
-  if (lastActiveAccountId !== null) {
-    const runningInSession = await reconRepo
-      .getRunningRow(lastActiveAccountId, EXECUTION_PROCESS_OWNER_ID)
-      .catch(() => null);
-    const latestOverall = await reconRepo
-      .getLatestRunOverall(lastActiveAccountId)
-      .catch(() => null);
-    reconciliationRunHealth = classifyReconciliationReadiness(
-      runningInSession !== null,
-      latestOverall,
-      EXECUTION_PROCESS_OWNER_ID,
-    );
-  }
+  const durable = await loadDurableReadiness({
+    repository: reconRepo, sessionId: EXECUTION_PROCESS_OWNER_ID, now: () => new Date(),
+    current: () => ({ accountId: lastActiveAccountId, generation: tws.getConnectionGeneration(), connected: tws.isConnected() }),
+  });
 
   const result = evaluateReadiness({
     now: new Date(),
@@ -1268,7 +1256,7 @@ app.get("/ready", async (request, reply) => {
     activeAccountId: lastActiveAccountId,
     accountAllowedByEnvironment: accountAllowed,
     auditWriteAvailable,
-    lastReconciliationAt,
+    lastReconciliationAt: durable.lastReconciliationAt,
     reconciliationMaxAgeSeconds:
       config.EXECUTION_READY_RECONCILIATION_MAX_AGE_S,
     // Round-7 blocker: surface broker-driven snapshot refresher
@@ -1282,7 +1270,7 @@ app.get("/ready", async (request, reply) => {
             snapshotHealthByAccount.get(lastActiveAccountId),
           )
         : undefined,
-    reconciliationRunHealth,
+    reconciliationRunHealth: durable.reconciliationRunHealth,
   });
 
   return reply.code(result.statusCode).send(result.body);
