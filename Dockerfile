@@ -15,6 +15,7 @@ COPY apps/llm-agent/package.json apps/llm-agent/package.json
 COPY apps/backtest-engine/package.json apps/backtest-engine/package.json
 COPY apps/ui/package.json apps/ui/package.json
 COPY packages/shared/package.json packages/shared/package.json
+COPY tools/paper-verify-stack/package.json tools/paper-verify-stack/package.json
 
 RUN pnpm install --frozen-lockfile
 
