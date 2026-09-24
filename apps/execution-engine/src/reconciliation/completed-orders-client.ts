@@ -89,11 +89,13 @@ export class CompletedOrdersClient {
           || !positiveId(contract.conId) || !text(contract.symbol) || !text(contract.secType)
           || !text(contract.currency) || !positiveId(order.permId)
           || !["BUY", "SELL"].includes(String(order.action))
-          || !quantity(order.totalQuantity) || order.totalQuantity <= 0 || !quantity(order.filledQuantity)
-          || order.filledQuantity > order.totalQuantity || !text(state.status)
+          || !quantity(order.totalQuantity) || !quantity(order.filledQuantity)
+          || !text(state.status)
           || !["Filled", "Cancelled", "ApiCancelled", "Inactive"].includes(state.status)
           || !text(state.completedStatus)
-          || (state.status === "Filled" && order.filledQuantity !== order.totalQuantity)
+          || !(state.status === "Filled" && order.totalQuantity === 0 && order.filledQuantity > 0)
+            && (order.totalQuantity <= 0 || order.filledQuantity > order.totalQuantity
+              || (state.status === "Filled" && order.filledQuantity !== order.totalQuantity))
           || (order.orderRef !== undefined && typeof order.orderRef !== "string")) throw new Error("completed_record_invalid");
         if (order.account !== req.accountId) return;
         const row: BrokerOrderRow = {
@@ -103,7 +105,7 @@ export class CompletedOrdersClient {
           symbol: contract.symbol, conId: String(contract.conId), secType: contract.secType,
           exchange: text(contract.exchange) ? contract.exchange : null, currency: contract.currency,
           status: state.status, terminalStatus: state.completedStatus, action: String(order.action),
-          filled: order.filledQuantity, remaining: order.totalQuantity - order.filledQuantity,
+          filled: order.filledQuantity, remaining: state.status === "Filled" ? 0 : order.totalQuantity - order.filledQuantity,
           observedAt: this.deps.now?.() ?? new Date(),
         };
         const key = `${row.accountId}:${row.permId}`;

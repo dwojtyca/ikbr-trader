@@ -5,6 +5,56 @@ import { completedFixture, CompletedSocketFixture, completedRecord, captureReque
 import { buildExecutionConfig } from "../config.js";
 const request = (signal = new AbortController().signal) => ({ accountId: "DU-TEST", timeoutMs: 1000, abortSignal: signal });
 
+test("completed Filled with zero total preserves broker fill and terminal zero remaining", async () => {
+  const f = completedFixture();
+  f.socket.handle = () => {
+    const [c, o, s] = completedRecord();
+    for (let i = 0; i < 2; i++) f.socket.emit("completedOrder", c,
+      { ...o, totalQuantity: 0, filledQuantity: 7 }, s);
+  };
+  const pending = f.client.load(request());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.socket.disconnects, 0);
+  f.socket.emit("completedOrdersEnd");
+  const result = await pending;
+  assert.equal(result.ok, true); assert.equal(result.rows.length, 1);
+  assert.equal(result.rows[0].filled, 7); assert.equal(result.rows[0].remaining, 0);
+  assert.equal(result.rows[0].brokerOrderId, null);
+  assert.equal(f.socket.disconnects, 1);
+});
+
+const invalidQuantities: [string, unknown, unknown, string][] = [
+  ...[undefined, "0", -1, NaN, Infinity, Number.MAX_VALUE, Number.MAX_SAFE_INTEGER]
+    .map((total, i): [string, unknown, unknown, string] => [`total-${i}`, total, 7, "Filled"]),
+  ...[undefined, "7", -1, 0, NaN, Infinity, Number.MAX_VALUE, Number.MAX_SAFE_INTEGER]
+    .map((filled, i): [string, unknown, unknown, string] => [`fill-${i}`, 0, filled, "Filled"]),
+  ...["Cancelled", "ApiCancelled", "Inactive"]
+    .map((status): [string, unknown, unknown, string] => [status, 0, 7, status]),
+  ["positive-total-underfill", 8, 7, "Filled"],
+  ["positive-total-overfill", 6, 7, "Filled"],
+];
+for (const [name, totalQuantity, filledQuantity, status] of invalidQuantities) {
+  test(`completed zero-total exception rejects ${name}`, async () => {
+    const f = completedFixture();
+    f.socket.handle = () => {
+      const [c, o, s] = completedRecord();
+      f.socket.emit("completedOrder", c, { ...o, totalQuantity, filledQuantity }, { ...s, status });
+      f.socket.emit("completedOrdersEnd");
+    };
+    assert.deepEqual(await f.client.load(request()), { ok: false, rows: [], error: "completed_record_invalid" });
+  });
+}
+test("completed zero-total conflicting fill duplicates fail closed", async () => {
+  const f = completedFixture();
+  f.socket.handle = () => {
+    const [c, o, s] = completedRecord();
+    for (const filledQuantity of [7, 8]) f.socket.emit("completedOrder", c,
+      { ...o, totalQuantity: 0, filledQuantity }, s);
+    f.socket.emit("completedOrdersEnd");
+  };
+  assert.deepEqual(await f.client.load(request()), { ok: false, rows: [], error: "completed_conflicting_duplicate" });
+});
+
 test("completed client waits for end, retains null API ID and deduplicates exact records", async () => {
   const f = completedFixture();
   f.socket.handle = () => { f.socket.emit("completedOrder", ...completedRecord()); f.socket.emit("completedOrder", ...completedRecord()); };

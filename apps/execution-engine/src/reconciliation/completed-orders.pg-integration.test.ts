@@ -9,6 +9,50 @@ import { ReconciliationRunner } from "./runner.js";
 import { classifyReadiness } from "./gate.js";
 import { completedFixture, completedRecord } from "./completed-test-fixture.js";
 const connection = process.env.TEST_POSTGRES_URL;
+for (const mode of ["filled", "zero-fill", "cancelled"] as const) test(`external zero-total completed record + PostgreSQL: ${mode}`, { skip: !connection }, async () => {
+  const url = new URL(connection!); url.pathname = "/postgres";
+  const admin = new Pool({ connectionString: url.toString() });
+  const db = `completed_zero_${randomUUID().replaceAll("-", "")}`;
+  await admin.query(`CREATE DATABASE ${db}`);
+  url.pathname = `/${db}`; const pool = new Pool({ connectionString: url.toString() });
+  try {
+    await runMigrations(pool);
+    const repo = new ExecutionRepository(pool), recon = new ReconciliationRepository(pool), f = completedFixture();
+    const inserted = await pool.query(`INSERT INTO proposed_orders
+      (instrument,conid,side,order_type,quantity,entry,stop,take_profit,reason,confidence,risk_check_status,
+      status,client_order_id,execution_account_id)
+      VALUES ('TEST','123','BUY','LMT',1,100,99,102,'test',0.9,'PASS','PROPOSED','unrelated-proposal','DU-TEST') RETURNING *`);
+    f.socket.handle = () => {
+      const [c, o, s] = completedRecord();
+      f.socket.emit("completedOrder", c, { ...o, orderRef: "external-ref", totalQuantity: 0,
+        filledQuantity: mode === "zero-fill" ? 0 : 7 }, { ...s, status: mode === "cancelled" ? "Cancelled" : "Filled" });
+      f.socket.emit("completedOrdersEnd");
+    };
+    const runner = new ReconciliationRunner(pool, repo, recon, f.adapter);
+    const report = await runner.runOnce({ accountId: "DU-TEST", sessionId: "session", sessionStartedAt: new Date() },
+      { runTimeoutMs: 5000, sourceTimeoutMs: 1000, executionSafetyMarginMs: 1000 });
+    assert.ok(report);
+    assert.equal(report.status, mode === "filled" ? "CLEAN" : "INCOMPLETE");
+    const stored = (await pool.query("SELECT broker_snapshot FROM reconciliation_runs WHERE id=$1", [report.runId])).rows[0].broker_snapshot;
+    assert.equal(stored.sourceCoverage.completedOrders.available, mode === "filled");
+    if (mode === "filled") {
+      assert.equal(stored.completedOrders.length, 1);
+      assert.equal(stored.completedOrders[0].filled, 7);
+      assert.equal(stored.completedOrders[0].remaining, 0);
+      assert.equal(stored.completedOrders[0].brokerOrderId, null);
+    } else {
+      assert.deepEqual(stored.completedOrders, []);
+      assert.equal(stored.sourceCoverage.completedOrders.reason, "completed_record_invalid");
+    }
+    const after = await pool.query("SELECT * FROM proposed_orders WHERE id=$1", [inserted.rows[0].id]);
+    assert.deepEqual(after.rows, inserted.rows);
+    for (const table of ["broker_order_ref_map", "broker_order_links", "reconciliation_broker_order_observations", "reconciliation_holds"]) {
+      assert.equal(Number((await pool.query(`SELECT count(*) AS count FROM ${table}`)).rows[0].count), 0);
+    }
+  } finally {
+    await pool.end(); await admin.query(`DROP DATABASE ${db}`); await admin.end();
+  }
+});
 for (const mode of ["clean", "unavailable", "ambiguous", "race"] as const) test(`completed production source + PostgreSQL: ${mode}`, { skip: !connection }, async () => {
   const url = new URL(connection!); url.pathname = "/postgres";
   const admin = new Pool({ connectionString: url.toString() });
