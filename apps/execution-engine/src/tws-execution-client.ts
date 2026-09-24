@@ -1,3 +1,4 @@
+import { parseIbExecutionTime, type ExecutionTimeZone } from "./execution-time.js";
 import { isPkoIdentity } from "./gpw-window.js";
 import { isWseBound, validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import IB from "ib";
@@ -17,7 +18,7 @@ interface TwsExecutionConfig {
   primaryExchange?: string;
   currency: string;
   orderTimeoutMs: number;
-  executionTimeZone?: "UTC";
+  executionTimeZone?: ExecutionTimeZone;
   submittedAutoCancelMs?: number;
   retryAsMktOnCode110?: boolean;
   fractionalSymbols?: Set<string>;
@@ -2478,7 +2479,9 @@ export class TwsExecutionClient {
           shares: Number(shares),
           price: Number(price),
           avgPrice: toNum(exec.avgPrice),
-          executedAt: typeof exec.time === "string" ? exec.time : undefined,
+          executedAt: typeof exec.time === "string"
+            ? parseIbExecutionTime(exec.time, this.config.executionTimeZone)?.toISOString()
+            : undefined,
         });
       },
     );
@@ -3167,19 +3170,4 @@ export class TwsExecutionClient {
       }
     });
   }
-}
-
-function parseIbExecutionTime(raw: string, configuredTimeZone?: "UTC"): Date | null {
-  // Bare times require an explicit operator assertion of the Gateway timezone.
-  const normalized = configuredTimeZone === "UTC" && /^\d{8}\s+\d{2}:\d{2}:\d{2}$/.test(raw)
-    ? `${raw} UTC` : raw;
-  const match = normalized.match(/^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2}) (?:UTC|GMT)$/);
-  if (!match) return null;
-  const [, year, month, day, hour, minute, second] = match;
-  const parts = [year, month, day, hour, minute, second].map(Number);
-  const parsed = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2], parts[3], parts[4], parts[5]));
-  if (parsed.getUTCFullYear() !== parts[0] || parsed.getUTCMonth() + 1 !== parts[1] ||
-    parsed.getUTCDate() !== parts[2] || parsed.getUTCHours() !== parts[3] ||
-    parsed.getUTCMinutes() !== parts[4] || parsed.getUTCSeconds() !== parts[5]) return null;
-  return parsed;
 }

@@ -191,95 +191,119 @@ export class ReconciliationRunner {
       };
     }
 
-    // Phase C — reconcile + persist.
-    const plan = await this.#reconcile(context, snapshot);
-    snapshot = plan.snapshot;
-    // PR15 r5 §1 — correlated broker-order observations. One row
-    // per broker source record; the operator link path requires
-    // all identifiers to originate from the SAME observation row.
-    const brokerOrderObservations: BrokerOrderObservationInsert[] = [];
-    for (const r of snapshot.openOrders) {
-      const bid = String(r.brokerOrderId ?? "");
-      if (bid.length === 0) continue;
-      brokerOrderObservations.push({
+    try {
+      // Phase C — reconcile + persist.
+      assertSnapshotTimestamps(snapshot);
+      const plan = await this.#reconcile(context, snapshot);
+      snapshot = plan.snapshot;
+      // PR15 r5 §1 — correlated broker-order observations. One row
+      // per broker source record; the operator link path requires
+      // all identifiers to originate from the SAME observation row.
+      const brokerOrderObservations: BrokerOrderObservationInsert[] = [];
+      for (const r of snapshot.openOrders) {
+        const bid = String(r.brokerOrderId ?? "");
+        if (bid.length === 0) continue;
+        brokerOrderObservations.push({
+          accountId: context.accountId,
+          sessionId: context.sessionId,
+          source: "OPEN_ORDER",
+          brokerOrderId: bid,
+          permId: r.permId ? String(r.permId) : null,
+          orderRef: r.orderRef ? String(r.orderRef) : null,
+          brokerStatus: r.status ? String(r.status) : null,
+          observedAt: r.observedAt ?? snapshot.capturedAt,
+        });
+      }
+      for (const r of snapshot.completedOrders) {
+        const bid = String(r.brokerOrderId ?? "");
+        if (bid.length === 0) continue;
+        brokerOrderObservations.push({
+          accountId: context.accountId,
+          sessionId: context.sessionId,
+          source: "COMPLETED_ORDER",
+          brokerOrderId: bid,
+          permId: r.permId ? String(r.permId) : null,
+          orderRef: r.orderRef ? String(r.orderRef) : null,
+          brokerStatus: r.terminalStatus
+            ? String(r.terminalStatus)
+            : r.status
+              ? String(r.status)
+              : null,
+          observedAt: r.observedAt ?? snapshot.capturedAt,
+        });
+      }
+      for (const r of snapshot.executions) {
+        const bid = String(r.brokerOrderId ?? "");
+        if (bid.length === 0) continue;
+        brokerOrderObservations.push({
+          accountId: context.accountId,
+          sessionId: context.sessionId,
+          source: "EXECUTION",
+          brokerOrderId: bid,
+          permId: r.permId ? String(r.permId) : null,
+          orderRef: r.orderRef ? String(r.orderRef) : null,
+          brokerStatus: null,
+          observedAt: r.executedAt,
+        });
+      }
+      await this.reconRepo.publishResult(client, {
+        runId,
         accountId: context.accountId,
-        sessionId: context.sessionId,
-        source: "OPEN_ORDER",
-        brokerOrderId: bid,
-        permId: r.permId ? String(r.permId) : null,
-        orderRef: r.orderRef ? String(r.orderRef) : null,
-        brokerStatus: r.status ? String(r.status) : null,
-        observedAt: r.observedAt ?? snapshot.capturedAt,
-      });
-    }
-    for (const r of snapshot.completedOrders) {
-      const bid = String(r.brokerOrderId ?? "");
-      if (bid.length === 0) continue;
-      brokerOrderObservations.push({
-        accountId: context.accountId,
-        sessionId: context.sessionId,
-        source: "COMPLETED_ORDER",
-        brokerOrderId: bid,
-        permId: r.permId ? String(r.permId) : null,
-        orderRef: r.orderRef ? String(r.orderRef) : null,
-        brokerStatus: r.terminalStatus
-          ? String(r.terminalStatus)
-          : r.status
-            ? String(r.status)
-            : null,
-        observedAt: r.observedAt ?? snapshot.capturedAt,
-      });
-    }
-    for (const r of snapshot.executions) {
-      const bid = String(r.brokerOrderId ?? "");
-      if (bid.length === 0) continue;
-      brokerOrderObservations.push({
-        accountId: context.accountId,
-        sessionId: context.sessionId,
-        source: "EXECUTION",
-        brokerOrderId: bid,
-        permId: r.permId ? String(r.permId) : null,
-        orderRef: r.orderRef ? String(r.orderRef) : null,
-        brokerStatus: null,
-        observedAt: r.executedAt ?? snapshot.capturedAt,
-      });
-    }
-    await this.reconRepo.publishResult(client, {
-      runId,
-      accountId: context.accountId,
-      finalStatus: plan.finalStatus,
-      snapshot,
-      matches: plan.matches,
-      mismatchesCount: plan.mismatches.length,
-      expectedPositionsCount: plan.expectedCount,
-      brokerPositionsCount: plan.brokerCount,
-      report: {
-        externalOrders: plan.externalOrders,
+        finalStatus: plan.finalStatus,
+        snapshot,
         matches: plan.matches,
-        mismatches: plan.mismatches,
+        mismatchesCount: plan.mismatches.length,
+        expectedPositionsCount: plan.expectedCount,
+        brokerPositionsCount: plan.brokerCount,
+        report: {
+          externalOrders: plan.externalOrders,
+          matches: plan.matches,
+          mismatches: plan.mismatches,
+          exposureComplete: snapshot.exposureComplete,
+          recoveryComplete: snapshot.recoveryComplete,
+          ambiguousOrdersEvaluated: plan.ambiguousEvaluated,
+          lifecycleTransitions: plan.pendingLifecycle.length,
+          brokerOrderObservationCount: brokerOrderObservations.length,
+        },
+        error: null,
+        holdInserts: plan.holdInserts,
+        holdResolves: plan.holdResolves,
+        pendingLifecycle: plan.pendingLifecycle,
+        brokerOrderObservations,
+      });
+      return {
+        runId,
+        status: plan.finalStatus,
         exposureComplete: snapshot.exposureComplete,
         recoveryComplete: snapshot.recoveryComplete,
-        ambiguousOrdersEvaluated: plan.ambiguousEvaluated,
-        lifecycleTransitions: plan.pendingLifecycle.length,
-        brokerOrderObservationCount: brokerOrderObservations.length,
-      },
-      error: null,
-      holdInserts: plan.holdInserts,
-      holdResolves: plan.holdResolves,
-      pendingLifecycle: plan.pendingLifecycle,
-      brokerOrderObservations,
-    });
-    return {
-      runId,
-      status: plan.finalStatus,
-      exposureComplete: snapshot.exposureComplete,
-      recoveryComplete: snapshot.recoveryComplete,
-      matches: plan.matches,
-      mismatches: plan.mismatches.length,
-      holdsCreated: plan.holdInserts.length,
-      holdsResolved: plan.holdResolves.length,
-      error: null,
-    };
+        matches: plan.matches,
+        mismatches: plan.mismatches.length,
+        holdsCreated: plan.holdInserts.length,
+        holdsResolved: plan.holdResolves.length,
+        error: null,
+      };
+    } catch (error) {
+      const reason = error instanceof InvalidSnapshotTimestampError
+        ? "invalid_snapshot_timestamp" : "reconciliation_phase_c_failed";
+      const finalized = await this.reconRepo.failRunningRun(client, {
+        runId,
+        accountId: context.accountId,
+        sessionId: context.sessionId,
+        reason,
+      });
+      if (!finalized) throw new Error("reconciliation_failure_finalization_not_applied", { cause: error });
+      return {
+        runId,
+        status: "FAILED",
+        exposureComplete: false,
+        recoveryComplete: false,
+        matches: 0,
+        mismatches: 0,
+        holdsCreated: 0,
+        holdsResolved: 0,
+        error: reason,
+      };
+    }
   }
 
   async #findOldestAmbiguousAttemptedAt(): Promise<Date | null> {
@@ -966,4 +990,15 @@ function deriveStatusFromBroker(
   if (filled > 0 && remaining > 0) return "SUBMITTED"; // partial fill on open
   if (totalExec > 0 && totalExec < expectedQuantity) return "SUBMITTED"; // partial via executions only
   return null;
+}
+
+class InvalidSnapshotTimestampError extends Error {}
+
+function assertSnapshotTimestamps(snapshot: BrokerReconciliationSnapshot): void {
+  const valid = (value: unknown): value is Date => value instanceof Date && Number.isFinite(value.getTime());
+  if (!valid(snapshot.capturedAt)
+    || snapshot.executions.some(row => !valid(row.executedAt))
+    || [...snapshot.openOrders, ...snapshot.completedOrders].some(row => row.observedAt != null && !valid(row.observedAt))) {
+    throw new InvalidSnapshotTimestampError("invalid_snapshot_timestamp");
+  }
 }

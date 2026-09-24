@@ -410,6 +410,29 @@ export class ReconciliationRepository {
     }
   }
 
+  async failRunningRun(
+    client: PoolClient,
+    input: { readonly runId: number; readonly accountId: string; readonly sessionId: string; readonly reason: string },
+  ): Promise<boolean> {
+    await client.query("BEGIN");
+    try {
+      await acquireSnapLock(client, input.accountId);
+      const result = await client.query(
+        `UPDATE reconciliation_runs
+           SET status = 'FAILED', completed_at = NOW(), snapshot_complete = false,
+               snapshot_captured_at = NULL, broker_snapshot = NULL,
+               source_coverage = '{}'::jsonb, error = $4, report = jsonb_build_object('error', $4::text)
+         WHERE id = $1 AND account_id = $2 AND session_id = $3 AND status = 'RUNNING'`,
+        [input.runId, input.accountId, input.sessionId, input.reason],
+      );
+      await client.query("COMMIT");
+      return result.rowCount === 1;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    }
+  }
+
   /** Finalise a still-RUNNING row as ABANDONED (§7 timeout path). */
   async abandonRun(
     client: PoolClient,

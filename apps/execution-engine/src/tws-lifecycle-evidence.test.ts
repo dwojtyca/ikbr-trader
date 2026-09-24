@@ -164,3 +164,16 @@ test("daily execution coverage sends UTC wire filter, waits matching end and rec
   assert.ok(Date.parse(snapshot.sourceCoverage.executions.window.to) >= beforeEnd);
   assert.equal(snapshot.connectionGeneration, client.getConnectionGeneration());
 });
+
+test("Warsaw Gateway bare execution timestamp is converted before snapshot evidence", async () => {
+  const ib = new FakeIb();
+  ib.reqExecutions = id => {
+    ib.emit("execDetails", id, { conId: 123 }, { execId: "one", orderId: 1, acctNumber: "PAPER", shares: 1, side: "BOT", time: "20260924  15:30:21" });
+    ib.emit("execDetailsEnd", id);
+  };
+  const client = new TwsExecutionClient({ host: "unused", port: 0, clientId: 1, securityType: "STK", exchange: "SMART", currency: "USD",
+    orderTimeoutMs: 100, executionTimeZone: "Europe/Warsaw" }, () => {}, undefined, undefined, undefined, { ib });
+  const result = await client.reqExecutionsSnapshot({ accountId: "PAPER", since: new Date(), timeoutMs: 100, abortSignal: new AbortController().signal });
+  assert.equal(result.ok, true);
+  assert.equal(result.rows[0].executedAt.toISOString(), "2026-09-24T13:30:21.000Z");
+});

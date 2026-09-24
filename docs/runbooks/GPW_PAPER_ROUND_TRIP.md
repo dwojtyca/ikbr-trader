@@ -289,3 +289,15 @@ mean leave the default profile and collect more history, not lower more threshol
 Execution `/ready` uses the latest durable account/session result for both status
 and completedAt freshness. Periodic and explicit captures can advance readiness
 without restarting the service; failures and session changes remain fail-closed.
+
+## Execution timestamp timezone
+
+Set `EXECUTION_BROKER_TIME_ZONE=UTC` or `Europe/Warsaw` only after verifying the
+Gateway login timezone. This is an explicit assertion for execution timestamps
+without a zone; it is independent of instrument exchange and host timezone.
+Unset rejects bare timestamps. Explicit UTC/GMT timestamps remain authoritative.
+The supported calendar range is 2000–2100. Nonexistent or ambiguous Warsaw DST
+local times are rejected rather than guessed. Invalid execution timestamps fail
+reconciliation before matching/persistence; a Phase C failure is finalized FAILED
+only while that exact account/session run is still RUNNING. A failed capture or
+persistence is never evidence of CLEAN or permission to retry an order.
