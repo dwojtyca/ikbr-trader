@@ -1,3 +1,5 @@
+import { AaplScheduleAdapter } from "./aapl-schedule-adapter.js";
+import { AaplScheduleRefresh } from "./aapl-schedule-refresh.js";
 import { isAaplSubscription, AaplNativeRefresh } from "./aapl-native-refresh.js";
 import { isWseSubscription, WseNativeRefresh } from "./wse-native-refresh.js";
 import Fastify from "fastify";
@@ -183,6 +185,7 @@ const twsClient = new TwsClient(
     }
   },
   (line) => app.log.info(line),
+  { onConnectionInvalidated: () => { void aaplScheduleRefresh.invalidate().catch(error => app.log.error(error, "AAPL schedule invalidation failed")); } },
 );
 
 const wseRefresh = new WseNativeRefresh({
@@ -190,16 +193,22 @@ const wseRefresh = new WseNativeRefresh({
   fetch: async (sub, tf, count) => (await twsClient.backfillRecentCandles([sub], tf, count))[0]?.candles ?? [],
   write: candle => repo.upsertCandle(candle),
 });
+const aaplScheduleAdapter = new AaplScheduleAdapter({ host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT,
+  clientId: config.AAPL_SCHEDULE_CLIENT_ID, acquirePacing: () => twsClient.acquireHistoricalPacingToken() });
+const aaplScheduleRefresh = new AaplScheduleRefresh({ read: () => repo.getAaplSchedule(),
+  begin: status => repo.beginAaplSchedule(status), finish: (generation, schedule) => repo.finishAaplSchedule(generation, schedule),
+  fetch: () => aaplScheduleAdapter.fetch() });
 const aaplRefresh = new AaplNativeRefresh({
+  schedule: () => aaplScheduleRefresh.ensure(), readSchedule: () => repo.getAaplSchedule(),
   read: (conid, tf, limit) => repo.getNativeAaplCandles(conid, tf, limit),
   fetch: (sub, tf, count) => twsClient.fetchNativeAaplCandles(sub, tf, count),
   write: candle => repo.upsertCandle(candle),
 });
 const aaplRefreshTimer = setInterval(() => {
-  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void aaplRefresh.run(activeSubscriptions);
+  if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void aaplRefresh.run(activeSubscriptions).catch(error => app.log.error(error, "AAPL native refresh failed"));
 }, 60000);
 aaplRefreshTimer.unref();
-app.addHook("onClose", async () => { clearInterval(aaplRefreshTimer); await aaplRefresh.idle(); });
+app.addHook("onClose", async () => { clearInterval(aaplRefreshTimer); await aaplRefresh.idle(); await aaplScheduleRefresh.idle(); });
 const wseRefreshTimer = setInterval(() => {
   if (!nativeRefreshPaused && !bootstrapInFlight && twsClient.isConnected()) void wseRefresh.run(activeSubscriptions);
 }, 60000);
@@ -220,6 +229,8 @@ app.get("/backfill-progress", async () => ({
   progress: backfillProgress,
   wseWarmup: Array.from(wseRefresh.status.values()),
   aaplWarmup: Array.from(aaplRefresh.status.values()),
+  aaplSchedule: await repo.getAaplSchedule(),
+  aaplScheduleError: aaplScheduleRefresh.lastError,
 }));
 
 app.get("/watchlist", async () => {

@@ -104,6 +104,9 @@ importers:
       '@ikbr/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@stoqey/ib':
+        specifier: 1.6.10
+        version: 1.6.10(rxjs@7.8.2)
       dotenv:
         specifier: ^16.4.5
         version: 16.6.1

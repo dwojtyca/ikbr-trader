@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { TwsExecutionClient, type PreparedBrokerOrder } from "./tws-execution-client.js";
 
-for (const stage of ["missing", "expired", "during connect", "before first wire", "valid", "close"]) {
+for (const stage of ["missing", "expired", "during connect", "before first wire", "valid", "close", "permit missing", "permit rejected", "permit timeout", "permit duplicate", "permit expired", "permit commit failure", "permit disconnect"]) {
   test(`AAPL dispatcher ${stage} preserves entry deadline and close exemption`, async t => {
     t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-24T15:00:00Z") });
     let writes = 0, expireOnLog = false;
@@ -39,8 +39,23 @@ for (const stage of ["missing", "expired", "during connect", "before first wire"
       });
     }
     expireOnLog = false;
-    const dispatch = () => client.dispatchPreparedOrder(prepared, stage === "missing" || close ? undefined : deadline);
+    let lateSend: (() => void) | undefined;
+    const permit = async (send: () => void) => {
+      lateSend = send;
+      if (stage === "permit rejected") throw new Error("fixture_permit_rejected");
+      if (stage === "permit timeout") { await new Promise<void>(() => undefined); return; }
+      if (stage === "permit expired") t.mock.timers.tick(1000);
+      if (stage === "permit disconnect") client.disconnect();
+      send();
+      if (stage === "permit duplicate") send();
+      if (stage === "permit commit failure") throw new Error("fixture_commit_failure");
+    };
+    const dispatch = () => client.dispatchPreparedOrder(prepared, stage === "missing" || close ? undefined : deadline, stage === "permit missing" ? undefined : permit);
     if (stage === "valid" || close) { await dispatch(); assert.equal(writes, 1); }
-    else { await assert.rejects(dispatch, /aapl_window_dispatch_expired/); assert.equal(writes, 0); }
+    else if (stage.startsWith("permit ")) {
+      await assert.rejects(dispatch);
+      assert.equal(writes, ["permit duplicate", "permit commit failure"].includes(stage) ? 1 : 0);
+      if (lateSend) assert.throws(lateSend, /permit_inactive/);
+    } else { await assert.rejects(dispatch, /aapl_window_dispatch_expired/); assert.equal(writes, 0); }
   });
 }

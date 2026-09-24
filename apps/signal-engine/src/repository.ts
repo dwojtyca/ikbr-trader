@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import {
+  type AaplScheduleEvidence,
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
@@ -591,6 +592,13 @@ export class SignalRepository {
    * `conid` differs from the bound contract, even when the
    * broker symbol collides (rollovers, share-class migrations).
    */
+  async getAaplScheduleEvidence(): Promise<AaplScheduleEvidence | null> {
+    const result = await this.pool.query(`SELECT generation,status,evidence,updated_at FROM aapl_schedule_state WHERE instrument_id='aapl_nasdaq'`);
+    const row = result.rows[0];
+    return row ? { generation: Number(row.generation), status: row.status,
+      updatedAt: new Date(row.updated_at).toISOString(), schedule: row.evidence } : null;
+  }
+
   async getRecentCandlesForContract(
     symbol: string,
     conId: string,

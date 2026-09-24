@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import type { Redis } from 'ioredis';
 import { AAPL_NATIVE_SOURCE } from '@ikbr/shared';
+import { nativeAaplSchedule } from './runtime/strategy/aapl-native.fixture.js';
 import { SignalRepository } from './repository.js';
 
 it('AAPL provenance and exact contract filter precede SQL LIMIT without changing WSE reads',
@@ -23,6 +24,13 @@ it('AAPL provenance and exact contract filter precede SQL LIMIT without changing
           200,201,199,200,100,$3 FROM generate_series(1,3) n`, [conid,symbol,source]);
       }
       const repo = new SignalRepository(pool, {} as Redis);
+      await pool.query(`CREATE TABLE aapl_schedule_state (instrument_id text PRIMARY KEY, generation bigint NOT NULL, status text, evidence jsonb, updated_at timestamptz)`);
+      assert.equal(await repo.getAaplScheduleEvidence(), null);
+      const calendar = nativeAaplSchedule();
+      await pool.query(`INSERT INTO aapl_schedule_state VALUES ('aapl_nasdaq', $1, $2, $3, $4)`, [calendar.generation, calendar.status, JSON.stringify(calendar.schedule), calendar.updatedAt]);
+      assert.deepEqual(await repo.getAaplScheduleEvidence(), calendar);
+      await pool.query(`UPDATE aapl_schedule_state SET generation=generation+1, status='REFRESHING', evidence=NULL`);
+      assert.deepEqual(await repo.getAaplScheduleEvidence(), { ...calendar, generation: 2, status: 'REFRESHING', schedule: null });
       const native = await repo.getRecentCandlesForContract('AAPL', '265598', '1m', 2, false, AAPL_NATIVE_SOURCE);
       assert.deepEqual(native.map(c => [c.conid,c.symbol,c.source,c.ts.toISOString()]), [
         ['265598','AAPL',AAPL_NATIVE_SOURCE,'2026-09-24T14:02:00.000Z'],

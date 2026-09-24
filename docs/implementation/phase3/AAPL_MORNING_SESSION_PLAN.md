@@ -77,10 +77,11 @@ Use one shared pure implementation in ingestion and signal-engine. Keep source,
 contract, OHLC, volume and minimum-count checks. Do not globally increase existing
 age limits and do not alter WSE, futures or other US-symbol paths.
 
-For exact AAPL intraday bars use the verified New York wall-clock lattice:
-1m and5m aligned to minute multiples;1h to whole hours;4h to00/04/08/12/16/20.
-Intersect each bucket with the authoritative RTH session. Therefore a normal day
-has4h intervals09:30–12:00 and12:00–16:00, and1h begins09:30–10:00.
+For exact AAPL intraday bars use the observed UTC wall-clock lattice:
+1m and5m aligned to minute multiples;1h to whole hours;4h to00/04/08/12/16/20UTC.
+Intersect each bucket with the authoritative RTH session. Therefore a summer normal day
+has4h intervals09:30–12:00 and12:00–16:00 New York; a winter normal day
+has09:30–11:00,11:00–15:00 and15:00–16:00 New York. Hourly begins09:30–10:00.
 Use the session close to clip early-close terminal bars. Never derive all buckets
 by repeatedly adding four hours to09:30. Validate broker-returned starts against
 this lattice on the covered recent sessions; any mismatch blocks readiness and
@@ -201,3 +202,27 @@ new-boundary refresh within the publication grace, and actual-session checks at
 the existing submission phases. Runtime implementation, implementation review,
 replay, full checks and disabled deployment are subsequent deliverables; this
 planning document does not claim that the morning restriction is already fixed.
+
+## Amendment M1 — native winter alignment (implementation evidence)
+
+The required read-only Gateway sample on2026-09-24 contradicted the original
+fixed-New-York4h grid. Exact AAPL native4h epochs for2026-01-06/07/08 began
+14:30UTC,16:00UTC,20:00UTC. The2025-11-28 early-close sample began14:30UTC
+and16:00UTC (regularclose18:00UTC); preceding winter full sessions had the same
+three starts. Summer persisted samples begin13:30UTC and16:00UTC. Weekly probe
+confirmed completed Friday labels and a partial current Thursday label.
+
+Bounded correction: anchor intraday slots to UTC midnight, then intersect each
+bucket with the authoritative New York session; retain every other gate,
+provenance, conservative daily/weekly finality, coverage policy and minimum.
+This is an inference matching the observed summer, winter and short-session
+native responses, not a guarantee of undocumented IBKR behavior. Any future
+mismatching native start must still fail closed. Add immutable observed-epoch
+fixtures to tests, assert no shorter bucket becomes eligible before its actual
+end, and exercise both DST transitions and shortened winter terminal bars.
+Old uncovered historical rows retain the previous conservative finality policy.
+
+M1 independent plan review: ACCEPT. Reviewed separately from the shared-policy
+implementation and by a different agent than the final implementation reviewer.
+An additional paced weekly probe confirmed the Good Friday2026 week carries
+Thursday2026-04-02, matching the last actual session rather than nominal Friday.

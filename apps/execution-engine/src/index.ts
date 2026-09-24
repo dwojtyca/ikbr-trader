@@ -979,7 +979,7 @@ const submissionService = buildSubmissionApplicationService({
       clientOrderId,
     }),
   dispatcher: {
-    dispatch: async ({ prepared, windowDeadlineMs }) => tws.dispatchPreparedOrder(prepared, windowDeadlineMs),
+    dispatch: async ({ prepared, windowDeadlineMs, sendWithEntryPermit }) => tws.dispatchPreparedOrder(prepared, windowDeadlineMs, sendWithEntryPermit),
   },
   assertKillSwitchOk: async (input) => {
     await assertKillSwitchOk({

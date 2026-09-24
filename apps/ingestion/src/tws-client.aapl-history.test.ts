@@ -16,25 +16,25 @@ class Fake extends EventEmitter {
     this.emit("historicalData", args[0], "finished");
   }); }
 }
-test("AAPL daily request is RTH native and excludes current day and malformed date", async t => {
+test("AAPL daily transport is RTH native, rejects malformed dates and retains partial rows for schedule validation", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-24T17:00:00Z") });
   const ib = new Fake(), client = new TwsClient(config, () => {}, () => {}, { ib });
   const rows = await client.fetchNativeAaplCandles(sub, "1d", 60);
-  assert.equal(rows.length, 1); assert.equal(rows[0].source, AAPL_NATIVE_SOURCE);
+  assert.equal(rows.length, 2); assert.equal(rows[0].source, AAPL_NATIVE_SOURCE);
   assert.equal(rows[0].ts.toISOString(), "2026-09-23T04:00:00.000Z");
   assert.equal(ib.requests[0][6], 1); assert.equal(ib.requests[0][5], "TRADES");
   await assert.rejects(client.fetchNativeAaplCandles(sub, "12h" as AaplTimeframe, 60), /aapl_native_request_invalid/);
   await assert.rejects(client.fetchNativeAaplCandles({ ...sub, conid: "123" }, "1m", 60));
   assert.equal(ib.requests.length, 1);
 });
-for (const timeframe of ["1m", "5m", "1h", "4h"] as const) test(`AAPL ${timeframe} filters incomplete and premarket timestamps`, async t => {
+for (const timeframe of ["1m", "5m", "1h", "4h"] as const) test(`AAPL ${timeframe} retains raw RTH response timestamps for authoritative schedule validation`, async t => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-09-24T18:00:00Z") });
   const ib = new Fake();
   ib.dates = ["2026-09-24T13:29:00Z", "2026-09-24T13:30:00Z", "2026-09-24T17:59:30Z", "2026-09-24T18:00:00Z"]
     .map(date => String(Date.parse(date) / 1000));
   const client = new TwsClient(config, () => {}, () => {}, { ib });
   const rows = await client.fetchNativeAaplCandles(sub, timeframe, 60);
-  assert.equal(rows.length, 1); assert.equal(rows[0].ts.toISOString(), "2026-09-24T13:30:00.000Z");
+  assert.equal(rows.length, 4); assert.equal(rows[0].ts.toISOString(), "2026-09-24T13:29:00.000Z");
   assert.equal(ib.requests[0][6], 1);
 });
 test("AAPL broker pacing errors propagate promptly and don't become empty successful history", async () => {

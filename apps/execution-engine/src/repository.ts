@@ -434,6 +434,22 @@ export class ExecutionRepository {
     return checkAaplWindow(this.pool, this.aaplWindow, accountId, order.id, dispatch);
   }
 
+  async withAaplDispatchPermit(order: ProposedOrder, accountId: string, send: () => void): Promise<void> {
+    if (!isExactAaplIdentity(order)) throw new Error("aapl_window_identity_mismatch");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const permit = await checkAaplWindow(client, this.aaplWindow, accountId, order.id, true);
+      if (!permit.ok) throw new Error(permit.reason);
+      if (Date.now() >= permit.endsAtMs) throw new Error("aapl_window_dispatch_expired");
+      send();
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  }
+
   async getAaplWindowStatus(accountId: string | null) {
     const check = await checkAaplWindow(this.pool, this.aaplWindow, accountId ?? "");
     return { ...check, configured: Boolean(this.aaplWindow), runId: this.aaplWindow?.runId ?? null,

@@ -1,5 +1,5 @@
-import { AAPL_NATIVE_SOURCE } from '@ikbr/shared';
-import { AAPL_FIXTURE_NOW, nativeAaplFixture } from './aapl-native.fixture.js';
+import { AAPL_NATIVE_SOURCE, aaplCandleEnd } from '@ikbr/shared';
+import { AAPL_FIXTURE_NOW, nativeAaplFixture, nativeAaplSchedule } from './aapl-native.fixture.js';
 import { computeIndicatorsForContext } from './indicators.js';
 import { detectRegimeForContext } from './regime.js';
 import { evaluateMomentumBreakoutLong } from '../../strategies/momentum-breakout-long.strategy.js';
@@ -729,9 +729,11 @@ describe('AAPL native context and deterministic six-timeframe replay', () => {
   const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, exchange: 'SMART' };
   const original = nativeAaplFixture();
   const timeframes: CandleTimeframe[] = ['1m','5m','1h','4h','12h','1d','1w'];
-  async function evaluate(candles = original, now = AAPL_FIXTURE_NOW) {
+  async function evaluate(candles = original, now = AAPL_FIXTURE_NOW, evidence = nativeAaplSchedule(now), changeGeneration = false) {
     const requested: CandleTimeframe[] = [];
+    let reads = 0;
     const loader = new StrategyContextLoader({ clock: () => now, maxMarketStateAgeMs: 60000, repo: {
+      getAaplScheduleEvidence: async () => ({ ...evidence, generation: evidence.generation + (changeGeneration ? reads++ : 0) }),
       getInstrumentContractByConId: async () => makeContract({ exchange: 'SMART' }),
       getMarketState: async () => makeMarketState({ ts: now.toISOString() }),
       getRecentCandlesForContract: async (symbol, conid, tf, _limit, wseOnly, source) => {
@@ -769,12 +771,45 @@ describe('AAPL native context and deterministic six-timeframe replay', () => {
       if (bad === 'foreign') last.conid = '123';
       if (bad === 'ohlc') last.low = last.high + 1;
       const { result } = await evaluate({ ...original, [tf]: selected });
-      assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /insufficient/);
+      assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /insufficient|aapl_/);
     });
   }
-  it('before 13:30 ET unfinished first four-hour bar cannot make overnight history fresh', async () => {
-    const now = new Date('2026-09-24T16:00:00Z');
+  for (const instant of ['2026-09-24T13:31:00Z', '2026-09-28T13:31:00Z', '2026-09-08T13:31:00Z', '2026-11-02T14:31:00Z', '2026-11-27T14:31:00Z', '2026-11-30T14:31:00Z', '2026-03-09T13:31:00Z']) {
+    it(`morning replay ${instant} uses previous closed higher bars with first current minute`, async () => {
+      const now = new Date(instant), candles = nativeAaplFixture(now);
+      const { result } = await evaluate(candles, now);
+      assert.equal(result.kind, 'ok', JSON.stringify(result));
+      if (result.kind !== 'ok') return;
+      assert.equal(result.context.latestCandle.ts.getTime(), now.getTime() - 60000);
+      assert.ok(result.context.candlesByTimeframe['4h']!.at(-1)!.ts.getTime() < now.getTime() - 12 * 3600000);
+      // The former wall-time freshness rule rejected every morning in this replay.
+      assert.ok(now.getTime() - aaplCandleEnd(candles['4h'].at(-1)!.ts, '4h') > 21600000);
+      const indicators = computeIndicatorsForContext({ secType: 'STK', candlesByTimeframe: candles })!;
+      const regime = detectRegimeForContext('STK', candles['1m'].at(-1)!.close, indicators);
+      Object.assign(indicators, { directionalRegime: regime.directionalRegime, volatilityRegime: regime.volatilityRegime,
+        regimeScore: regime.score, regimeConfidence: regime.confidence, regimeReasons: regime.reasons,
+        timeframeTrendScores: regime.timeframeTrendScores, timeframeTrendVotes: regime.timeframeTrendVotes });
+      assert.deepEqual(result.context.indicators, indicators);
+      assert.equal(evaluateMomentumBreakoutLong(result.context).signal, null);
+    });
+  }
+  it('09:30 has no closed current-session minute', async () => {
+    const now = new Date('2026-09-24T13:30:00Z');
     const { result } = await evaluate(nativeAaplFixture(now), now);
-    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /stale 4h|4h.*stale/);
+    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /current_session_minute/);
+  });
+  it('a refreshed generation during asynchronous load cannot publish old context', async () => {
+    const { result } = await evaluate(original, AAPL_FIXTURE_NOW, nativeAaplSchedule(), true);
+    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /changed_during_context/);
+  });
+  for (const status of ['REFRESHING', 'FAILED'] as const) it(`${status} schedule blocks context`, async () => {
+    const { result } = await evaluate(original, AAPL_FIXTURE_NOW, { ...nativeAaplSchedule(), status });
+    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /schedule_unavailable/);
+  });
+  it('missing new 4h bucket is rejected once boundary publication grace expires', async () => {
+    const before = new Date('2026-09-24T15:59:00Z'), now = new Date('2026-09-24T16:01:31Z');
+    const history = nativeAaplFixture(now); history['4h'] = nativeAaplFixture(before)['4h'];
+    const { result } = await evaluate(history, now);
+    assert.equal(result.kind, 'error'); if (result.kind === 'error') assert.match(result.message, /4h: aapl_expected_candle_missing/);
   });
 });

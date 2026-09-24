@@ -57,6 +57,7 @@ export interface BrokerDispatchPayload {
   readonly accountId: string;
   readonly prepared: PreparedBrokerOrder;
   readonly windowDeadlineMs?: number;
+  readonly sendWithEntryPermit?: (send: () => void) => Promise<void>;
 }
 
 export interface BrokerDispatchResult {
@@ -265,6 +266,7 @@ export function buildSubmissionApplicationService(
         accountId,
         prepared,
         windowDeadlineMs,
+        sendWithEntryPermit: isAaplIdentity(order) ? send => deps.repo.withAaplDispatchPermit(order, accountId, send) : undefined,
       });
       if (result.status === "FILLED") {
         // PR14 round-8 — invalidate snapshot BEFORE local FILLED

@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
-import { InstrumentBindingAuthority, InstrumentRegistry, type Instrument, type SignalTicket } from "@ikbr/shared";
+import { newYorkMidnight, type AaplSchedule, InstrumentBindingAuthority, InstrumentRegistry, type Instrument, type SignalTicket } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { runMigrations } from "../migrations.js";
 import { ExecutionRepository } from "../repository.js";
@@ -50,6 +50,17 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   // of the host hour, just as its market-risk adapter uses a fixed open session.
   const window: AaplWindow = { runId: "test-run", accountId, startsAt: new Date(Date.now()-1000).toISOString(),
     endsAt: new Date(Date.now()+60000).toISOString(), tradeDate: "2026-09-24" };
+  const date = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const day = new Date(`${date}T12:00:00Z`);
+  const midnight = (d: Date) => newYorkMidnight(d.getUTCFullYear(), d.getUTCMonth()+1, d.getUTCDate()).toISOString();
+  const next = new Date(day); next.setUTCDate(next.getUTCDate()+1);
+  const before = new Date(day); before.setUTCDate(before.getUTCDate()-20);
+  // Synthetic broker calendar spans the current local day so PG tests remain
+  // independent of wall-clock market hours, while all production checks run.
+  const schedule: AaplSchedule = { source:"ibkr_aapl_schedule_v1",conId:265598,symbol:"AAPL",exchange:"SMART",currency:"USD",secType:"STK",timeZone:"America/New_York",
+    coverageStart:midnight(before),coverageEnd:midnight(next),requestedAt:new Date(Date.now()-1000).toISOString(),receivedAt:new Date(Date.now()-1000).toISOString(),
+    sessions:[{date,start:midnight(day),end:midnight(next)}] };
+  await pool.query("INSERT INTO aapl_schedule_state VALUES ('aapl_nasdaq',1,'READY',$1,clock_timestamp())",[JSON.stringify(schedule)]);
   const repo = new ExecutionRepository(pool, undefined, window);
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
@@ -62,7 +73,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   ]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,
     alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false, expireWindowDuringPrepare: false,
-    wseFailure: "" as string,
+    wseFailure: "" as string, invalidateScheduleDuringPrepare: false,
     session: sessionId, account: accountId };
   const service = buildSubmissionApplicationService({ repo, bindingAuthority: authority,
     ensureBrokerSession: async () => ({ accountId: state.account }),
@@ -94,6 +105,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
     },
     prepareBrokerPlan: async ({ order, clientOrderId }) => {
       state.prepares++;
+      if (state.invalidateScheduleDuringPrepare) await pool.query("UPDATE aapl_schedule_state SET generation=generation+1,status='REFRESHING',updated_at=clock_timestamp()");
       if (state.expireWindowDuringPrepare) await pool.query("SELECT pg_sleep(2.2)");
       if (state.ageDuringPrepare) await pool.query("SELECT pg_sleep(0.15)");
       if (state.rejectDuringPrepare) await repo.rejectPendingProposal(order.id!, "concurrent rejection");
@@ -104,9 +116,9 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
           { role: "TP", roleOrdinal: 1, brokerOrderId: String(base + 1), orderRef: deriveChildOrderRef(clientOrderId, { role: "TP", ordinal: 1 }) },
           { role: "SL", roleOrdinal: 1, brokerOrderId: String(base + 2), orderRef: deriveChildOrderRef(clientOrderId, { role: "SL", ordinal: 1 }) } ] };
     },
-    dispatcher: { dispatch: async ({ prepared }) => {
-      state.dispatches++;
-      if (state.uncertain) throw new Error("simulated broker timeout after possible acceptance");
+    dispatcher: { dispatch: async ({ prepared, sendWithEntryPermit }) => {
+      await sendWithEntryPermit!(() => { state.dispatches++;
+        if (state.uncertain) throw new Error("simulated broker timeout after possible acceptance"); });
       return { brokerOrderId: prepared.legs[0].brokerOrderId, status: "SUBMITTED" };
     } },
     assertKillSwitchOk: async () => undefined, recordAlert: () => undefined, triggerReconciliation: () => undefined,
@@ -128,7 +140,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   };
   const approve = async (id: number) => pool.query(`UPDATE proposal_ai_reviews SET status='APPROVED', decision_json=$2,
     decided_at=clock_timestamp(), delivery_started_at=clock_timestamp() WHERE proposed_order_id=$1`, [id, JSON.stringify(decision)]);
-  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve, window, makeTicket,
+  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve, window, makeTicket, schedule,
     close: async () => {
       const disconnected = new Promise<void>(resolve => {
         let remaining = pool.totalCount;
@@ -244,5 +256,67 @@ describe("AAPL durable single-entry window through production service", {skip: !
       assert.equal(Number((await f.pool.query("SELECT consumed_proposal_id FROM aapl_windows")).rows[0].consumed_proposal_id),id);
       assert.ok((await f.repo.getProposedOrderById(id))!.executionAttemptedAt);
     } finally {await f.close();}
+  });
+});
+
+
+describe("AAPL authoritative session evidence at production execution phases", {skip: !connection}, () => {
+  for (const mode of ["missing", "failed", "refreshing", "stale", "identity", "coverage", "early close"]) it(`${mode} calendar blocks insertion without a proposal`, async () => {
+    const f = await fixture();
+    try {
+      if (mode === "missing") await f.pool.query("DELETE FROM aapl_schedule_state");
+      else if (mode === "failed" || mode === "refreshing") await f.pool.query("UPDATE aapl_schedule_state SET status=$1,generation=generation+1",[mode.toUpperCase()]);
+      else {
+        const changed = structuredClone(f.schedule);
+        if (mode === "stale") { changed.requestedAt = new Date(Date.now()-7*3600000).toISOString(); changed.receivedAt = changed.requestedAt; }
+        if (mode === "identity") changed.conId = 1 as 265598;
+        if (mode === "coverage") changed.coverageStart = new Date(Date.now()-60000).toISOString();
+        if (mode === "early close") changed.sessions[0].end = new Date(Date.now()+1000).toISOString();
+        await f.pool.query("UPDATE aapl_schedule_state SET evidence=$1",[JSON.stringify(changed)]);
+      }
+      const result = await f.submit();
+      assert.notEqual(result.kind,"awaiting_ai",JSON.stringify(result));
+      assert.equal((await f.pool.query("SELECT count(*) FROM proposed_orders")).rows[0].count,"0");
+      assert.equal(f.state.dispatches,0);
+    } finally { await f.close(); }
+  });
+  it("failure before prepare blocks AI-approved order without broker preparation", async () => {
+    const f=await fixture();
+    try { const id=await f.create();await f.approve(id);
+      await f.pool.query("UPDATE aapl_schedule_state SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
+      assert.equal((await f.execute(id)).kind,"risk_rejected");assert.equal(f.state.prepares,0);assert.equal(f.state.dispatches,0);
+    } finally {await f.close();}
+  });
+  it("new invalidation during preparation blocks atomic claim and preserves unconsumed budget", async () => {
+    const f=await fixture();
+    try {const id=await f.create();await f.approve(id);f.state.invalidateScheduleDuringPrepare=true;
+      assert.equal((await f.execute(id)).kind,"submission_identity_mismatch");assert.equal(f.state.dispatches,0);
+      assert.equal((await f.pool.query("SELECT consumed_proposal_id FROM aapl_windows")).rows[0].consumed_proposal_id,null);
+      assert.equal((await f.repo.getProposedOrderById(id))!.executionAttemptedAt,undefined);
+    } finally {await f.close();}
+  });
+  it("post-claim refresh fails the final dispatch permit and cannot replenish consumed budget", async () => {
+    const f=await fixture();
+    try {const id=await f.create();await f.approve(id);
+      const original=f.repo.withAaplDispatchPermit.bind(f.repo);
+      f.repo.withAaplDispatchPermit=async (order,account,send)=>{
+        await f.pool.query("UPDATE aapl_schedule_state SET status='REFRESHING',generation=generation+1,updated_at=clock_timestamp()");
+        return original(order,account,send);
+      };
+      assert.equal((await f.execute(id)).kind,"execution_error");assert.equal(f.state.dispatches,0);
+      assert.equal(Number((await f.pool.query("SELECT consumed_proposal_id FROM aapl_windows")).rows[0].consumed_proposal_id),id);
+      assert.ok((await f.repo.getProposedOrderById(id))!.executionAttemptedAt);
+    } finally {await f.close();}
+  });
+  it("final dispatch reads the generation committed by a competing updater", async () => {
+    const f=await fixture();let writer;
+    try {const id=await f.create();await f.approve(id);await f.execute(id);
+      writer=await f.pool.connect();await writer.query("BEGIN");
+      await writer.query("UPDATE aapl_schedule_state SET status='FAILED',generation=generation+1,updated_at=clock_timestamp()");
+      let sends=0;
+      const permit=f.repo.withAaplDispatchPermit((await f.repo.getProposedOrderById(id))!,accountId,()=>{sends++;});
+      const denied=assert.rejects(permit,/schedule_unavailable/);
+      await writer.query("COMMIT");await denied;assert.equal(sends,0);
+    } finally {writer?.release();await f.close();}
   });
 });

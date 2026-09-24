@@ -1,4 +1,4 @@
-import { AAPL_NATIVE_SOURCE, AAPL_REQUIRED_CANDLES, validClosedAaplCandle, newYorkMidnight, type AaplTimeframe } from "@ikbr/shared";
+import { AAPL_NATIVE_SOURCE, AAPL_REQUIRED_CANDLES, newYorkMidnight, type AaplTimeframe } from "@ikbr/shared";
 import { isAaplSubscription } from "./aapl-native-refresh.js";
 import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
 import { isWseSubscription } from "./wse-native-refresh.js";
@@ -128,6 +128,7 @@ export interface TwsClientDependencies {
   /** Test seam for the installed ib client without opening a broker socket. */
   readonly ib?: any;
   readonly now?: () => number;
+  readonly onConnectionInvalidated?: () => void;
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
@@ -339,7 +340,7 @@ export class TwsClient {
       currency: toStr(raw.currency) ?? sub.instrumentContract?.currency ?? "",
       multiplier: toStr(raw.multiplier) ?? "",
     });
-    await this.acquireFinalBarPacingToken();
+    await this.acquireHistoricalPacingToken();
     const reqId = this.allocReqId();
     return new Promise<Candle | null>((resolve, reject) => {
       const matches: Candle[] = [];
@@ -388,7 +389,7 @@ export class TwsClient {
     });
   }
 
-  private async acquireFinalBarPacingToken(): Promise<void> {
+  async acquireHistoricalPacingToken(): Promise<void> {
     const windowMs = 10 * 60_000;
     while (true) {
       const now = this.dependencies.now?.() ?? Date.now();
@@ -903,7 +904,7 @@ export class TwsClient {
     options: { progressPrefix?: string } = {},
   ): Promise<Candle[]> {
     if (isAaplSubscription(sub) && !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe)) throw new Error("aapl_timeframe_unsupported");
-    await this.acquireFinalBarPacingToken();
+    await this.acquireHistoricalPacingToken();
     const reqId = this.allocReqId();
     if (isWseSubscription(sub) && timeframe === "12h") throw new Error("wse_12h_unsupported");
     const { barSize, durationStr } = this.historicalParamsFor(
@@ -941,8 +942,7 @@ export class TwsClient {
         const ordered = Array.from(uniqueByTs.values()).sort(
           (a, b) => a.ts.getTime() - b.ts.getTime(),
         );
-        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) :
-          isAaplSubscription(sub) ? ordered.filter(c => validClosedAaplCandle(c, Date.now())) : ordered;
+        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) : ordered;
         const sliced = finalized.slice(
           Math.max(0, finalized.length - candlesPerSymbol),
         );
@@ -1052,6 +1052,7 @@ export class TwsClient {
 
     this.ib.on("disconnected", () => {
       this.onLog("TWS socket disconnected");
+      this.dependencies.onConnectionInvalidated?.();
       this.connected = false;
       for (const state of this.tickerStates.values()) {
         state.bidObservedAt = undefined;
@@ -1062,6 +1063,7 @@ export class TwsClient {
 
     this.ib.on("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
       const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+      if (parsed.code !== undefined && [1100, 1101, 1102, 1300].includes(Number(parsed.code))) this.dependencies.onConnectionInvalidated?.();
       const prefix =
         parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : "reqId=n/a";
       this.onLog(

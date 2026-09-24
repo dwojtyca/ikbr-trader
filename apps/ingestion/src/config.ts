@@ -30,6 +30,7 @@ const schema = z.object({
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   INGESTION_CLIENT_ID: z.coerce.number().default(101),
+  AAPL_SCHEDULE_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(154),
   IB_EXCHANGE: z.string().default("SMART"),
   IB_PRIMARY_EXCHANGE: optionalTrimmedString,
   IB_CURRENCY: z.string().default("USD"),
@@ -57,6 +58,10 @@ const schema = z.object({
 });
 
 const env = schema.parse(process.env);
+const otherClientIds = [env.INGESTION_CLIENT_ID, ...Object.entries({ EXECUTION_CLIENT_ID: 102, BACKTEST_INGESTION_CLIENT_ID: 104,
+  IB_METADATA_CLIENT_ID: 119, IB_COMPLETED_ORDERS_CLIENT_ID: 120, IBKR_ES_ACQUISITION_CLIENT_ID: 91551 })
+  .map(([key, fallback]) => Number(process.env[key] ?? fallback))];
+if (otherClientIds.includes(env.AAPL_SCHEDULE_CLIENT_ID)) throw new Error("AAPL_SCHEDULE_CLIENT_ID must be distinct from existing broker clients");
 
 type OverrideKey =
   | "conid"

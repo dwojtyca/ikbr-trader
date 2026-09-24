@@ -34,28 +34,43 @@ account-wide exposure, spread/slippage, daily-loss and freshness checks remain.
 - Fresh exact-contract bid/ask with marketDataType1, not delayed/frozen. A market
   data subscription description or successful contract lookup is insufficient.
 - Actual current broker liquidHours contain the complete chosen window, including
-  holiday/early-close handling. The application's weekday09:35–15:45ET envelope
+  holiday/early-close handling. The application's weekday09:30–15:45ET envelope
   is only a conservative additional guard, not an exchange calendar.
 - Closed, identity-matching 1m/5m/1h/4h/1d/1w history and valid indicators. Existing
   minima are1m220 and each retained higher timeframe50; counts alone are not proof
   of closed valid bars. Set bootstrap12hcount0. AAPL deliberately excludes legacy
   12h rows because that path can label IB8h bars as12h. Do not relabel data to pass.
   Require `ibkr_aapl_rth_native_v1` provenance from the native bootstrap/refresh
-  path and inspect `aaplWarmup` at `/backfill-progress`. Intraday eligibility uses
-  the full nominal bar duration; daily/weekly eligibility uses conservative New
-  York calendar ends. The first 09:30 ET four-hour bar is eligible at 13:30 ET;
-  preceding-session bars can remain stale before then. Do not relax this gate to
-  force an earlier test. Quote availability alone does not make history ready.
+  path and inspect `aaplWarmup` at `/backfill-progress`. Intraday eligibility uses the authoritative persisted
+  IBKR `SCHEDULE` response and session-clipped UTC buckets. In New York summer time
+  4h buckets are09:30–12:00 and12:00–16:00; in winter they are09:30–11:00,
+  11:00–15:00 and15:00–16:00. Early-close sessions clip the last bucket. Daily/weekly retain conservative
+  next-midnight/next-Monday finality. Before today's first completed higher bar,
+  the exact last completed slot from the previous trading session can be used.
+  Missing a newly due bar blocks after90s publication grace; a previous-session
+  minute never satisfies the current-session1m requirement.
+- Pre-open: warm all six timeframes and inspect schedule generation/status,
+  coverage, received time and expected/latest slots in `aaplWarmup`. Schedule
+  evidence must be READY, at most6h old, cover the current time and complete prior
+  week, and survive reconnect/refresh without a newer invalidation. Pre-open
+  context remains blocked until a current-session minute closes. Earliest normal
+  evaluation is approximately09:31ET plus ingestion/AI latency, assuming history
+  is already warm. This is eligibility, not a promise of a signal or fill.
+  The dedicated schedule clientId must differ from ingestion, execution and
+  other Gateway clients. Do not run parallel backtest history loading.
 - AI provider/worker readiness, no competing pending reviews. Missing research or
   rejected AI decision remains a valid refusal.
 
 Choose a fresh run ID and explicit UTC ISO AAPL_RUN_START/AAPL_RUN_END for one
 20–30minute supervised test, on the same New York date, max60minutes. Set
 AAPL_RUN_ACCOUNT to the verified allowlisted account. Keep the window wholly
-inside confirmed liquidHours and before an operator exit deadline at least15min
+inside the persisted broker session and confirmed liquidHours and before an operator exit deadline at least15min
 before close. `/execution/aapl-window` reports durable eligibility. A consumed
 attempt cannot be reset by restarting or changing run ID. Unknown submission
 consumes the attempt and must be reconciled, never blindly retried.
+
+AI research identity/context validation remains a separate delivery gate; provider
+configuration or a successful model request alone is not proof of complete review.
 
 Only after every gate passes may the authorized Paper writes, AI worker and loop
 be enabled for that bounded window. Observe durable proposal, AI, risk and broker

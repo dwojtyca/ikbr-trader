@@ -1,4 +1,4 @@
-import { AAPL_NATIVE_SOURCE, aaplCandleEnd, validClosedAaplCandle, isAaplBound } from '@ikbr/shared';
+import { AAPL_NATIVE_SOURCE, evaluateAaplCandles, requireAaplSchedule, type AaplScheduleEvidence, isAaplBound } from '@ikbr/shared';
 /**
  * PR15.4 — Strategy context loader.
  *
@@ -81,6 +81,7 @@ export const MAX_CANDLE_AGE_MS: Readonly<Record<CandleTimeframe, number>> =
   });
 
 export interface StrategyContextLoaderRepo {
+  getAaplScheduleEvidence?(): Promise<AaplScheduleEvidence | null>;
   getInstrumentContractByConId(
     conId: string,
   ): Promise<InstrumentContract | null>;
@@ -179,6 +180,16 @@ export class StrategyContextLoader {
       return { kind: "error", code: "STRATEGY_CONTRACT_MISMATCH", message: "momentum profile identity mismatch" };
     const timeframes = input.timeframes.filter(tf => !((wse || isAaplBound(bound)) && tf === "12h"));
     const nowMs = this.#clock().getTime();
+    let schedule: AaplScheduleEvidence | null = null;
+    if (aapl) {
+      try {
+        schedule = await this.#repo.getAaplScheduleEvidence?.() ?? null;
+        requireAaplSchedule(schedule, nowMs);
+      } catch (error) {
+        return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE",
+          message: error instanceof Error ? error.message : "aapl_schedule_unavailable" };
+      }
+    }
     const symbol = instrument.brokerSymbol;
     const boundConId = String(bound.conId);
 
@@ -193,7 +204,11 @@ export class StrategyContextLoader {
       aapl ? AAPL_NATIVE_SOURCE : undefined,
     );
     if (wse) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
-    if (aapl) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedAaplCandle(c, nowMs));
+    if (aapl) {
+      const assessed = evaluateAaplCandles(candles1m, "1m", schedule, nowMs);
+      if (assessed.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: assessed.reason };
+      candles1m = assessed.candles;
+    }
     if (candles1m.length === 0) {
       return {
         kind: "error",
@@ -208,7 +223,7 @@ export class StrategyContextLoader {
         message: `insufficient 1m candles: ${candles1m.length} < ${MIN_CANDLES_BY_TIMEFRAME["1m"]}`,
       };
     }
-    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : aapl ? aaplCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
+    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
     if (Number.isNaN(latest1mTs) || latest1mTs > nowMs) {
       return {
         kind: "error",
@@ -216,7 +231,7 @@ export class StrategyContextLoader {
         message: "latest 1m candle has invalid or future timestamp",
       };
     }
-    if (nowMs - latest1mTs > MAX_CANDLE_AGE_MS["1m"]) {
+    if (!aapl && nowMs - latest1mTs > MAX_CANDLE_AGE_MS["1m"]) {
       return {
         kind: "error",
         code: "STRATEGY_CONTEXT_UNAVAILABLE",
@@ -324,7 +339,11 @@ export class StrategyContextLoader {
         aapl ? AAPL_NATIVE_SOURCE : undefined,
       );
       if (wse) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
-      if (aapl) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedAaplCandle(c, nowMs));
+      if (aapl) {
+        const assessed = evaluateAaplCandles(fetched, tf as Exclude<CandleTimeframe, "12h">, schedule, nowMs);
+        if (assessed.reason) return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE", message: `${tf}: ${assessed.reason}` };
+        fetched = assessed.candles;
+      }
       if (fetched.length < MIN_CANDLES_BY_TIMEFRAME[tf]) {
         return {
           kind: "error",
@@ -332,7 +351,7 @@ export class StrategyContextLoader {
           message: `insufficient ${tf} candles: ${fetched.length} < ${MIN_CANDLES_BY_TIMEFRAME[tf]}`,
         };
       }
-      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : aapl ? aaplCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
+      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
       if (Number.isNaN(latestTs) || latestTs > nowMs) {
         return {
           kind: "error",
@@ -340,7 +359,7 @@ export class StrategyContextLoader {
           message: `latest ${tf} candle has invalid or future timestamp`,
         };
       }
-      if (nowMs - latestTs > MAX_CANDLE_AGE_MS[tf]) {
+      if (!aapl && nowMs - latestTs > MAX_CANDLE_AGE_MS[tf]) {
         return {
           kind: "error",
           code: "STRATEGY_CONTEXT_UNAVAILABLE",
@@ -492,6 +511,22 @@ export class StrategyContextLoader {
       },
       currentPosition: { quantity: positionQuantity },
     };
+    if (aapl) {
+      try {
+        const latestSchedule = await this.#repo.getAaplScheduleEvidence?.() ?? null;
+        const finalNow = this.#clock().getTime();
+        requireAaplSchedule(latestSchedule, finalNow);
+        if (JSON.stringify(latestSchedule) !== JSON.stringify(schedule)) throw new Error("aapl_schedule_changed_during_context");
+        for (const [tf, candles] of Object.entries(candlesByTimeframe)) {
+          const result = evaluateAaplCandles(candles!, tf as Exclude<CandleTimeframe, "12h">, latestSchedule, finalNow);
+          if (result.reason) throw new Error(`${tf}: ${result.reason}`);
+        }
+        if (this.#maxMarketStateAgeMs > 0 && finalNow - marketStateTs > this.#maxMarketStateAgeMs) throw new Error("market state stale during context load");
+      } catch (error) {
+        return { kind: "error", code: "STRATEGY_CONTEXT_UNAVAILABLE",
+          message: error instanceof Error ? error.message : "aapl_schedule_unavailable" };
+      }
+    }
     return { kind: "ok", context };
   }
 }

@@ -1,10 +1,18 @@
 import { Pool } from "pg";
-import { AAPL_NATIVE_SOURCE, Candle, InstrumentContract, MarketState } from "@ikbr/shared";
+import { AAPL_NATIVE_SOURCE, type AaplSchedule, type AaplScheduleEvidence, Candle, InstrumentContract, MarketState } from "@ikbr/shared";
 
 export class MarketRepository {
   constructor(private readonly pool: Pool) {}
 
   async init(): Promise<void> {
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS aapl_schedule_state (
+  instrument_id text PRIMARY KEY CHECK (instrument_id = 'aapl_nasdaq'),
+  generation bigint NOT NULL CHECK (generation > 0),
+  status text NOT NULL CHECK (status IN ('READY', 'REFRESHING', 'FAILED')),
+  evidence jsonb,
+  updated_at timestamptz NOT NULL
+);
+`);
     for (const timeframe of [
       "1m",
       "5m",
@@ -59,6 +67,26 @@ export class MarketRepository {
       CREATE UNIQUE INDEX IF NOT EXISTS instrument_contracts_conid_idx
       ON instrument_contracts (conid);
     `);
+  }
+
+  async getAaplSchedule(): Promise<AaplScheduleEvidence | null> {
+    const { rows } = await this.pool.query("SELECT generation, status, evidence, updated_at FROM aapl_schedule_state WHERE instrument_id = 'aapl_nasdaq'");
+    const row = rows[0];
+    return row ? { generation: Number(row.generation), status: row.status, schedule: row.evidence, updatedAt: new Date(row.updated_at).toISOString() } : null;
+  }
+
+  async beginAaplSchedule(status: 'REFRESHING' | 'FAILED'): Promise<number> {
+    const { rows } = await this.pool.query(`INSERT INTO aapl_schedule_state (instrument_id, generation, status, evidence, updated_at)
+      VALUES ('aapl_nasdaq', 1, $1, NULL, clock_timestamp()) ON CONFLICT (instrument_id) DO UPDATE
+      SET generation = aapl_schedule_state.generation + 1, status = EXCLUDED.status, updated_at = clock_timestamp() RETURNING generation`, [status]);
+    return Number(rows[0].generation);
+  }
+
+  async finishAaplSchedule(generation: number, schedule: AaplSchedule | null): Promise<boolean> {
+    const result = await this.pool.query(`UPDATE aapl_schedule_state SET status = $2, evidence = COALESCE($3::jsonb, evidence),
+      updated_at = clock_timestamp() WHERE instrument_id = 'aapl_nasdaq' AND generation = $1 AND status = 'REFRESHING'`,
+      [generation, schedule ? 'READY' : 'FAILED', schedule ? JSON.stringify(schedule) : null]);
+    return result.rowCount === 1;
   }
 
   async upsertInstrumentContract(contract: InstrumentContract): Promise<void> {

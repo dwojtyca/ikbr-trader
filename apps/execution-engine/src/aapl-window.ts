@@ -1,4 +1,5 @@
 import type { PoolClient, Pool } from 'pg';
+import { checkAaplSessionWindow, type AaplScheduleEvidence } from '@ikbr/shared';
 
 export interface AaplWindow { runId: string; accountId: string; startsAt: string; endsAt: string; tradeDate: string }
 export function isAaplIdentity(order: { instrumentId?: string | null; instrument?: string; conid?: string | null }): boolean {
@@ -20,7 +21,7 @@ export function parseAaplWindow(env: Record<string, unknown>): AaplWindow | unde
   const parts=(ms:number)=>Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:'America/New_York',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',weekday:'short',hourCycle:'h23'}).formatToParts(ms).map(x=>[x.type,x.value]));
   const x=parts(a),y=parts(b);const date=(p:Record<string,string>)=>`${p.year}-${p.month}-${p.day}`;
   const seconds=(p:Record<string,string>)=>Number(p.hour)*3600+Number(p.minute)*60+Number(p.second);
-  if(date(x)!==date(y)||['Sat','Sun'].includes(x.weekday)||seconds(x)<34500||seconds(y)+(b%1000)/1000>56700) throw new Error('AAPL window must fit one New York weekday 09:35–15:45');
+  if(date(x)!==date(y)||['Sat','Sun'].includes(x.weekday)||seconds(x)<34200||seconds(y)+(b%1000)/1000>56700) throw new Error('AAPL window must fit one New York weekday 09:30–15:45');
   return Object.freeze({runId,accountId,startsAt:new Date(a).toISOString(),endsAt:new Date(b).toISOString(),tradeDate:date(x)});
 }
 
@@ -32,8 +33,15 @@ export async function checkAaplWindow(db: Db, config: AaplWindow | undefined, ac
   if(config.accountId!==accountId) return deny('account_mismatch');
   const result=await db.query(`SELECT clock_timestamp() AS now, w.* FROM (SELECT 1) anchor
     LEFT JOIN aapl_windows w ON w.run_id=$1`,[config.runId]);
-  const row=result.rows[0];const now=new Date(row.now).getTime();
+  const row=result.rows[0];let now=new Date(row.now).getTime();
   if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
+  const calendar = await db.query("SELECT generation,status,evidence,updated_at FROM aapl_schedule_state WHERE instrument_id='aapl_nasdaq' FOR SHARE");
+  const proof = calendar.rows[0];
+  now = new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime();
+  if(now<Date.parse(config.startsAt)||now>=Date.parse(config.endsAt)) return deny('outside_window');
+  try {
+    checkAaplSessionWindow(proof ? { generation: Number(proof.generation), status: proof.status, schedule: proof.evidence, updatedAt: new Date(proof.updated_at).toISOString() } as AaplScheduleEvidence : null, now, Date.parse(config.startsAt), Date.parse(config.endsAt));
+  } catch (error) { return deny(error instanceof Error ? error.message : 'schedule_invalid'); }
   if(row.run_id && (row.account_id!==accountId||new Date(row.starts_at).toISOString()!==config.startsAt||new Date(row.ends_at).toISOString()!==config.endsAt)) return deny('configuration_changed');
   if(proposalId!==undefined) {
     const binding=await db.query('SELECT run_id FROM aapl_proposals WHERE proposed_order_id=$1',[proposalId]);

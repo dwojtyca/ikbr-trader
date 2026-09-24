@@ -699,6 +699,7 @@ export class TwsExecutionClient {
   async dispatchPreparedOrder(
     prepared: PreparedBrokerOrder,
     windowDeadlineMs?: number,
+    sendWithEntryPermit?: (send: () => void) => Promise<void>,
   ): Promise<PlaceOrderResult> {
     await this.connect();
     this.assertWseDispatch(prepared);
@@ -710,8 +711,9 @@ export class TwsExecutionClient {
       prepared.plan,
       prepared.contract,
       prepared.normalizedTicket,
-      undefined,
+      isAaplIdentity(prepared.normalizedTicket) ? this.connectionGeneration : undefined,
       windowDeadlineMs,
+      sendWithEntryPermit,
     );
   }
 
@@ -730,6 +732,7 @@ export class TwsExecutionClient {
     ticket: SignalTicket,
     expectedGeneration?: number,
     windowDeadlineMs?: number,
+    sendWithEntryPermit?: (send: () => void) => Promise<void>,
   ): Promise<PlaceOrderResult> {
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
@@ -770,7 +773,9 @@ export class TwsExecutionClient {
       }
     }
 
-    return new Promise<PlaceOrderResult>((resolve, reject) => {
+    let permitCompletion: Promise<void> = Promise.resolve();
+    const acknowledgment = new Promise<PlaceOrderResult>((resolve, reject) => {
+      let settled = false, sent = false;
       const timeout = setTimeout(() => {
         cleanup();
         reject(
@@ -781,6 +786,7 @@ export class TwsExecutionClient {
       }, this.config.orderTimeoutMs);
 
       const cleanup = () => {
+        settled = true;
         clearTimeout(timeout);
         this.ib.off("orderStatus", onOrderStatus);
         this.ib.off("error", onError);
@@ -869,7 +875,9 @@ export class TwsExecutionClient {
 
       this.ib.on("orderStatus", onOrderStatus);
       this.ib.on("error", onError);
-      try {
+      const send = () => {
+        if (settled || sent) throw new Error("aapl_entry_permit_inactive");
+        sent = true;
         if (isPkoIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
         if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
@@ -882,11 +890,16 @@ export class TwsExecutionClient {
             plannedOrder.order,
           );
         }
-      } catch (error) {
-        cleanup();
-        reject(error as Error);
-      }
+      };
+      try {
+        if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE") {
+          if (!sendWithEntryPermit) throw new Error("aapl_entry_permit_missing");
+          permitCompletion = sendWithEntryPermit(send);
+          void permitCompletion.catch(error => { cleanup(); reject(error as Error); });
+        } else send();
+      } catch (error) { cleanup(); reject(error as Error); }
     });
+    return Promise.all([acknowledgment, permitCompletion]).then(([result]) => result);
   }
 
   async cancelOwnedOrder(input: OwnedOrderCancellation): Promise<OwnedOrderCancellationResult> {
