@@ -1,3 +1,4 @@
+import { parseExternalOrders } from "./reconciliation/external-orders.js";
 import { parseGpwWindow } from "./gpw-window.js";
 import dotenv from "dotenv";
 import { z } from "zod";
@@ -18,6 +19,7 @@ const optionalTrimmedString = z.preprocess(
 // and logged at startup. Runtime enforcement lands in PR2..PR5.
 // -----------------------------------------------------------------------
 const rawSchema = z.object({
+  EXECUTION_EXTERNAL_ORDERS_JSON: z.string().default("[]").transform(parseExternalOrders),
   EXECUTION_BROKER_TIME_ZONE: z.preprocess(
     value => value === "" ? undefined : value, z.literal("UTC").optional()),
   EXECUTION_INGESTION_BASE_URL: z.string().url().default("http://ingestion:3101"),

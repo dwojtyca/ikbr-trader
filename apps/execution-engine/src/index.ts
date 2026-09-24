@@ -1,3 +1,4 @@
+import { readZeroDayRows, evaluateZeroDay } from "./daily-loss-evidence.js";
 import { CompletedOrdersClient } from "./reconciliation/completed-orders-client.js";
 import { registerGpwRoutes } from "./gpw-routes.js";
 import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
@@ -79,6 +80,7 @@ const EXECUTION_PROCESS_OWNER_ID = `execution-engine:${hostname()}:${randomUUID(
 const EXECUTION_SESSION_STARTED_AT = new Date();
 const wseMetadata = new WseMetadataClient({ host: config.IB_SOCKET_HOST,
   port: config.IB_SOCKET_PORT, clientId: config.IB_METADATA_CLIENT_ID });
+let lastBrokerFillObservedAt = 0;
 const tws = new TwsExecutionClient(
   {
     host: config.IB_SOCKET_HOST,
@@ -137,6 +139,7 @@ const tws = new TwsExecutionClient(
     // a previous account CANNOT invalidate a different account's
     // snapshot.
     const status = String(update.status ?? "").toUpperCase();
+    if (status === "FILLED") lastBrokerFillObservedAt = Date.now();
     void (async () => {
       try {
         if (status === "FILLED" && lastActiveAccountId !== null) {
@@ -219,6 +222,7 @@ const tws = new TwsExecutionClient(
     }
   },
   (fill) => {
+    lastBrokerFillObservedAt = Date.now();
     // Round-8: partial fills / executionDetails events also
     // change broker-side exposure. Invalidate BEFORE persisting
     // the fill record (so a write path racing this callback can
@@ -290,6 +294,8 @@ const reconRunner = new ReconciliationRunner(
   reconRepo,
   reconBrokerAdapter,
   app.log,
+  () => ({ approvals: config.EXECUTION_EXTERNAL_ORDERS_JSON, protectedConIds: instrumentBindingAuthority.listBoundInstruments()
+    .filter(b => b.instrument.trading.executionEnabled).map(b => String(b.conId)) }),
 );
 const reconScheduler = new ReconciliationScheduler(
   reconRunner,
@@ -647,12 +653,15 @@ interface KillSwitchStatus {
     missingCommissionReports: number;
     complete: boolean;
     snapshotCacheAgeMs?: number;
+    zeroDayEvidence?: { ok: boolean; reason: string; runId?: number };
   };
 }
 
 /**
- * Evaluates the daily-loss kill-switch using already-cached account
- * snapshot data (no extra TWS round-trip) and broker_execution_fills
+ * Evaluates daily loss using cached account data and broker_execution_fills.
+ * The empty-day path may refresh readonly reconciliation once after a position
+ * refresh invalidates its generation; it never refreshes the account in a loop.
+ * Reads fills
  * persisted by the execution-engine. Returns a structured status so the
  * same code path can answer GET /execution/kill-switch and gate
  * /execution/execute-* endpoints.
@@ -678,6 +687,18 @@ async function evaluateKillSwitch(): Promise<KillSwitchStatus> {
     fxToBaseByCurrency,
   });
 
+  let zeroDayEvidence: { ok: boolean; reason: string; runId?: number } | undefined;
+  if (!summary.complete && summary.pnl === 0 && summary.missingCommissionReports === 0 && summary.missingFxRates === 0 && lastActiveAccountId && tws.isConnected()) {
+    zeroDayEvidence = await evaluateZeroDay({
+      read: (accountId, dayStart) => readZeroDayRows(pool, accountId, dayStart),
+      refresh: async () => (await reconScheduler.triggerNow()) !== null,
+      context: () => !lastActiveAccountId || !tws.isConnected() ? null : ({
+        accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
+        connectionGeneration: tws.getConnectionGeneration(), now: Date.now(), lastBrokerFillObservedAt,
+        accountSnapshot: accountSnapshotCache?.snapshot ?? null,
+      }),
+    });
+  }
   const enabled = config.EXECUTION_MAX_DAILY_LOSS_PCT > 0;
 
   const status: KillSwitchStatus = {
@@ -693,7 +714,8 @@ async function evaluateKillSwitch(): Promise<KillSwitchStatus> {
     diagnostics: {
       missingFxRates: summary.missingFxRates,
       missingCommissionReports: summary.missingCommissionReports,
-      complete: summary.complete,
+      complete: summary.complete || zeroDayEvidence?.ok === true,
+      zeroDayEvidence,
       snapshotCacheAgeMs,
     },
   };

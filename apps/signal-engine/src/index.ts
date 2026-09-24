@@ -357,6 +357,7 @@ if (config.runtimeEnabled) {
     }
     const readyProbe = new HttpReadyProbe({
       engineUrl,
+      bearerToken,
       requestTimeoutMs: config.executionRuntime.requestTimeoutMs,
     });
     const paperGuard = new PaperGuard({

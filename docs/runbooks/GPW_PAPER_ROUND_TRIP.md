@@ -238,3 +238,33 @@ Such records retain `brokerOrderId: null` in the diagnostic snapshot and are
 excluded from automated recovery matching and correlated order observations.
 An unavailable, malformed or timed-out source remains INCOMPLETE; do not override
 it to force CLEAN. Readiness requires both available and bounded recovery coverage.
+
+## Recognized external manual orders and empty-day accounting
+
+`EXECUTION_EXTERNAL_ORDERS_JSON` defaults to `[]`. An owner-confirmed external
+manual reducing SELL may be explicitly registered in the local secret environment
+using its observed accountId, positive permId, conId, symbol, STK secType, currency,
+exchange, SELL action, totalQuantity, UTC validFrom/expiresAt and operator note.
+Each approval lasts at most24h. Populate identities from the broker snapshot,
+never from orderId0 alone. Do not register a configured executable bot contract.
+The sum of all accepted external SELL remaining quantities must fit the observed
+long position; an unknown competing order blocks recognition. Classification does
+not authorize the bot to change or cancel the external order. Expiry/revocation
+reinstates the orphan hold while the order remains.
+
+Reconciliation records approvals in its report and can resolve only the matching
+orphan hold with persisted broker identity proof. Other holds remain. A legacy
+hold missing permId requires the matching referenced broker snapshot; missing
+history is a blocker, not permission to guess identity.
+
+For a day with no local fills, daily-loss readiness still requires current broker
+proof: complete UTC-day execution coverage, no executions/filled completions,
+fresh matching-account explicit USD zero RealizedPnL, matching session and position
+and connection generations. Missing commission or P&L data is not zero. Cumulative
+P&L remains distinct. Internal signal readiness uses the same execution Bearer;
+401 must be fixed by credentials/wiring, not making `/ready` public.
+
+The empty-day check may request one readonly reconciliation refresh when account
+refresh changed the position generation. It then rereads all evidence; an in-flight
+or failed refresh remains incomplete, and account/session/fill changes invalidate
+the result. It never refreshes account data in a loop or enables trading.

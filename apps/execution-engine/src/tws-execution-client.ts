@@ -223,6 +223,8 @@ export interface AccountSnapshot {
     completedAt: string;
     complete: true;
     configuredBaseCurrency: string;
+    connectionGeneration?: number;
+    realizedPnlByCurrency?: Record<string, number>;
     exchangeRatesToBase?: Record<string, number>;
     cashByCurrency?: Record<string, number>;
     usdMetrics: {
@@ -1029,6 +1031,7 @@ export class TwsExecutionClient {
     await this.connect();
     if (this.accountSnapshotInFlight) throw new Error("Account snapshot request already in flight");
     this.accountSnapshotInFlight = true;
+    const accountConnectionGeneration = this.getConnectionGeneration();
 
     return new Promise<AccountSnapshot>((resolve, reject) => {
       const requestStartedAt = new Date().toISOString();
@@ -1119,6 +1122,7 @@ export class TwsExecutionClient {
       const onAccountDownloadEnd = (accountName: string) => {
         if (accountName !== accountId) return;
         cleanup();
+        if (accountConnectionGeneration !== this.getConnectionGeneration() || !this.isConnected()) { reject(new Error("Account session changed during download")); return; }
         const explicitUsdMetric = (key: string): number | undefined => {
           const raw = valuesByKey.get(key)?.get("USD");
           if (raw === undefined || raw.trim() === "") return undefined;
@@ -1144,6 +1148,8 @@ export class TwsExecutionClient {
             completedAt: new Date().toISOString(),
             complete: true,
             configuredBaseCurrency: this.config.currency.trim().toUpperCase(),
+            connectionGeneration: accountConnectionGeneration,
+            realizedPnlByCurrency: explicitCurrencyValues("RealizedPnL"),
             exchangeRatesToBase: explicitCurrencyValues("ExchangeRate"),
             cashByCurrency: explicitCurrencyValues("CashBalance"),
             usdMetrics: {

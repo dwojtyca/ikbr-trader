@@ -93,6 +93,7 @@ export interface BrokerReconciliationSnapshot {
   readonly exposureComplete: boolean;
   readonly recoveryComplete: boolean;
   readonly capturedAt: Date;
+  readonly connectionGeneration?: number;
   readonly accountId: string;
   readonly sessionId: string;
   readonly sourceCoverage: {

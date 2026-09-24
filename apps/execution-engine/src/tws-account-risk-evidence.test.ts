@@ -95,3 +95,17 @@ test("invalid latest currency data cannot preserve an earlier valid value", asyn
     assert.deepEqual(evidence.cashByCurrency, {}, invalid);
   }
 });
+
+test("zero daily-loss evidence requires explicit matching-account USD PnL and records connection generation", async () => {
+  const ib = new FakeIb(), client = makeClient(ib);
+  for (const raw of ["0", "", "NaN", "0x0", "1.7976931348623157e308"]) {
+    const pending = client.getAccountSnapshot("PAPER_TEST"); await turn();
+    ib.emit("updateAccountValue", "RealizedPnL", "0", "BASE", "PAPER_TEST");
+    ib.emit("updateAccountValue", "RealizedPnL", "999", "USD", "OTHER");
+    ib.emit("updateAccountValue", "RealizedPnL", raw, "USD", "PAPER_TEST");
+    ib.emit("accountDownloadEnd", "PAPER_TEST");
+    const evidence = (await pending).riskEvidence!;
+    assert.equal(evidence.realizedPnlByCurrency?.USD, raw === "0" ? 0 : undefined);
+    assert.equal(evidence.connectionGeneration, client.getConnectionGeneration());
+  }
+});

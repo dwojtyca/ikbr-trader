@@ -37,14 +37,16 @@ export class IbBrokerReconciliationAdapter
     const exposureStart = new Date(
       req.sessionStartedAt.getTime() - req.safetyMarginMs,
     );
+    const utcDayStart = new Date(capturedAtStart); utcDayStart.setUTCHours(0, 0, 0, 0);
     const recoveryStart = req.oldestAmbiguousAttemptedAt
       ? new Date(
           Math.min(
+            utcDayStart.getTime(),
             exposureStart.getTime(),
             req.oldestAmbiguousAttemptedAt.getTime() - req.safetyMarginMs,
           ),
         )
-      : exposureStart;
+      : new Date(Math.min(exposureStart.getTime(), utcDayStart.getTime()));
 
     // Fire all four snapshot reads in parallel — each carries its
     // own timeout + abort handling so a single slow source cannot
@@ -63,7 +65,7 @@ export class IbBrokerReconciliationAdapter
         since: recoveryStart,
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
-      }),
+      }).then(result => ({ ...result, completedAt: new Date() })),
       this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal }),
     ]);
 
@@ -88,7 +90,7 @@ export class IbBrokerReconciliationAdapter
       reason: execResult.ok ? undefined : execResult.error,
       window: {
         from: recoveryStart.toISOString(),
-        to: new Date().toISOString(),
+        to: execResult.completedAt.toISOString(),
         exposureWindowComplete:
           execResult.ok &&
           execResult.endObserved &&
@@ -188,6 +190,7 @@ export class IbBrokerReconciliationAdapter
     }));
 
     return {
+      connectionGeneration: generation,
       exposureComplete: flags.exposureComplete,
       recoveryComplete: flags.recoveryComplete,
       capturedAt: new Date(

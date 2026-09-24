@@ -143,3 +143,24 @@ for (const raw of ["20260923 12:00:00", "20260230 12:00:00", "20260923 12:00:00 
       raw === "20260923 12:00:00" ? "2026-09-23T12:00:00.000Z" : null);
   });
 }
+
+test("daily execution coverage sends UTC wire filter, waits matching end and records its actual end time", async () => {
+  const ib = new FakeIb(), client = makeClient(ib);
+  let wire: Record<string, unknown> | undefined, requestId = -1;
+  ib.reqExecutions = (id: number, filter?: Record<string, unknown>) => { requestId = id; wire = filter; };
+  await client.connect();
+  const adapter = new IbBrokerReconciliationAdapter(client, { load: async () => ({ ok: true, rows: [] }) });
+  const started = new Date(); const midnight = new Date(started); midnight.setUTCHours(0,0,0,0);
+  const pending = adapter.capture({ accountId: "PAPER", sessionId: "current", sessionStartedAt: started,
+    safetyMarginMs: 0, sourceTimeoutMs: 1000, abortSignal: new AbortController().signal });
+  await turn();
+  assert.equal(wire?.time, midnight.toISOString().slice(0,10).replaceAll("-", "") + "-00:00:00");
+  assert.equal(wire?.acctCode, "PAPER"); assert.equal(wire?.clientId, 0);
+  let settled = false; void pending.then(() => { settled = true; });
+  ib.emit("execDetailsEnd", requestId + 1); await turn(); assert.equal(settled, false);
+  const beforeEnd = Date.now(); ib.emit("execDetailsEnd", requestId);
+  const snapshot = await pending;
+  assert.equal(snapshot.sourceCoverage.executions.window.from, midnight.toISOString());
+  assert.ok(Date.parse(snapshot.sourceCoverage.executions.window.to) >= beforeEnd);
+  assert.equal(snapshot.connectionGeneration, client.getConnectionGeneration());
+});

@@ -1,9 +1,8 @@
 /**
  * Execution Runtime — HTTP-backed `/ready` probe for the paper guard.
  *
- * Wraps a single GET on `execution-engine`'s public `/ready`
- * endpoint. `/ready` is a public path (no Bearer required per
- * `apps/execution-engine/src/index.ts`), so no auth token is sent.
+ * Wraps a single GET on `execution-engine`'s protected `/ready`
+ * endpoint using the shared internal execution token.
  *
  * Errors NEVER throw — they map to `{ kind: "error", message }` so
  * `PaperGuard.check()` can fail-closed without leaking a raw
@@ -14,29 +13,36 @@ import type { ReadyProbe } from "./paper-guard.js";
 
 export interface HttpReadyProbeOptions {
   readonly engineUrl: string;
+  readonly bearerToken?: string;
   readonly requestTimeoutMs: number;
   readonly fetchImpl?: typeof fetch;
 }
 
 export class HttpReadyProbe implements ReadyProbe {
   readonly #url: string;
+  readonly #token: string;
   readonly #timeoutMs: number;
   readonly #fetch: typeof fetch;
 
   constructor(options: HttpReadyProbeOptions) {
+    this.#token = options.bearerToken ?? "";
     this.#url = options.engineUrl.replace(/\/$/, "");
     this.#timeoutMs = options.requestTimeoutMs;
     this.#fetch = options.fetchImpl ?? fetch;
   }
 
   async probeReady(): ReturnType<ReadyProbe["probeReady"]> {
+    if (!this.#token) return { kind: "error", message: "execution readiness token missing" };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
     try {
       const response = await this.#fetch(`${this.#url}/ready`, {
         method: "GET",
+        headers: { Authorization: `Bearer ${this.#token}` },
+        redirect: "error",
         signal: controller.signal,
       });
+      if (![200, 503].includes(response.status)) return { kind: "error", message: `/ready HTTP ${response.status}` };
       // /ready returns 200 when ready and 503 when not. Both bodies
       // carry the full `ReadinessResponse`; we parse either way and
       // let the guard decide.
@@ -55,11 +61,14 @@ export class HttpReadyProbe implements ReadyProbe {
         tradingEnabled?: unknown;
         checks?: { accountMatchesEnvironment?: unknown };
       };
+      if (typeof body.ready !== "boolean" || (response.status === 503 && body.ready)) {
+        return { kind: "error", message: "/ready returned inconsistent readiness" };
+      }
       const environment = body.environment;
       if (environment !== "paper" && environment !== "live") {
         return {
           kind: "error",
-          message: `/ready returned unexpected environment=${String(environment)}`,
+          message: "/ready returned unexpected environment",
         };
       }
       return {
@@ -84,12 +93,12 @@ export class HttpReadyProbe implements ReadyProbe {
               : undefined,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const aborted = error instanceof Error && error.name === "AbortError";
       return {
         kind: "error",
-        message: /aborted/i.test(message)
+        message: aborted
           ? `execution-engine /ready timed out after ${this.#timeoutMs}ms`
-          : `execution-engine /ready failed: ${message}`,
+          : "execution-engine /ready request failed",
       };
     } finally {
       clearTimeout(timer);

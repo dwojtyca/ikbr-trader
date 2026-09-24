@@ -1,3 +1,4 @@
+import { recognizeExternalOrders, type ExternalOrderPolicy } from "./external-orders.js";
 /**
  * PR15 — reconciliation runner (Phase A / Phase B / Phase C).
  *
@@ -78,6 +79,7 @@ export class ReconciliationRunner {
     private readonly reconRepo: ReconciliationRepository,
     private readonly broker: BrokerReconciliationAdapter,
     private readonly logger: Pick<Logger, "info" | "warn" | "error"> = console as unknown as Logger,
+    private readonly externalPolicy: () => ExternalOrderPolicy = () => ({ approvals: [], protectedConIds: [] }),
   ) {}
 
   /**
@@ -252,6 +254,7 @@ export class ReconciliationRunner {
       expectedPositionsCount: plan.expectedCount,
       brokerPositionsCount: plan.brokerCount,
       report: {
+        externalOrders: plan.externalOrders,
         matches: plan.matches,
         mismatches: plan.mismatches,
         exposureComplete: snapshot.exposureComplete,
@@ -296,6 +299,7 @@ export class ReconciliationRunner {
     context: RunnerContext,
     snapshot: BrokerReconciliationSnapshot,
   ): Promise<{
+    externalOrders: Record<string, unknown>[];
     snapshot: BrokerReconciliationSnapshot;
     finalStatus: ReconciliationRunStatus;
     matches: number;
@@ -433,13 +437,59 @@ export class ReconciliationRunner {
       });
     }
 
+    // 3) Ambiguous PROPOSED recovery.
+    const ambiguousRows = await this.#loadAmbiguousProposed(context.accountId);
+    if (snapshot.sourceCoverage.completedOrders.recoveryScope === "current_state_only" && ambiguousRows.length > 0) {
+      snapshot = { ...snapshot, recoveryComplete: false, sourceCoverage: { ...snapshot.sourceCoverage,
+        completedOrders: { ...snapshot.sourceCoverage.completedOrders, boundedWindow: false,
+          reason: "completed_historical_window_unproven" } } };
+    }
+    // Load per-row (NOT global) authoritative identifiers so a
+    // spoofed / mis-attributed match cannot resolve the WRONG
+    // ambiguous row: row A must only be matchable against A's
+    // own persisted refs / permIds / broker order IDs.
+    const identifiersByOrder = await this.#loadIdentifiersByProposedOrder(
+      ambiguousRows,
+    );
+
+    const externalOrders: Record<string, unknown>[] = [];
     // 2) Orphan broker orders (open orders NOT owned by us).
     if (snapshot.exposureComplete) {
       const orphans = await this.#findOrphanOpenOrders(
         context.accountId,
         snapshot.openOrders,
       );
+      const policy = this.externalPolicy();
+      const collisions = await this.#externalCollisions(context.accountId, policy, orphans);
+      const history = await this.pool.query(`SELECT id, broker_snapshot FROM reconciliation_runs
+        WHERE id=ANY($1::bigint[]) AND account_id=$2 AND snapshot_complete=true`,
+        [activeHolds.filter(h => h.reason === "orphan_broker_order").map(h => h.reconciliationRunId), context.accountId]);
+      const historicalSnapshots = new Map(history.rows.map(row => [String(row.id), row.broker_snapshot]));
+      const recognized = recognizeExternalOrders(snapshot, orphans, policy, collisions, Date.now());
+      for (const [row, approval] of recognized) {
+        externalOrders.push({ classification: "APPROVED_EXTERNAL_REDUCING", accountId: row.accountId,
+          conId: row.conId, permId: row.permId, symbol: row.symbol, filled: row.filled, remaining: row.remaining,
+          approval: { validFrom: approval.validFrom, expiresAt: approval.expiresAt, note: approval.note } });
+      }
+      for (const hold of activeHolds) {
+        if (hold.reason !== "orphan_broker_order") continue;
+        const group = orphans.filter(o => o.accountId === context.accountId && o.conId === hold.conId);
+        if (!group.length || group.some(o => !recognized.has(o))) continue;
+        const payload = hold.payload ?? {};
+        const oldRows = historicalSnapshots.get(String(hold.reconciliationRunId))?.openOrders;
+        if (!Array.isArray(oldRows)) continue;
+        const original = oldRows.filter(o => o && o.accountId === context.accountId && o.conId === hold.conId
+          && o.brokerOrderId === payload.brokerOrderId && (o.clientId ?? null) === (payload.clientId ?? null)
+          && (o.orderRef ?? null) === (payload.orderRef ?? null)
+          && (payload.permId == null || o.permId === payload.permId));
+        if (original.length !== 1 || typeof original[0].permId !== "string" || !/^[1-9]\d*$/.test(original[0].permId)
+          || !group.some(o => o.permId === original[0].permId && o.symbol === original[0].symbol
+            && o.secType === original[0].secType && o.currency === original[0].currency && o.exchange === original[0].exchange)) continue;
+        holdResolves.push({ holdId: hold.id, resolvedBy: "system", resolvedKind: "auto_snapshot_clean",
+          resolutionNote: `explicit external-order approval; permId=${original[0].permId}; snapshot=${hold.reconciliationRunId}` });
+      }
       for (const o of orphans) {
+        if (recognized.has(o)) continue;
         const identity = canonicaliseIdentity({
           accountId: context.accountId,
           conId: o.conId,
@@ -461,6 +511,7 @@ export class ReconciliationRunner {
           severity: "warn",
           payload: {
             brokerOrderId: o.brokerOrderId,
+            permId: o.permId ?? null,
             orderRef: o.orderRef ?? null,
             clientId: o.clientId ?? null,
             status: o.status,
@@ -469,20 +520,6 @@ export class ReconciliationRunner {
       }
     }
 
-    // 3) Ambiguous PROPOSED recovery.
-    const ambiguousRows = await this.#loadAmbiguousProposed(context.accountId);
-    if (snapshot.sourceCoverage.completedOrders.recoveryScope === "current_state_only" && ambiguousRows.length > 0) {
-      snapshot = { ...snapshot, recoveryComplete: false, sourceCoverage: { ...snapshot.sourceCoverage,
-        completedOrders: { ...snapshot.sourceCoverage.completedOrders, boundedWindow: false,
-          reason: "completed_historical_window_unproven" } } };
-    }
-    // Load per-row (NOT global) authoritative identifiers so a
-    // spoofed / mis-attributed match cannot resolve the WRONG
-    // ambiguous row: row A must only be matchable against A's
-    // own persisted refs / permIds / broker order IDs.
-    const identifiersByOrder = await this.#loadIdentifiersByProposedOrder(
-      ambiguousRows,
-    );
     let ambiguousEvaluated = 0;
     for (const row of ambiguousRows) {
       ambiguousEvaluated += 1;
@@ -605,11 +642,12 @@ export class ReconciliationRunner {
       ? "INCOMPLETE"
       : !snapshot.recoveryComplete
         ? "INCOMPLETE"
-        : mismatches.length > 0 || holdInserts.length > 0
+        : mismatches.length > 0 || holdInserts.length > 0 || activeHolds.some(h => !holdResolves.some(r => r.holdId === h.id))
           ? "MISMATCH"
           : "CLEAN";
 
     return {
+      externalOrders,
       snapshot,
       finalStatus,
       matches,
@@ -785,6 +823,22 @@ export class ReconciliationRunner {
       if (row.perm_id) entry.permIds.add(String(row.perm_id));
     }
     return out;
+  }
+
+  async #externalCollisions(accountId: string, policy: ExternalOrderPolicy, orders: readonly BrokerOrderRow[]): Promise<Set<string>> {
+    if (!policy.approvals.length) return new Set();
+    const result = await this.pool.query<{ perm_id: string }>(`
+      SELECT a->>'permId' AS perm_id FROM jsonb_array_elements($1::jsonb) a
+      WHERE EXISTS (SELECT 1 FROM broker_order_links l WHERE l.perm_id=a->>'permId')
+      OR EXISTS (SELECT 1 FROM jsonb_array_elements($3::jsonb) o JOIN broker_order_links l
+        ON l.broker_order_id=o->>'brokerOrderId'
+        WHERE o->>'permId'=a->>'permId' AND o->>'brokerOrderId' ~ '^[1-9][0-9]*$'
+          AND (l.account_id=$2 OR l.account_id IS NULL))
+      OR EXISTS (SELECT 1 FROM proposed_orders p WHERE p.status IN ('PROPOSED','SUBMITTED')
+        AND (p.execution_account_id=$2 OR p.execution_account_id IS NULL)
+        AND (p.conid=a->>'conId' OR (p.conid IS NULL AND p.instrument=a->>'symbol')))`,
+    [JSON.stringify(policy.approvals), accountId, JSON.stringify(orders)]);
+    return new Set(result.rows.map(r => r.perm_id));
   }
 
   async #findOrphanOpenOrders(
