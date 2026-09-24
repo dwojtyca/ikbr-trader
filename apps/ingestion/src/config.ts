@@ -3,7 +3,7 @@ import { z } from "zod";
 import { WatchlistInstrument } from "./types.js";
 import {
   buildInstrumentBindingAuthority,
-  defaultInstrumentRegistry,
+  buildConfiguredInstrumentRegistry,
   InstrumentBindingAuthority,
 } from "@ikbr/shared";
 import { buildMergedWatchlist } from "./bound-watchlist.js";
@@ -152,7 +152,7 @@ const ingestionPort = env.INGESTION_PORT ?? 3101;
 // start on a bad configuration. Raw payload is never logged.
 const bindingResult = buildInstrumentBindingAuthority(
   env.INSTRUMENT_BINDINGS_JSON,
-  defaultInstrumentRegistry,
+  buildConfiguredInstrumentRegistry(process.env),
 );
 if (!bindingResult.ok) {
   const summary = bindingResult.errors

@@ -42,6 +42,7 @@ const ticketSchema = z.object({
   confidence: z.coerce.number().min(0).max(1).default(0.5),
   timestamp: z.string().default(() => new Date().toISOString()),
   riskCheckStatus: z.enum(["PASS", "REJECT"]).default("PASS"),
+  indicators: z.record(z.unknown()).optional(),
 });
 
 export const executeTicketBodySchema = z.object({

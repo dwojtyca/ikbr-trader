@@ -44,7 +44,7 @@ identity. No trading configuration, deployment, strategy or P&L changes.
   typecheck, pnpm test, pnpm test:integration, pnpm build. Integration totals:
   execution 988/988, backtest 18/18, AI worker 7/7; no skipped tests.
 - All 29 pre-existing unrelated research files retain their original hashes.
-- Commit/push and exact GitHub CI: pending.
+- Delivered on main as ba9d2bd; GitHub CI run 35929293402 succeeded.
 
 ## Actual read-only Gateway evidence
 

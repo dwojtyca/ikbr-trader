@@ -1,3 +1,5 @@
+import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
+import { isWseSubscription } from "./wse-native-refresh.js";
 import IB from "ib";
 import {
   buildExactIbkrEsHistoricalContract,
@@ -894,6 +896,7 @@ export class TwsClient {
   ): Promise<Candle[]> {
     await this.acquireFinalBarPacingToken();
     const reqId = this.allocReqId();
+    if (isWseSubscription(sub) && timeframe === "12h") throw new Error("wse_12h_unsupported");
     const { barSize, durationStr } = this.historicalParamsFor(
       timeframe,
       candlesPerSymbol,
@@ -929,8 +932,9 @@ export class TwsClient {
         const ordered = Array.from(uniqueByTs.values()).sort(
           (a, b) => a.ts.getTime() - b.ts.getTime(),
         );
-        const sliced = ordered.slice(
-          Math.max(0, ordered.length - candlesPerSymbol),
+        const finalized = isWseSubscription(sub) ? ordered.filter(c => validClosedWseCandle(c, Date.now())) : ordered;
+        const sliced = finalized.slice(
+          Math.max(0, finalized.length - candlesPerSymbol),
         );
         this.onLog(
           `historical backfill ${options.progressPrefix ? options.progressPrefix + " " : ""}${sub.symbol} (${sub.conid}) [${timeframe}] fetched ${sliced.length}/${candlesPerSymbol} candles`,
@@ -957,10 +961,17 @@ export class TwsClient {
           return;
         }
 
-        const ts = this.parseHistoricalDate(date);
+        let ts: Date | undefined;
+        if (isWseSubscription(sub) && /^\d{8}$/.test(date)) {
+          const year = +date.slice(0, 4), month = +date.slice(4, 6), day = +date.slice(6, 8);
+          const check = new Date(Date.UTC(year, month - 1, day));
+          if (year < 2000 || year > 2100 || check.getUTCMonth() + 1 !== month || check.getUTCDate() !== day) return;
+          ts = warsawMidnight(year, month, day);
+        } else ts = this.parseHistoricalDate(date);
         if (!ts) return;
 
         bars.push({
+          ...(isWseSubscription(sub) ? { source: WSE_NATIVE_SOURCE } : {}),
           conid: sub.conid,
           symbol: sub.symbol,
           timeframe,
@@ -993,7 +1004,7 @@ export class TwsClient {
         durationStr,
         barSize,
         "TRADES",
-        0,
+        isWseSubscription(sub) ? 1 : 0,
         2,
         false,
       );

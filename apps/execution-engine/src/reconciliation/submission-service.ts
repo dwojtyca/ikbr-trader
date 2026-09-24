@@ -1,3 +1,4 @@
+import { isPkoIdentity } from "../gpw-window.js";
 import { isWseBound } from "../wse-market-rules.js";
 /**
  * PR15 r7 §1 — production submission application service.
@@ -54,6 +55,7 @@ export interface BrokerDispatchPayload {
   readonly proposedOrderId: number;
   readonly accountId: string;
   readonly prepared: PreparedBrokerOrder;
+  readonly windowDeadlineMs?: number;
 }
 
 export interface BrokerDispatchResult {
@@ -246,10 +248,17 @@ export function buildSubmissionApplicationService(
   }): Promise<SubmissionOutcome> {
     const { order, prepared, accountId, metadata, resumed } = input;
     try {
+      let windowDeadlineMs: number | undefined;
+      if (isPkoIdentity(order)) {
+        const window = await deps.repo.checkGpwEntry(order, accountId, true);
+        if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
+        windowDeadlineMs = window.endsAtMs;
+      }
       const result = await deps.dispatcher.dispatch({
         proposedOrderId: order.id!,
         accountId,
         prepared,
+        windowDeadlineMs,
       });
       if (result.status === "FILLED") {
         // PR14 round-8 — invalidate snapshot BEFORE local FILLED
@@ -447,6 +456,10 @@ export function buildSubmissionApplicationService(
         return { kind: "risk_rejected", reason: assessed.reason };
       }
       aiRiskEvidence = assessed.evidence;
+    }
+    if (isPkoIdentity(validatedOrder)) {
+      const window = await deps.repo.checkGpwEntry(validatedOrder, accountId);
+      if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
     }
     // Phase A — pure prepare. Any exception surfaces to caller
     // as execution_error (contract resolution / RTH / tick).

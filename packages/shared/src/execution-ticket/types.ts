@@ -158,6 +158,7 @@ export interface ExecutionTicket {
  * dependency. The shared package MUST NOT read `process.env`.
  */
 export interface ExecutionTicketPolicy {
+  readonly strategyPrices?: { readonly entry: number; readonly stopLoss: number; readonly takeProfit: number };
   readonly quantity: number;
   readonly orderType: SupportedOrderType;
   readonly timeInForce: TimeInForce;

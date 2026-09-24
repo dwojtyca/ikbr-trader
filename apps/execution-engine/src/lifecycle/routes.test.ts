@@ -11,12 +11,12 @@ test("lifecycle evidence and cancel routes retain real global bearer protection"
   registerExecutionAuth(app, { token, publicPaths: new Set(["/health"]),
     burstTracker: new AuthFailureBurstTracker(() => {}, {windowMs:60000,threshold:3}),
     writeAudit: () => {}, logger: {warn: () => {}} });
-  registerLifecycleRoutes(app, { repository: {getLifecycleEvidence: async () => { reads++; return null; }},
+  registerLifecycleRoutes(app, { repository: {getRoundTripEvidence: async () => { reads++; return null; }, getLifecycleEvidence: async () => { reads++; return null; }},
     currentAccountId: () => "TEST", currentSessionId: () => "session", boundInstrument: () => null });
   registerCancelProposedRoute(app, { repository: {getProposedOrderById: async () => { reads++; return null; }},
     broker: {cancelBrokerOrder: async () => { cancels++; throw new Error("unexpected"); }}, requestReconciliation: () => {} });
   try {
-    for (const [method,url] of [["GET","/execution/lifecycle/1"],["POST","/execution/cancel-proposed/1"]] as const)
+    for (const [method,url] of [["GET","/execution/lifecycle/1/round-trip"],["GET","/execution/lifecycle/1"],["POST","/execution/cancel-proposed/1"]] as const)
       assert.equal((await app.inject({method,url})).statusCode,401);
     assert.equal(reads,0); assert.equal(cancels,0);
     const headers = {authorization:`Bearer ${token}`};
@@ -25,4 +25,20 @@ test("lifecycle evidence and cancel routes retain real global bearer protection"
     assert.equal((await app.inject({method:"GET",url:"/execution/lifecycle/invalid",headers})).statusCode,400);
     assert.equal(reads,1);
   } finally { await app.close(); }
+});
+
+test("round-trip GET rechecks account/session after collection and has no mutation dependency", async () => {
+  const { roundTrip } = await import("./round-trip-test-fixture.js");
+  const f=roundTrip(), app=Fastify(); let account=f.context.accountId, session=f.context.sessionId, reads=0;
+  registerLifecycleRoutes(app,{repository:{getLifecycleEvidence:async()=>null,getRoundTripEvidence:async()=>{
+    reads++; session="new-session"; return f.evidence;
+  }},currentAccountId:()=>account,currentSessionId:()=>session,boundInstrument:()=>f.context.bound,now:()=>f.context.nowMs});
+  try {
+    const invalid=await app.inject({method:"GET",url:"/execution/lifecycle/invalid/round-trip"});
+    assert.equal(invalid.statusCode,400);assert.equal(reads,0);
+    const result=await app.inject({method:"GET",url:"/execution/lifecycle/42/round-trip"});
+    assert.equal(result.statusCode,200);assert.equal(result.json().status,"NOT_PROVEN");
+    assert.ok(result.json().reasons.includes("current_identity_missing"));
+    account=null;
+  } finally {await app.close();}
 });

@@ -17,11 +17,15 @@ class FakeIb extends EventEmitter {
     queueMicrotask(() => this.emit("orderStatus", id, "Submitted", 0, 1, 0, id + 100, 0, 0, 4));
   }
 }
-async function setup(t: TestContext, close = false) {
+async function setup(t: TestContext, close = false, pko = false) {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-24T10:00:00Z") });
   const bound = fixture().context.bound!;
   Object.assign(bound, { currency: "PLN", exchange: "WSE", minTick: .0001 });
   Object.assign(bound.instrument, { currency: "PLN", exchange: "WSE" });
+  if (pko) {
+    Object.assign(bound,{instrumentId:"pko_wse",brokerSymbol:"PKO",conId:35146360,localSymbol:"PKO",tradingClass:"PKO"});
+    Object.assign(bound.instrument,{id:"pko_wse",brokerSymbol:"PKO",conId:35146360,localSymbol:"PKO"});
+  }
   const metadata = wseMetadataFixture(bound, "PAPER", Date.now());
   metadata.priceIncrements = [{ lowEdge: 0, increment: .01 }, { lowEdge: 100, increment: .05 }];
   const ib = new FakeIb();
@@ -83,4 +87,26 @@ test("WSE legacy direct route and untracked prepared objects cannot dispatch", a
   const p = await f.prepare();
   await assert.rejects(f.client.dispatchPreparedOrder({ ...p }), /WSE_PREPARATION_REQUIRED/);
   assert.equal(f.ib.orders.length, 0);
+});
+
+for (const stage of ["missing", "expired", "during connect", "before first wire"]) test(`PKO entry deadline ${stage} sends no orders`,async t=>{
+  const f=await setup(t,false,true),p=await f.prepare();
+  const deadline=Date.now()+1000;
+  if(stage==="expired") t.mock.timers.tick(1000);
+  if(stage==="during connect") {const connect=f.client.connect.bind(f.client);f.client.connect=async()=>{await connect();t.mock.timers.tick(1000);};}
+  if(stage==="before first wire") {
+    const original=Date.now;let reads=0;
+    t.mock.method(Date,"now",()=>{reads++;return original()+(reads>=3?1000:0);});
+  }
+  await assert.rejects(()=>f.client.dispatchPreparedOrder(p,stage==="missing"?undefined:deadline),/gpw_window_dispatch_expired/);
+  assert.equal(f.ib.orders.length,0);
+});
+test("PKO valid entry deadline allows bracket",async t=>{
+ const f=await setup(t,false,true),p=await f.prepare();
+ await f.client.dispatchPreparedOrder(p,Date.now()+1000);assert.equal(f.ib.orders.length,3);
+});
+
+test("PKO lifecycle close remains possible without an entry window",async t=>{
+ const f=await setup(t,true,true),p=await f.prepare();
+ await f.client.dispatchPreparedClose(p,f.client.getConnectionGeneration());assert.equal(f.ib.orders.length,1);
 });

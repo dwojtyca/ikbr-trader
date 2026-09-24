@@ -1,3 +1,5 @@
+import { registerGpwRoutes } from "./gpw-routes.js";
+import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
 import { WseMetadataClient } from "./wse-metadata-client.js";
 import { isWseBound } from "./wse-market-rules.js";
 import { shouldInvalidateExecutionFill } from "./execution-fill-invalidation.js";
@@ -59,7 +61,7 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
-const repo = new ExecutionRepository(pool);
+const repo = new ExecutionRepository(pool, config.gpwWindow);
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -876,7 +878,15 @@ async function ensureBrokerSession(): Promise<{
  */
 const instrumentBindingAuthority = buildExecutionInstrumentBindingAuthority(
   config.INSTRUMENT_BINDINGS_JSON,
+  buildConfiguredInstrumentRegistry(process.env),
 );
+registerGpwRoutes(app, {
+  currentAccountId: () => lastActiveAccountId,
+  boundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
+  assertAccountAllowed: accountId => assertActiveAccountAllowed(envGuardConfig(), accountId, {requireKnownAccount:true}),
+  loadMetadata: (bound,accountId) => wseMetadata.load(bound,accountId),
+  windowStatus: accountId => repo.getGpwWindowStatus(accountId),
+});
 app.log.info(
   {
     component: "instrument-bindings",
@@ -939,7 +949,7 @@ const submissionService = buildSubmissionApplicationService({
       clientOrderId,
     }),
   dispatcher: {
-    dispatch: async ({ prepared }) => tws.dispatchPreparedOrder(prepared),
+    dispatch: async ({ prepared, windowDeadlineMs }) => tws.dispatchPreparedOrder(prepared, windowDeadlineMs),
   },
   assertKillSwitchOk: async (input) => {
     await assertKillSwitchOk({

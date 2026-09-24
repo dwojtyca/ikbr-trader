@@ -1,3 +1,4 @@
+import { isPkoIdentity } from "./gpw-window.js";
 import { isWseBound, validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import IB from "ib";
 import { SignalTicket, type BoundInstrument, defaultInstrumentRegistry } from "@ikbr/shared";
@@ -692,13 +693,18 @@ export class TwsExecutionClient {
    */
   async dispatchPreparedOrder(
     prepared: PreparedBrokerOrder,
+    windowDeadlineMs?: number,
   ): Promise<PlaceOrderResult> {
     await this.connect();
     this.assertWseDispatch(prepared);
+    if (isPkoIdentity(prepared.normalizedTicket) &&
+      (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
     return this.dispatchPlan(
       prepared.plan,
       prepared.contract,
       prepared.normalizedTicket,
+      undefined,
+      windowDeadlineMs,
     );
   }
 
@@ -716,6 +722,7 @@ export class TwsExecutionClient {
     contract: ContractShape,
     ticket: SignalTicket,
     expectedGeneration?: number,
+    windowDeadlineMs?: number,
   ): Promise<PlaceOrderResult> {
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
@@ -856,6 +863,8 @@ export class TwsExecutionClient {
       this.ib.on("orderStatus", onOrderStatus);
       this.ib.on("error", onError);
       try {
+        if (isPkoIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
+          (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
         for (const plannedOrder of plan.orders) {
           if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
           this.ib.placeOrder(

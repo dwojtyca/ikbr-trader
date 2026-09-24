@@ -116,14 +116,23 @@ export class ExecutionTicketBuilder {
     const side = directionToSide(decision.action);
 
     const priceData = input.snapshot.sections.price.data!;
-    const entryResult = computeEntryPrice(side, priceData, input.policy);
+    const explicit = input.policy.strategyPrices;
+    const isWse = input.instrument.exchange === "WSE" && input.instrument.currency === "PLN";
+    if ((isWse && !explicit) || (explicit && (input.policy.orderType !== "LMT" || side !== "BUY"
+      || ![explicit.entry, explicit.stopLoss, explicit.takeProfit].every(p => Number.isFinite(p) && p > 0)
+      || explicit.stopLoss >= explicit.entry || explicit.takeProfit <= explicit.entry))) {
+      return fail([{ code: "INVALID_PROTECTION_LEVELS", source: "policy", message: "valid explicit long strategy levels required" }], warnings);
+    }
+    const entryResult = explicit ? { entry: explicit.entry, warnings: [], blockers: [] }
+      : computeEntryPrice(side, priceData, input.policy);
     warnings.push(...entryResult.warnings);
     if (entryResult.blockers.length > 0) {
       return fail(entryResult.blockers, warnings);
     }
     const entry = entryResult.entry!;
 
-    const protectionResult = computeProtection(side, entry, input.policy);
+    const protectionResult = explicit ? { stopLoss: explicit.stopLoss, takeProfit: explicit.takeProfit,
+      trailingStop: undefined, warnings: [], blockers: [] } : computeProtection(side, entry, input.policy);
     warnings.push(...protectionResult.warnings);
     if (protectionResult.blockers.length > 0) {
       return fail(protectionResult.blockers, warnings);

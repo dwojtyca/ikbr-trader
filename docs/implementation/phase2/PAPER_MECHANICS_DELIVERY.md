@@ -150,3 +150,13 @@ GPW3 is the next bounded implementation: strategy-price propagation, history
 warmup, one-round-trip budget, honest AI context coverage, currency-labelled
 P&L/fees and supervised exit/reconciliation/abort readiness. No trading has been
 activated and no Paper round trip has yet been proved.
+
+## GPW3 delivery — 2026-09-24
+
+[GPW3](../phase3/GPW3_CONTROLLED_WINDOW_REPORT.md) prepares exact strategy-price
+propagation, native WSE warmup, durable one-entry window and currency-honest
+round-trip evidence. The next gate is the separately authorized supervised
+Paper window in the [GPW runbook](../../runbooks/GPW_PAPER_ROUND_TRIP.md), after
+all current runtime preflight checks pass. No deployment, activation or broker
+round trip was performed by this engineering stage. Strategy tuning follows
+actual mechanically correct entry/exit evidence.

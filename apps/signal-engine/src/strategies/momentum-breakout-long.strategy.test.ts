@@ -305,3 +305,39 @@ test('MomentumBreakoutLongStrategy rejects weak breakout candle quality', () => 
   assert.equal(signal, null);
   assert.equal(strategy.getLastRejectionReason(), 'breakout_close_not_near_high');
 });
+
+test('GPW3 real momentum strategy WSE levels survive normalization builder and mapper', async () => {
+  const { defaultInstrumentRegistry, normalizeWseStrategyLevels, ExecutionTicketBuilder } = await import('@ikbr/shared');
+  const { toLegacySignalTicket } = await import('../runtime/execution/ticket-mapper.js');
+  const now = new Date('2026-09-24T10:00:00Z');
+  const source = baseContext();
+  const candles = source.candlesByTimeframe['1m']!.map((c, i, all) => ({ ...c, symbol: 'PKO', conid: '35146360', ts: new Date(now.getTime() - (all.length - i) * 60000) }));
+  const context: StrategyContext = { ...source, symbol: 'PKO', conid: '35146360', latestCandle: candles.at(-1)!, candlesByTimeframe: { '1m': candles } };
+  const emitted = new MomentumBreakoutLongStrategy().generateSignal(context);
+  assert.ok(emitted);
+  const seed = defaultInstrumentRegistry.getInstrumentOrThrow('pko_wse');
+  const instrument = { ...seed, trading: { ...seed.trading, executionEnabled: true } };
+  const bound: import('@ikbr/shared').BoundInstrument = { instrument, instrumentId: instrument.id, broker: 'ibkr', brokerSymbol: 'PKO', conId: 35146360,
+    localSymbol: 'PKO', tradingClass: 'PKO', exchange: 'WSE', currency: 'PLN', minTick: .0001 };
+  const raw = { entry: emitted.suggestedEntry!, stopLoss: emitted.stopLoss!, takeProfit: emitted.takeProfit! };
+  const evidence = normalizeWseStrategyLevels({ accountId: 'DU-TEST', instrumentId: 'pko_wse', conId: 35146360, symbol: 'PKO', localSymbol: 'PKO', tradingClass: 'PKO',
+    exchange: 'WSE', currency: 'PLN', secType: 'STK', marketRuleId: 1, priceIncrements: [{ lowEdge: 0, increment: .01 }, { lowEdge: 100, increment: .05 }],
+    timeZoneId: 'Europe/Warsaw', liquidHours: '20260924:0900-20260924:1705', requestStartedAtMs: now.getTime() - 100, receivedAtMs: now.getTime() - 50 }, bound, 'DU-TEST', raw, now.getTime());
+  const signal: import('@ikbr/shared').SignalEvaluation = {
+    signalId: 's', instrumentId: instrument.id, generatedAt: now, status: 'GENERATED', reasonSummary: 'fixture deterministic decision/risk approval', warnings: [], blockers: [],
+    decision: { decisionId: 'd', instrumentId: instrument.id, generatedAt: now, action: 'LONG', confidence: 90, overallScore: 50, reasons: [], warnings: [], blockedBy: [], metadata: { engineVersion: 'fixture', evaluationTimeMs: 0 } },
+    risk: { approved: true, riskScore: 1, warnings: [], blockers: [], metadata: { engineVersion: 'fixture', evaluationTimeMs: 0 } },
+    metadata: { engineVersions: { signal: 'fixture', decision: 'fixture', risk: 'fixture' }, evaluationTimeMs: 0 },
+  };
+  const snapshot = { instrumentId: instrument.id, sections: { price: { status: 'fresh', observedAt: now, source: 'fixture', warnings: [], data: { last: 120, bid: 119, ask: 121 } } } } as unknown as import('@ikbr/shared').MarketContextSnapshot;
+  const built = new ExecutionTicketBuilder({ idFactory: () => 't', correlationIdFactory: () => 'c', now: () => now }).build({ signal, snapshot, instrument,
+    policy: { quantity: 1, orderType: 'LMT', timeInForce: 'DAY', outsideRth: false, transmit: true, priceTickSize: .0001, priceRoundingMode: 'nearest', stopLossDistance: 999, takeProfitDistance: 999, strategyPrices: evidence.final } });
+  assert.ok(built.ok);
+  const wire = toLegacySignalTicket(built.ticket, { bound });
+  assert.deepEqual({ entry: wire.entry, stopLoss: wire.stop, takeProfit: wire.takeProfit }, evidence.final);
+  assert.deepEqual(evidence.raw, raw);
+  assert.equal(wire.entry, emitted.suggestedEntry);
+  assert.notEqual(wire.entry, 121);
+  assert.equal(context.indicators.timeframes?.['12h'], undefined);
+  assert.equal(new MomentumBreakoutLongStrategy().generateSignal({ ...context, directionalRegime: 'range' }), null);
+});

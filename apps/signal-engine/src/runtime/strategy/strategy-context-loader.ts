@@ -24,7 +24,7 @@ import type {
   InstrumentContract,
   SecType,
 } from "@ikbr/shared";
-import { mapAssetClassToIbkrSecType } from "@ikbr/shared";
+import { isWseBound, validClosedWseCandle, wseCandleEnd, mapAssetClassToIbkrSecType } from "@ikbr/shared";
 
 import type { StrategyContext } from "../../strategies/strategy.types.js";
 
@@ -88,6 +88,7 @@ export interface StrategyContextLoaderRepo {
     conId: string,
     timeframe: CandleTimeframe,
     limit: number,
+    nativeWseOnly?: boolean,
   ): Promise<Candle[]>;
   getMarketState(conid: string): Promise<{
     conid: string;
@@ -166,18 +167,23 @@ export class StrategyContextLoader {
     readonly positionQuantity: number;
     readonly timeframes: readonly CandleTimeframe[];
   }): Promise<StrategyContextLoadResult> {
-    const { instrument, bound, positionQuantity, timeframes } = input;
+    const { instrument, bound, positionQuantity } = input;
+    const wse = isWseBound(bound);
+    const timeframes = input.timeframes.filter(tf => !(wse && tf === "12h"));
+    const nowMs = this.#clock().getTime();
     const symbol = instrument.brokerSymbol;
     const boundConId = String(bound.conId);
 
     // Step 1 — 1m candles first. Without them nothing else is
     // meaningful.
-    const candles1m = await this.#repo.getRecentCandlesForContract(
+    let candles1m = await this.#repo.getRecentCandlesForContract(
       symbol,
       boundConId,
       "1m",
       DEFAULT_FETCH_LIMITS["1m"],
+      wse,
     );
+    if (wse) candles1m = candles1m.filter(c => c.timeframe === "1m" && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
     if (candles1m.length === 0) {
       return {
         kind: "error",
@@ -192,8 +198,7 @@ export class StrategyContextLoader {
         message: `insufficient 1m candles: ${candles1m.length} < ${MIN_CANDLES_BY_TIMEFRAME["1m"]}`,
       };
     }
-    const nowMs = this.#clock().getTime();
-    const latest1mTs = new Date(candles1m[candles1m.length - 1].ts).getTime();
+    const latest1mTs = wse ? wseCandleEnd(candles1m[candles1m.length - 1].ts, "1m") : new Date(candles1m[candles1m.length - 1].ts).getTime();
     if (Number.isNaN(latest1mTs) || latest1mTs > nowMs) {
       return {
         kind: "error",
@@ -300,12 +305,14 @@ export class StrategyContextLoader {
     for (const tf of timeframes) {
       if (tf === "1m") continue;
       const limit = DEFAULT_FETCH_LIMITS[tf];
-      const fetched = await this.#repo.getRecentCandlesForContract(
+      let fetched = await this.#repo.getRecentCandlesForContract(
         symbol,
         boundConId,
         tf,
         limit,
+        wse,
       );
+      if (wse) fetched = fetched.filter(c => c.timeframe === tf && c.conid === boundConId && c.symbol === bound.brokerSymbol && validClosedWseCandle(c, nowMs));
       if (fetched.length < MIN_CANDLES_BY_TIMEFRAME[tf]) {
         return {
           kind: "error",
@@ -313,7 +320,7 @@ export class StrategyContextLoader {
           message: `insufficient ${tf} candles: ${fetched.length} < ${MIN_CANDLES_BY_TIMEFRAME[tf]}`,
         };
       }
-      const latestTs = new Date(fetched[fetched.length - 1].ts).getTime();
+      const latestTs = wse ? wseCandleEnd(fetched[fetched.length - 1].ts, tf) : new Date(fetched[fetched.length - 1].ts).getTime();
       if (Number.isNaN(latestTs) || latestTs > nowMs) {
         return {
           kind: "error",

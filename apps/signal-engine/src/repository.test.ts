@@ -134,7 +134,7 @@ describe("SignalRepository.getRecentCandlesForContract — exact-conId candle SQ
     assert.match(pool.calls[0].sql, /UPPER\(symbol\) = UPPER\(\$1\)/);
     assert.match(pool.calls[0].sql, /conid = \$2/);
     assert.match(pool.calls[0].sql, /LIMIT \$3/);
-    assert.deepEqual(pool.calls[0].params, ["AAPL", "265598", 10]);
+    assert.deepEqual(pool.calls[0].params, ["AAPL", "265598", 10, false]);
     // Rows returned newest-first; helper reverses to ascending ts order.
     assert.equal(candles.length, 2);
     assert.ok(candles[0].ts.getTime() < candles[1].ts.getTime());

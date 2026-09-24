@@ -619,3 +619,19 @@ describe("ExecutionTicketBuilder — immutability + determinism", () => {
     );
   });
 });
+
+describe("GPW3 explicit strategy prices", () => {
+  it("preserves all three strategy prices despite quote and policy distance changes", () => {
+    const builder = new ExecutionTicketBuilder({ idFactory: () => "x", correlationIdFactory: () => "y" });
+    const result = builder.build({ ...happyInput(), policy: {
+      ...policy({ stopLossDistance: 500, takeProfitDistance: 999 }),
+      strategyPrices: { entry: 60.03, stopLoss: 59.97, takeProfit: 60.5 },
+    } });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.ticket.order.limitPrice, 60.03);
+      assert.equal(result.ticket.protection.stopLoss, 59.97);
+      assert.equal(result.ticket.protection.takeProfit, 60.5);
+    }
+  });
+});

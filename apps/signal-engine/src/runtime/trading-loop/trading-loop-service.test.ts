@@ -1,3 +1,4 @@
+import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -1185,6 +1186,7 @@ interface IntegrationEnv {
 
 function makeIntegrationSvc(
   overrides: {
+    wseMetadataReader?: WseStrategyMetadataReader;
     instruments?: readonly Instrument[];
     bounds?: readonly BoundInstrument[];
     loaderRepo?: LoaderRepoSpy;
@@ -1226,6 +1228,7 @@ function makeIntegrationSvc(
   const exposureReader =
     overrides.exposureReader ?? makeExposureReader(overrides.exposure);
   const svc = new TradingLoopService({
+    wseMetadataReader: overrides.wseMetadataReader,
     config: makeConfig(),
     registry: makeRegistry(instruments),
     bindingAuthority: makeBindingAuthority(bounds),
@@ -2192,5 +2195,32 @@ describe("TradingLoopService — AI approval wait", () => {
     if (repeat.reports[0].outcome.kind === "SKIPPED")
       assert.equal(repeat.reports[0].outcome.reason, "EXPOSURE_BLOCKED");
     assert.equal(env.executionRuntime.preparedCalls.length, 1);
+  });
+});
+
+describe("GPW3 WSE strategy level wiring", () => {
+  for (const badMetadata of [false, true]) it(`normalizes before pipeline and fails closed: badMetadata=${badMetadata}`, async () => {
+    const instrument: Instrument = { ...makeInstrument("pko_wse", { executionPolicy: { ...AAPL_POLICY, quantity: 1, maxQuantity: 1 } }), brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" };
+    const bound: BoundInstrument = { ...makeBound(instrument), brokerSymbol: "PKO", conId: 35146360, localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" };
+    const candles = makeFullCandles(bound);
+    for (const tf of Object.keys(candles) as CandleTimeframe[]) candles[tf] = candles[tf].map(c => ({ ...c, source: "ibkr_wse_native_v1" }));
+    const strategy = makeRealStrategy(AAPL_POLICY.strategyId);
+    const original = strategy.generateSignal.bind(strategy);
+    strategy.generateSignal = context => ({ ...original(context)!, suggestedEntry: 100.039, stopLoss: 99.997, takeProfit: 100.051 });
+    const ticket = { ...makeTicket({ quantity: 1, limitPrice: 100 }), instrumentId: "pko_wse", brokerSymbol: "PKO", exchange: "WSE", currency: "PLN",
+      protection: { bracketEnabled: true, stopLoss: 99.99, takeProfit: 100.1 } };
+    const env = makeIntegrationSvc({ instruments: [instrument], bounds: [bound], strategies: [strategy], loaderRepo: makeLoaderRepo(bound, { candles }), runtimeBehavior: { ticket },
+      wseMetadataReader: { read: async () => ({ accountId: "DU-TEST", metadata: { accountId: badMetadata ? "FOREIGN" : "DU-TEST",
+        instrumentId: "pko_wse", conId: 35146360, symbol: "PKO", localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN", secType: "STK",
+        marketRuleId: 1, priceIncrements: [{ lowEdge: 0, increment: .01 }, { lowEdge: 100, increment: .05 }], timeZoneId: "Europe/Warsaw",
+        liquidHours: "20260714:0900-20260714:1705", requestStartedAtMs: NOW_MS - 100, receivedAtMs: NOW_MS - 50 } }) },
+    });
+    const report = await env.svc.runOnce();
+    assert.equal(report.reports[0].outcome.kind, badMetadata ? "SKIPPED" : "SUBMITTED");
+    assert.equal(env.marketDataRuntime.calls.length, badMetadata ? 0 : 1);
+    if (!badMetadata) {
+      assert.deepEqual(env.marketDataRuntime.calls[0].policy.strategyPrices, { entry: 100, stopLoss: 99.99, takeProfit: 100.1 });
+      assert.equal(env.loaderRepo.candleCalls.some(c => c.timeframe === "12h"), false);
+    }
   });
 });

@@ -1,3 +1,5 @@
+import { executeTicketBodySchema } from "../execute-ticket-schema.js";
+import type { GpwWindow } from "../gpw-window.js";
 import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -34,7 +36,7 @@ function ticket(overrides: Partial<SignalTicket> = {}): SignalTicket {
     timestamp: new Date().toISOString(), riskCheckStatus: "PASS", ...overrides };
 }
 
-async function fixture(currency: "USD" | "PLN" = "USD") {
+async function fixture(currency: "USD" | "PLN" = "USD", pko = false) {
   const exchange = currency === "PLN" ? "WSE" : "SMART";
   const database = `ikbr_ai_service_${randomUUID().replaceAll('-', '')}`;
   const url = new URL(connection!); url.pathname = "/postgres";
@@ -43,16 +45,23 @@ async function fixture(currency: "USD" | "PLN" = "USD") {
   url.pathname = `/${database}`;
   const pool = new Pool({ connectionString: url.toString() });
   await runMigrations(pool);
-  const repo = new ExecutionRepository(pool);
+  // Window policy parsing is unit-tested against Warsaw wall time. The PG fake
+  // broker fixture uses a short interval around database wall time, independently
+  // of the host hour, just as its market-risk adapter uses a fixed open session.
+  const window: GpwWindow = { runId: "test-run", accountId, startsAt: new Date(Date.now()-1000).toISOString(),
+    endsAt: new Date(Date.now()+60000).toISOString(), tradeDate: "2026-09-24" };
+  const repo = new ExecutionRepository(pool, pko ? window : undefined);
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
-  const selectedInstrument = { ...instrument(), currency, exchange };
+  const selectedInstrument = { ...instrument(pko ? "pko_wse" : "test", pko ? "PKO" : "TEST"), currency, exchange };
+  const makeTicket = (overrides: Partial<SignalTicket> = {}) => ticket({ ...(pko ? {instrumentId:"pko_wse",instrument:"PKO",conid:"35146360"} : {}), ...overrides });
   const authority = new InstrumentBindingAuthority(new InstrumentRegistry([selectedInstrument, instrument("other", "OTHER")]), [
-    { instrumentId: "test", conId: 123, localSymbol: "TEST", tradingClass: "TEST", exchange, currency, minTick: 0.01 },
+    { instrumentId: selectedInstrument.id, conId: pko ? 35146360 : 123, localSymbol: selectedInstrument.brokerSymbol,
+      tradingClass: selectedInstrument.brokerSymbol, exchange, currency, minTick: 0.01 },
     { instrumentId: "other", conId: 456, localSymbol: "OTHER", tradingClass: "OTHER", exchange: "SMART", currency: "USD", minTick: 0.01 },
   ]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,
-    alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false,
+    alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false, expireWindowDuringPrepare: false,
     wseFailure: "" as string,
     session: sessionId, account: accountId };
   const service = buildSubmissionApplicationService({ repo, bindingAuthority: authority,
@@ -84,6 +93,7 @@ async function fixture(currency: "USD" | "PLN" = "USD") {
     },
     prepareBrokerPlan: async ({ order, clientOrderId }) => {
       state.prepares++;
+      if (state.expireWindowDuringPrepare) await pool.query("SELECT pg_sleep(2.2)");
       if (state.ageDuringPrepare) await pool.query("SELECT pg_sleep(0.15)");
       if (state.rejectDuringPrepare) await repo.rejectPendingProposal(order.id!, "concurrent rejection");
       const base = 10000 + state.prepares * 10;
@@ -101,7 +111,7 @@ async function fixture(currency: "USD" | "PLN" = "USD") {
     assertKillSwitchOk: async () => undefined, recordAlert: () => undefined, triggerReconciliation: () => undefined,
     ownerId: sessionId, allowMarketOrder: false, allowCrossContractExposure: false, defaultTif: "DAY",
   });
-  const submit = (value = ticket(), clientOrderId = "proposal-1") => service.submitTicket({ ticket: value,
+  const submit = (value = makeTicket(), clientOrderId = "proposal-1") => service.submitTicket({ ticket: value,
     strategy: "test_strategy", clientOrderId, clientOrderHash: computeClientOrderHash(value) });
   const execute = (id: number) => service.executeProposed({ proposedOrderId: id, overrideRejected: true,
     decisionMetadata: { aiReason: "spoofed metadata", aiModel: "spoofed", aiDecision: "EXECUTE" } });
@@ -117,7 +127,7 @@ async function fixture(currency: "USD" | "PLN" = "USD") {
   };
   const approve = async (id: number) => pool.query(`UPDATE proposal_ai_reviews SET status='APPROVED', decision_json=$2,
     decided_at=clock_timestamp(), delivery_started_at=clock_timestamp() WHERE proposed_order_id=$1`, [id, JSON.stringify(decision)]);
-  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve,
+  return { pool, repo, service, state, submit, execute, create, rewriteReview, approve, window, makeTicket,
     close: async () => { await pool.end(); await admin.query(`DROP DATABASE ${database}`); await admin.end(); } };
 }
 
@@ -320,5 +330,94 @@ describe("GPW2B metadata gate through production submission service", { skip: !c
       assert.equal(f.state.prepares, 0); assert.equal(f.state.dispatches, 0);
       assert.equal((await f.repo.getProposedOrderById(id))?.executionAttemptedAt, undefined);
     } finally { await f.close(); }
+  });
+});
+
+
+describe("GPW3 durable single-entry window through production service", {skip: !connection}, () => {
+  it("wire schema preserves strategy evidence and it is durable before AI claim",async()=>{
+    const f=await fixture("PLN",true);
+    try {
+      const indicators={ema20:99,strategyPriceEvidence:{raw:{entry:100.009,stop:99.001,takeProfit:102.001},final:{entry:100,stop:99,takeProfit:102.01}}};
+      const parsed=executeTicketBodySchema.parse({ticket:{...f.makeTicket(),indicators}});
+      const result=await f.submit(parsed.ticket);assert.equal(result.kind,"awaiting_ai");
+      if(result.kind!=="awaiting_ai")throw new Error("missing proposal");
+      const row=(await f.pool.query("SELECT indicator_snapshot FROM proposed_orders WHERE id=$1",[result.order.id])).rows[0];
+      assert.deepEqual(row.indicator_snapshot,indicators);
+      assert.deepEqual((await f.repo.getProposedOrderById(result.order.id!))!.indicators,indicators);
+    }finally{await f.close();}
+  });
+
+  it("concurrent approval executes once; restart and terminal flat cannot replenish budget", async () => {
+    const f=await fixture("PLN",true);
+    try {
+      const id=await f.create();await f.approve(id);
+      const out=await Promise.all([f.execute(id),f.execute(id)]);
+      assert.equal(out.filter(x=>x.kind==="resumed").length,1,JSON.stringify(out));
+      assert.equal(f.state.dispatches,1);
+      const spent=(await f.pool.query("SELECT * FROM gpw_windows")).rows[0];
+      assert.equal(Number(spent.consumed_proposal_id),id);
+      const restarted=new ExecutionRepository(f.pool,f.window);
+      assert.equal((await restarted.getGpwWindowStatus(accountId)).ok,false);
+      await f.pool.query("UPDATE proposed_orders SET status='CANCELLED' WHERE id=$1",[id]);
+      const retry=await f.submit(f.makeTicket(),"second-entry");
+      assert.equal(retry.kind,"execution_error");assert.equal(f.state.dispatches,1);
+      f.window.runId="another-run";
+      assert.equal((await restarted.getGpwWindowStatus(accountId)).ok,false);
+    } finally {await f.close();}
+  });
+  it("unknown dispatch retains consumed budget and never retries",async()=>{
+    const f=await fixture("PLN",true);
+    try {const id=await f.create();await f.approve(id);f.state.uncertain=true;
+      assert.equal((await f.execute(id)).kind,"execution_error");
+      await f.execute(id);assert.equal(f.state.dispatches,1);
+      assert.equal((await f.repo.getGpwWindowStatus(accountId)).ok,false);
+    } finally {await f.close();}
+  });
+  it("old pending run and altered same-run configuration refuse before prepare",async()=>{
+    const f=await fixture("PLN",true);
+    try {const id=await f.create();await f.approve(id);
+      f.window.runId="new-run";assert.equal((await f.execute(id)).kind,"risk_rejected");
+      f.window.runId="test-run";f.window.endsAt=new Date(Date.now()+50000).toISOString();
+      assert.equal((await f.execute(id)).kind,"risk_rejected");assert.equal(f.state.prepares,0);
+    } finally {await f.close();}
+  });
+  it("pre-commit plan failure rolls back budget and claim",async()=>{
+    const f=await fixture("PLN",true);
+    try {const id=await f.create();await f.approve(id);
+      await f.pool.query(`CREATE FUNCTION fail_gpw_leg() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture_plan_failure'; END $$`);
+      await f.pool.query(`CREATE TRIGGER fail_gpw_leg BEFORE INSERT ON broker_order_links FOR EACH ROW EXECUTE FUNCTION fail_gpw_leg()`);
+      await assert.rejects(()=>f.execute(id),/fixture_plan_failure/);
+      assert.equal((await f.pool.query("SELECT consumed_proposal_id FROM gpw_windows")).rows[0].consumed_proposal_id,null);
+      assert.equal((await f.repo.getProposedOrderById(id))!.executionAttemptedAt,undefined);
+      assert.equal(f.state.dispatches,0);
+    } finally {await f.close();}
+  });
+  it("real database time crossing window end during prepare refuses atomic claim",async()=>{
+    const f=await fixture("PLN",true);
+    try {const id=await f.create();await f.approve(id);
+      f.window.endsAt=new Date(Date.now()+2000).toISOString();
+      await f.pool.query("UPDATE gpw_windows SET ends_at=$1",[f.window.endsAt]);
+      f.state.expireWindowDuringPrepare=true;
+      const out=await f.execute(id);
+      assert.equal(out.kind,"submission_identity_mismatch",JSON.stringify(out));
+      assert.equal(f.state.prepares,1);assert.equal(f.state.dispatches,0);
+      assert.equal((await f.pool.query("SELECT consumed_proposal_id FROM gpw_windows")).rows[0].consumed_proposal_id,null);
+      assert.equal((await f.repo.getProposedOrderById(id))!.executionAttemptedAt,undefined);
+      assert.equal((await f.pool.query("SELECT count(*) FROM broker_order_links WHERE proposed_order_id=$1",[id])).rows[0].count,"0");
+    }finally{await f.close();}
+  });
+  it("expiry after commit before dispatch sends nothing and keeps budget consumed",async()=>{
+    const f=await fixture("PLN",true);
+    try {const id=await f.create();await f.approve(id);
+      const claim=f.repo.tryStartSubmissionWithPlan.bind(f.repo);
+      f.repo.tryStartSubmissionWithPlan=async input=>{const result=await claim(input);
+        if(result.kind==="claimed_with_persisted_plan") f.window.endsAt=new Date(Date.now()-1).toISOString();
+        return result;};
+      const out=await f.execute(id);assert.equal(out.kind,"risk_rejected",JSON.stringify(out));
+      assert.equal(f.state.dispatches,0);
+      assert.equal(Number((await f.pool.query("SELECT consumed_proposal_id FROM gpw_windows")).rows[0].consumed_proposal_id),id);
+      assert.ok((await f.repo.getProposedOrderById(id))!.executionAttemptedAt);
+    } finally {await f.close();}
   });
 });

@@ -1,3 +1,5 @@
+import { checkGpwWindow, bindGpwProposal, isPkoIdentity, type GpwWindow } from "./gpw-window.js";
+import type { RoundTripEvidence, RoundTripFill } from "./lifecycle/round-trip-evidence.js";
 import type { LifecycleEvidence, LifecycleLegLink, LifecycleRun } from "./lifecycle/ownership.js";
 import { Pool, type PoolClient } from "pg";
 import {
@@ -423,7 +425,17 @@ export interface Trade {
 }
 
 export class ExecutionRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow) {}
+
+  async checkGpwEntry(order: ProposedOrder, accountId: string, dispatch = false) {
+    return checkGpwWindow(this.pool, this.gpwWindow, accountId, order.id, dispatch);
+  }
+
+  async getGpwWindowStatus(accountId: string | null) {
+    const check = await checkGpwWindow(this.pool, this.gpwWindow, accountId ?? "");
+    return { ...check, configured: Boolean(this.gpwWindow), runId: this.gpwWindow?.runId ?? null,
+      startsAt: this.gpwWindow?.startsAt ?? null, endsAt: this.gpwWindow?.endsAt ?? null };
+  }
 
   private static readonly IBKR_UNSET_DOUBLE_THRESHOLD = 1e307;
 
@@ -1365,6 +1377,15 @@ export class ExecutionRepository {
         return guarded.outcome;
       }
 
+      if (isPkoIdentity(ticket)) {
+        if (ticket.instrumentId !== "pko_wse" || ticket.conid !== "35146360" || ticket.instrument !== "PKO" || positionGuard.kind !== "available") {
+          await client.query("ROLLBACK");
+          return { kind: "invalid_ticket_shape", reason: "gpw_window_identity_mismatch" };
+        }
+        const window = await checkGpwWindow(client, this.gpwWindow, positionGuard.accountId);
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
+      }
+
       const result = await client.query(
         `
         INSERT INTO proposed_orders (
@@ -1389,6 +1410,7 @@ export class ExecutionRepository {
           decision_source,
           client_order_id,
           client_order_hash,
+          indicator_snapshot,
           created_at
         )
         VALUES (
@@ -1396,7 +1418,7 @@ export class ExecutionRepository {
           $6, $7, $8, $9, $10,
           $11::jsonb, $12, $13,
           $14, $15, $16, 'PROPOSED', $17, 'user',
-          $18, $19, NOW()
+          $18, $19, $20::jsonb, NOW()
         )
         RETURNING id
         `,
@@ -1422,8 +1444,11 @@ export class ExecutionRepository {
           strategy,
           idempotency?.clientOrderId ?? null,
           idempotency?.clientOrderHash ?? null,
+          ticket.indicators ? JSON.stringify(ticket.indicators) : null,
         ],
       );
+
+      if (isPkoIdentity(ticket)) await bindGpwProposal(client, this.gpwWindow!, Number(result.rows[0].id));
 
       if (ticket.instrumentId) {
         if (positionGuard.kind !== "available" || !idempotency || !ticket.conid)
@@ -1507,6 +1532,40 @@ export class ExecutionRepository {
 
     if (!result.rows[0]) return null;
     return this.mapRow(result.rows[0] as ProposedOrderRow);
+  }
+
+  async getRoundTripEvidence(id: number, accountId: string | null): Promise<RoundTripEvidence | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const operation = await client.query("SELECT * FROM lifecycle_close_operations WHERE original_proposal_id=$1", [id]);
+      const row = operation.rows[0];
+      const closeId = row?.close_proposal_id == null ? null : Number(row.close_proposal_id);
+      const lifecycle = await this.getLifecycleEvidence(id, accountId, client, closeId);
+      if (!lifecycle) { await client.query("COMMIT"); return null; }
+      const closeLinks = closeId === null ? [] : (await client.query<LifecycleLegLink>(
+        "SELECT * FROM broker_order_links WHERE proposed_order_id=$1", [closeId])).rows.map(link =>
+          ({ ...link, proposed_order_id: Number(link.proposed_order_id) }));
+      const snapshot = lifecycle.run?.broker_snapshot as { executions?: Array<{execId?: string; accountId?: string; conId?: string}> } | null;
+      const execIds = Array.isArray(snapshot?.executions) ? snapshot.executions.filter(fill =>
+        fill.accountId === accountId && fill.conId === lifecycle.order.conid).map(fill => fill.execId).filter(Boolean) : [];
+      const window = (await client.query(`SELECT w.* FROM gpw_proposals p JOIN gpw_windows w ON w.run_id=p.run_id
+        WHERE p.proposed_order_id=$1`, [id])).rows[0];
+      const fills = await client.query<RoundTripFill>(`SELECT exec_id,broker_order_id,proposed_order_id,account_id,conid,currency,
+        side,shares,price,executed_at,commission,commission_currency,realized_pnl FROM broker_execution_fills
+        WHERE proposed_order_id=ANY($1::bigint[]) OR exec_id=ANY($2::text[])
+          OR (account_id=$3 AND broker_order_id=ANY($4::text[])) ORDER BY exec_id`,
+      [[id, ...(closeId === null ? [] : [closeId])], execIds, accountId,
+        [...lifecycle.links, ...closeLinks].map(link => link.broker_order_id).filter(Boolean)]);
+      await client.query("COMMIT");
+      return { lifecycle, window: window ? { runId: window.run_id, accountId: window.account_id,
+        startsAt: window.starts_at, endsAt: window.ends_at, consumedAt: window.consumed_at,
+        consumedProposalId: window.consumed_proposal_id == null ? null : Number(window.consumed_proposal_id) } : null,
+        close: row ? { state: row.state, accountId: row.account_id, conid: row.conid,
+        originalHash: row.original_hash, closeProposalId: closeId, links: closeLinks } : null,
+        fills: fills.rows.map(fill => ({ ...fill, proposed_order_id: fill.proposed_order_id === null ? null : Number(fill.proposed_order_id) })) };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   }
 
   async getLifecycleEvidence(
@@ -2434,6 +2493,13 @@ export class ExecutionRepository {
           [input.id, JSON.stringify(risk)]);
       }
 
+      if (isPkoIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
+        const window = await checkGpwWindow(client, this.gpwWindow, input.accountId, input.id);
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
+        await client.query(`UPDATE gpw_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
+          WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.gpwWindow!.runId, input.id]);
+      }
+
       // Atomic claim + metadata + account write. Same fencing as
       // `tryStartSubmission`; also stamps `execution_account_id`
       // and decision metadata so a crash after this point leaves
@@ -2443,7 +2509,7 @@ export class ExecutionRepository {
         UPDATE proposed_orders
         SET processing_owner = $2,
             processing_claimed_at = NOW(),
-            execution_attempted_at = NOW(),
+            execution_attempted_at = clock_timestamp(),
             execution_account_id = $3,
             decision_source = COALESCE($4, decision_source),
             decision_actor = COALESCE($5, decision_actor),
@@ -3779,7 +3845,7 @@ export class ExecutionRepository {
         account_id AS account_id,
         upper(symbol) AS symbol,
         conid AS conid,
-        NULLIF(upper(commission_currency), '') AS currency,
+        NULLIF(upper(currency), '') AS currency,
         NULLIF(upper(exchange), '') AS exchange,
         NULL::text AS sec_type,
         SUM(
@@ -3800,7 +3866,7 @@ export class ExecutionRepository {
       FROM broker_execution_fills
       ${whereClause}
       GROUP BY account_id, upper(symbol), conid,
-               NULLIF(upper(commission_currency), ''),
+               NULLIF(upper(currency), ''),
                NULLIF(upper(exchange), '')
       HAVING ABS(SUM(
         CASE

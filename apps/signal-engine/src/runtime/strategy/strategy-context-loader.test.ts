@@ -647,3 +647,60 @@ describe("StrategyContextLoader — cross-conId query safety", () => {
     assert.deepEqual(repo.contractCalls, ["265598"]);
   });
 });
+
+describe("GPW3 WSE native warmup", () => {
+  it("omits unsupported 12h, demands native closed bars and exposes exact missing TF", async () => {
+    const instrument: Instrument = { ...INSTRUMENT, id: "pko_wse", brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" };
+    const bound: BoundInstrument = { ...BOUND, instrument, instrumentId: instrument.id, brokerSymbol: "PKO", conId: 35146360,
+      localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" };
+    const requested: string[] = [];
+    const loader = new StrategyContextLoader({ clock: () => NOW, maxMarketStateAgeMs: 60000, repo: {
+      getInstrumentContractByConId: async () => makeContract({ symbol: "PKO", conid: "35146360", exchange: "WSE", primaryExchange: "WSE", currency: "PLN", localSymbol: "PKO", tradingClass: "PKO" }),
+      getMarketState: async () => ({ conid: "35146360", symbol: "PKO", lastPrice: 60, ts: NOW.toISOString() }),
+      getRecentCandlesForContract: async (_symbol, _conid, tf, _limit, nativeOnly) => {
+        assert.equal(nativeOnly, true); requested.push(tf);
+        return Array.from({ length: tf === "1m" ? 220 : 1 }, (_, i) => ({ conid: "35146360", symbol: "PKO", timeframe: tf,
+          ts: new Date(NOW_MS - (220 - i) * 60000), open: 60, high: 61, low: 59, close: 60, volume: 100, source: "ibkr_wse_native_v1" }));
+      },
+    } });
+    const result = await loader.load({ instrument, bound, positionQuantity: 0, timeframes: ["1m", "12h", "1h"] });
+    assert.deepEqual(requested, ["1m", "1h"]);
+    assert.equal(result.kind, "error");
+    if (result.kind === "error") assert.match(result.message, /insufficient 1h candles/);
+  });
+});
+
+describe("GPW3 native WSE freshness measured from conservative close", () => {
+  async function evaluate(tf: "1h" | "4h", ageSinceEnd: number, wse = true) {
+    const instrument: Instrument = wse ? { ...INSTRUMENT, id: "pko_wse", brokerSymbol: "PKO", exchange: "WSE", currency: "PLN" } : INSTRUMENT;
+    const bound: BoundInstrument = wse ? { ...BOUND, instrument, instrumentId: instrument.id, brokerSymbol: "PKO", conId: 35146360,
+      localSymbol: "PKO", tradingClass: "PKO", exchange: "WSE", currency: "PLN" } : BOUND;
+    const selected = makeCandles(50, TIMEFRAME_MS[tf], NOW_MS - TIMEFRAME_MS[tf] - ageSinceEnd, String(bound.conId), bound.brokerSymbol)
+      .map(c => ({ ...c, timeframe: tf, source: "ibkr_wse_native_v1" }));
+    const repo = makeRepo({
+      contract: makeContract({ symbol: bound.brokerSymbol, conid: String(bound.conId), exchange: bound.exchange, primaryExchange: bound.exchange, currency: bound.currency, localSymbol: bound.localSymbol, tradingClass: bound.tradingClass }),
+      candles: { "1m": makeCandles(220, 60000, NOW_MS - 60000, String(bound.conId), bound.brokerSymbol).map(c => ({ ...c, source: "ibkr_wse_native_v1" })), [tf]: selected },
+      marketState: makeMarketState({ symbol: bound.brokerSymbol, conid: String(bound.conId) }),
+    });
+    return makeLoader(repo).load({ instrument, bound, positionQuantity: 0, timeframes: ["1m", tf] });
+  }
+  for (const [tf, ceiling] of [["1h", 5400000], ["4h", 21600000]] as const) {
+    it(`${tf} exact end+ceiling passes; next millisecond and overnight fail`, async () => {
+      assert.equal((await evaluate(tf, ceiling)).kind, "ok");
+      const beyond = await evaluate(tf, ceiling + 1);
+      assert.equal(beyond.kind, "error");
+      if (beyond.kind === "error") assert.match(beyond.message, /stale/);
+      assert.equal((await evaluate(tf, 24 * 3600000)).kind, "error");
+    });
+    it(`${tf} unfinished latest bar cannot supply the 50th required native candle`, async () => {
+      const unfinished = await evaluate(tf, -1);
+      assert.equal(unfinished.kind, "error");
+      if (unfinished.kind === "error") assert.match(unfinished.message, /insufficient/);
+    });
+    it(`${tf} USD retains start-based freshness`, async () => {
+      const legacy = await evaluate(tf, ceiling, false);
+      assert.equal(legacy.kind, "error");
+      if (legacy.kind === "error") assert.match(legacy.message, /stale/);
+    });
+  }
+});

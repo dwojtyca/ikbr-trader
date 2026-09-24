@@ -1,3 +1,4 @@
+import { parseGpwWindow } from "./gpw-window.js";
 import dotenv from "dotenv";
 import { z } from "zod";
 
@@ -341,7 +342,10 @@ export function buildExecutionConfig(
   rawEnv: NodeJS.ProcessEnv | Record<string, unknown>,
 ) {
   const env = schema.parse(rawEnv);
+  const gpwWindow = parseGpwWindow(rawEnv);
+  if (gpwWindow && env.IBKR_ENVIRONMENT !== "paper") throw new Error("GPW window requires paper environment");
   return {
+    gpwWindow,
     ...env,
     ...buildLegacyDerived(env),
     ...buildPhase1Derived(env),

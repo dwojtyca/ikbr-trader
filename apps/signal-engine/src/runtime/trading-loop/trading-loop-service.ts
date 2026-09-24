@@ -1,3 +1,5 @@
+import type { WseStrategyPriceEvidence } from "@ikbr/shared";
+import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 /**
  * Trading Loop — core service.
  *
@@ -48,7 +50,7 @@ import type {
   InstrumentRegistry,
   SignalAttributionContext,
 } from "@ikbr/shared";
-import { findStrategyProfile, mapAssetClassToIbkrSecType } from "@ikbr/shared";
+import { isWseBound, normalizeWseStrategyLevels, findStrategyProfile, mapAssetClassToIbkrSecType } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
@@ -89,6 +91,7 @@ export interface StrategyRuntimeStateRepository
 
 export interface TradingLoopServiceOptions {
   readonly config: TradingLoopConfig;
+  readonly wseMetadataReader?: WseStrategyMetadataReader;
   readonly registry: InstrumentRegistry;
   /**
    * PR15.2 — server-side authority mapping logical `instrumentId`
@@ -199,6 +202,7 @@ export class TradingLoopService {
   readonly #contextLoader: StrategyContextLoader;
   readonly #logger: TradingLoopServiceOptions["logger"];
   readonly #clock: () => Date;
+  readonly #wseMetadataReader?: WseStrategyMetadataReader;
   readonly #setTimeoutFn: typeof setTimeout;
   readonly #clearTimeoutFn: typeof clearTimeout;
   readonly #setIntervalFn: typeof setInterval;
@@ -248,6 +252,7 @@ export class TradingLoopService {
     this.#repo = options.repo;
     this.#strategyCooldownMs = options.strategyCooldownMs;
     this.#logger = options.logger;
+    this.#wseMetadataReader = options.wseMetadataReader;
     this.#clock = options.clock ?? (() => new Date());
     this.#setTimeoutFn = options.setTimeoutFn ?? setTimeout;
     this.#clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;
@@ -689,7 +694,8 @@ export class TradingLoopService {
         message: policyResolution.message,
       });
     }
-    const { policy, executionPolicy } = policyResolution;
+    const { executionPolicy } = policyResolution;
+    let policy = policyResolution.policy;
 
     // ---- PR15.4 resolve active strategies for this symbol ----------
     const resolution = await resolveActiveStrategyIds(
@@ -761,7 +767,7 @@ export class TradingLoopService {
       instrument,
       bound,
       positionQuantity,
-      timeframes: Array.from(strategyTimeframeSet),
+      timeframes: Array.from(strategyTimeframeSet).filter(tf => !(bound && isWseBound(bound) && tf === "12h")),
     });
     if (contextResult.kind === "error") {
       return this.#finalize(cycleId, instrument.id, startedAt, {
@@ -868,6 +874,23 @@ export class TradingLoopService {
       intendedAction: winner.signal.direction,
     };
 
+    let strategyPriceEvidence: WseStrategyPriceEvidence | undefined;
+    if (bound && isWseBound(bound)) {
+      try {
+        if (!this.#wseMetadataReader) throw new Error("wse_metadata_reader_unavailable");
+        const source = await this.#wseMetadataReader.read(bound);
+        strategyPriceEvidence = normalizeWseStrategyLevels(source.metadata, bound, source.accountId, {
+          entry: winner.signal.suggestedEntry!, stopLoss: winner.signal.stopLoss!, takeProfit: winner.signal.takeProfit!,
+        }, this.#clock().getTime());
+        policy = { ...policy, strategyPrices: strategyPriceEvidence.final };
+      } catch (error) {
+        return this.#finalize(cycleId, instrument.id, startedAt, {
+          kind: "SKIPPED", instrumentId: instrument.id, reason: "STRATEGY_POLICY_MISMATCH",
+          message: error instanceof Error ? error.message : "wse_strategy_prices_unavailable",
+        });
+      }
+    }
+
     // ---- Run pipeline ONCE to derive stable trigger identity --------
     let dryRunResult: DryRunResult;
     try {
@@ -919,6 +942,13 @@ export class TradingLoopService {
         },
         reason: "PIPELINE_FAILURE",
       });
+    }
+
+    if (strategyPriceEvidence && (dryRunResult.pipeline.ticket.order.limitPrice !== strategyPriceEvidence.final.entry
+      || dryRunResult.pipeline.ticket.protection.stopLoss !== strategyPriceEvidence.final.stopLoss
+      || dryRunResult.pipeline.ticket.protection.takeProfit !== strategyPriceEvidence.final.takeProfit)) {
+      return this.#finalize(cycleId, instrument.id, startedAt, { kind: "SKIPPED", instrumentId: instrument.id,
+        reason: "STRATEGY_POLICY_MISMATCH", message: "wse_strategy_prices_changed_in_pipeline" });
     }
 
     // ---- PR15.4 post-pipeline defence-in-depth (attribution) --------
@@ -984,6 +1014,7 @@ export class TradingLoopService {
         dryRunResult,
         idempotencyKey,
         strategyId: attribution.strategyId,
+        ...(strategyPriceEvidence ? { indicators: { ...contextResult.context.indicators, strategyPriceEvidence } } : {}),
         // PR15.2 — carry the bound broker identity through so
         // the ticket sent to execution-engine matches what
         // its server-side authority will verify.

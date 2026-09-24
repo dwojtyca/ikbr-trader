@@ -35,7 +35,17 @@ export class BoundReviewWorker {
   }
 
   private async evaluate(claim: BoundClaim): Promise<BoundDecision> {
+    const isPko = claim.identity.instrumentId === "pko_wse" && claim.identity.conid === "35146360" && claim.order.instrument === "PKO";
+    const coverage = {
+      technicalIndicators: claim.order.indicators ? "AVAILABLE" : "UNAVAILABLE",
+      instrumentMatchedNews: "UNAVAILABLE",
+      financialStatements: "UNAVAILABLE", earnings: "UNAVAILABLE", macro: "UNAVAILABLE", broaderMarketTrends: "UNAVAILABLE",
+    };
     const context: Record<string, unknown> = {
+      coverage,
+      instrument: { ...claim.identity, symbol: claim.order.instrument,
+        currency: isPko ? "PLN" : "UNVERIFIED", exchange: isPko ? "WSE" : "UNVERIFIED" },
+      accountValuationCurrency: "UNVERIFIED",
       proposal: claim.proposalSnapshot ?? claim.order, identity: claim.identity,
       indicatorAvailability: claim.order.indicators ? "AVAILABLE" : "UNAVAILABLE",
       startedAt: new Date().toISOString(),
@@ -56,7 +66,11 @@ export class BoundReviewWorker {
     let news: MarketNewsItem[];
     try {
       news = await this.deps.news.getNewsForSymbol(claim.order.instrument, this.deps.newsWindowHours, this.deps.maxNewsItems);
-      context.news = { items: news, receivedAt: new Date().toISOString(), availability: news.length ? "AVAILABLE" : "EMPTY" };
+      // Symbol-only search cannot establish that a PKO entity is the WSE listing.
+      const unverifiedItemsCount = isPko ? news.length : 0;
+      if (isPko) news = [];
+      coverage.instrumentMatchedNews = unverifiedItemsCount ? "UNVERIFIED_IDENTITY" : news.length ? "SYMBOL_MATCH_ONLY" : "EMPTY";
+      context.news = { items: news, unverifiedItemsCount, receivedAt: new Date().toISOString(), availability: coverage.instrumentMatchedNews };
     } catch { return reject("NEWS_UNAVAILABLE"); }
     const current = account.positions.find((position) => position.conid === claim.identity.conid);
     let decision: LlmDecision;

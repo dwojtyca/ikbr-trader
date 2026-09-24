@@ -1,3 +1,4 @@
+import type { IndicatorSnapshot } from "@ikbr/shared";
 /**
  * Execution Runtime — orchestration.
  *
@@ -180,6 +181,7 @@ export interface ExecuteInput {
  * NOT invoke this method.
  */
 export interface ExecutePreparedInput {
+  readonly indicators?: IndicatorSnapshot;
   readonly dryRunResult: DryRunResult;
   readonly idempotencyKey: string;
   /**
@@ -350,6 +352,7 @@ export class ExecutionRuntime {
       input.idempotencyKey,
       input.bound,
       input.strategyId,
+      input.indicators,
     );
   }
 
@@ -358,6 +361,7 @@ export class ExecutionRuntime {
     idempotencyKey: string,
     bound: BoundInstrument | undefined,
     strategyLabel: string,
+    indicators?: IndicatorSnapshot,
   ): Promise<ExecutionRuntimeOutcome> {
     const pipeline = dryRunResult.pipeline;
 
@@ -390,6 +394,7 @@ export class ExecutionRuntime {
     let legacyTicket;
     try {
       legacyTicket = toLegacySignalTicket(ticket, { bound });
+      if (indicators) legacyTicket.indicators = indicators;
     } catch (err) {
       // The mapper rejects tickets that cannot be represented on
       // the legacy wire (STP_LMT, STP+bracket). These are deterministic

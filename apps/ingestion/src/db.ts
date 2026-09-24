@@ -29,6 +29,7 @@ export class MarketRepository {
         );
       `);
 
+      await this.pool.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS source text`);
       await this.pool.query(`
         CREATE INDEX IF NOT EXISTS ${table}_symbol_ts_idx
         ON ${table} (symbol, ts DESC);
@@ -107,15 +108,15 @@ export class MarketRepository {
     const table = this.tableForTimeframe(candle.timeframe);
     await this.pool.query(
       `
-      INSERT INTO ${table} (conid, symbol, ts, open, high, low, close, volume)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO ${table} (conid, symbol, ts, open, high, low, close, volume, source)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       ON CONFLICT (conid, ts)
       DO UPDATE SET
         open = EXCLUDED.open,
         high = EXCLUDED.high,
         low = EXCLUDED.low,
         close = EXCLUDED.close,
-        volume = EXCLUDED.volume;
+        volume = EXCLUDED.volume, source = EXCLUDED.source;
       `,
       [
         candle.conid,
@@ -126,6 +127,7 @@ export class MarketRepository {
         candle.low,
         candle.close,
         candle.volume,
+        candle.source ?? null,
       ],
     );
   }
@@ -181,6 +183,13 @@ export class MarketRepository {
    * (symbol, timeframe) pairs that already have fresh data in the DB,
    * staying under IBKR's 60-historical-requests/10-minute pacing cap.
    */
+  async getNativeWseCandles(conid: string, timeframe: Candle["timeframe"], limit: number): Promise<Candle[]> {
+    const rows = await this.pool.query(`SELECT conid, symbol, ts, open, high, low, close, volume, source
+      FROM ${this.tableForTimeframe(timeframe)} WHERE conid=$1 AND source='ibkr_wse_native_v1' ORDER BY ts DESC LIMIT $2`, [conid, limit]);
+    return rows.rows.map(row => ({ conid: row.conid, symbol: row.symbol, timeframe, ts: new Date(row.ts),
+      open: Number(row.open), high: Number(row.high), low: Number(row.low), close: Number(row.close), volume: Number(row.volume), source: row.source })).reverse();
+  }
+
   async getLatestCandleTsByConids(
     timeframe: Candle["timeframe"],
     conids: string[],

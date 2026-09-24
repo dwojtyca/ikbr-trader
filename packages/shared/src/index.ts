@@ -44,6 +44,7 @@ export type AiDecision = "EXECUTE" | "REJECT";
 export type CandleTimeframe = "1m" | "5m" | "1h" | "4h" | "12h" | "1d" | "1w";
 
 export interface Candle {
+  source?: string;
   conid: string;
   symbol: string;
   timeframe: CandleTimeframe;
@@ -156,6 +157,7 @@ export interface SignalTicket {
 }
 
 export interface IndicatorSnapshot {
+  strategyPriceEvidence?: import("./wse-market-rules.js").WseStrategyPriceEvidence;
   ema20?: number;
   ema50?: number;
   ema200?: number;
@@ -408,3 +410,9 @@ export * from "./risk-engine/index.js";
 export * from "./signal-engine/index.js";
 export * from "./execution-ticket/index.js";
 export * from "./trading-pipeline/index.js";
+
+export * from "./wse-market-rules.js";
+
+export { buildConfiguredInstrumentRegistry } from "./instruments/configured-registry.js";
+
+export * from "./wse-candles.js";

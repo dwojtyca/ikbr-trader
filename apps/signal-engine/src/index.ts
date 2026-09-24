@@ -1,9 +1,10 @@
+import { HttpWseStrategyMetadataReader } from "./runtime/trading-loop/wse-metadata-reader.js";
 import Fastify from "fastify";
 import { legacyProducerOwnsSymbol } from "./runtime/legacy-producer-scope.js";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
-import { ProposedOrder, defaultInstrumentRegistry } from "@ikbr/shared";
+import { ProposedOrder, buildConfiguredInstrumentRegistry } from "@ikbr/shared";
 import { buildInstrumentBindingAuthority } from "@ikbr/shared";
 import { config } from "./config.js";
 import { SignalRepository } from "./repository.js";
@@ -34,6 +35,7 @@ import { ReconciliationReader } from "./runtime/trading-loop/reconciliation-read
 import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
+const defaultInstrumentRegistry = buildConfiguredInstrumentRegistry(process.env);
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
@@ -415,6 +417,7 @@ if (config.runtimeEnabled) {
       },
     });
     tradingLoopService = new TradingLoopService({
+      wseMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
       config: config.tradingLoop,
       registry: defaultInstrumentRegistry,
       bindingAuthority,

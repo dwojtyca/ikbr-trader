@@ -28,6 +28,7 @@ import {
   defaultInstrumentRegistry,
   InstrumentBindingAuthority,
   type InstrumentBindingParseError,
+  type InstrumentRegistry,
 } from "@ikbr/shared";
 
 export class InstrumentBindingConfigError extends Error {
@@ -60,10 +61,11 @@ export class InstrumentBindingConfigError extends Error {
  */
 export function buildExecutionInstrumentBindingAuthority(
   rawInput: string | undefined,
+  registry: InstrumentRegistry = defaultInstrumentRegistry,
 ): InstrumentBindingAuthority {
   const result = buildInstrumentBindingAuthority(
     rawInput ?? "",
-    defaultInstrumentRegistry,
+    registry,
   );
   if (!result.ok) throw new InstrumentBindingConfigError(result.errors);
   return result.authority;

@@ -596,22 +596,25 @@ export class SignalRepository {
     conId: string,
     timeframe: CandleTimeframe,
     limit: number,
+    nativeWseOnly = false,
   ): Promise<Candle[]> {
     const table = this.tableForTimeframe(timeframe);
     const result = await this.pool.query(
       `
-      SELECT conid, symbol, ts, open, high, low, close, volume
+      SELECT conid, symbol, ts, open, high, low, close, volume, source
       FROM ${table}
       WHERE UPPER(symbol) = UPPER($1)
         AND conid = $2
+        AND ($4::boolean = false OR source = 'ibkr_wse_native_v1')
       ORDER BY ts DESC
       LIMIT $3;
       `,
-      [symbol, conId, limit],
+      [symbol, conId, limit, nativeWseOnly],
     );
 
     return result.rows
       .map((row) => ({
+        source: row.source as string | undefined,
         conid: row.conid as string,
         symbol: row.symbol as string,
         timeframe,
