@@ -69,8 +69,13 @@ before close. `/execution/aapl-window` reports durable eligibility. A consumed
 attempt cannot be reset by restarting or changing run ID. Unknown submission
 consumes the attempt and must be reconciled, never blindly retried.
 
-AI research identity/context validation remains a separate delivery gate; provider
-configuration or a successful model request alone is not proof of complete review.
+The bound AI worker requires exact AAPL proposal identity, configured binding and
+raw ingestion metadata with `source=ibkr`: STK, SMART routing, NASDAQ primary
+exchange, USD, local symbol AAPL and trading class NMS. Missing or contradictory
+evidence rejects before provider calls. A valid identity does not verify
+symbol-only news or provide missing fundamentals. Inspect persisted review
+coverage and the actual EXECUTE/REJECT reason; provider configuration or a
+successful model request alone is not proof of complete research.
 
 Only after every gate passes may the authorized Paper writes, AI worker and loop
 be enabled for that bounded window. Observe durable proposal, AI, risk and broker

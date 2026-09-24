@@ -5,6 +5,10 @@ export interface ClaimedOrderRow {
   id: number;
   instrument: string;
   conid: string | null;
+  instrument_id?: string | null;
+  partial_take_profits?: ProposedOrder["partialTakeProfits"] | null;
+  trailing_stop_pct?: number | null;
+  trailing_stop_activation_r?: number | null;
   side: Side;
   position_effect: "OPEN_OR_ADD" | "CLOSE_OR_REDUCE" | null;
   order_type: "MKT" | "LMT" | "STP";
@@ -292,6 +296,10 @@ export class LlmAgentRepository {
       id: Number(row.id),
       instrument: row.instrument,
       conid: row.conid ?? undefined,
+      instrumentId: row.instrument_id ?? undefined,
+      partialTakeProfits: row.partial_take_profits ?? undefined,
+      trailingStopPct: row.trailing_stop_pct ?? undefined,
+      trailingStopActivationR: row.trailing_stop_activation_r ?? undefined,
       side: row.side,
       positionEffect: row.position_effect ?? undefined,
       orderType: row.order_type,

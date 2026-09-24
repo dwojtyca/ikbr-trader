@@ -1,3 +1,4 @@
+import { createAaplIdentityResolver } from "./aapl-identity.js";
 import { BoundReviewRepository } from "./bound-review-repository.js";
 import { BoundReviewWorker } from "./bound-review-worker.js";
 import { IndicatorSnapshot } from "@ikbr/shared";
@@ -31,6 +32,7 @@ const decider = new OpenAiDecider({
 
 const boundWorker = new BoundReviewWorker({
   repository: new BoundReviewRepository(pool), execution: executionApi,
+  resolveAaplIdentity: createAaplIdentityResolver({ pool, env: process.env }),
   news: marketaux, decider, model: config.LLM_AGENT_MODEL,
   promptVersion: config.LLM_AGENT_PROMPT_VERSION,
   newsWindowHours: config.LLM_AGENT_NEWS_WINDOW_HOURS,

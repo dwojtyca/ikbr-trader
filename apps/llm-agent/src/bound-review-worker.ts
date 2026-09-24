@@ -1,3 +1,4 @@
+import { needsAaplIdentity, exactAaplClaim, type AaplIdentityResolver } from "./aapl-identity.js";
 import type { BoundClaim, BoundDecision, BoundReviewStore, DeliveryOutcome } from "./bound-review-repository.js";
 import type { AccountSummary } from "./execution-api-client.js";
 import type { DecisionContext, LlmDecision } from "./openai-decider.js";
@@ -5,6 +6,7 @@ import type { MarketNewsItem } from "./marketaux-client.js";
 
 interface BoundWorkerDependencies {
   repository: BoundReviewStore;
+  resolveAaplIdentity?: AaplIdentityResolver;
   execution: {
     getAccountSummary(force?: boolean): Promise<AccountSummary>;
     executeBoundProposed(id: number): Promise<DeliveryOutcome>;
@@ -52,6 +54,15 @@ export class BoundReviewWorker {
     };
     const reject = (reason: string): BoundDecision => ({ decision: "REJECT", confidence: 0, reason,
       model: this.deps.model, promptVersion: this.deps.promptVersion, context });
+    if (needsAaplIdentity(claim)) {
+      if (!exactAaplClaim(claim)) return reject("AAPL_IDENTITY_CLAIM_MISMATCH");
+      if (!this.deps.resolveAaplIdentity) return reject("AAPL_IDENTITY_RESOLVER_MISSING");
+      try {
+        const resolved = await this.deps.resolveAaplIdentity(claim);
+        if (!resolved.ok) return reject(resolved.reason);
+        context.instrument = { ...claim.identity, ...resolved.evidence };
+      } catch { return reject("AAPL_IDENTITY_LOOKUP_FAILED"); }
+    }
     if (claim.order.riskCheckStatus !== "PASS") return reject("RISK_NOT_PASS");
     if (!this.deps.news.isConfigured()) return reject("NEWS_NOT_CONFIGURED");
     if (!this.deps.decider.isConfigured()) return reject("AI_NOT_CONFIGURED");
