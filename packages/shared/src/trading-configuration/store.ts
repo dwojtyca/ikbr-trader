@@ -4,6 +4,7 @@ import { createLegacyManagementSnapshot, decodeLegacyManagementSnapshot, validat
 import { buildTradingConfigurationProjection } from "./projection.js";
 import { TRADING_CONFIGURATION_SERVICES, type TradingConfigurationAdmissionState, type TradingConfigurationObservation, type TradingConfigurationService } from "./admission.js";
 import type { InstrumentBindingAuthority } from "../instruments/bindings.js";
+import { preparePP2Conversion } from "./strategy-conversion.js";
 
 export interface TradingConfigurationDb { query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }
 export interface TradingConfigurationConnection extends TradingConfigurationDb { release(): void }
@@ -19,6 +20,9 @@ export interface TradingConfigurationRegistrationResult {
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : typeof v === "string" ? v : "";
 export class TradingConfigurationStore {
   constructor(private readonly pool: TradingConfigurationPool) {}
+  async prepareStrategyRuntime(loaded: LoadedTradingConfiguration, tradingEnabled: boolean) {
+    return preparePP2Conversion(this.pool, { loaded, tradingEnabled });
+  }
   private async transaction<T>(fn: (db: TradingConfigurationDb) => Promise<T>): Promise<T> {
     const db = await this.pool.connect();
     try {
@@ -141,7 +145,7 @@ export class TradingConfigurationStore {
     });
   }
   async readAdmissionState(): Promise<TradingConfigurationAdmissionState> {
-    const result = await this.pool.query(`SELECT r.bundle_latched,clock_timestamp() AS now,
+    const result = await this.pool.query(`SELECT (r.bundle_latched OR EXISTS(SELECT 1 FROM strategy_runtime_conversion)) AS bundle_latched,clock_timestamp() AS now,
       COALESCE((SELECT json_agg(o) FROM trading_configuration_observations o),'[]'::json) AS observations
       FROM trading_configuration_rollout r WHERE singleton=TRUE`);
     const row = result.rows[0];

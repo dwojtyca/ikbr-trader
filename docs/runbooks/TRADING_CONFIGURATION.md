@@ -1,4 +1,4 @@
-# Versioned trading configuration (PP1)
+# Versioned trading configuration (PP1 + PP2)
 
 PP1 adds a startup configuration bundle shared by ingestion, signal-engine,
 execution-engine and llm-agent. The [field contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md)
@@ -15,8 +15,9 @@ strategy instances and separate account, entry, execution, risk and research
 catalogues. To describe another supported stock, add its verified listing
 expectations, issuer mapping and policy references. To describe different strategy
 parameters, add a named instance and assign it; do not copy parameters into an
-instrument. PP1 represents these choices; applying parameters to strategy objects
-is PP2 work.
+instrument. PP1 represents these choices; PP2 applies parameters through fresh
+strategy objects. See [strategy instances](STRATEGY_INSTANCES.md) for evaluation,
+priority, account scope, immutable attribution and the additional conversion gates.
 
 Build the shared package, then calculate the effective hash from the repository
 root. This resolves versioned defaults before hashing and prints no credentials:
@@ -45,14 +46,19 @@ binding JSON, enabled PKO/AAPL profile flags and legacy strategy overrides; clea
 those authority settings during conversion. Credentials, account allowlists and
 activation controls stay outside the bundle.
 
-Even a valid entry-enabled declaration cannot trade through PP1 bundle mode.
-Diagnostics retain `PP2_STRATEGY_RUNTIME_UNAVAILABLE` and
-`PP3_EXECUTION_POLICY_UNAVAILABLE`; issuer mapping is not verified PP4 research.
+Even a valid entry-enabled declaration cannot trade through bundle mode.
+Diagnostics retain `PP3_EXECUTION_POLICY_UNAVAILABLE`; PP2 permits guarded
+diagnostic evaluation only. Issuer mapping is not verified PP4 research.
 `TRADING_ENABLED` keeps its existing meaning, including the requirement for an
 authorized full close. Configuration admission never exempts close from its
 existing account, authentication, ownership, quote, risk or quantity checks.
 
 ## Disabled conversion and retained positions
+
+The following PP1 authority procedure remains necessary. A PP2 image additionally
+requires its disabled-write cutoff/state-inheritance conversion; unresolved attempts,
+close work or live AI leases block it. Follow the [PP2 runbook](STRATEGY_INSTANCES.md)
+and do not treat a PP1 retained-management snapshot alone as PP2 evaluation readiness.
 
 1. Preserve a private database backup and record the reviewed image/commit. Upgrade
    all four services to the PP1-capable image with the existing legacy authority,

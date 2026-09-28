@@ -137,7 +137,7 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
     const o = v.object(raw, p, ["id","assetClass","contract","session","monitoringEnabled","entryEnabled","strategySelection","accountPolicyId","entryPolicyId","executionPolicyId","riskPolicyId","researchPolicyId","issuerMappingId"]);
     const contract = v.object(v.required(o,"contract",p),`${p}.contract`,["broker","symbol","conId","exchange","primaryExchange","currency","localSymbol","tradingClass","expectedMinTick"]);
     const session = v.object(v.required(o,"session",p),`${p}.session`,["useRTH","timeZone"]);
-    const selection = v.object(v.required(o,"strategySelection",p),`${p}.strategySelection`,["mode","instanceIds"]);
+    const selection = v.object(v.required(o,"strategySelection",p),`${p}.strategySelection`,["mode","instanceIds","priorities"]);
     const exchange = v.literal(v.required(contract,"exchange",`${p}.contract`),`${p}.contract.exchange`,["WSE","SMART"]);
     const primary = v.literal(v.required(contract,"primaryExchange",`${p}.contract`),`${p}.contract.primaryExchange`,[...VENUES]);
     const currency = v.literal(v.required(contract,"currency",`${p}.contract`),`${p}.contract.currency`,["PLN","USD"]);
@@ -148,7 +148,19 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
     v.unique(instanceIds, instanceIds.map((_,j)=>`${p}.strategySelection.instanceIds[${j}]`));
     const entryEnabled = v.bool(v.required(o,"entryEnabled",p),`${p}.entryEnabled`);
     const monitoringEnabled = v.bool(v.required(o,"monitoringEnabled",p),`${p}.monitoringEnabled`);
-    const mode = v.literal(v.required(selection,"mode",`${p}.strategySelection`),`${p}.strategySelection.mode`,["single"]);
+    const mode = v.literal(v.required(selection,"mode",`${p}.strategySelection`),`${p}.strategySelection.mode`,["single","priority"]);
+    let priorities: Record<string, number> | undefined;
+    if (mode === "priority") {
+      if (entryEnabled && !instanceIds.length) v.add(`${p}.strategySelection.instanceIds`, "INVALID_VALUE");
+      const rawPriorities = v.object(v.required(selection, "priorities", `${p}.strategySelection`), `${p}.strategySelection.priorities`, instanceIds);
+      priorities = {};
+      const seen = new Set<number>();
+      for (const id of instanceIds) {
+        const rank = v.number(v.required(rawPriorities, id, `${p}.strategySelection.priorities`), `${p}.strategySelection.priorities.${id}`, 0, 1000, true);
+        if (seen.has(rank)) v.add(`${p}.strategySelection.priorities`, "CONTRADICTORY_POLICY");
+        seen.add(rank); priorities[id] = rank;
+      }
+    } else if (selection && Object.hasOwn(selection, "priorities")) v.add(`${p}.strategySelection.priorities`, "UNKNOWN_FIELD");
     if (mode === "single" && (entryEnabled ? instanceIds.length !== 1 : instanceIds.length > 1)) v.add(`${p}.strategySelection.instanceIds`,"INVALID_VALUE");
     if (entryEnabled && !monitoringEnabled) v.add(`${p}.entryEnabled`,"CONTRADICTORY_POLICY");
     if (instanceIds.some((id) => !strategyInstances.some((x) => x.id === id))) v.add(`${p}.strategySelection.instanceIds`,"MISSING_REFERENCE");
@@ -163,7 +175,7 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
     const mapping=find(issuerMappings,ref.issuerMappingId,"issuerMappingId");
     if (risk && risk.maxEntryNotional.currency !== currency) v.add(`${p}.riskPolicyId`,"CONTRADICTORY_POLICY");
     if (mapping && (mapping.currency !== currency || mapping.primaryExchange !== primary)) v.add(`${p}.issuerMappingId`,"CONTRADICTORY_POLICY");
-    return { id:v.id(v.required(o,"id",p),`${p}.id`), assetClass:v.literal(v.required(o,"assetClass",p),`${p}.assetClass`,["stock"]), contract:{ broker:v.literal(v.required(contract,"broker",`${p}.contract`),`${p}.contract.broker`,["ibkr"]), symbol:v.string(v.required(contract,"symbol",`${p}.contract`),`${p}.contract.symbol`,SYMBOL,32), conId:v.number(v.required(contract,"conId",`${p}.contract`),`${p}.contract.conId`,1,Number.MAX_SAFE_INTEGER,true,true), exchange, primaryExchange:primary, currency, localSymbol:v.string(v.required(contract,"localSymbol",`${p}.contract`),`${p}.contract.localSymbol`,SYMBOL,32), tradingClass:v.string(v.required(contract,"tradingClass",`${p}.contract`),`${p}.contract.tradingClass`,SYMBOL,32), expectedMinTick:v.number(v.required(contract,"expectedMinTick",`${p}.contract`),`${p}.contract.expectedMinTick`,Number.MIN_VALUE,1000,false,true) }, session:{ useRTH:v.literal(v.required(session,"useRTH",`${p}.session`),`${p}.session.useRTH`,[true]), timeZone:timezone }, monitoringEnabled, entryEnabled, strategySelection:{mode:mode as "single",instanceIds}, ...ref };
+    return { id:v.id(v.required(o,"id",p),`${p}.id`), assetClass:v.literal(v.required(o,"assetClass",p),`${p}.assetClass`,["stock"]), contract:{ broker:v.literal(v.required(contract,"broker",`${p}.contract`),`${p}.contract.broker`,["ibkr"]), symbol:v.string(v.required(contract,"symbol",`${p}.contract`),`${p}.contract.symbol`,SYMBOL,32), conId:v.number(v.required(contract,"conId",`${p}.contract`),`${p}.contract.conId`,1,Number.MAX_SAFE_INTEGER,true,true), exchange, primaryExchange:primary, currency, localSymbol:v.string(v.required(contract,"localSymbol",`${p}.contract`),`${p}.contract.localSymbol`,SYMBOL,32), tradingClass:v.string(v.required(contract,"tradingClass",`${p}.contract`),`${p}.contract.tradingClass`,SYMBOL,32), expectedMinTick:v.number(v.required(contract,"expectedMinTick",`${p}.contract`),`${p}.contract.expectedMinTick`,Number.MIN_VALUE,1000,false,true) }, session:{ useRTH:v.literal(v.required(session,"useRTH",`${p}.session`),`${p}.session.useRTH`,[true]), timeZone:timezone }, monitoringEnabled, entryEnabled, strategySelection:mode === "priority" ? {mode: "priority",instanceIds,priorities:priorities!} : {mode:"single",instanceIds}, ...ref };
   });
   v.unique(instruments.map((x)=>x.id),instruments.map((_,i)=>`$.instruments[${i}].id`));
   v.unique(instruments.map((x)=>x.contract.symbol),instruments.map((_,i)=>`$.instruments[${i}].contract.symbol`),true);

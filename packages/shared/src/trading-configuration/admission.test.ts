@@ -7,7 +7,7 @@ const rows = (): TradingConfigurationObservation[] => TRADING_CONFIGURATION_SERV
   migrationPrepared: false, legacySourceHash: null, observedAt: new Date(nowMs - 1000).toISOString(), expiresAt: new Date(nowMs + 29000).toISOString() }));
 test("matching bundle remains denied; missing, stale, unknown versions and concurrent processes remain visible", () => {
   const match = assessTradingConfigurationAdmission(local, { latched: true, nowMs, observations: rows() });
-  assert.equal(match.allowed, false); assert.deepEqual(match.reasons, ["PP2_STRATEGY_RUNTIME_UNAVAILABLE", "PP3_EXECUTION_POLICY_UNAVAILABLE"]);
+  assert.equal(match.allowed, false); assert.deepEqual(match.reasons, ["PP3_EXECUTION_POLICY_UNAVAILABLE"]);
   assert.ok(assessTradingConfigurationAdmission(local, { latched: true, nowMs, observations: rows().slice(1) }).reasons.includes("CONFIG_SERVICE_UNAVAILABLE"));
   for (const patch of [{ effectiveHash: "b".repeat(64) }, { schemaVersion: 2 }, { canonicalVersion: 2 }, { mode: "legacy" as const }]) {
     const observations = rows(); observations.push({ ...observations[0], processId: "concurrent", ...patch });

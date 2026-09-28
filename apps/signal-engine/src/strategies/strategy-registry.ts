@@ -1,4 +1,5 @@
 import { listStrategyProfiles } from "@ikbr/shared";
+import type { TradingStrategyInstanceV1 } from "@ikbr/shared";
 import { GapFadeShortStrategy } from "./gap-fade-short.strategy.js";
 import { MomentumBreakdownShortStrategy } from "./momentum-breakdown-short.strategy.js";
 import { MomentumBreakoutLongStrategy } from "./momentum-breakout-long.strategy.js";
@@ -32,6 +33,13 @@ export function createStrategy(strategyId: string): Strategy {
     throw new Error(`Strategy profile ${strategyId} has no implementation`);
   }
   return factory();
+}
+
+export function createConfiguredStrategy(instance: TradingStrategyInstanceV1): Strategy {
+  if (!instance || instance.implementationId !== "momentum_breakout_long_v1") {
+    throw new Error("UNSUPPORTED_IMPLEMENTATION");
+  }
+  return new MomentumBreakoutLongStrategy(instance.parameters);
 }
 
 export function createStrategies(

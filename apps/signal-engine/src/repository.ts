@@ -1,8 +1,10 @@
 import type { InstrumentSessionIdentity, SessionScheduleEvidence } from '@ikbr/shared';
 import { Pool } from "pg";
+import { getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
 import { Redis } from "ioredis";
 import {
   type AaplScheduleEvidence,
+  parseStrategyAttribution, parseStrategyTrigger,
   Candle,
   CandleTimeframe,
   IndicatorSnapshot,
@@ -24,6 +26,10 @@ interface StoredMarketState {
 }
 
 interface ProposedOrderRow {
+  instrument_id?: string | null;
+  strategy_attribution?: unknown;
+  strategy_trigger?: unknown;
+  client_order_hash_version?: 1 | 2;
   id: number;
   instrument: string;
   conid: string | null;
@@ -1248,10 +1254,10 @@ export class SignalRepository {
   async getRecentSignals(limit: number): Promise<ProposedOrder[]> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, instrument_id, instrument, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              execution_attempted_at, executed_at, generated_from_candle_ts, lifecycle_reason, superseded_by_order_id,
-             created_at
+             created_at, strategy_attribution, strategy_trigger, client_order_hash_version
       FROM proposed_orders
       ORDER BY created_at DESC
       LIMIT $1
@@ -1652,7 +1658,17 @@ export class SignalRepository {
         : new Date(row.created_at);
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
 
+    const identity = {
+      strategyAttribution: row.strategy_attribution == null ? undefined : parseStrategyAttribution(row.strategy_attribution),
+      strategyTrigger: row.strategy_trigger == null ? undefined : parseStrategyTrigger(row.strategy_trigger),
+      clientOrderHashVersion: row.client_order_hash_version,
+    };
+    getClientOrderHashVersion(identity);
+    if (identity.strategyAttribution && (identity.strategyAttribution.instrumentId !== row.instrument_id ||
+        identity.strategyAttribution.implementationId !== row.strategy)) throw new Error("STRATEGY_ATTRIBUTION_ROW_MISMATCH");
     return {
+      ...identity,
+      instrumentId: row.instrument_id ?? undefined,
       id: row.id,
       instrument: row.instrument,
       conid: row.conid ?? undefined,

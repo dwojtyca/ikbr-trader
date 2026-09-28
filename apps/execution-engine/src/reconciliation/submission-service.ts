@@ -34,6 +34,7 @@ import type {
 } from "@ikbr/shared";
 import { tickSizesEqual } from "@ikbr/shared";
 import { aiApprovalFailure } from "../ai-proposal-review.js";
+import type { StrategyInstancePreflight } from "../strategy-instance-identity.js";
 import type { AiEntryRiskEvidence } from "../ai-entry-risk.js";
 
 import type {
@@ -92,6 +93,7 @@ export type BrokerPlanPreparer = (input: {
 }) => Promise<PreparedBrokerOrder>;
 
 export interface SubmissionServiceDeps {
+  readonly strategyPreflight?: (ticket: SignalTicket) => Promise<StrategyInstancePreflight>;
   readonly assertEntryAllowed: () => Promise<void>;
   readonly assessAiRisk?: (order: ProposedOrder, bound: BoundInstrument, accountId: string, sessionId: string) => Promise<{ok:true; evidence: AiEntryRiskEvidence} | {ok:false; reason:string}>;
   readonly repo: ExecutionRepository;
@@ -427,6 +429,10 @@ export function buildSubmissionApplicationService(
     const validatedOrder: ProposedOrder = {
       ...identity.order,
     };
+    if (validatedOrder.strategyAttribution) {
+      try { deps.repo.assertCurrentStrategyConfiguration(validatedOrder); }
+      catch { return { kind: "risk_rejected", reason: "STRATEGY_CURRENT_CONFIGURATION_MISMATCH" }; }
+    }
     if (validatedOrder.riskCheckStatus !== "PASS") return { kind: "risk_rejected", reason: "risk_check_not_pass" };
     if (validatedOrder.instrumentId !== undefined) {
       if (validatedOrder.positionEffect === "CLOSE_OR_REDUCE")
@@ -640,7 +646,9 @@ export function buildSubmissionApplicationService(
         return { kind: "market_order_not_allowed" };
       }
       // §5 server-side hash verification.
-      const serverHash = computeClientOrderHash(input.ticket);
+      let serverHash: string;
+      try { serverHash = computeClientOrderHash(input.ticket); }
+      catch { return { kind: "client_order_hash_mismatch" }; }
       if (input.clientOrderHash !== serverHash) {
         return { kind: "client_order_hash_mismatch" };
       }
@@ -734,6 +742,13 @@ export function buildSubmissionApplicationService(
         });
       }
       // Fresh INSERT.
+      let strategyPreflight: StrategyInstancePreflight | undefined;
+      if (input.ticket.strategyAttribution) {
+        try {
+          if (!deps.strategyPreflight) throw new Error("STRATEGY_PREFLIGHT_UNAVAILABLE");
+          strategyPreflight = await deps.strategyPreflight(input.ticket);
+        } catch { return { kind: "binding_identity_mismatch", reason: "STRATEGY_PREFLIGHT_UNAVAILABLE" }; }
+      }
       const positionGuard = await deps.buildPositionGuard();
       const deniedBeforeInsert = await configurationFailure();
       if (deniedBeforeInsert) return deniedBeforeInsert;
@@ -751,6 +766,7 @@ export function buildSubmissionApplicationService(
           positionGuard,
           {
             allowCrossContractExposure,
+            strategyPreflight,
             reconciliationGate: deps.reconciliationGate(),
           },
         );

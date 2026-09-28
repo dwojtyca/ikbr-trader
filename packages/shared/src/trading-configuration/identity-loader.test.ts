@@ -57,13 +57,13 @@ test("loader fails configured-file and conflicting authority before fallback; le
   assert.throws(() => loadTradingConfiguration({ TRADING_CONFIG_MIGRATION_PREPARE: "true" }), /DISABLED_WRITES/);
   assert.equal(loadTradingConfiguration({ TRADING_CONFIG_MIGRATION_PREPARE: "true", TRADING_ENABLED: "false" }).migrationPrepare, true);
 });
-test("all fixture instruments project monitoring with independent identities and unconditional PP2/PP3 blockers", () => {
+test("all fixture instruments project monitoring with independent identities and unconditional PP3 blocker", () => {
   const projection = buildTradingConfigurationProjection(parse(fixture()));
   assert.equal(projection.authority.getBoundInstrument("xyz_nyse")?.brokerSymbol, "QZXP");
   assert.equal(projection.registry.listExecutionEnabled().length, 0);
   for (const row of projection.readiness) {
     assert.equal(row.entryReady, false);
-    assert.ok(row.reasons.includes("PP2_STRATEGY_RUNTIME_UNAVAILABLE"));
+    assert.ok(!row.reasons.includes("PP2_STRATEGY_RUNTIME_UNAVAILABLE"));
     assert.ok(row.reasons.includes("PP3_EXECUTION_POLICY_UNAVAILABLE"));
     assert.equal(row.priceGrid.status, "unknown");
   }

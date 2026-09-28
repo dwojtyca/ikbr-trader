@@ -98,6 +98,9 @@ export interface PartialTakeProfit {
 }
 
 export interface SignalTicket {
+  strategyAttribution?: import("./strategy-attribution.js").StrategyInstanceAttributionV1;
+  strategyTrigger?: import("./strategy-attribution.js").StrategyTriggerV1;
+  clientOrderHashVersion?: 1 | 2;
   instrument: string;
   /**
    * PR15.2 — optional logical instrument id from the shared
@@ -427,3 +430,4 @@ export * from "./instrument-sessions.js";
 export type * from "./trading-configuration/types.js";
 export { MOMENTUM_CONFIGURATION_DEFAULTS_V1 } from "./trading-configuration/defaults.js";
 export { parseTradingConfiguration } from "./trading-configuration/parser.js";
+export * from "./strategy-attribution.js";

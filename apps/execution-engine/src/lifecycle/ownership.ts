@@ -1,5 +1,6 @@
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import { validatePersistedOrderIdentity } from "../repository.js";
+import { canonicalJson } from "@ikbr/shared/trading-config";
 
 export interface LifecycleLegLink {
   proposed_order_id: number;
@@ -107,6 +108,9 @@ export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: Lif
     (order.partialTakeProfits?.length ?? 0) > 0 || order.trailingStopPct !== undefined || order.trailingStopActivationR !== undefined)
     return refuse("proposal_scope_invalid");
   const review = object(evidence.review);
+  if (order.strategyAttribution && (!review || review.client_order_hash_version !== 2 ||
+      canonicalJson(review.strategy_attribution ?? null) !== canonicalJson(order.strategyAttribution) ||
+      canonicalJson(review.strategy_trigger ?? null) !== canonicalJson(order.strategyTrigger))) return refuse("approval_strategy_identity_invalid");
   const decision = object(review?.decision_json);
   if (!review || Number(review.proposed_order_id) !== order.id || review.instrument_id !== order.instrumentId ||
     review.conid !== order.conid || review.client_order_hash !== evidence.clientOrderHash || review.account_id !== accountId ||

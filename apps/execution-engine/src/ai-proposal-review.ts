@@ -1,7 +1,12 @@
 import type { Pool, PoolClient } from "pg";
 import type { ProposedOrder } from "@ikbr/shared";
+import { canonicalJson } from "@ikbr/shared/trading-config";
+import { getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
 
 export interface AiProposalReview {
+  client_order_hash_version?: number;
+  strategy_attribution?: unknown;
+  strategy_trigger?: unknown;
   proposed_order_id: number;
   client_order_hash: string;
   instrument_id: string;
@@ -24,6 +29,11 @@ export async function readAiProposalReview(db: Pool | PoolClient, id: number, lo
 export function aiApprovalFailure(review: AiProposalReview | null, order: ProposedOrder,
   hash: string, accountId?: string, sessionId?: string): string | undefined {
   if (!review) return "ai_review_missing";
+  try {
+    if ((review.client_order_hash_version ?? 1) !== getClientOrderHashVersion(order) ||
+        canonicalJson(review.strategy_attribution ?? null) !== canonicalJson(order.strategyAttribution ?? null) ||
+        canonicalJson(review.strategy_trigger ?? null) !== canonicalJson(order.strategyTrigger ?? null)) return "ai_review_strategy_identity_mismatch";
+  } catch { return "ai_review_strategy_identity_mismatch"; }
   if (Number(review.proposed_order_id) !== order.id || review.client_order_hash !== hash ||
     review.instrument_id !== order.instrumentId || review.conid !== order.conid ||
     (accountId !== undefined && review.account_id !== accountId) ||

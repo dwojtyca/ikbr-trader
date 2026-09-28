@@ -91,7 +91,7 @@ export interface TradingInstrumentV1 {
   readonly session: { readonly useRTH: true; readonly timeZone: "Europe/Warsaw" | "America/New_York" };
   readonly monitoringEnabled: boolean;
   readonly entryEnabled: boolean;
-  readonly strategySelection: { readonly mode: "single"; readonly instanceIds: readonly string[] };
+  readonly strategySelection: { readonly mode: "single"; readonly instanceIds: readonly string[] } | { readonly mode: "priority"; readonly instanceIds: readonly string[]; readonly priorities: Readonly<Record<string, number>> };
   readonly accountPolicyId: string;
   readonly entryPolicyId: string;
   readonly executionPolicyId: string;

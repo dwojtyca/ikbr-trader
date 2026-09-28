@@ -69,7 +69,8 @@ const configurationRuntime = createTradingConfigurationRuntime({
   service: "execution-engine", loaded: tradingConfiguration.loaded, store: configurationStore,
   legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
 });
-const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)));
+const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)),
+  () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined);
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -962,6 +963,19 @@ app.log.info(
  */
 const submissionService = buildSubmissionApplicationService({
   assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
+  strategyPreflight: async ticket => {
+    if (tradingConfiguration.loaded.mode !== "bundle") throw new Error("STRATEGY_CONFIGURATION_UNAVAILABLE");
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error("STRATEGY_PRICE_UNAVAILABLE");
+    const body = await response.json() as { connected?: boolean; watchlist?: Array<{ instrumentId?: string; conid?: string; subscribed?: boolean;
+      marketState?: { conid?: string; marketDataType?: number; ts?: string } }> };
+    const matches = Array.isArray(body.watchlist) ? body.watchlist.filter(row => row.instrumentId === ticket.instrumentId) : [];
+    const row = matches[0];
+    if (body.connected !== true || matches.length !== 1 || row.subscribed !== true || row.conid !== ticket.conid ||
+        !row.marketState || row.marketState.conid !== ticket.conid || row.marketState.marketDataType !== 1 || typeof row.marketState.ts !== "string")
+      throw new Error("STRATEGY_PRICE_UNAVAILABLE");
+    return { effectiveConfigHash: tradingConfiguration.loaded.effectiveHash, observedAt: row.marketState.ts };
+  },
   repo,
   assessAiRisk: async (order, bound, accountId, sessionId) => {
     const [snapshot, response, metadata] = await Promise.all([
@@ -972,6 +986,7 @@ const submissionService = buildSubmissionApplicationService({
     ]);
     if (!response.ok) return { ok: false, reason: "ingestion_unavailable" };
     return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot, wseMetadata: metadata,
+      effectiveConfigHash: tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
       watchlist: await response.json(), nowMs: Date.now(), limits: {
         maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
         maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,

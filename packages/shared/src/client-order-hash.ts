@@ -16,6 +16,8 @@
 import { createHash } from "node:crypto";
 
 import type { SignalTicket } from "./index.js";
+import { parseStrategyAttribution, parseStrategyTrigger } from "./strategy-attribution.js";
+import { canonicalJson } from "./trading-configuration/identity.js";
 
 export const CLIENT_ORDER_HASH_VERSION = "v1";
 
@@ -25,6 +27,23 @@ export function computeClientOrderHash(ticket: SignalTicket): string {
 }
 
 export function canonicaliseSignalTicket(ticket: SignalTicket): string {
+  const legacy = canonicaliseLegacySignalTicket(ticket);
+  if (getClientOrderHashVersion(ticket) === 1) return legacy;
+  const attribution = parseStrategyAttribution(ticket.strategyAttribution);
+  const trigger = parseStrategyTrigger(ticket.strategyTrigger);
+  if (ticket.instrumentId !== attribution.instrumentId) throw new Error("STRATEGY_INSTRUMENT_MISMATCH");
+  return canonicalJson({ version: 2, ticket: legacy, instrumentId: ticket.instrumentId, strategyAttribution: attribution, strategyTrigger: trigger });
+}
+
+export function getClientOrderHashVersion(ticket: Pick<SignalTicket, "strategyAttribution" | "strategyTrigger" | "clientOrderHashVersion">): 1 | 2 {
+  const attributed = ticket.strategyAttribution !== undefined || ticket.strategyTrigger !== undefined;
+  const version = attributed ? 2 : 1;
+  if (ticket.clientOrderHashVersion !== undefined && ticket.clientOrderHashVersion !== version) throw new Error("CLIENT_ORDER_HASH_VERSION_MISMATCH");
+  if (attributed) { parseStrategyAttribution(ticket.strategyAttribution); parseStrategyTrigger(ticket.strategyTrigger); }
+  return version;
+}
+
+function canonicaliseLegacySignalTicket(ticket: SignalTicket): string {
   const fields: readonly [string, string][] = [
     ["instrument", str(ticket.instrument)],
     ["conid", ticket.conid ?? ""],

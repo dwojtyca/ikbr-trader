@@ -1,3 +1,4 @@
+import type { ConfiguredStrategyRuntime } from "../strategy/configured-strategy-runtime.js";
 import type { WseStrategyPriceEvidence } from "@ikbr/shared";
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 /**
@@ -90,6 +91,7 @@ export interface StrategyRuntimeStateRepository
 }
 
 export interface TradingLoopServiceOptions {
+  readonly configuredStrategyRuntime?: Pick<ConfiguredStrategyRuntime, "evaluate" | "listInstrumentIds">;
   readonly assertEntryAllowed?: () => Promise<void>;
   readonly config: TradingLoopConfig;
   readonly wseMetadataReader?: WseStrategyMetadataReader;
@@ -189,6 +191,7 @@ function mapAssetClassToSecType(
 }
 
 export class TradingLoopService {
+  readonly #configuredStrategyRuntime?: TradingLoopServiceOptions["configuredStrategyRuntime"];
   readonly #assertEntryAllowed?: () => Promise<void>;
   readonly #config: TradingLoopConfig;
   readonly #registry: InstrumentRegistry;
@@ -242,6 +245,7 @@ export class TradingLoopService {
     }
     if (!options.logger)
       throw new Error("TradingLoopService: logger is required");
+    this.#configuredStrategyRuntime = options.configuredStrategyRuntime;
     this.#assertEntryAllowed = options.assertEntryAllowed;
     this.#config = options.config;
     this.#registry = options.registry;
@@ -405,6 +409,7 @@ export class TradingLoopService {
   }
 
   async #runCycle(): Promise<TradingLoopCycleReport> {
+    if (this.#configuredStrategyRuntime) return this.#runConfiguredCycle();
     await this.#assertEntryAllowed?.();
     const cycleId = randomUUID();
     const startedAt = this.#clock();
@@ -513,6 +518,27 @@ export class TradingLoopService {
       durationMs: finishedAt.getTime() - startedAt.getTime(),
       reports,
     };
+  }
+
+  async #runConfiguredCycle(): Promise<TradingLoopCycleReport> {
+    const cycleId = randomUUID(), startedAt = this.#clock();
+    this.#lastCycleAt = startedAt; this.#cycleCount++;
+    this.#nextCycleAt = this.#config.enabled ? new Date(startedAt.getTime() + this.#config.intervalMs) : null;
+    const reports: TradingLoopInstrumentReport[] = [];
+    for (const instrumentId of this.#configuredStrategyRuntime!.listInstrumentIds()) {
+      if (this.#stopping || this.#inFlight.has(instrumentId)) continue;
+      const start = this.#clock();
+      const task = (async () => {
+        const evaluation = await this.#configuredStrategyRuntime!.evaluate(instrumentId);
+        const report = this.#finalize(cycleId, instrumentId, start, { kind:"CONFIGURED_EVALUATION", instrumentId, evaluation });
+        reports.push(report); this.#lastOutcomes.set(instrumentId, report);
+      })();
+      this.#inFlight.set(instrumentId, task);
+      try { await task; } finally { this.#inFlight.delete(instrumentId); }
+    }
+    this.#trimLastOutcomes();
+    const finishedAt = this.#clock();
+    return { cycleId, startedAt, finishedAt, durationMs:finishedAt.getTime()-startedAt.getTime(), reports };
   }
 
   #trimLastOutcomes(): void {
@@ -1176,6 +1202,9 @@ export class TradingLoopService {
       kind: report.outcome.kind,
     };
     switch (report.outcome.kind) {
+      case "CONFIGURED_EVALUATION":
+        this.#logger.info({ ...base, evaluation: report.outcome.evaluation.kind }, "trading-loop: configured evaluation");
+        return;
       case "SUBMITTED":
       case "DUPLICATE":
       case "PENDING":

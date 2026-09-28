@@ -12,8 +12,19 @@
  */
 
 import { z } from "zod";
+import { parseStrategyAttribution, parseStrategyTrigger } from "@ikbr/shared";
+
+const strategyAttribution = z.unknown().transform((value, ctx) => {
+  try { return parseStrategyAttribution(value); } catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid strategy attribution" }); return z.NEVER; }
+});
+const strategyTrigger = z.unknown().transform((value, ctx) => {
+  try { return parseStrategyTrigger(value); } catch { ctx.addIssue({ code: z.ZodIssueCode.custom, message: "invalid strategy trigger" }); return z.NEVER; }
+});
 
 const ticketSchema = z.object({
+  strategyAttribution: strategyAttribution.optional(),
+  strategyTrigger: strategyTrigger.optional(),
+  clientOrderHashVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   instrument: z.string().min(1),
   conid: z.string().optional(),
   /**

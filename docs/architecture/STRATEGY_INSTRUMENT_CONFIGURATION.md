@@ -1,7 +1,8 @@
 # Strategy and instrument configuration contract
 
-Status updated 2026-09-28: **PP1 source implemented; PP2 runtime design proposed**.
-The normative implemented format is the [PP1 contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md),
+Status updated 2026-09-28: **PP1 published; PP2 implemented, final publication checks pending**.
+The normative implemented format is the [PP1 contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md)
+and additive [PP2 runtime contract](../implementation/phase3/PP2_RUNTIME_CONTRACT.md),
 with [disabled JSON example](../../config/trading/paper.v1.json) and
 [configuration runbook](../runbooks/TRADING_CONFIGURATION.md). Independent review, local checks, publication
 and exact-commit CI passed; see the [PP1 report](../implementation/phase3/PP1_IMPLEMENTATION_REPORT.md).
@@ -29,9 +30,9 @@ Adding a new algorithm requires source implementation and its own reviewed scope
 This is a **design example**, not operational configuration or permission to trade.
 Its inline policy objects differ from PP1's separate referenced catalogues, and
 its contract fields are incomplete for PP1. The implemented parser exposes three
-existing momentum thresholds with versioned defaults; PP2 must apply them through
-reviewed factories and parity tests. PP1 records resolved parameters in the hash
-but does not apply them to strategy objects. The versioned production example
+existing momentum thresholds with versioned defaults. PP2 applies them through
+fresh factories with default-signal and full replay parity tests. PP1 records
+resolved parameters in the hash. The versioned production example
 contains disabled entries and a disabled instance.
 
 ```json
@@ -107,9 +108,9 @@ selects a versioned read-only JSON file through `TRADING_CONFIG_PATH`, with an e
 `TRADING_CONFIG_EXPECTED_HASH`. Configured-file failures stop startup without legacy
 fallback. The bundle is immutable until restart; hot reload remains deferred.
 Shared snapshots and service observations record identity/drift and retain legacy
-management evidence. Every bundle entry stays denied because PP2 runtime and PP3
-execution policy are unavailable; PP4 research remains unavailable too. Backtest
-strategy construction and parameter application are later PP2 work.
+management evidence. PP2 adds configured diagnostic/scheduled evaluation and
+independent binding replays. Every bundle entry stays denied because PP3 execution
+policy is unavailable; PP4 research remains unavailable too.
 
 Validation rejects unknown fields/versions, duplicate IDs or broker identities,
 missing instance references, empty assignment for entry-enabled instruments,
@@ -132,27 +133,28 @@ execution/risk/research policy and contract identity. Never include secrets in i
 Provider entitlement and fresh broker observations are readiness evidence rather
 than static promises in configuration.
 
-## Selection and parameter isolation (future PP2)
+## Selection and parameter isolation (PP2)
 
 - Evaluate only enabled instances assigned to that instrument, intersected with
   implementation capabilities and persisted runtime restrictions.
 - Initial production policy is `single`. PP2 also defines/test-validates explicit
   `priority` selection for multiple assigned instances: reject opposite-direction
-  candidates, select the first eligible candidate by an explicit unique priority,
-  then stable instance ID as the declared fallback. Never submit every candidate.
-  Operational enablement of multiple instances requires its own compatibility gate.
+  candidates and select the eligible candidate with the highest explicit unique
+  integer priority. Ties reject; there is no confidence or lexical fallback.
+  PP2 evaluation does not submit broker entries.
 - No implicit instrument-level parameter overrides. To customize PKO versus AAPL,
   create two named parameter sets and assign them separately.
-- State key: account + instrument + strategy-instance identity/revision. Each
-  binding gets isolated mutable strategy objects and rejection/indicator state;
-  sharing immutable parameters does not share mutable instances.
+- Object key: account + instrument + strategy-instance identity/revision. Each
+  binding gets isolated mutable strategy objects and rejection state. Durable
+  safety state uses account + broker + conId + implementation, surviving renamed
+  instances, logical instruments and revisions; parameters may be shared immutably.
 - Account-level exposure, entry reservations, loss limits and daily attempt budgets
-  remain authoritative across all instances/instruments. Per-instance cooldowns
+  remain authoritative across all instances/instruments. Stable binding safety counters
   cannot reset or bypass account restrictions.
 - Required history is derived from selected strategies and regime requirements;
   unassigned strategies must not impose extra timeframes or block evaluation.
 
-## Durable attribution and compatibility (future PP2)
+## Durable attribution and compatibility (PP2)
 
 Preserve existing algorithm `strategyId` semantics; add separate instance ID,
 instance revision/hash and effective configuration hash to proposal/AI/risk/audit
@@ -161,8 +163,9 @@ using an additive versioned migration. Do not reinterpret existing hashes or
 recompute historical proposals using new defaults. Old submitted/unknown proposals
 and owned positions remain readable and manageable under their original policy.
 
-Idempotency identifies an account/instrument/instance/trigger intent; migration
-must also prevent duplicate entry when the instance revision changes mid-trigger.
+The durable trigger fence identifies account + broker + conId + direction +
+trusted evaluation bucket, excluding instance/revision/configuration names. It
+prevents duplicate entry when the instance revision changes mid-trigger.
 A new revision is not permission for a second order. Old pending unattempted
 proposals are drained or explicitly invalidated by a reviewed transition; an
 unknown attempt is never invalidated into retry permission.

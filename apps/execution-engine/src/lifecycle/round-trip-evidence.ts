@@ -1,8 +1,10 @@
 import { isAaplBound } from "@ikbr/shared";
+import { buildStrategyEconomicEvidence } from "@ikbr/shared/trading-config";
 import type { LifecycleContext, LifecycleEvidence, LifecycleLegLink } from "./ownership.js";
 import { evaluateLifecycleFacts } from "./ownership.js";
 
 export interface RoundTripFill {
+  sec_type?: string | null; sec_type_conflict?: boolean;
   exec_id: string; broker_order_id: string | null; proposed_order_id: number | null;
   account_id: string | null; conid: string | null; currency: string | null; side: string;
   shares: number | null; price: number | null; executed_at: Date | string | null;
@@ -29,6 +31,19 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
   const quoteCurrency = aapl ? "USD" : "PLN";
   const review = record(lifecycle.review), decision = record(review?.decision_json), risk = record(review?.risk_evidence);
   const report = {
+    clientOrderHash: lifecycle.clientOrderHash,
+    strategyAttribution: lifecycle.order.strategyAttribution ?? null,
+    economicEvidence: buildStrategyEconomicEvidence({
+      fills: evidence.fills.map(fill => ({ execId: fill.exec_id, accountId: fill.account_id, conid: fill.conid,
+        proposedOrderId: fill.proposed_order_id, brokerOrderId: fill.broker_order_id, secType: fill.sec_type ?? null, secTypeConflict: fill.sec_type_conflict === true, side: fill.side, currency: fill.currency,
+        quantity: fill.shares, price: fill.price, executedAt: Number.isFinite(time(fill.executed_at)) ? new Date(time(fill.executed_at)).toISOString() : null,
+        commission: fill.commission, commissionCurrency: fill.commission_currency })),
+      links: [...lifecycle.links, ...(close?.links ?? [])].map(link => ({
+        proposedOrderId: link.proposed_order_id, accountId: link.account_id, role: link.role,
+        brokerOrderId: link.broker_order_id, orderRef: link.order_ref })),
+      close: close ? { state: close.state, accountId: close.accountId, conid: close.conid, originalHash: close.originalHash,
+        closeProposalId: close.closeProposalId } : null,
+    }),
     readOnly: true as const, canSubmit: false as const, status: "NOT_PROVEN" as "NOT_PROVEN" | "COMPLETED",
     reasons: [] as string[], proposalId: lifecycle.order.id ?? null, instrumentId: lifecycle.order.instrumentId ?? null,
     accountId: context.accountId, conid: lifecycle.order.conid ?? null, sessionId: context.sessionId,

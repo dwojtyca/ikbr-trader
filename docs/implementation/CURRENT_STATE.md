@@ -8,8 +8,11 @@ PP0 changes source/security controls. PP1 source adds versioned JSON configurati
 canonical hashes, snapshots/service observations and monitoring diagnostics.
 Independent review, all required local checks, publication and exact-commit CI
 passed; evidence is in the
-[PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). Neither source update establishes
-operational deployment or broker readiness.
+[PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). PP2 adds configured factories,
+assignment-only diagnostic/scheduled evaluation, durable attribution and stable
+safety counters; final delivery evidence is in the
+[PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md). These source updates establish
+no operational deployment or broker readiness.
 
 ## Delivery objective
 
@@ -21,7 +24,7 @@ exits, recovery and operator visibility are required. A supervised one-share rou
 trip is an intermediate proof, not final delivery. See the [delivery plan](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
 and [PP1 configuration contract](phase3/PP1_CONFIGURATION_CONTRACT.md).
 The [architecture page](../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md)
-separates implemented PP1 configuration from future PP2 runtime design.
+links the implemented PP1 configuration and additive PP2 runtime contract.
 
 ## Evidence vocabulary
 
@@ -39,7 +42,7 @@ None of these labels implies profitability or permission to activate Live.
 | --- | --- | --- |
 | Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
 | Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
-| Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applying instance parameters, assignment-aware evaluation and isolated mutable state remains planned |
+| Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applies instance parameters, assignment-only evaluation and isolated state; final publication evidence in PP2 report |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
 | Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |
 | Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | Current AI-entry account evidence requires USD base currency; wider asset/currency/quantity support not generic |
@@ -60,8 +63,9 @@ None of these labels implies profitability or permission to activate Live.
   [admission](../../packages/shared/src/trading-configuration/admission.ts),
   [monitoring projection](../../packages/shared/src/trading-configuration/projection.ts)
   and [configuration runbook](../runbooks/TRADING_CONFIGURATION.md).
-  Bundle readiness keeps PP2/PP3 unavailable and PP4 research unavailable;
-  configured parameters do not reach current strategy constructors.
+  Bundle entry readiness keeps PP3 execution policy and PP4 research unavailable.
+  PP2 applies parameters through fresh configured factories and exposes guarded
+  diagnostic evaluation; see the [runtime contract](phase3/PP2_RUNTIME_CONTRACT.md).
 - Registry: [definitions](../../packages/shared/src/instruments/definitions.ts),
   [configured profiles](../../packages/shared/src/instruments/configured-registry.ts),
   [binding authority](../../packages/shared/src/instruments/bindings.ts).

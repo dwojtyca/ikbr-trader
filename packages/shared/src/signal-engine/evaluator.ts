@@ -122,6 +122,7 @@ export class SignalEngine {
       engineVersions,
       evaluationTimeMs: this.#performanceNow() - start,
       ...(attribution ? { strategyId: attribution.strategyId } : {}),
+      ...(attribution?.strategyAttribution ? { strategyAttribution: attribution.strategyAttribution, strategyTrigger: attribution.strategyTrigger } : {}),
     };
 
     const evaluation: SignalEvaluation = {

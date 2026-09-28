@@ -1,0 +1,25 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import type { Pool } from "pg";
+import type { Redis } from "ioredis";
+import { SignalRepository } from "./repository.js";
+const attribution = {version:1,implementationId:"momentum_breakout_long_v1",instanceId:"removed_instance",instanceRevision:3,instrumentId:"aapl_smart",instanceHash:"a".repeat(64),effectiveConfigHash:"b".repeat(64)};
+const trigger = {version:1,source:"evaluation_bucket",timeframe:"1m",observedAt:"2026-09-28T12:00:01.000Z",bucketStartMs:Date.parse("2026-09-28T12:00:00Z")};
+test("recent signal projection retains v2 identity and explicit legacy absence",async()=>{
+  const row = {id:1,instrument:"AAPL",instrument_id:"aapl_smart",strategy:"momentum_breakout_long_v1",side:"BUY",order_type:"LMT",quantity:1,reason:"fixture",confidence:0.8,risk_check_status:"PASS",status:"PROPOSED",created_at:new Date(0),strategy_attribution:attribution,strategy_trigger:trigger,client_order_hash_version:2};
+  const pool={query:async()=>({rows:[row,{...row,id:2,strategy_attribution:null,strategy_trigger:null,client_order_hash_version:1}]})} as unknown as Pool;
+  const repo=new SignalRepository(pool,{} as Redis);
+  const rows=await repo.getRecentSignals(50);
+  assert.deepEqual(rows[0].strategyAttribution,attribution);
+  assert.deepEqual(rows[0].strategyTrigger,trigger);
+  assert.equal(rows[0].instrumentId,"aapl_smart");
+  assert.equal(rows[1].strategyAttribution,undefined);
+  row.instrument_id="changed_instrument";
+  await assert.rejects(repo.getRecentSignals(50),/STRATEGY_ATTRIBUTION_ROW_MISMATCH/);
+  row.instrument_id="aapl_smart";
+  row.strategy="changed_implementation";
+  await assert.rejects(repo.getRecentSignals(50),/STRATEGY_ATTRIBUTION_ROW_MISMATCH/);
+  row.strategy="momentum_breakout_long_v1";
+  row.client_order_hash_version=1;
+  await assert.rejects(repo.getRecentSignals(50),/CLIENT_ORDER_HASH_VERSION_MISMATCH/);
+});

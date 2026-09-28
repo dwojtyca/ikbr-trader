@@ -1,3 +1,4 @@
+import type { ConfiguredStrategyEvaluation } from "../strategy/configured-strategy-runtime.js";
 /**
  * Trading Loop — public types.
  *
@@ -85,6 +86,7 @@ export type TradingLoopSkipReason =
  * for the status endpoint and the pino log stream.
  */
 export type TradingLoopInstrumentOutcome =
+  | { readonly kind: "CONFIGURED_EVALUATION"; readonly instrumentId: string; readonly evaluation: ConfiguredStrategyEvaluation }
   | {
       readonly kind:
         | "SUBMITTED"

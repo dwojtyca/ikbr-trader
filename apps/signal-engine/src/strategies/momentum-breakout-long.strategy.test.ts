@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { Candle } from '@ikbr/shared';
+import { MOMENTUM_CONFIGURATION_DEFAULTS_V1 } from '@ikbr/shared';
 import {
   MomentumBreakoutLongStrategy,
   evaluateMomentumBreakoutLong,
@@ -220,6 +221,64 @@ test('MomentumBreakoutLongStrategy rejects signals outside UTC strategy session'
 
   assert.equal(signal, null);
   assert.equal(strategy.getLastRejectionReason(), 'outside_strategy_session');
+});
+
+test('configured momentum defaults preserve complete legacy signal and rejection behavior', () => {
+  const legacy = new MomentumBreakoutLongStrategy();
+  const configured = new MomentumBreakoutLongStrategy({ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1 });
+  assert.deepEqual(configured.generateSignal(baseContext()), legacy.generateSignal(baseContext()));
+  const rejection = baseContext({ indicators: { ...baseContext().indicators, rsi14: 74 } });
+  assert.deepEqual(configured.generateSignal(rejection), legacy.generateSignal(rejection));
+  assert.equal(configured.getLastRejectionReason(), legacy.getLastRejectionReason());
+  const exitContext = { ...baseContext({ directionalRegime: 'range' }), positionQuantity: 1 };
+  assert.deepEqual(configured.shouldExit(exitContext), legacy.shouldExit(exitContext));
+});
+
+test('each editable configured threshold is applied and combined values are accepted', () => {
+  const cases = [
+    [{ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, dailyReturn20MinPct: 14.01 }, 'daily_momentum_too_weak'],
+    [{ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, h1Return4MinPct: 1.21 }, 'hourly_momentum_too_weak'],
+    [{ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, return60MinPct: 1.21 }, 'intraday_momentum_too_weak'],
+  ] as const;
+  for (const [parameters, reason] of cases) {
+    const strategy = new MomentumBreakoutLongStrategy(parameters);
+    assert.equal(strategy.generateSignal(baseContext()), null);
+    assert.equal(strategy.getLastRejectionReason(), reason);
+  }
+  const combined = new MomentumBreakoutLongStrategy({ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, dailyReturn20MinPct: 0, h1Return4MinPct: 0, return60MinPct: 0 });
+  assert.ok(combined.generateSignal(baseContext()));
+  assert.doesNotThrow(() => new MomentumBreakoutLongStrategy({ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, dailyReturn20MinPct: 100, h1Return4MinPct: 100, return60MinPct: 3 }));
+});
+
+test('configured momentum rejects malformed snapshots and conflicting legacy profiles', () => {
+  const valid = { ...MOMENTUM_CONFIGURATION_DEFAULTS_V1 };
+  for (const bad of [
+    { ...valid, unknown: 1 },
+    Object.fromEntries(Object.entries(valid).filter(([key]) => key !== 'dailyReturn20MinPct')),
+    { ...valid, dailyReturn20MinPct: 101 },
+    { ...valid, h1Return4MinPct: Number.NaN },
+    { ...valid, return60MinPct: -0.1 },
+    { ...valid, dailyReturn20MinPct: -0 },
+    { ...valid, rsiMax: 73 },
+    Object.assign(Object.create({ polluted: true }), valid),
+  ]) assert.throws(() => new MomentumBreakoutLongStrategy(bad as never), /INVALID_MOMENTUM_PARAMETERS/);
+
+  const configured = new MomentumBreakoutLongStrategy(valid);
+  assert.equal(configured.generateSignal(baseContext({ momentumBreakoutProfile: 'pko_mild_v1' })), null);
+  assert.equal(configured.getLastRejectionReason(), 'momentum_profile_configuration_conflict');
+  const legacy = new MomentumBreakoutLongStrategy();
+  const pko = baseContext({ symbol: 'PKO', conid: '35146360', momentumBreakoutProfile: 'pko_mild_v1' });
+  assert.ok(legacy.generateSignal(pko));
+  assert.equal(evaluateMomentumBreakoutLong(pko).signal?.metadata?.momentumBreakoutProfile, 'pko_mild_v1');
+});
+
+test('configured evaluator helper matches the constructor path and instances keep independent rejection state', () => {
+  const strategy = new MomentumBreakoutLongStrategy({ ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, dailyReturn20MinPct: 20 });
+  assert.deepEqual(evaluateMomentumBreakoutLong(baseContext(), undefined, { ...MOMENTUM_CONFIGURATION_DEFAULTS_V1, dailyReturn20MinPct: 20 }), { signal: strategy.generateSignal(baseContext()), rejectionReason: 'daily_momentum_too_weak' });
+  const other = new MomentumBreakoutLongStrategy();
+  strategy.generateSignal(baseContext());
+  assert.equal(strategy.getLastRejectionReason(), 'daily_momentum_too_weak');
+  assert.equal(other.getLastRejectionReason(), undefined);
 });
 
 test('MomentumBreakoutLongStrategy accepts neutral 1h inside bull trend regime', () => {

@@ -19,6 +19,10 @@ const schema = z
   .object({
     SIGNAL_BIND_HOST: z.string().trim().min(1).default("127.0.0.1"),
     SIGNAL_PORT: z.coerce.number().default(3102),
+    IBKR_ACCOUNT_ID: z.string().optional(),
+    IBKR_ENVIRONMENT: z.preprocess(value => value === "" ? undefined : value, z.enum(["paper", "live"]).optional()),
+    ALLOWED_PAPER_ACCOUNTS: z.string().optional(),
+    ALLOWED_LIVE_ACCOUNTS: z.string().optional(),
     LOG_LEVEL: z.string().default("info"),
     POSTGRES_URL: z
       .string()

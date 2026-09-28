@@ -5,8 +5,9 @@ import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
+import { assertConfiguredEvaluationReady } from "./trading-configuration-bootstrap.js";
 import { config, tradingConfiguration } from "./config.js";
-import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
+import { createTradingConfigurationRuntime, TradingConfigurationStore, preparePP2Conversion } from "@ikbr/shared/trading-config";
 import { SignalRepository } from "./repository.js";
 import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
@@ -32,6 +33,10 @@ import { executionRuntimeRoutesPlugin } from "./runtime/execution/routes.js";
 import { HttpTradingExposureReader } from "./runtime/trading-loop/exposure-reader.js";
 import { ReconciliationReader } from "./runtime/trading-loop/reconciliation-reader.js";
 import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
+import { ConfiguredStrategyRuntime } from "./runtime/strategy/configured-strategy-runtime.js";
+import { configuredStrategyRoutes } from "./runtime/strategy/configured-strategy-routes.js";
+import { ConfiguredStrategyStateRepository, HttpConfiguredOutcomeReader } from "./runtime/strategy/configured-strategy-state.js";
+import { StrategyContextLoader } from "./runtime/strategy/strategy-context-loader.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
 const defaultInstrumentRegistry = tradingConfiguration.registry;
@@ -47,7 +52,9 @@ const configurationRuntime = createTradingConfigurationRuntime({
 });
 app.get("/configuration", async () => {
   await configurationRuntime.admission();
-  return configurationRuntime.diagnostics();
+  return { ...configurationRuntime.diagnostics(), configuredStrategyRuntimeAvailable: config.runtimeEnabled && tradingConfiguration.loaded.mode === "bundle",
+    configuredAccountReady: tradingConfiguration.configuredAccount?.ok ?? null,
+    configuredAccountReason: tradingConfiguration.configuredAccount && !tradingConfiguration.configuredAccount.ok ? tradingConfiguration.configuredAccount.reason : null };
 });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
@@ -199,6 +206,27 @@ if (config.runtimeEnabled) {
   });
   app.log.info("runtime: /runtime/* endpoints registered (dry-run only)");
 
+  const configuredStrategyRuntime = tradingConfiguration.loaded.mode === "bundle"
+    ? new ConfiguredStrategyRuntime({
+      configuration: tradingConfiguration.loaded.configuration,
+      effectiveConfigHash: tradingConfiguration.loaded.effectiveHash,
+      accountId: tradingConfiguration.configuredAccount?.ok ? tradingConfiguration.configuredAccount.accountId : "",
+      authority: bindingAuthority, registry: defaultInstrumentRegistry,
+      contextLoader: new StrategyContextLoader({ repo, maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS }),
+      state: new ConfiguredStrategyStateRepository({
+        pool, cooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
+        getInheritanceSourceHash: async () => (await preparePP2Conversion(pool, {
+          tradingEnabled: process.env.TRADING_ENABLED !== "false", loaded: tradingConfiguration.loaded,
+        })).sourceHash,
+        outcomeReader: new HttpConfiguredOutcomeReader({ baseUrl: config.executionRuntime.engineUrl,
+          bearerToken: config.EXECUTION_API_TOKEN ?? "", timeoutMs: config.tradingLoop.exposureTimeoutMs }),
+      }),
+      assertEvaluationAllowed: () => assertConfiguredEvaluationReady({
+        account: tradingConfiguration.configuredAccount, admission: () => configurationRuntime.admission(),
+      }),
+    }) : undefined;
+  if (configuredStrategyRuntime) await app.register(configuredStrategyRoutes, { runtime: configuredStrategyRuntime });
+
   // -------------------------------------------------------------------------
   // PR13 — Execution Runtime (paper-only write endpoint). Registered ONLY
   // when EXECUTION_RUNTIME_ENABLED=true. Off by default. Live is impossible
@@ -206,10 +234,10 @@ if (config.runtimeEnabled) {
   // literal AND every submission verifies execution-engine's /ready reports
   // environment="paper". See docs/architecture/EXECUTION_RUNTIME.md.
   // -------------------------------------------------------------------------
-  if (config.executionRuntime.enabled) {
+  if (config.executionRuntime.enabled || configuredStrategyRuntime) {
     const engineUrl = config.executionRuntime.engineUrl;
     const bearerToken = config.EXECUTION_API_TOKEN ?? "";
-    if (!bearerToken) {
+    if (!bearerToken && config.executionRuntime.enabled) {
       app.log.warn(
         "execution-runtime: EXECUTION_API_TOKEN is empty; POST /runtime/execute will deny every request",
       );
@@ -239,19 +267,20 @@ if (config.runtimeEnabled) {
       // any market-data read or submission.
       bindingAuthority,
     });
-    await app.register(executionRuntimeRoutesPlugin, {
-      runtime: executionRuntime,
-      bearerToken,
-      readinessDeps: { redis, postgres: pool, paperGuard },
-    });
-    app.log.info(
-      "execution-runtime: /runtime/execute registered (paper-only, bearer-protected)",
-    );
+    if (config.executionRuntime.enabled) {
+      await app.register(executionRuntimeRoutesPlugin, {
+        runtime: executionRuntime,
+        bearerToken,
+        readinessDeps: { redis, postgres: pool, paperGuard },
+      });
+      app.log.info(
+        "execution-runtime: /runtime/execute registered (paper-only, bearer-protected)",
+      );
+    }
 
     // -------------------------------------------------------------------
-    // PR14 — Trading Loop scheduler. Uses the same ExecutionRuntime and
-    // PaperGuard as the write endpoint; contained in this branch so the
-    // loop can never run without ExecutionRuntime being wired.
+    // The configured scheduler evaluates assignments without entering
+    // ExecutionRuntime. Legacy scheduling retains its Paper execution path.
     // -------------------------------------------------------------------
     const exposureReader = new HttpTradingExposureReader({
       engineUrl,
@@ -278,6 +307,7 @@ if (config.runtimeEnabled) {
       },
     });
     tradingLoopService = new TradingLoopService({
+      configuredStrategyRuntime,
       assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
       wseMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
       config: config.tradingLoop,

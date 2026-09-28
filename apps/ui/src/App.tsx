@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { deriveOrderDiagnostics } from "@ikbr/shared";
+import { deriveOrderDiagnostics, type StrategyInstanceAttributionV1 } from "@ikbr/shared";
+import { formatStrategyAttribution } from "./strategy-attribution";
 import { TradingLoopResultView } from "./TradingLoopResult";
 import {
   fetchOperatorApi,
@@ -63,6 +64,7 @@ type WatchlistResponse = {
 };
 
 type Order = {
+  strategyAttribution?: StrategyInstanceAttributionV1;
   id?: number;
   instrument: string;
   conid?: string;
@@ -243,6 +245,7 @@ type ReportAggregate = {
 };
 
 type ReportTrade = {
+  strategyAttribution?: StrategyInstanceAttributionV1;
   orderId: number;
   instrument: string;
   strategy: string;
@@ -354,6 +357,7 @@ type IngestionBackfillProgress = {
 };
 
 type BacktestRun = {
+  strategyAttribution?: StrategyInstanceAttributionV1;
   id: number;
   datasetId: number;
   mode: "bot" | "isolated";
@@ -1422,7 +1426,7 @@ export function App() {
                 <option value="">latest completed</option>
                 {backtestRuns.map((run) => (
                   <option key={run.id} value={run.id}>
-                    #{run.id} {run.mode} {run.status}{" "}
+                    #{run.id} {run.mode} {run.status}{" "}{formatStrategyAttribution(run.strategyAttribution)}{" "}
                     {run.finishedAt
                       ? formatTs(run.finishedAt)
                       : formatTs(run.startedAt)}
@@ -1713,7 +1717,7 @@ export function App() {
                           <tr key={trade.orderId}>
                             <td>{trade.orderId}</td>
                             <td>{trade.instrument}</td>
-                            <td>{trade.strategy}</td>
+                            <td title={formatStrategyAttribution(trade.strategyAttribution)}>{trade.strategy}<div className="muted">{formatStrategyAttribution(trade.strategyAttribution)}</div></td>
                             <td>{trade.side}</td>
                             <td>{trade.directionalRegime}</td>
                             <td>{trade.volatilityRegime}</td>
@@ -2627,10 +2631,9 @@ export function App() {
                                       </strong>
                                     </div>
                                     <div>
-                                      <span>Strategy Profile</span>
+                                      <span>Strategy Attribution</span>
                                       <strong>
-                                        {order.indicators?.strategyProfile ??
-                                          "-"}
+                                        {formatStrategyAttribution(order.strategyAttribution)}
                                       </strong>
                                     </div>
                                   </div>
@@ -2917,7 +2920,7 @@ function ReportDetails({
                   <tr key={trade.orderId}>
                     <td>{trade.orderId}</td>
                     <td>{trade.instrument}</td>
-                    <td>{trade.strategy}</td>
+                    <td title={formatStrategyAttribution(trade.strategyAttribution)}>{trade.strategy}<div className="muted">{formatStrategyAttribution(trade.strategyAttribution)}</div></td>
                     <td>{trade.side}</td>
                     <td>{trade.directionalRegime}</td>
                     <td>{trade.volatilityRegime}</td>

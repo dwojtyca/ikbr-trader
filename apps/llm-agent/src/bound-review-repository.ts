@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { LlmAgentRepository, type ClaimedOrder, type ClaimedOrderRow } from "./repository.js";
+import type { StrategyInstanceAttributionV1, StrategyTriggerV1 } from "@ikbr/shared";
+import { computeClientOrderHash, getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
+import { canonicalJson, readStrategyAttributionSnapshot } from "@ikbr/shared/trading-config";
 
 export interface BoundClaim {
   order: ClaimedOrder;
   proposalSnapshot?: Record<string, unknown>;
-  identity: { clientOrderHash: string; instrumentId: string; conid: string; accountId: string; sessionId: string };
+  identity: { clientOrderHash: string; instrumentId: string; conid: string; accountId: string; sessionId: string;
+    clientOrderHashVersion?: 1 | 2; strategyAttribution?: StrategyInstanceAttributionV1; strategyTrigger?: StrategyTriggerV1 };
   token: string;
 }
 
@@ -27,7 +31,20 @@ export interface BoundReviewStore {
 
 // Every transaction locks the proposal before its review, matching submission.
 export class BoundReviewRepository implements BoundReviewStore {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly options: { effectiveConfigHash?: string } = {}) {}
+
+  private async validateStrategyIdentity(client: PoolClient, row: ClaimedOrderRow & { client_order_hash?: string }): Promise<ClaimedOrder> {
+    const order = new LlmAgentRepository(this.pool).mapClaimedOrder(row);
+    if (getClientOrderHashVersion(order) === 2) {
+      if (!this.options.effectiveConfigHash || order.strategyAttribution!.effectiveConfigHash !== this.options.effectiveConfigHash ||
+          computeClientOrderHash(order) !== row.client_order_hash || order.strategy !== order.strategyAttribution!.implementationId)
+        throw new Error("AI_STRATEGY_IDENTITY_MISMATCH");
+      const snapshot = await readStrategyAttributionSnapshot(client, order.strategyAttribution!);
+      if (snapshot.instrument.contract.symbol !== order.instrument || String(snapshot.instrument.contract.conId) !== order.conid)
+        throw new Error("AI_STRATEGY_CONTRACT_MISMATCH");
+    }
+    return order;
+  }
 
   async claim(): Promise<BoundClaim | null> {
     return this.transaction(async (client) => {
@@ -43,6 +60,7 @@ export class BoundReviewRepository implements BoundReviewStore {
         ORDER BY po.id LIMIT 1 FOR UPDATE OF po SKIP LOCKED`);
       if (!selected.rows[0]) return null;
       const row = selected.rows[0];
+      const order = await this.validateStrategyIdentity(client, row);
       const token = randomUUID();
       const review = await client.query(`
         UPDATE proposal_ai_reviews SET claim_token = $2::uuid,
@@ -51,14 +69,18 @@ export class BoundReviewRepository implements BoundReviewStore {
           AND expires_at > clock_timestamp() AND delivery_started_at IS NULL
           AND (claim_until IS NULL OR claim_until <= clock_timestamp())
           AND client_order_hash = $3 AND instrument_id = $4 AND conid = $5
-        RETURNING *`, [row.id, token, row.client_order_hash, row.instrument_id, row.conid]);
+          AND client_order_hash_version = $6 AND strategy_attribution IS NOT DISTINCT FROM $7::jsonb
+          AND strategy_trigger IS NOT DISTINCT FROM $8::jsonb
+        RETURNING *`, [row.id, token, row.client_order_hash, row.instrument_id, row.conid, getClientOrderHashVersion(order),
+          order.strategyAttribution ? JSON.stringify(order.strategyAttribution) : null, order.strategyTrigger ? JSON.stringify(order.strategyTrigger) : null]);
       if (!review.rows[0]) return null;
       const r = review.rows[0];
       return {
-        order: new LlmAgentRepository(this.pool).mapClaimedOrder(row as ClaimedOrderRow),
+        order,
         proposalSnapshot: row,
         identity: { clientOrderHash: r.client_order_hash, instrumentId: r.instrument_id,
-          conid: r.conid, accountId: r.account_id, sessionId: r.session_id }, token,
+          conid: r.conid, accountId: r.account_id, sessionId: r.session_id,
+          ...(order.strategyAttribution ? { clientOrderHashVersion: 2 as const, strategyAttribution: order.strategyAttribution, strategyTrigger: order.strategyTrigger } : {}) }, token,
       };
     });
   }
@@ -70,6 +92,12 @@ export class BoundReviewRepository implements BoundReviewStore {
       if (!row || row.status !== 'PROPOSED' || row.execution_attempted_at || row.broker_order_id ||
           row.client_order_hash !== claim.identity.clientOrderHash || row.instrument_id !== claim.identity.instrumentId ||
           row.conid !== claim.identity.conid) return false;
+      try {
+        const validated = await this.validateStrategyIdentity(client, row);
+        if (getClientOrderHashVersion(validated) !== (claim.identity.clientOrderHashVersion ?? 1) ||
+            canonicalJson(validated.strategyAttribution ?? null) !== canonicalJson(claim.identity.strategyAttribution ?? null) ||
+            canonicalJson(validated.strategyTrigger ?? null) !== canonicalJson(claim.identity.strategyTrigger ?? null)) return false;
+      } catch { return false; }
       const result = await client.query(`
         UPDATE proposal_ai_reviews
         SET status = $3, decision_json = $4::jsonb, decided_at = clock_timestamp(),

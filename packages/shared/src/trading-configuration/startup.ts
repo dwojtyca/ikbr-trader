@@ -18,6 +18,7 @@ export class TradingConfigurationRuntime {
   private lastAdmission: TradingConfigurationAdmission = Object.freeze({ allowed: false, reasons: ["CONFIG_NOT_INITIALIZED"] });
   private timer: ReturnType<typeof setInterval> | undefined;
   private registration: Promise<void> | null = null;
+  private strategyConversion: "not_prepared" | "prepared" | "blocked" = "not_prepared";
   constructor(readonly options: TradingConfigurationRuntimeOptions) { this.processId = options.processId ?? randomUUID(); }
   async initialize(): Promise<void> {
     if (this.registration) return this.registration;
@@ -27,6 +28,12 @@ export class TradingConfigurationRuntime {
   private async register(): Promise<void> {
     try {
       this.state = await this.options.store.register({ ...this.options, processId: this.processId });
+      if (this.options.loaded.migrationPrepare && !this.state.preparationPending) {
+        try {
+          await this.options.store.prepareStrategyRuntime(this.options.loaded, this.options.tradingEnabled);
+          this.strategyConversion = "prepared";
+        } catch { this.strategyConversion = "blocked"; }
+      }
       this.lastFailure = null;
       await this.admission();
     } catch (error) {
@@ -72,6 +79,7 @@ export class TradingConfigurationRuntime {
       admission: this.lastAdmission, diagnostics: loaded.diagnostics,
       instruments: loaded.mode === "bundle" ? buildTradingConfigurationProjection(loaded.configuration, evidence).readiness : [],
       retainedManagementInstrumentIds: Object.freeze([...new Set(this.state?.ownership.map(row => row.instrumentId) ?? [])]),
+      strategyConversion: this.strategyConversion,
       retainedManagementConIds: Object.freeze([...new Set(this.state?.ownership.map(row => row.conId) ?? [])]) });
   }
 }

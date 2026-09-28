@@ -1,7 +1,12 @@
 import { Pool } from "pg";
 import { IndicatorSnapshot, ProposedOrder, Side } from "@ikbr/shared";
+import { parseStrategyAttribution, parseStrategyTrigger } from "@ikbr/shared";
+import { getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
 
 export interface ClaimedOrderRow {
+  client_order_hash_version?: number;
+  strategy_attribution?: unknown;
+  strategy_trigger?: unknown;
   id: number;
   instrument: string;
   conid: string | null;
@@ -287,12 +292,19 @@ export class LlmAgentRepository {
   }
 
   mapClaimedOrder(row: ClaimedOrderRow): ClaimedOrder {
+    const identity = {
+      clientOrderHashVersion: (row.client_order_hash_version ?? 1) as 1 | 2,
+      ...(row.strategy_attribution != null ? { strategyAttribution: parseStrategyAttribution(row.strategy_attribution) } : {}),
+      ...(row.strategy_trigger != null ? { strategyTrigger: parseStrategyTrigger(row.strategy_trigger) } : {}),
+    };
+    getClientOrderHashVersion(identity);
     const createdAt =
       row.created_at instanceof Date
         ? row.created_at
         : new Date(row.created_at);
 
     return {
+      ...(identity.clientOrderHashVersion === 2 ? identity : {}),
       id: Number(row.id),
       instrument: row.instrument,
       conid: row.conid ?? undefined,

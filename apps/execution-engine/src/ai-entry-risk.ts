@@ -1,6 +1,7 @@
 import { isAaplBound } from '@ikbr/shared';
 import { validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
+import { getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
 import type { AccountSnapshot } from "./tws-execution-client.js";
 
 export interface AiEntryRiskLimits {
@@ -12,6 +13,10 @@ export interface AiEntryRiskLimits {
 }
 
 export interface AiEntryRiskEvidence {
+  strategyAttribution?: ProposedOrder["strategyAttribution"];
+  strategyTrigger?: ProposedOrder["strategyTrigger"];
+  strategyObservedAt?: string;
+  strategyEffectiveConfigHash?: string;
   accountId: string;
   sessionId: string;
   instrumentId: string;
@@ -61,9 +66,13 @@ export function assessAiEntryRisk(input: {
   limits: AiEntryRiskLimits;
   nowMs: number;
   wseMetadata?: unknown;
+  effectiveConfigHash?: string;
 }): { ok: true; evidence: AiEntryRiskEvidence } | { ok: false; reason: string } {
   const { order, bound, accountId, sessionId, snapshot, limits, nowMs } = input;
   const reject = (reason: string) => ({ ok: false as const, reason });
+  try { getClientOrderHashVersion(order); } catch { return reject("risk_strategy_identity_invalid"); }
+  if (order.strategyAttribution && (!input.effectiveConfigHash || input.effectiveConfigHash !== order.strategyAttribution.effectiveConfigHash))
+    return reject("risk_strategy_configuration_mismatch");
   if (!accountId || !sessionId || !Number.isFinite(nowMs)) return reject("risk_identity_missing");
   if (![limits.maxNotionalPct, limits.maxStopRiskPct, limits.maxExposurePct]
       .every(value => positive(value) && value <= 100))
@@ -114,6 +123,15 @@ export function assessAiEntryRisk(input: {
   if (matches.length !== 1) return reject("risk_quote_missing");
   const row = matches[0]!;
   const quote = record(row.marketState);
+  let strategyObservedAt: string | undefined;
+  if (order.strategyAttribution) {
+    const stamp = typeof quote?.ts === "string" ? Date.parse(quote.ts) : NaN;
+    if (!Number.isFinite(stamp) || new Date(stamp).toISOString() !== quote?.ts || stamp > nowMs || nowMs - stamp >= 90_000 ||
+        order.strategyAttribution.implementationId !== order.strategy || order.strategyAttribution.instrumentId !== order.instrumentId ||
+        Math.floor(stamp / 60_000) * 60_000 !== order.strategyTrigger!.bucketStartMs || Date.parse(order.strategyTrigger!.observedAt) > stamp)
+      return reject("risk_strategy_trigger_mismatch");
+    strategyObservedAt = quote.ts as string;
+  }
   if (row.conid !== order.conid || row.subscribed !== true || !quote || quote.conid !== order.conid ||
       quote.marketDataType !== 1) return reject("risk_quote_identity_or_live_missing");
   const bidTime = fresh(quote.bidObservedAt);
@@ -167,6 +185,7 @@ export function assessAiEntryRisk(input: {
   const wse = isPln ? validateWseOrder(input.wseMetadata, bound, accountId, order, nowMs) : undefined;
   if (wse && !wse.ok) return reject(wse.reason);
   return { ok: true, evidence: {
+    ...(order.strategyAttribution ? { strategyAttribution: order.strategyAttribution, strategyTrigger: order.strategyTrigger, strategyObservedAt, strategyEffectiveConfigHash: input.effectiveConfigHash } : {}),
     accountId, sessionId, instrumentId: bound.instrumentId, conid: order.conid,
     assessedAtMs: nowMs, validUntilMs: Math.min(Math.min(started, completed, bidTime, askTime) + MAX_AGE_MS,
       wse?.ok ? wse.expiresAtMs : Infinity),

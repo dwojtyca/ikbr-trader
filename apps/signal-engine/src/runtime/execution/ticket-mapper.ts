@@ -123,6 +123,7 @@ export function toLegacySignalTicket(
       : undefined;
 
   const legacy: SignalTicket = {
+    ...(ticket.strategyAttribution ? { strategyAttribution: ticket.strategyAttribution, strategyTrigger: ticket.strategyTrigger } : {}),
     instrument: wireInstrument,
     // PR15.2 — carry the logical registry id all the way through
     // to `POST /execution/execute-ticket`. The execution-engine

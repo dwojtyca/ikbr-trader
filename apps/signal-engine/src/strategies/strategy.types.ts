@@ -15,6 +15,8 @@ import type { ExposureSnapshot } from "../repository.js";
 export type StrategyDirection = "LONG" | "SHORT";
 
 export interface StrategySignal {
+  strategyAttribution?: import("@ikbr/shared").StrategyInstanceAttributionV1;
+  strategyTrigger?: import("@ikbr/shared").StrategyTriggerV1;
   strategyId: string;
   symbol: string;
   side: Exclude<Side, "HOLD">;

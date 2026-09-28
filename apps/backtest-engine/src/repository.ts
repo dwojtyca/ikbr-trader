@@ -1,6 +1,6 @@
 import { Pool, type PoolClient } from "pg";
 import type { Candle, InstrumentContract } from "@ikbr/shared";
-import { listStrategyProfiles } from "@ikbr/shared";
+import { parseStrategyAttribution, listStrategyProfiles } from "@ikbr/shared";
 import type {
   BacktestCandleSymbolSummary,
   BacktestDataset,
@@ -35,7 +35,10 @@ function mapDataset(row: any): BacktestDataset {
 }
 
 function mapRun(row: any): BacktestRun {
+  const configuration = typeof row.config_json === "string" ? JSON.parse(row.config_json) : row.config_json;
+  const strategyAttribution = configuration?.strategyAttribution == null ? undefined : parseStrategyAttribution(configuration.strategyAttribution);
   return {
+    strategyAttribution,
     id: Number(row.id),
     datasetId: Number(row.dataset_id),
     mode: row.mode === "isolated" ? "isolated" : "bot",
@@ -1417,6 +1420,7 @@ export class BacktestRepository {
     if (!selectedRun) throw new Error("No completed backtest run found.");
 
     const selectedRunId = Number(selectedRun.id);
+    const strategyAttribution = mapRun(selectedRun).strategyAttribution;
     const [fillsResult, statesResult, diagnosticsResult] = await Promise.all([
       this.pool.query(
         `SELECT f.*, o.indicator_snapshot
@@ -1446,6 +1450,7 @@ export class BacktestRepository {
           : row.indicator_snapshot;
 
       return {
+        strategyAttribution,
         orderId: Number(row.order_id),
         instrument: String(row.instrument),
         strategy: String(row.strategy),
@@ -1589,6 +1594,7 @@ export class BacktestRepository {
       limit: fills.length,
       source: "backtest",
       runId: selectedRunId,
+      strategyAttribution,
       runMode: selectedRun.mode === "isolated" ? "isolated" : "bot",
       overview: {
         trades: fills.length,

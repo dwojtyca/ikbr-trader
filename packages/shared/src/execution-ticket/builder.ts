@@ -197,6 +197,8 @@ export class ExecutionTicketBuilder {
     };
 
     const ticket: ExecutionTicket = {
+      ...(input.signal.metadata.strategyAttribution ? { strategyAttribution: input.signal.metadata.strategyAttribution,
+        strategyTrigger: input.signal.metadata.strategyTrigger } : {}),
       ticketId: this.#idFactory(),
       createdAt: this.#now(),
       signalId: input.signal.signalId,

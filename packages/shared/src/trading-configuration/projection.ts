@@ -23,7 +23,7 @@ export function buildTradingConfigurationProjection(configuration: TradingConfig
   const unknown = Object.freeze({ status: "unknown" as const, reason: "BROKER_EVIDENCE_UNKNOWN" });
   const readiness = Object.freeze(configuration.instruments.map(row => {
     const observed = evidence.get(row.id), assigned = Object.freeze(instances.filter(instance => row.strategySelection.instanceIds.includes(instance.id)));
-    const reasons = ["PP2_STRATEGY_RUNTIME_UNAVAILABLE", "PP3_EXECUTION_POLICY_UNAVAILABLE", "PP4_RESEARCH_UNAVAILABLE"];
+    const reasons = ["PP3_EXECUTION_POLICY_UNAVAILABLE", "PP4_RESEARCH_UNAVAILABLE"];
     if (!row.entryEnabled) reasons.unshift("ENTRY_DISABLED");
     if (assigned.some(instance => !instance.enabled)) reasons.push("STRATEGY_INSTANCE_DISABLED");
     return Object.freeze({ instrumentId: row.id, monitoringEnabled: row.monitoringEnabled, entryRequested: row.entryEnabled, entryReady: false as const,

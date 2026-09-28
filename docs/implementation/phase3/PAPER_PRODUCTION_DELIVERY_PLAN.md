@@ -1,10 +1,12 @@
 # Production-style Paper bot delivery plan
 
-Date: 2026-09-26; PP1 source status updated 2026-09-28. Status: **delivery specification**;
+Date: 2026-09-26; PP2 source status updated 2026-09-28. Status: **delivery specification**;
 PP0 is implemented and published with successful CI, recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 PP1 source implements the bounded [configuration contract](PP1_CONFIGURATION_CONTRACT.md),
 with independent review, local checks and exact-commit CI passed; evidence is in the [PP1 report](PP1_IMPLEMENTATION_REPORT.md).
-PP2–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+PP2 source implements the [bounded runtime contract](PP2_RUNTIME_CONTRACT.md);
+its [report](PP2_IMPLEMENTATION_REPORT.md) records final validation/publication gates.
+PP3–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.

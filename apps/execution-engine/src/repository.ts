@@ -14,8 +14,12 @@ import {
   SignalTicket,
   Side,
   deriveOrderDiagnostics,
+  parseStrategyAttribution,
+  parseStrategyTrigger,
 } from "@ikbr/shared";
-import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
+import { validateStrategyInstanceEntry, type StrategyInstancePreflight } from "./strategy-instance-identity.js";
+import { canonicalJson } from "@ikbr/shared/trading-config";
+import { computeClientOrderHash, getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
 import {
   BrokerCommissionReport,
   BrokerExecutionFill,
@@ -119,6 +123,9 @@ export function validatePersistedOrderIdentity(
     return { ok: false, reason: "shape_invalid", detail: (err as Error).message };
   }
   const ticket: SignalTicket = {
+    clientOrderHashVersion: order.clientOrderHashVersion,
+    strategyAttribution: order.strategyAttribution,
+    strategyTrigger: order.strategyTrigger,
     instrument: order.instrument,
     // PR15.2 — reconstructed for identity comparisons only.
     // Deliberately excluded from the canonical clientOrderHash
@@ -160,6 +167,9 @@ export function validatePersistedOrderIdentity(
 }
 
 interface ProposedOrderRow {
+  client_order_hash_version?: number;
+  strategy_attribution?: unknown;
+  strategy_trigger?: unknown;
   id: number;
   instrument: string;
   instrument_id: string | null;
@@ -428,7 +438,13 @@ export interface Trade {
 }
 
 export class ExecutionRepository {
-  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard) {}
+  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined) {}
+
+  assertCurrentStrategyConfiguration(order: SignalTicket): void {
+    if (getClientOrderHashVersion(order) === 2 && (!this.strategyConfigurationHash ||
+        this.strategyConfigurationHash() !== order.strategyAttribution!.effectiveConfigHash))
+      throw new Error("STRATEGY_CURRENT_CONFIGURATION_MISMATCH");
+  }
 
   async checkAaplEntry(order: ProposedOrder, accountId: string, dispatch = false) {
     if (!isExactAaplIdentity(order)) return { ok: false as const, reason: "aapl_window_identity_mismatch" };
@@ -446,6 +462,7 @@ export class ExecutionRepository {
       const session = await this.sessionEntryGuard(client, order);
       if (!session.ok) throw new Error(session.reason);
       let deadline = session.endsAtMs;
+      let strategyRiskDeadline = Infinity;
       if (isAaplIdentity(order)) {
         if (!isExactAaplIdentity(order)) throw new Error("aapl_window_identity_mismatch");
         const permit = await checkAaplWindow(client, this.aaplWindow, accountId, order.id, true, this.sessionEntryGuard);
@@ -458,6 +475,25 @@ export class ExecutionRepository {
         deadline = Math.min(deadline, permit.endsAtMs);
       }
       if (beforeSend) await beforeSend();
+      if (order.strategyAttribution) {
+        this.assertCurrentStrategyConfiguration(order);
+        const stored = await client.query("SELECT * FROM proposed_orders WHERE id=$1 FOR UPDATE", [order.id]);
+        const persisted = stored.rows[0] ? this.mapRow(stored.rows[0]) : undefined;
+        if (!persisted || !validatePersistedOrderIdentity(persisted, stored.rows[0].client_order_hash).ok ||
+            computeClientOrderHash(persisted) !== computeClientOrderHash(order)) throw new Error("STRATEGY_DISPATCH_IDENTITY_CHANGED");
+        const review = await readAiProposalReview(client, order.id!, true);
+        const risk = (review as (typeof review & { risk_evidence?: AiEntryRiskEvidence }))?.risk_evidence;
+        if (!risk?.strategyObservedAt || !Number.isFinite(risk.validUntilMs) || !risk.strategyEffectiveConfigHash || risk.strategyEffectiveConfigHash !== this.strategyConfigurationHash?.() || risk.validUntilMs <= Date.now() ||
+            canonicalJson(risk.strategyAttribution ?? null) !== canonicalJson(order.strategyAttribution) ||
+            canonicalJson(risk.strategyTrigger ?? null) !== canonicalJson(order.strategyTrigger)) throw new Error("STRATEGY_DISPATCH_RISK_CHANGED");
+        const approvalFailure = aiApprovalFailure(review, persisted, stored.rows[0].client_order_hash, accountId, risk.sessionId);
+        if (approvalFailure) throw new Error(approvalFailure);
+        strategyRiskDeadline = Math.min(risk.validUntilMs, review!.expires_at.getTime());
+        await validateStrategyInstanceEntry(client, persisted, persisted.strategy!, stored.rows[0].client_order_id,
+          { effectiveConfigHash: risk.strategyEffectiveConfigHash, observedAt: risk.strategyObservedAt });
+      }
+      if (order.strategyAttribution) this.assertCurrentStrategyConfiguration(order);
+      if (Date.now() >= strategyRiskDeadline) throw new Error("STRATEGY_DISPATCH_RISK_EXPIRED");
       if (Date.now() >= deadline) throw new Error("session_dispatch_expired");
       send();
       await client.query("COMMIT");
@@ -1257,6 +1293,7 @@ export class ExecutionRepository {
       | undefined,
     positionGuard: PositionGuardContext,
     options?: {
+      readonly strategyPreflight?: StrategyInstancePreflight;
       readonly allowCrossContractExposure?: boolean;
       readonly reconciliationGate?: ReconciliationSubmissionGate;
     },
@@ -1327,6 +1364,8 @@ export class ExecutionRepository {
     // PR15 r8 §1 — validate order-critical fields fail-closed
     // BEFORE any DB tx. `partialTakeProfits` in particular must
     // be a well-shaped array; malformed input never persists.
+    let hashVersion: 1 | 2;
+    try { hashVersion = getClientOrderHashVersion(ticket); } catch { return { kind: "invalid_ticket_shape", reason: "strategy_identity_invalid" }; }
     const validationError = validateOrderCriticalShape(ticket);
     if (validationError) {
       return { kind: "invalid_ticket_shape", reason: validationError };
@@ -1363,6 +1402,27 @@ export class ExecutionRepository {
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [
         ticket.instrument,
       ]);
+
+      if (hashVersion === 2) {
+        try {
+          this.assertCurrentStrategyConfiguration(ticket);
+          await validateStrategyInstanceEntry(client, ticket, strategy, idempotency?.clientOrderId, options?.strategyPreflight);
+          if (!idempotency || computeClientOrderHash(ticket) !== idempotency.clientOrderHash || positionGuard.kind !== "available")
+            throw new Error("STRATEGY_HASH_OR_ACCOUNT_MISMATCH");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          return { kind: "invalid_ticket_shape", reason: error instanceof Error ? error.message : "STRATEGY_IDENTITY_INVALID" };
+        }
+        const fenced = await client.query(`SELECT p.id,p.status,p.client_order_id FROM strategy_trigger_fences f
+          JOIN proposed_orders p ON p.id=f.proposed_order_id WHERE f.account_id=$1 AND f.broker='ibkr'
+            AND f.conid=$2 AND f.direction='LONG' AND f.source='evaluation_bucket' AND f.timeframe='1m'
+            AND f.bucket_start_ms=$3`, [positionGuard.kind === "available" ? positionGuard.accountId : null, ticket.conid, ticket.strategyTrigger!.bucketStartMs]);
+        if (fenced.rows[0]) {
+          await client.query("ROLLBACK");
+          return { kind: "active_intent_exists", existingOrderId: Number(fenced.rows[0].id),
+            existingStatus: this.normalizeStatus(fenced.rows[0].status), existingClientOrderId: fenced.rows[0].client_order_id };
+        }
+      }
 
       // PR15 — authoritative reconciliation gate under the SAME
       // locks + transaction as the PR14 exposure guard. Runs
@@ -1507,6 +1567,7 @@ export class ExecutionRepository {
           decision_source,
           client_order_id,
           client_order_hash,
+          client_order_hash_version, strategy_attribution, strategy_trigger,
           indicator_snapshot,
           created_at
         )
@@ -1515,7 +1576,7 @@ export class ExecutionRepository {
           $6, $7, $8, $9, $10,
           $11::jsonb, $12, $13,
           $14, $15, $16, 'PROPOSED', $17, 'user',
-          $18, $19, $20::jsonb, NOW()
+          $18, $19, $21, $22::jsonb, $23::jsonb, $20::jsonb, NOW()
         )
         RETURNING id
         `,
@@ -1542,8 +1603,15 @@ export class ExecutionRepository {
           idempotency?.clientOrderId ?? null,
           idempotency?.clientOrderHash ?? null,
           ticket.indicators ? JSON.stringify(ticket.indicators) : null,
+          hashVersion, ticket.strategyAttribution ? JSON.stringify(ticket.strategyAttribution) : null,
+          ticket.strategyTrigger ? JSON.stringify(ticket.strategyTrigger) : null,
         ],
       );
+
+      if (hashVersion === 2 && positionGuard.kind === "available") await client.query(`INSERT INTO strategy_trigger_fences
+        (account_id,broker,conid,direction,source,timeframe,bucket_start_ms,proposed_order_id,client_order_hash,strategy_trigger)
+        VALUES($1,'ibkr',$2,'LONG','evaluation_bucket','1m',$3,$4,$5,$6::jsonb)`,
+        [positionGuard.accountId,ticket.conid,ticket.strategyTrigger!.bucketStartMs,result.rows[0].id,idempotency!.clientOrderHash,JSON.stringify(ticket.strategyTrigger)]);
 
       if (isPkoIdentity(ticket)) await bindGpwProposal(client, this.gpwWindow!, Number(result.rows[0].id));
       if (isAaplIdentity(ticket)) await bindAaplProposal(client, this.aaplWindow!, Number(result.rows[0].id));
@@ -1552,9 +1620,10 @@ export class ExecutionRepository {
         if (positionGuard.kind !== "available" || !idempotency || !ticket.conid)
           throw new Error("Bound AI proposal requires guarded account and complete identity");
         await client.query(`INSERT INTO proposal_ai_reviews
-          (proposed_order_id,client_order_hash,instrument_id,conid,account_id,session_id)
-          VALUES ($1,$2,$3,$4,$5,$6)`, [result.rows[0].id, idempotency.clientOrderHash,
-          ticket.instrumentId,ticket.conid,positionGuard.accountId,positionGuard.sessionId]);
+          (proposed_order_id,client_order_hash,instrument_id,conid,account_id,session_id,client_order_hash_version,strategy_attribution,strategy_trigger)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)`, [result.rows[0].id, idempotency.clientOrderHash,
+          ticket.instrumentId,ticket.conid,positionGuard.accountId,positionGuard.sessionId,hashVersion,
+          ticket.strategyAttribution ? JSON.stringify(ticket.strategyAttribution) : null, ticket.strategyTrigger ? JSON.stringify(ticket.strategyTrigger) : null]);
       }
       await client.query("COMMIT");
       return { kind: "inserted", id: Number(result.rows[0].id) };
@@ -1586,7 +1655,7 @@ export class ExecutionRepository {
   ): Promise<{ order: ProposedOrder; clientOrderHash: string | null } | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, client_order_hash_version, strategy_attribution, strategy_trigger, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1615,7 +1684,7 @@ export class ExecutionRepository {
   async getProposedOrderById(id: number): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, client_order_hash_version, strategy_attribution, strategy_trigger, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1653,7 +1722,7 @@ export class ExecutionRepository {
         : (await client.query(`SELECT w.* FROM gpw_proposals p JOIN gpw_windows w ON w.run_id=p.run_id
           WHERE p.proposed_order_id=$1`, [id])).rows[0];
       const fills = await client.query<RoundTripFill>(`SELECT exec_id,broker_order_id,proposed_order_id,account_id,conid,currency,
-        side,shares,price,executed_at,commission,commission_currency,realized_pnl FROM broker_execution_fills
+        side,shares,price,executed_at,commission,commission_currency,realized_pnl,sec_type,sec_type_conflict FROM broker_execution_fills
         WHERE proposed_order_id=ANY($1::bigint[]) OR exec_id=ANY($2::text[])
           OR (account_id=$3 AND broker_order_id=ANY($4::text[])) ORDER BY exec_id`,
       [[id, ...(closeId === null ? [] : [closeId])], execIds, accountId,
@@ -1832,7 +1901,7 @@ export class ExecutionRepository {
   } | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, client_order_hash_version, strategy_attribution, strategy_trigger, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1868,7 +1937,7 @@ export class ExecutionRepository {
   ): Promise<ProposedOrder | null> {
     const result = await this.pool.query(
       `
-      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, client_order_hash_version, strategy_attribution, strategy_trigger, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -1990,7 +2059,7 @@ export class ExecutionRepository {
 
     const result = await this.pool.query(
       `
-      SELECT id, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
+      SELECT id, client_order_hash_version, strategy_attribution, strategy_trigger, instrument, instrument_id, conid, side, position_effect, order_type, quantity, entry, stop, take_profit,
              partial_take_profits, trailing_stop_pct, trailing_stop_activation_r,
              reason, confidence, risk_check_status, status, strategy, indicator_snapshot,
              decision_source, decision_actor, ai_decision, ai_reason, ai_model, ai_decision_confidence,
@@ -2585,6 +2654,22 @@ export class ExecutionRepository {
           risk.instrumentId !== row.instrument_id || risk.conid !== row.conid) {
           await client.query("ROLLBACK");
           return { kind: "submission_identity_mismatch", reason: failure ?? "fresh_ai_risk_missing_or_stale" };
+        }
+        if (order.strategyAttribution) {
+          try {
+            this.assertCurrentStrategyConfiguration(order);
+            if (canonicalJson(risk.strategyAttribution ?? null) !== canonicalJson(order.strategyAttribution) ||
+                canonicalJson(risk.strategyTrigger ?? null) !== canonicalJson(order.strategyTrigger)) throw new Error("STRATEGY_RISK_IDENTITY_MISMATCH");
+            await validateStrategyInstanceEntry(client, order, order.strategy!, row.client_order_id ?? undefined,
+              risk.strategyObservedAt && risk.strategyEffectiveConfigHash ? { effectiveConfigHash: risk.strategyEffectiveConfigHash, observedAt: risk.strategyObservedAt } : undefined);
+            const fence = await client.query(`SELECT proposed_order_id FROM strategy_trigger_fences WHERE proposed_order_id=$1
+              AND account_id=$2 AND conid=$3 AND client_order_hash=$4 AND strategy_trigger=$5::jsonb`,
+              [input.id,input.accountId,order.conid,row.client_order_hash,JSON.stringify(order.strategyTrigger)]);
+            if (fence.rows.length !== 1) throw new Error("STRATEGY_TRIGGER_FENCE_MISSING");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            return { kind: "submission_identity_mismatch", reason: error instanceof Error ? error.message : "STRATEGY_IDENTITY_INVALID" };
+          }
         }
         if (await findAccountReservation(client, input.accountId, input.id)) {
           await client.query("ROLLBACK");
@@ -3303,7 +3388,14 @@ export class ExecutionRepository {
         : new Date(row.created_at);
     const indicators = this.normalizeIndicators(row.indicator_snapshot);
 
+    const strategyIdentity = {
+      clientOrderHashVersion: row.client_order_hash_version ?? 1,
+      ...(row.strategy_attribution != null ? { strategyAttribution: parseStrategyAttribution(row.strategy_attribution) } : {}),
+      ...(row.strategy_trigger != null ? { strategyTrigger: parseStrategyTrigger(row.strategy_trigger) } : {}),
+    };
+    getClientOrderHashVersion(strategyIdentity as SignalTicket);
     const out: ProposedOrder = {
+      ...(strategyIdentity.clientOrderHashVersion === 2 ? strategyIdentity as Pick<SignalTicket,"clientOrderHashVersion" | "strategyAttribution" | "strategyTrigger"> : {}),
       id: Number(row.id),
       instrument: row.instrument,
       // PR15.2 — logical registry id, optional on the wire and

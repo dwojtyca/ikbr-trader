@@ -38,6 +38,28 @@ test("fresh exact USD stock entry has account/session-bound evidence and oldest-
   assert.equal(result.evidence.stopRisk, 1);
 });
 
+test("attributed risk requires the server's current configuration and trusted trigger bucket", () => {
+  const input = fixture();
+  const hash = "a".repeat(64);
+  input.order.strategy = "momentum_breakout_long_v1";
+  input.bound = { ...input.bound, instrument: { ...input.bound.instrument,
+    executionPolicy: { ...input.bound.instrument.executionPolicy!, strategyId: input.order.strategy } } };
+  input.order.strategyAttribution = { version: 1, implementationId: "momentum_breakout_long_v1", instanceId: "original",
+    instanceRevision: 1, instanceHash: "b".repeat(64), effectiveConfigHash: hash, instrumentId: "test" };
+  input.order.strategyTrigger = { version: 1, source: "evaluation_bucket", timeframe: "1m", observedAt: stamp(),
+    bucketStartMs: Math.floor(nowMs / 60000) * 60000 };
+  const watchlist = { ...input.watchlist, watchlist: [{ ...input.watchlist.watchlist[0],
+    marketState: { ...input.watchlist.watchlist[0].marketState, ts: stamp() } }] };
+  assert.deepEqual(assessAiEntryRisk({ ...input, watchlist }), { ok: false, reason: "risk_strategy_configuration_mismatch" });
+  assert.deepEqual(assessAiEntryRisk({ ...input, watchlist, effectiveConfigHash: "c".repeat(64) }),
+    { ok: false, reason: "risk_strategy_configuration_mismatch" });
+  const valid = assessAiEntryRisk({ ...input, watchlist, effectiveConfigHash: hash });
+  assert.equal(valid.ok, true);
+  if (valid.ok) assert.equal(valid.evidence.strategyEffectiveConfigHash, hash);
+  const stale = { ...watchlist, watchlist: [{ ...watchlist.watchlist[0], marketState: { ...watchlist.watchlist[0].marketState, ts: stamp(-60001) } }] };
+  assert.equal(assessAiEntryRisk({ ...input, watchlist: stale, effectiveConfigHash: hash }).ok, false);
+});
+
 type Fixture = ReturnType<typeof fixture>;
 const cases: Array<[string, (f: Fixture) => void]> = [
   ["nonstock asset", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, assetClass: "future" } }; }],

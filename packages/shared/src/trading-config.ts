@@ -9,3 +9,6 @@ export * from "./trading-configuration/management.js";
 export * from "./trading-configuration/store.js";
 export * from "./trading-configuration/startup.js";
 export * from "./trading-configuration/broker-evidence.js";
+export * from "./trading-configuration/attribution.js";
+export * from "./trading-configuration/strategy-conversion.js";
+export * from "./trading-configuration/economic-evidence.js";

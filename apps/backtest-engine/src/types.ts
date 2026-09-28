@@ -1,5 +1,6 @@
 import type {
   Candle,
+  StrategyInstanceAttributionV1,
   IndicatorSnapshot,
   PartialTakeProfit,
   ProposedOrder,
@@ -19,6 +20,7 @@ export interface BacktestDataset {
 }
 
 export interface BacktestRun {
+  strategyAttribution?: StrategyInstanceAttributionV1;
   id: number;
   datasetId: number;
   mode: "bot" | "isolated";

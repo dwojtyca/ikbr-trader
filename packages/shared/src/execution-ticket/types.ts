@@ -134,6 +134,8 @@ export interface ExecutionTicketMetadata {
  * `execution-engine`.
  */
 export interface ExecutionTicket {
+  readonly strategyAttribution?: import("../strategy-attribution.js").StrategyInstanceAttributionV1;
+  readonly strategyTrigger?: import("../strategy-attribution.js").StrategyTriggerV1;
   readonly ticketId: string;
   readonly createdAt: Date;
   readonly signalId: string;

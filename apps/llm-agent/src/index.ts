@@ -38,7 +38,7 @@ const decider = new OpenAiDecider({
 
 const boundWorker = new BoundReviewWorker({
   assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
-  repository: new BoundReviewRepository(pool), execution: executionApi,
+  repository: new BoundReviewRepository(pool, { effectiveConfigHash: tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined }), execution: executionApi,
   resolveAaplIdentity: createAaplIdentityResolver({ pool, env: process.env }),
   news: marketaux, decider, model: config.LLM_AGENT_MODEL,
   promptVersion: config.LLM_AGENT_PROMPT_VERSION,

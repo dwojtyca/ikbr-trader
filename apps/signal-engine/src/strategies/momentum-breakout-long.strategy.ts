@@ -1,5 +1,7 @@
 import { isWithinStrategySession, hasUnknownStrategyVolume } from "./session-filter.js";
 import type { SecType, Candle } from "@ikbr/shared";
+import { MOMENTUM_CONFIGURATION_DEFAULTS_V1 } from "@ikbr/shared";
+import type { MomentumConfigurationParametersV1 } from "@ikbr/shared";
 import type {
   Strategy,
   StrategyContext,
@@ -8,32 +10,38 @@ import type {
   ExitSignal,
 } from "./strategy.types.js";
 
-interface MomentumBreakoutParams {
-  dailyReturn20MinPct: number;
-  h1Return4MinPct: number;
-  return20MaxPct: number;
-  return60MinPct: number;
-  return60MaxPct: number;
-  consolidationDriftMaxPct: number;
-  rsiMax: number;
-  bbWidthMaxPct: number;
-  volumeMultiplier: number;
-  closeLocationMin: number;
-  bodyMin: number;
-  upperWickMax: number;
-  plannedRewardMinPct: number;
-  stopAtrMult: number;
-  structureStopAtrMult: number;
-  takeProfitR: number;
-  /**
-   * Minimum regimeScore (from MarketRegimeDetector) required to emit a
-   * signal. Tuned on backtest run #25: scores 0..8 form a stagnant
-   * "no man's land" with negative expectancy, while scores >= 9 carry
-   * the bulk of profits. Set to 0 to disable.
-   */
-  minRegimeScore: number;
-  sessionUtcStartHour: number;
-  sessionUtcEndHour: number;
+type MomentumBreakoutParams = MomentumConfigurationParametersV1;
+
+const ADJUSTABLE_PARAMETER_BOUNDS = {
+  dailyReturn20MinPct: [0, 100],
+  h1Return4MinPct: [0, 100],
+  return60MinPct: [0, 3],
+} as const;
+
+export function validateMomentumConfigurationParameters(
+  input: unknown,
+): MomentumConfigurationParametersV1 {
+  const fail = (): never => { throw new Error("INVALID_MOMENTUM_PARAMETERS"); };
+  if (input === null || typeof input !== "object" || Array.isArray(input)) return fail();
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) return fail();
+  const keys = Reflect.ownKeys(input);
+  const expected = Object.keys(MOMENTUM_CONFIGURATION_DEFAULTS_V1);
+  if (keys.length !== expected.length || keys.some((key) => typeof key !== "string" || !expected.includes(key))) return fail();
+  const record = input as Record<string, unknown>;
+  for (const key of expected) {
+    const descriptor = Object.getOwnPropertyDescriptor(input, key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return fail();
+  }
+  for (const [key, [min, max]] of Object.entries(ADJUSTABLE_PARAMETER_BOUNDS)) {
+    const value = record[key];
+    if (typeof value !== "number" || !Number.isFinite(value) || Object.is(value, -0) || value < min || value > max) return fail();
+  }
+  for (const [key, value] of Object.entries(MOMENTUM_CONFIGURATION_DEFAULTS_V1)) {
+    if (key in ADJUSTABLE_PARAMETER_BOUNDS) continue;
+    if (record[key] !== value) return fail();
+  }
+  return Object.freeze({ ...record }) as unknown as MomentumConfigurationParametersV1;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -148,8 +156,9 @@ export interface MomentumBreakoutLongEvaluation {
 export function evaluateMomentumBreakoutLong(
   context: StrategyContext,
   allowedSecTypes: readonly SecType[] = ["STK", "IND"],
+  parameters?: MomentumConfigurationParametersV1,
 ): MomentumBreakoutLongEvaluation {
-  const evaluator = new MomentumBreakoutLongStrategy();
+  const evaluator = new MomentumBreakoutLongStrategy(parameters);
   const signal = evaluator.evaluateForAllowedSecTypes(context, allowedSecTypes);
   return { signal, rejectionReason: evaluator.getLastRejectionReason() };
 }
@@ -168,16 +177,19 @@ export class MomentumBreakoutLongStrategy implements Strategy {
   // and must beat any swing-style strategy (e.g. trend_following_long_v1) when
   // both fire on the same symbol/tick, regardless of confidence score.
   readonly lanePriority = 10;
+  private readonly configuredParameters?: MomentumBreakoutParams;
   private lastRejectionReason: string | undefined;
+
+  constructor(parameters?: MomentumConfigurationParametersV1) {
+    if (parameters !== undefined) this.configuredParameters = validateMomentumConfigurationParameters(parameters);
+  }
 
   getLastRejectionReason(): string | undefined {
     return this.lastRejectionReason;
   }
 
   generateSignal(context: StrategyContext): StrategySignal | null {
-    const evaluation = evaluateMomentumBreakoutLong(context, this.secTypes);
-    this.lastRejectionReason = evaluation.rejectionReason;
-    return evaluation.signal;
+    return this.evaluateForAllowedSecTypes(context, this.secTypes);
   }
 
   evaluateForAllowedSecTypes(
@@ -194,11 +206,16 @@ export class MomentumBreakoutLongStrategy implements Strategy {
     if (context.volatilityRegime === "low_volatility")
       return this.reject("volatility_regime_low_volatility");
 
+    return this.evaluate(context);
+  }
+
+  private evaluate(context: StrategyContext): StrategySignal | null {
     const profile = context.momentumBreakoutProfile ?? "default";
     if (!["default", "pko_mild_v1", "pko_moderate_v1"].includes(profile)) return this.reject("invalid_momentum_profile");
+    if (this.configuredParameters && profile !== "default") return this.reject("momentum_profile_configuration_conflict");
     if (profile !== "default" && (context.symbol !== "PKO" || context.conid !== "35146360" || context.secType !== "STK"))
       return this.reject("momentum_profile_identity_mismatch");
-    const params = { ...paramsForSecType(context.secType), ...MOMENTUM_PROFILE_THRESHOLDS[profile] };
+    const params = this.configuredParameters ?? { ...paramsForSecType(context.secType), ...MOMENTUM_PROFILE_THRESHOLDS[profile] };
     if (
       !isWithinStrategySession(
         context,

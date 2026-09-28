@@ -2208,3 +2208,15 @@ it("configuration preparation stops the actual loop before market/provider/propo
   assert.equal(marketDataRuntime.calls.length, 0);
   assert.equal(executionRuntime.preparedCalls.length, 0);
 });
+
+it("configured scheduler evaluates with denied entry and never touches legacy or execution paths",async()=>{
+ let evaluations=0;
+ const forbidden=async()=>{throw Error("forbidden side effect");};
+ const svc=new TradingLoopService({config:makeConfig(),registry:makeRegistry([makeInstrument("aapl")]),
+  configuredStrategyRuntime:{listInstrumentIds:()=>["aapl"],evaluate:async instrumentId=>{evaluations++;return {kind:"no_signal",instrumentId,reasons:[],entryAllowed:false,entryBlockers:["PP3_EXECUTION_POLICY_UNAVAILABLE"]};}},
+  assertEntryAllowed:forbidden,marketDataRuntime:{dryRun:forbidden} as unknown as MarketDataRuntime,
+  executionRuntime:{executePrepared:forbidden} as unknown as ExecutionRuntime,exposureReader:{readExposure:forbidden,probeReady:forbidden},
+  reconciliationReader:{checkInstrument:forbidden} as unknown as ReconciliationReader,repo:{syncStrategyRuntimeStates:forbidden} as unknown as StrategyRuntimeStateRepository,
+  portfolioManager:makeFakePortfolioManager(),strategyCooldownMs:0,maxMarketStateAgeMs:0,logger:makeLogger()});
+ const report=await svc.runOnce();assert.equal(evaluations,1);assert.equal(report.reports[0].outcome.kind,"CONFIGURED_EVALUATION");
+});

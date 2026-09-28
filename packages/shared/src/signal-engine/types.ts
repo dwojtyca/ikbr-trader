@@ -99,6 +99,8 @@ export interface SignalBlocker {
  * `SignalEvaluation.metadata.strategyId`.
  */
 export interface SignalAttributionContext {
+  readonly strategyAttribution?: import("../strategy-attribution.js").StrategyInstanceAttributionV1;
+  readonly strategyTrigger?: import("../strategy-attribution.js").StrategyTriggerV1;
   readonly strategyId: string;
   readonly intendedAction: "LONG" | "SHORT";
 }
@@ -115,6 +117,8 @@ export interface SignalEngineVersions {
 }
 
 export interface SignalMetadata {
+  readonly strategyAttribution?: import("../strategy-attribution.js").StrategyInstanceAttributionV1;
+  readonly strategyTrigger?: import("../strategy-attribution.js").StrategyTriggerV1;
   readonly engineVersions: SignalEngineVersions;
   /**
    * Wall-clock cost of the whole pipeline in milliseconds, measured
