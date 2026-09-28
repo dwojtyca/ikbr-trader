@@ -1,5 +1,15 @@
 # PR16B — full close of the mechanical stock position
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Status: implemented; independent review ACCEPTED and local validation passed (2026-09-23).
 Plan: [PR16B_FULL_CLOSE_PLAN.md](PR16B_FULL_CLOSE_PLAN.md), revision 2 accepted by
 independent `pr16b_plan_review`. Implementation review was accepted by the new independent

@@ -1,5 +1,24 @@
 # Execution Runtime (PR13)
 
+## Documentation status — 2026-09-28
+
+The Paper-only runtime is hosted inside signal-engine and used by the trading
+loop. The loop and durable reconciliation now exist. Handoff of an attributed
+bound intent creates a persisted proposal/AI review; mandatory AI approval and
+fresh execution risk precede broker dispatch. Unknown delivery is not retried.
+No runtime flag enables Live. Current settings are documented in the configuration
+reference; original PR13 sequencing/outcomes below are not the full current flow.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Paper-only, single-shot submit. Composes the PR12 dry-run flow
 > with a duplicate-safe HTTP call to `execution-engine`. Kill-switch
 > `EXECUTION_RUNTIME_ENABLED=false` by default. No scheduler, no

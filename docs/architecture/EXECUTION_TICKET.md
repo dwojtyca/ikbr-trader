@@ -1,5 +1,22 @@
 # Execution Ticket Builder — Skeleton (PR10)
 
+## Documentation status — 2026-09-28
+
+The pure builder is consumed by the shared pipeline and signal runtime. Broker
+handoff persists a bound proposal/AI review; a constructed ticket is not dispatch
+permission. Existing algorithm attribution is present; separately configured
+strategy-instance/revision attribution is planned in PP2.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Status: **Phase 1, foundation only.** This document describes the
 > `packages/shared/src/execution-ticket/` module introduced in PR10.
 > The builder is entirely deterministic and produces an

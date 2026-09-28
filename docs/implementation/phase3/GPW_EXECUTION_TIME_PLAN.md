@@ -1,5 +1,15 @@
 # GPW execution timestamps and durable reconciliation failure
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 ## Evidence and scope
 
 The authorized Paper observation was stopped with writes and scheduler disabled.

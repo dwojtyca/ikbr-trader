@@ -1,5 +1,15 @@
 # GPW2B — broker market rules and Warsaw sessions
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Date: 2026-09-24. Independent plan and implementation reviews accepted; all local gates passed.
 Plan: [GPW2B_MARKET_RULES_PLAN.md](GPW2B_MARKET_RULES_PLAN.md).
 

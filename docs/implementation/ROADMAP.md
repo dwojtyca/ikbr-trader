@@ -1,122 +1,98 @@
-# ROADMAP.md
+# AI Trading Platform roadmap
 
-# AI Trading Platform Roadmap
+Updated: 2026-09-26. Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
+Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
-Current delivery priority: validate a complete Paper round trip on one instrument
-before tuning strategies. See [Paper mechanics delivery](phase2/PAPER_MECHANICS_DELIVERY.md).
-The mandatory [AI entry gate](phase2/PR15_6_AI_PROPOSAL_GATE_REPORT.md) is implemented.
-[PR16A](phase3/PR16A_OWNERSHIP_PLAN.md) adds read-only ownership evidence and
-cancellation uncertainty handling. [PR16B](phase3/PR16B_FULL_CLOSE_REPORT.md)
-adds a durable full close for the one-share stock scope. The next operational
-gate is a separately authorized controlled Paper round trip. No instrument is
-enabled by these changes.
+## Owner-selected outcome
 
-## Phase 0 - Architecture Baseline
-Goal:
-- Audit current architecture
-- Produce PHASE_0_PLAN.md
-- No behavior changes
+Run the existing platform as a production-style automated bot on **IBKR Paper**.
+Initially configure PKO and AAPL and one parameterized existing strategy. Maintain
+separate catalogues for strategy configurations and instruments; each instrument
+selects previously defined strategy configurations. Support further instruments
+within verified capabilities through configuration, without ticker branches.
 
-Exit criteria:
-- Architecture documented
-- Data flow documented
-- Build/lint/test commands verified
+The completed product must evaluate scheduled signals, obtain source-backed AI
+entry adjudication, enforce deterministic risk, submit and protect orders, manage
+exits, recover safely after failures and explain its state to the operator.
+One supervised round trip is a prerequisite, not the finish line. Live activation,
+new strategy development and ES research are outside this delivery track.
 
----
+## Reuse the delivered work
 
-## Phase 1 - Execution Security
-- API authentication
-- localhost by default
-- Paper/Live verification
-- Remove unsafe execution paths
-- Disable default market orders
+Bound contracts, strategy attribution, durable proposal identity, mandatory AI
+reviews, submission/reconciliation, ownership, one-share full-close and generic
+session/native-candle readiness are implemented. Do not restart those subsystems.
+Configuration generality, company research, operator security/UI and automated
+lifecycle remain incomplete. See the evidence matrix in CURRENT_STATE.
 
----
+## Current sequence
 
-## Phase 2 - Reliability
-- Idempotency keys
-- Submission state machine
-- Reconciliation
-- Unknown submission handling
-- Retry safety
+All work packages below are **planned, not implemented by this documentation**.
+Each receives its own bounded plan, independent plan review, implementation,
+independent hostile review, checks, report, scoped commit/push and exact CI.
 
----
+| Package | Result | Depends on |
+| --- | --- | --- |
+| PP0 | Secure operator/API surface; dependency remediation and accurate UI entry point | Current baseline |
+| PP1 | Versioned strategy-instance and instrument configuration; shared validation and rollout identity | Current baseline; PP0 before operational use |
+| PP2 | Parameterized strategy factories, explicit per-instrument selection and durable instance attribution | PP1 |
+| PP3 | Generic bounded stock Paper execution/windows/budgets/round-trip evidence for PKO+AAPL | PP1, PP2 |
+| PP4 | Cached instrument research and source-bound AI evidence for both initial issuers | PP1; integrate with PP2/PP3 before entries |
+| PP5 | Automated protection/exit observation, recovery and entry-pause semantics | PP3 |
+| PP6 | Operator readiness/decision/lifecycle view, alerts, deployment and recovery runbooks | PP0–PP5 |
+| PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
 
-## Phase 3 - Order Lifecycle
-- Modify orders
-- Partial close
-- Full close
-- Replace workflow
-- Position ownership
-- Cancel all
-- Kill switch
+PP4 research implementation may proceed independently after the identity contract
+is fixed. Final integration and broker activation remain sequential and gated.
+Do not fund broad external-data subscriptions before checking coverage for both
+initial issuers. A missing provider contract is an explicit delivery blocker.
 
----
+## Completion criteria
 
-## Phase 4 - Instrument Registry
-- Replace env watchlist
-- Instrument definitions
-- Futures roll policy
-- Monitoring vs execution flags
+- PKO and AAPL coexist in one validated configuration; only assigned enabled
+  strategy instances run. Reusing an implementation with different parameters
+  preserves separate identity, state and audit.
+- A supported additional instrument is accepted in fixtures using only config;
+  an unsupported asset/policy combination fails before any order/provider call.
+- All entries use persisted proposal, immutable configuration/research identity,
+  mandatory AI and fresh deterministic execution risk. Rejections remain visible.
+- Normal exits and close reconciliation are automated, with bounded uncertainty
+  escalation and no duplicate submissions or accidental reversal.
+- The operator can pause new entries without losing supported protective/exit
+  supervision. Current master-switch behavior is not reinterpreted retroactively.
+- PP7 documents real entry/exit evidence for both initial instruments and the
+  specified automated soak/restart/failure criteria. No-signal periods do not prove
+  trading mechanics; signals or approvals are never fabricated to obtain a pass.
+- Paper operation uses the business lifecycle intended for production. Live stays
+  disabled and requires separate readiness review and owner authorization.
 
----
+## Long-term capability map
 
-## Phase 5 - Decision Engine
-- Separate AI from execution
-- Structured decisions
-- Trade thesis
-- Risk validation before execution
+The original phase numbers remain classification labels, not an instruction to
+finish every earlier research task before this track.
 
----
+| Phase | Capability | Current disposition |
+| --- | --- | --- |
+| 0 | Architecture baseline | Historical audit; current map maintained in docs |
+| 1 | Execution security | Implemented baseline; PP0 closes newly identified control-plane gaps |
+| 2 | Reliability | Durable bound entry/reconciliation implemented; real Paper proof pending |
+| 3 | Order lifecycle | Ownership/full close implemented narrowly; PP3/PP5 generalize and automate |
+| 4 | Instrument registry | Foundation implemented; PP1/PP2 deliver operator configuration |
+| 5 | Decision layer | Shared deterministic rules and separate AI gate implemented; PP4 enriches evidence |
+| 6 | Market context | Price/technical evidence exists; PP4 adds issuer research; broad macro/flows later |
+| 7 | Operator dashboard | Existing dashboard; PP0/PP6 repair and extend |
+| 8 | Autonomous Paper | Target of PP7 after lifecycle/recovery gates |
+| 9 | Live readiness | Deferred; this track never authorizes Live |
 
-## Phase 6 - Market Context
-- DXY
-- Yields
-- Gold
-- Silver
-- Platinum
-- Copper
-- ETF flows
-- COT
-- Inventories
-- Macro calendar
-- News
+## Deferred work and historical records
 
----
+ES PR15.5D.3 remains REJECTED_FOR_ES. PR15.5F local diagnostics are unfinished and
+off the critical path; preserve source, frozen data and verdicts. Futures roll,
+options, shorts, fractional quantities, leverage and complex partial/trailing
+exits require explicit capability stages, not permissive flags. ETF entry/exit
+support is a separately bounded extension using the same contracts.
 
-## Phase 7 - Operator Dashboard
-- Portfolio
-- Orders
-- Audit
-- AI decisions
-- Risk
-- Reconciliation
-
----
-
-## Phase 8 - Autonomous Paper Trading
-- Advisory mode
-- Approval mode
-- Autonomous mode
-- Shadow mode
-- Paper validation
-
----
-
-## Phase 9 - Live Readiness
-- Security review
-- Operational review
-- Disaster recovery
-- Limited live rollout
-
-## Rules
-
-Every phase follows:
-
-1. Create PHASE_X_PLAN.md
-2. Wait for approval
-3. Implement only that phase
-4. Run lint/typecheck/test/build
-5. Perform hostile review
-6. Create PHASE_X_REPORT.md
-7. Stop
+[Phase2 history](phase2/PHASE_2_ROADMAP.md) and earlier instrument plans retain
+historical evidence. The current owner direction supersedes their next-step order.
+[Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
+tracks this prose-only change; runtime implementation is still pending.

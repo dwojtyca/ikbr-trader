@@ -1,5 +1,15 @@
 # GPW preflight — Docker workspace dependency fix
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 The clean ab74890 Docker build fails with `tools/paper-verify-stack: tsc: not found`.
 Docker installs workspace dependencies before copying that workspace's manifest.
 

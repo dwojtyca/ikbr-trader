@@ -1,5 +1,15 @@
 # PR15.2 — Authoritative Instrument Binding — REPORT
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 > Status: **shipped as `1472a33`**.
 > Base commit: `89e1377` (PR15.1 shipped).
 > Scope: bind a logical registry `instrumentId` to one exact,

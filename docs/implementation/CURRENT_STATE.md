@@ -1,0 +1,144 @@
+# Current project state
+
+Reviewed: 2026-09-26. Code baseline: `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
+The audit also tested the existing dirty workspace; those results do not mean its
+uncommitted ES work shipped. Documentation changes do not change this runtime baseline.
+
+## Delivery objective
+
+The owner wants a production-style bot operating on **IBKR Paper**, initially with
+PKO/WSE and AAPL, with instruments configured independently from reusable named
+strategy parameter sets. Instruments select previously configured strategies.
+Automated evaluation, persisted AI adjudication, risk, execution, protection,
+exits, recovery and operator visibility are required. A supervised one-share round
+trip is an intermediate proof, not final delivery. See the [delivery plan](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
+and [configuration contract](../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md).
+
+## Evidence vocabulary
+
+- **Implemented:** reachable production code exists; fixtures alone are insufficient.
+- **Locally verified:** identified checks passed for the stated workspace.
+- **Deployed observation:** dated observation of a particular image/configuration.
+- **Broker accepted:** fills, ownership and final broker state establish the claimed outcome.
+- **Planned:** requires implementation and review; examples are not supported configuration.
+
+None of these labels implies profitability or permission to activate Live.
+
+## Capability matrix
+
+| Capability | Implemented state | Remaining gap / evidence |
+| --- | --- | --- |
+| Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
+| Instrument registry | Shared typed registry and exact contract binding | Catalogue is code-defined; runtime opt-ins are mutually exclusive PKO/AAPL special cases |
+| Strategy framework | Seven registered implementations; enabled profiles select a subset; portfolio selection and regime detection exist | No general reusable parameterized instance catalogue or per-instrument instance assignment |
+| Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
+| Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |
+| Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | Current AI-entry account evidence requires USD base currency; wider asset/currency/quantity support not generic |
+| Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
+| Exit/ownership | Durable ownership, bracket protection and supported audited full close | No automatic full-close observation worker; no general quantity/partial/replace lifecycle |
+| AI evidence | Persisted technical/order/account context, Marketaux news, AAPL-specific verified identity | Financial statements/earnings/macro are unavailable; PKO symbol-only news excluded; no ETF research pipeline |
+| Operator control | API health/readiness, lifecycle/round-trip endpoints, existing UI | UI calls retired signal route; proxy authority and unauthenticated ingestion/signal mutations need hardening |
+| Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
+| Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
+| Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |
+
+## Source-backed implementation map
+
+- Registry: [definitions](../../packages/shared/src/instruments/definitions.ts),
+  [configured profiles](../../packages/shared/src/instruments/configured-registry.ts),
+  [binding authority](../../packages/shared/src/instruments/bindings.ts).
+- Strategy: [implementation registry](../../apps/signal-engine/src/strategies/strategy-registry.ts),
+  [profiles](../../packages/shared/src/strategy-profiles.ts),
+  [portfolio selection](../../apps/signal-engine/src/portfolio/strategy-portfolio-manager.ts),
+  [runtime evaluation](../../apps/signal-engine/src/runtime/trading-loop/trading-loop-service.ts).
+  The current runtime evaluates enabled candidates before checking the winning
+  implementation against instrument policy; this is not an instance assignment system.
+- Data/session: [context loader](../../apps/signal-engine/src/runtime/strategy/strategy-context-loader.ts),
+  [session adapter](../../apps/ingestion/src/session-schedule-adapter.ts),
+  [session report](phase3/INSTRUMENT_SESSION_READINESS_REPORT.md).
+- AI: [bound worker](../../apps/llm-agent/src/bound-review-worker.ts),
+  [review store](../../apps/llm-agent/src/bound-review-repository.ts),
+  [AI integration report](phase2/PR15_6_AI_PROPOSAL_GATE_REPORT.md).
+  `coverage.financialStatements/earnings/macro/broaderMarketTrends` are unavailable.
+  Generic market-context runtime currently registers only the price provider.
+- Execution: [entry risk](../../apps/execution-engine/src/ai-entry-risk.ts),
+  [submission service](../../apps/execution-engine/src/reconciliation/submission-service.ts),
+  [close risk](../../apps/execution-engine/src/lifecycle/close-risk.ts),
+  [round-trip evidence](../../apps/execution-engine/src/lifecycle/round-trip-evidence.ts).
+  The broker adapter still classifies USD/STK as US stock; generic calendar support
+  upstream does not remove downstream venue/tick assumptions.
+- Security: [UI proxy](../../apps/ui/vite.config.ts), [Compose](../../docker-compose.yml),
+  [signal controls](../../apps/signal-engine/src/index.ts),
+  [ingestion controls](../../apps/ingestion/src/index.ts).
+
+## Important current limits
+
+1. PKO and AAPL cannot currently both opt into execution through the configured
+   registry. Seed entries remain disabled without opt-in.
+2. ETFs map to IBKR STK at the binding layer but `assetClass=etf` is rejected by
+   production entry/close risk. Futures/index types likewise do not prove tradability.
+3. Current run windows, daily attempt accounting and completion reports use
+   dedicated AAPL/GPW branches/tables. Changing a ticker is not sufficient.
+4. Full close cancels protection before submitting its bounded SELL limit. An
+   unfilled/failed close may leave an unprotected position. No blind replacement;
+   operator observation is currently necessary. `TRADING_ENABLED=false` neither
+   closes positions nor cancels existing broker protection and blocks full close.
+5. The bound AI worker has a 30-second claim with sequential account/news/model
+   requests and no renewal. It does not persist returned `riskFlags`. News response
+   mapping does not enforce matched entity or publication-time validity.
+6. UI's legacy signal action receives 503. Vite proxy inserts execution credentials
+   without authenticating the browser caller; Compose exposes its port on all host
+   interfaces. Ingestion stop/bootstrap and strategy-toggle controls also lack a
+   complete authentication boundary. Exploitability depends on network reachability;
+   this audit did not establish Internet exposure or perform mutating probes.
+
+## Dated operational evidence
+
+The initial [September 24 preflight](phase3/GPW_PREFLIGHT_DOCKER_REPORT.md) is
+historical. Later [completed-order](phase3/GPW_COMPLETED_ORDERS_REPORT.md),
+[preflight closure](phase3/GPW_PREFLIGHT_CLOSURE_REPORT.md) and
+[session readiness](phase3/INSTRUMENT_SESSION_READINESS_REPORT.md) reports document
+subsequent fixes and disabled deployments. Do not reopen already-fixed work from
+an early report without reproducing a current failure.
+
+On September 26 the read-only stack verifier reported stale PKO market data,
+incomplete reconciliation exposure and an account-summary timeout (overall
+UNREACHABLE, exit 20). It observed the scheduler disabled. Docker showed ingestion,
+signal and execution running the instrument-session-reviewed image, llm-agent in
+Created state, and UI stopped. Saturday explains absent fresh market ticks, not
+complete broker/account readiness. No restart, paid provider call or order was
+performed by that audit. The observation is not a permanent diagnosis of the broker.
+
+No inspected versioned report proves a real normal-flow entry plus exit for both
+initial instruments. The AAPL provider diagnostic was a synthetic non-deliverable
+proposal with a real model REJECT; it was not a trade. The PKO profile replay remains
+INSUFFICIENT_EVIDENCE with zero signals; no threshold was selected for activation.
+
+## Local and CI evidence from the audit
+
+On the existing working tree: lint PASS (three warnings), typecheck PASS, unit
+command 2,472 passes/52 skips, build PASS. Standard CI-environment integration on
+disposable PostgreSQL16: 2,037 passes, zero failures/skips. An earlier nonstandard
+attempt set `TEST_RESEARCH_POSTGRES_URL` to an empty database; that frozen-source
+ES test cannot run there. This was test setup error, not a demonstrated regression.
+
+[Exact baseline CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36064194643)
+passed for `6cbd2c7`. It excludes local uncommitted changes. The local toolchain was
+Node24.4.1/pnpm9.15.4; the repository declares pnpm9.5.0, so this is not an exact
+local reproduction of the declared package-manager version.
+
+Production dependency audit reported two moderate Fastify5.8.5 advisories and no
+high/critical findings in that scan. Patched version is5.12.1:
+[schema coercion advisory](https://github.com/advisories/GHSA-w2qp-rph6-63g4),
+[trustProxy advisory](https://github.com/advisories/GHSA-3m5p-2c4r-xxw2).
+No vulnerable route configuration was demonstrated; this is dependency evidence,
+not a penetration-test result. Refresh dependency evidence in the security stage.
+
+## Authority and next work
+
+Use [ROADMAP](ROADMAP.md) for order, the [detailed plan](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
+for acceptance and [docs index](../README.md) for document status. Historical plans
+are not the current queue. The root AGENTS.md contains an older PKO-only priority;
+the owner's September26 direction supersedes that ordering, while its safety,
+review and delivery rules remain applicable. This docs-only change leaves that
+pre-existing dirty file untouched.

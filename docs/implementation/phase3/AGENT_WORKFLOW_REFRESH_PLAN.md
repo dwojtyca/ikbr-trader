@@ -1,5 +1,15 @@
 # Agent instructions refresh
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Documentation-only scope, requested by the owner after the PKO preflight.
 
 Update AGENTS.md to reflect the owner's main/commit/push/CI workflow, independent

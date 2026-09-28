@@ -1,5 +1,16 @@
 # ADR-001 — Execution Security
 
+## Documentation status — 2026-09-28
+
+This ADR preserves the original security decisions and rollout history. Current
+production HTTP refuses unpersisted direct tickets; old emergency direct-ticket
+opt-in descriptions below are not an available bypass. Shared API credentials do
+not authenticate UI callers: operator proxy and ingestion/signal controls still
+need PP0 hardening. Read [current state](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) before
+applying historical rollout examples. Paper-only runtime restrictions remain.
+
+## Historical decision text
+
 - **Status:** Accepted
 - **Date:** 2026-07-10
 - **Deciders:** Operator (owner of ikbr-trader)

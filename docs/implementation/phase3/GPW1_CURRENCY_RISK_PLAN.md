@@ -1,5 +1,15 @@
 # GPW1 — PLN valuation evidence and risk limits
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Status: ACCEPTED by independent gpw1_plan_review (2026-09-23). Work on main. No broker order,
 service restart, instrument activation, paid API request or FX conversion.
 

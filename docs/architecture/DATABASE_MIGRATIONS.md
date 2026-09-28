@@ -1,5 +1,12 @@
 # Database Migrations
 
+## Documentation status — 2026-09-28
+
+Current migration mechanism reference. Runtime baseline includes migrations through
+000015_instrument_session_schedules.sql; inspect the migration directory for later
+changes. PP1–PP5 propose additive schema changes, not edits to released migrations.
+See [current capabilities](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
 PR14.2 introduces versioned SQL migrations for the schema
 previously created dynamically in `ExecutionRepository.init()`.
 The runner lives in

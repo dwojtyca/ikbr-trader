@@ -1,5 +1,15 @@
 # GPW2B — authoritative WSE rules and sessions
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Date: 2026-09-24. Status: ACCEPTED by independent gpw2b_plan_review.
 Owner authorizes plan review → implementation → new independent review → all
 checks → commit/push main → exact-commit CI. No activation or broker writes.

@@ -1,7 +1,23 @@
 # PR15.5D.2 — Backtest hot-path performance remediation — PLAN
 
-Status: owner approved 2026-09-18; implementation in progress; no new real
-experiment has started
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading. Frozen ES verdicts and experiment artifacts are unchanged; research is
+deferred off the production-Paper critical path. Local PR15.5F drafts are not shipped
+capability or prerequisites.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
+Status (reconciled 2026-09-23): optimization and benchmark tooling committed
+in `4bf079f`, `e814a99`, and `50a8b07`; the separate D.2 benchmark/Stage A
+closure record is not present. The subsequent real attempt used the D.3
+identity and ended `REJECTED_FOR_ES`. D.2 is historical prerequisite work,
+not the next pending replay. This does not retroactively certify the complete
+D.2 forecast protocol; see [D.3 deviations](PR15_5D_3_STAGE_B_REPORT.md).
 
 Date: 2026-09-18
 

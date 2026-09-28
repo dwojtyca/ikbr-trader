@@ -1,5 +1,15 @@
 # Phase 1 — Report
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](CURRENT_STATE.md) and [detailed delivery plan](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Raport wykonawczy z Fazy 1 (**Execution Security**). Uzupełniany po każdym
 zamkniętym PR-ze. Ten dokument ma być czytany razem z:
 

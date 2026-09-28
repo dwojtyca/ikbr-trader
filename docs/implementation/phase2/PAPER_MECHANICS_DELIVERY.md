@@ -1,5 +1,17 @@
 # One-instrument Paper mechanics — delivery direction
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading. The earlier entry-only/PKO-first ordering is superseded by the owner's
+production-style Paper objective with independent strategy and instrument
+configuration. Mandatory AI and narrow full-close have since been implemented.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Date: 2026-09-23
 
 Status: owner-confirmed priority; code-path audit complete. This document

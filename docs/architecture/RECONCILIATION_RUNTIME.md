@@ -1,5 +1,25 @@
 # Reconciliation Runtime (PR15)
 
+## Documentation status — 2026-09-28
+
+The production adapter now loads completed-order evidence through a dedicated
+@stoqey/ib client, in addition to positions/open orders/executions. Earlier universal
+completed-source-unavailable statements are historical. Coverage remains bounded:
+ambiguous submissions and lost cancellation acknowledgements can still require a
+hold. Freshness comes from the latest durable observation and session/account
+identity, not a prior CLEAN snapshot. Instrument-scoped completion still enforces
+account-wide risk and identity checks; known external positions need not all be flat.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 Durable, scheduled, fail-closed reconciliation for the
 execution-engine. See
 [`docs/implementation/phase2/PR15_PLAN.md`](../implementation/phase2/PR15_PLAN.md)

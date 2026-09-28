@@ -1,131 +1,43 @@
-# Failure & Recovery — Phase 2
+# Current failure and recovery rules
 
-> Status (r2, PR15 shipped as commit `87eff1c`): the retry
-> taxonomy below reflects the shipped `submission-service` +
-> `execute-ticket` orchestrator, not the earlier
-> orchestrator-as-separate-process draft. Endpoint is
-> `POST /execution/execute-ticket`; ambiguous outcomes are
-> resolved by reconciliation, not by a client-side re-query.
+Reviewed 2026-09-26. This page supersedes early retry/timeout assumptions.
+[State model](STATE_AND_RECONCILIATION.md), [Paper target](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
-## Retry taxonomy
-
-| Class | Examples | Retry? | Owner | Notes |
-| --- | --- | --- | --- | --- |
-| **Deterministic reject** | `INVALID_QUANTITY`, `RISK_NOT_APPROVED`, `INSTRUMENT_DISABLED`, HTTP `400`, `422`, `423` (`live_trading_disabled`), `403` | **No** | signal-engine runtime | Record `REJECTED_BY_*`; no retry. |
-| **Auth failure** | HTTP `401` | **No** | runtime | Alert `AUTH_FAILURE`; refuse further submissions until config reloaded. |
-| **Idempotency hit** | HTTP `200 { duplicate: true, outcome: DUPLICATE_* \| PENDING_CLAIMED }` | **No** | runtime | Update local state from response; **do not** resend. |
-| **UNKNOWN (network / timeout / 5xx)** | ECONNRESET, connect timeout, HTTP `500/502/503/504` | **No auto-retry** | runtime | The submitter classifies these as `UNKNOWN` and returns without resending. Row stays `PROPOSED`; recovery is reconciliation-driven. Manual re-drive is an operator action, never a client-side loop. |
-| **Ambiguous (server-side)** | HTTP 200 with `outcome: DUPLICATE_PENDING_AMBIGUOUS` | **No** | runtime | Row stays `PROPOSED` with ambiguous marker + persisted plan; reconciliation resolves. |
-| **Broker session down** | `execution-engine` reports `503` from `/ready` or `SUBMIT_REJECTED_BROKER_DOWN` | Pause loop | runtime | Halt new submissions; resume when `/ready` returns 200. |
-| **IBKR-level reject** | Cancel codes `201`, `320`, pacing violations | **No** | `execution-engine` (existing) | Alert + terminal state. |
-| **DB write failure** | Postgres error mid-INSERT of `proposed_orders` | Fail-closed | `execution-engine` | Return `5xx`; do not `placeOrder`. |
-
-## Timeouts (defaults)
-
-| Hop | Connect | Total | Notes |
-| --- | --- | --- | --- |
-| runtime → `execution-engine` `POST /execute-ticket` | 2 s | **5 s** | On timeout the outcome is `UNKNOWN`; no auto-retry. |
-| runtime → `execution-engine` `GET /reconciliation/latest` | 2 s | 5 s | Read-only, safe to re-run manually. |
-| runtime → `execution-engine` `GET /reconciliation/holds?active=…` | 2 s | 5 s | Read-only. |
-| `execution-engine` → IBKR `placeOrder` ack | broker-side | existing | Not changed by Phase 2. |
-| runtime per-instrument cycle | — | **1 s hard** | Pure compute; longer means bug. |
-
-## No client-side backoff
-
-The runtime does **not** ship a retry helper, exponential
-backoff, or a `Set<clientOrderId>` cache. Duplicate-suppression
-is authoritative in the database (`client_order_id UNIQUE` on
-`proposed_orders`) and in the submission service (idempotency
-replay outcome union). The runtime's job is to submit once, log
-the outcome, and let reconciliation resolve anything ambiguous.
-
-If a caller ever re-submits the same trigger, the server-side
-idempotency layer returns HTTP 200 with `duplicate: true` and one
-of `DUPLICATE_SUBMITTED | DUPLICATE_TERMINAL |
-DUPLICATE_PENDING_AMBIGUOUS | PENDING_CLAIMED` — no second
-`ib.placeOrder`.
-
-## Duplicate-submission prevention
-
-Enforced authoritatively at the database + service layers (see
-[STATE_AND_RECONCILIATION.md](STATE_AND_RECONCILIATION.md)):
-
-1. `client_order_id UNIQUE` on `proposed_orders`.
-2. Server-recomputed `clientOrderHash` echoed back on duplicate.
-3. Submission-service replay path returns
-   `DUPLICATE_SUBMITTED | DUPLICATE_TERMINAL |
-   DUPLICATE_PENDING_AMBIGUOUS | PENDING_CLAIMED` without a
-   second `ib.placeOrder`.
-4. `orderRef` echoed to IBKR — broker-side session dedup.
-5. Process-local `Map<instrumentId, Promise<void>>` in
-   `trading-loop-service` prevents overlapping ticks for the
-   same instrument within a single runtime process. This is a
-   liveness guarantee, not a correctness guarantee — the
-   authoritative dedup is layers 1–4.
-
-Nothing in the runtime keeps an in-RAM `Set<clientOrderId>`;
-correctness after restart therefore depends only on the DB
-`UNIQUE` constraint and the reconciliation layer, not on
-cache rehydration.
-
-## Partial failures
-
-| Scenario | Behaviour |
+| Failure | Current required behavior |
 | --- | --- |
-| `POST /execute-ticket` returns `500` after DB row written but before broker send | `execution-engine` alerts `SUBMIT_UNKNOWN`; row stays `PROPOSED`. runtime retry via same `clientOrderId` no-ops server-side. |
-| Broker acked but ack lost on socket bounce | Reconciliation reassigns `broker_order_id` on next report. runtime holds the instrument until reconciliation is fresh. |
-| Reconciliation finds broker order runtime doesn't know about | Alert `RECON_ORPHAN_BROKER_ORDER`. runtime refuses new tickets for that instrument until operator acknowledges the reconciliation hold. |
-| runtime dies between ticket build and HTTP send | Ticket is lost — no side effect at broker. Next cycle recomputes; new `clientOrderId`. |
-| runtime dies after `2xx` but before persisting the mapping locally | Recovery step rebuilds RAM set from Postgres before any submission is allowed. |
+| Invalid contract/policy/strategy or failed risk | No dispatch; expose reason; fix configuration through reviewed scope |
+| Missing auth/account mismatch | No mutation; do not retry with broader permissions |
+| No signal or AI REJECT | Valid non-entry result; no fabricated signal or repeated model call to seek approval |
+| Provider unavailable/invalid output/expired claim | No approved delivery; preserve rejection/expiry and diagnose coverage/deadline |
+| HTTP timeout/disconnect after handoff | UNKNOWN; no automatic resubmission; reconcile broker ownership/state |
+| Broker cancel acknowledgement missing | Cancellation unproven; no replacement close or release merely because time elapsed |
+| Stale quote/session/account/reconciliation | Block new entries; fresh evidence is required before resumption |
+| Broker protection fills while close starts | Recompute owned remaining quantity using supported lifecycle; never oversell |
+| Close unfilled/failed after protection cancelled | Critical incident; current operator observation/recovery required |
+| Database unavailable before durable reservation | Do not send broker order; reconcile any previously attempted work after recovery |
+| Configuration mismatch | Planned PP1 explicit gate; current consumers still independently parse old settings |
 
-## IBKR connection loss
+Source timeout defaults are defined by application schemas, not a universal 1-second
+cycle or independent connect-timeout promise. Current AI claims last30s and context
+requests are sequential; PP4 addresses the total deadline. Polling/repeating a
+read is different from resubmitting a write. Even the same ID is not a recommendation
+to replay an unknown operation blindly.
 
-- `apps/execution-engine` behaviour unchanged. runtime must treat
-  `/ready` = 503 or reconciliation staleness as a loop-pause
-  condition — not a per-request error. It stops enqueueing
-  snapshots for evaluation until `/ready` returns 200.
-- No auto-cancel on disconnect. Broker retains working orders.
-  Reconciliation is what teaches us their state.
+## Current operator boundaries
 
-## Fail-closed rules (constitution)
+Use existing authenticated reconciliation/lifecycle APIs and the applicable
+[PKO](../../runbooks/GPW_PAPER_ROUND_TRIP.md) or
+[AAPL](../../runbooks/AAPL_PAPER_ROUND_TRIP.md) procedure. Only current broker
+quantity plus durable ownership can authorize the supported close. An unsupported
+legacy position or fractional residual requires an implementation extension or
+owner-operated broker action, never an ad hoc API bypass.
 
-- Missing / invalid Bearer → refuse.
-- `IBKR_ENVIRONMENT=live` + `TRADING_ENABLED=false` → refuse
-  (`423`, ADR-001).
-- Instrument disabled → skip in runtime.
-- `PRICE_NOT_FRESH` → do not build ticket.
-- Reconciliation stale OR active hold → pause loop, alert.
-- Ambiguous submission state → do not retry; wait for
-  reconciliation.
-- Unknown `proposed_orders` state at boot → alert, refuse
-  submissions for the affected key.
+TRADING_ENABLED=false blocks new guarded writes and also current full close; it
+does not cancel protection or flatten. Expiring the entry window likewise does
+not close. Do not confuse kill/pause state with a safe flat account. The production
+Paper plan introduces an explicit entry pause and automated exit supervision;
+those are not available merely by following this documentation.
 
-## Kill switches
-
-Multiple independent switches; either one halts writes:
-
-1. **Master (existing).** `TRADING_ENABLED=false` on
-   `execution-engine`. Restart required. `423` on every write
-   endpoint.
-2. **Runtime pause.** `EXECUTION_RUNTIME_ENABLED=false` or
-   `TRADING_LOOP_ENABLED=false` on signal-engine boot.
-3. **Daily-loss guard.** `execution-engine` kill-switch state
-   surfaced via `GET /execution/kill-switch`; `triggered=true`
-   halts submissions.
-
-None of these switches cancels or modifies open broker orders.
-Cancels / modifies are a Phase 3 concern.
-
-## Alerts (routing to existing Telegram + DB `system_alerts`)
-
-| Kind | Trigger | Severity |
-| --- | --- | --- |
-| `AUTH_FAILURE` | `401` from `execution-engine` | HIGH |
-| `SUBMIT_UNKNOWN` | Post-body timeout or 5xx from `execute-ticket`; no reconciliation resolution yet | CRITICAL |
-| `RECON_MISMATCH_HOLD` | Reconciliation places an active hold | HIGH |
-| `RECON_ORPHAN_BROKER_ORDER` | Reconciliation reports a broker order the runtime doesn't own | CRITICAL |
-| `TRADING_LOOP_PAUSED` | Runtime or scheduler disabled | INFO |
-| `BROKER_SESSION_DOWN` | `/ready` = 503 for > 60 s | HIGH |
-
-OUT OF SCOPE: circuit-breaker across instruments, adaptive
-backoff based on broker pacing headers, exit management (PR16).
+No automated IBKR UI, unknown-submission retry, local-row deletion as closure proof,
+reversal during close or new request ID to defeat a hold. Unresolved uncertainty
+requires escalation, not increasingly permissive flags.

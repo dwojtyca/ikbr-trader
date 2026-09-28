@@ -1,5 +1,15 @@
 # PR16B — durable full close of the single-stock mechanical position
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Status: revision 2 ACCEPTED by independent `pr16b_plan_review` (2026-09-23). Work directly on main; commit
 and push after independent implementation acceptance and local checks. No broker
 launch or activation is authorized by this implementation.

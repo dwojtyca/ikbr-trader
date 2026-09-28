@@ -1,5 +1,15 @@
 # Paper Entry E2E — single-instrument bounded window runbook
 
+## Documentation status — 2026-09-28
+
+**Historical entry-only procedure: do not execute this as the current launch
+runbook.** Its ES/entry-only activation assumptions were superseded. Use the current
+[PKO](GPW_PAPER_ROUND_TRIP.md) or [AAPL](AAPL_PAPER_ROUND_TRIP.md) supervised procedure
+within separately authorized scope. Historical commands below are preserved as
+records, not activation instructions.
+
+See [current capabilities](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
 > **Status (2026-08 hostile review):** PR15.3 is currently
 > **blocked, not ready**. `es_front.trading.executionEnabled`
 > was rolled back to `false` because the shared Phase 2

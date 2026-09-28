@@ -1,5 +1,15 @@
 # PR15 — Durable Reconciliation & Recovery — PLAN (revision 6)
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 > Status: **shipped as commit `87eff1c`**. Kept as historical
 > reference; PR15.1 reconciles the doc kit with the shipped
 > code.

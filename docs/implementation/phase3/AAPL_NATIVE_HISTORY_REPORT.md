@@ -1,5 +1,15 @@
 # AAPL native history implementation
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 The [accepted plan](AAPL_NATIVE_HISTORY_PLAN.md) is implemented without changing
 strategy parameters or entry policy. Exact AAPL now uses six native IBKR RTH
 series with source `ibkr_aapl_rth_native_v1`. Legacy aggregate timestamps cannot

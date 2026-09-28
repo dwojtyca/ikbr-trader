@@ -1,5 +1,17 @@
 # PR15.5D — Pre-registered ES compatibility experiment — PLAN
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading. Frozen ES verdicts and experiment artifacts are unchanged; research is
+deferred off the production-Paper critical path. Local PR15.5F drafts are not shipped
+capability or prerequisites.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 Status: the one authorized Stage B attempt is closed with terminal
 `INCONCLUSIVE` after failing an integrity check before processing candles. The
 PR15.5D experiment did not satisfy its definition of done, and no rerun is

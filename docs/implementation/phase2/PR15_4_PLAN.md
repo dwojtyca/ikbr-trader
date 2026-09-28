@@ -1,5 +1,15 @@
 # PR15.4 — Strategy Attribution & Direction Gate — PLAN (r15)
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 > **Status:** planned, awaiting approval
 >
 > **Gates on:** PR15.2 shipped (`1472a33`). PR15.3 remains `blocked, not ready`.

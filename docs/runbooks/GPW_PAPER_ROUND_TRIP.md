@@ -1,5 +1,16 @@
 # Supervised PKO Paper round trip
 
+## Documentation status — 2026-09-28
+
+Current reference for its stated narrow capability, not production-style
+unattended acceptance. PKO and AAPL profiles are currently mutually exclusive;
+AI/research coverage and broker readiness must be checked at actual operation time.
+The September26 preflight is a dated observation, not today's broker state.
+The [production acceptance specification](PRODUCTION_PAPER_ACCEPTANCE.md) is planned
+and cannot be executed until its implementation prerequisites are delivered.
+
+See [current capabilities](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
 GPW3 prepares code only. This runbook does not authorize activation, orders or
 paid provider calls. Obtain a separate owner-approved window and record its exact
 commit. No real Paper round trip or profitability is proven by local tests.

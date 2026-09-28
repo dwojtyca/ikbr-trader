@@ -1,5 +1,24 @@
 # Signal Engine — Skeleton (PR9)
 
+## Documentation status — 2026-09-28
+
+Distinguish the shared SignalEngine (pure decision/risk composition) from the
+signal-engine application (strategies, regime, portfolio, persistence clients and
+scheduler). Both participate in the bound runtime. Legacy /signals/run-once and
+/signals/on-candle now reject with503; operational evaluation uses authenticated
+/runtime/trading-loop/run-once or the configured scheduler. Explicit parameterized
+instance assignment is planned, not the present algorithm-profile activation model.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Status: **Phase 1, foundation only.** This document describes the
 > `packages/shared/src/signal-engine/` module introduced in PR9.
 > The engine is entirely deterministic and orchestrates two existing

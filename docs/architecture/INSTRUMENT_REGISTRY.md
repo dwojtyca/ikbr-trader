@@ -1,5 +1,24 @@
 # Instrument Registry
 
+## Documentation status — 2026-09-28
+
+Ingestion, signal-engine and execution-engine use configured shared registries
+and InstrumentBindingAuthority. Catalogue definitions are source code; current
+PKO/AAPL opt-ins are mutually exclusive one-share test profiles. The type union
+includes ETFs/futures, but current production entry/close risk does not support
+them. INSTRUMENT_BINDINGS_JSON binds existing definitions; it is not a general
+instrument/strategy-instance configuration loader. PP1–PP3 supply that missing layer.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > **Status:** implemented in `packages/shared/src/instruments/`.
 > **Consumers:** none yet — the registry is intentionally introduced
 > ahead of any migration so the surface can be reviewed in isolation.

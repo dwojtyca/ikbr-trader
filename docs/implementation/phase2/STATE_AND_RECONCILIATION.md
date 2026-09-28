@@ -1,165 +1,63 @@
-# State & Reconciliation — Phase 2
+# Current state, identity and reconciliation
 
-> Status (r2, PR15 shipped as commit `87eff1c`): OD-2, OD-3, and
-> OD-4 are resolved (see [README.md](README.md)). No separate
-> `execution_tickets` table exists; every order-critical field
-> lives on `proposed_orders`. Client-side idempotency is
-> `clientOrderId + clientOrderHash` in the request body — not a
-> header. Orchestrator = `signal-engine/src/runtime/`.
+Reviewed 2026-09-26. [Runtime flow](RUNTIME_FLOW.md), [current limitations](../CURRENT_STATE.md).
 
-## Source of truth (SoT) matrix
+## Sources of truth
 
-| Entity | SoT | Local mirror | Reconciler |
-| --- | --- | --- | --- |
-| Market candles | `apps/ingestion` → Postgres | — | not needed |
-| Market last tick | `apps/ingestion` → Redis | — | Redis TTL |
-| `SignalEvaluation` | signal-engine runtime, transient | — | n/a |
-| `ExecutionTicket` | signal-engine runtime, transient at build | `proposed_orders` (single row) | n/a |
-| `proposed_orders` row | `apps/execution-engine` Postgres | runtime holds `{proposedOrderId, clientOrderId, clientOrderHash}` in RAM | n/a |
-| Broker open orders | **IBKR** | `apps/execution-engine` snapshot | `execution-engine` reconciliation |
-| Broker fills | **IBKR** | `broker_execution_fills` | `execution-engine` reconciliation |
-| Broker positions | **IBKR** | `execution-engine` cache | `execution-engine` reconciliation |
-| Account state | **IBKR** | `execution-engine` account cache | `execution-engine` reconciliation |
+IBKR owns actual orders, executions, positions and account state. Postgres owns
+our intent, configuration/approval evidence, dispatch reservations, audit and
+ownership mappings. Disagreement is resolved using verified broker facts, never
+by deleting local evidence or assuming a timeout cancelled an order.
 
-**Broker wins for open orders, fills, positions.** Local state
-that disagrees is corrected in favour of the broker. Local state
-wins only for *intent* (Was a ticket ever built? Was it approved
-by Risk?).
+proposed_orders carries client_order_id/client_order_hash and bound instrument
+identity. proposal_ai_reviews records claims, decisions and delivery status.
+Broker links/order-ref maps establish ownership; prefix matches alone are not
+ownership. Reconciliation runs retain source coverage and holds; lifecycle/close
+operations retain original proposal identity and current broker observations.
+See [migration directory](../../../infra/sql/migrations/) and
+[repository](../../../apps/execution-engine/src/repository.ts).
 
-## Minimal order lifecycle
+## Durable entry ordering
 
-```
-INTENT (runtime RAM)
-   │  ticket built, clientOrderId + clientOrderHash assigned
-   ▼
-PROPOSED (proposed_orders row, status=PROPOSED,
-          client_order_id + client_order_hash persisted)
-   │  POST /execution/execute-ticket → 2xx (or duplicate marker)
-   ▼
-SUBMITTED (status=SUBMITTED, broker_order_id set)
-   │  ib.placeOrder acknowledged by broker
-   ▼
-WORKING → FILLED | CANCELLED | REJECTED | EXPIRED
-   │
-   └── all terminal transitions land via broker events
-       or reconciliation, never via the runtime.
-```
+Persist proposal and pending review -> claim/review -> persist decision and delivery
+marker -> fresh execution checks -> reserve broker plan -> dispatch -> broker
+observation/reconciliation. This is conceptual ordering, not a replacement for the
+actual database status enums. A claim/HTTP success does not imply broker acceptance.
+Unknown submission remains reserved and cannot be retried under a new ID.
 
-Only the runtime moves `INTENT → PROPOSED`. Only
-`execution-engine` moves `PROPOSED → SUBMITTED → terminal`.
+clientOrderId/clientOrderHash travel in the request body and are validated server
+side. Existing hashes must not be recomputed under future strategy-instance/config
+schemas. Broker orderRef assists correlation; do not rely on IBKR deduplicating
+arbitrary repeated submissions by orderRef. Durable local reservations and verified
+broker observations provide the safety boundary.
 
-## Idempotency contract (PR15)
+## Coverage and recovery
 
-- **Values.** `clientOrderId` (opaque, generated per intent) and
-  `clientOrderHash` (SHA-256 of a canonical serialization of the
-  ticket, computed via `@ikbr/shared/client-order-hash`).
-- **Scope.** Uniquely identifies one attempted broker submission.
-- **Propagation.**
-  - runtime → `POST /execution/execute-ticket` — JSON body carries
-    both fields.
-  - `execution-engine` recomputes the hash server-side and rejects
-    on mismatch.
-  - Persistence: mandatory `client_order_id` + `client_order_hash`
-    columns on `proposed_orders` with `UNIQUE(client_order_id)`.
-  - Passed to IBKR as `orderRef` where supported.
-- **Behaviour on collision.** Second call returns HTTP 200 with
-  `duplicate: true` and one of
-  `outcome: DUPLICATE_SUBMITTED | DUPLICATE_TERMINAL |
-  DUPLICATE_PENDING_AMBIGUOUS | PENDING_CLAIMED`. **No** second
-  `ib.placeOrder`.
-- **Retention.** Idempotency mapping outlives the broker order;
-  garbage-collect only tickets in terminal `REJECTED_BY_RISK`
-  after 90 days.
+The production adapter now requests completed-order evidence through a dedicated
+client as well as positions/open orders/executions. This closes the original
+missing-source defect; it does not prove all ambiguous cancellations or lost API
+order IDs can be recovered. Distinguish exposure completeness from recovery
+completeness and apply the actual account/instrument hold gates.
 
-## Ticket persistence
+Latest durable readiness rejects stale/future snapshots, incomplete exposure,
+account/session changes and failures. A previously CLEAN row cannot lend freshness
+to a newer failed observation. Known unrelated external contracts may coexist under
+explicit identity/risk rules; their presence is not blanket permission to ignore
+account exposure. See [completed source report](../phase3/GPW_COMPLETED_ORDERS_REPORT.md)
+and [preflight closure](../phase3/GPW_PREFLIGHT_CLOSURE_REPORT.md).
 
-Every order-critical field lives on `proposed_orders`. Migration
-000005 added `partial_take_profits`, `trailing_stop_pct`, and
-`trailing_stop_activation_r` so no separate `execution_tickets`
-table is needed. This resolves OD-2.
+Restart must re-establish broker/session evidence before entries. Current
+process-local in-flight maps are concurrency conveniences, not restart-safe duplicate
+protection. No document prescribes a retention/garbage-collection policy for live
+ownership records that the code has not implemented.
 
-## Restart recovery
+## Full-close and future attribution
 
-### signal-engine runtime restart
+Current supported full-close is one whole long stock share with original ownership
+and deterministic close-risk evidence. See [full-close report](../phase3/PR16B_FULL_CLOSE_REPORT.md).
+PP2 adds separate instance/revision/config attribution; PP3 generalizes Paper budget
+and completion records; PP5 automates observation/recovery. All must preserve old
+positions and consumed attempts through migrations and config rollback.
 
-On boot:
-
-1. Loads `IBKR_ENVIRONMENT`, whitelist, `TRADING_ENABLED`,
-   `RUNTIME_ENABLED`, `EXECUTION_RUNTIME_ENABLED`,
-   `TRADING_LOOP_ENABLED`.
-2. **Refuses to submit** anything until it has confirmed via
-   `GET /execution/ready` that reconciliation is fresh.
-3. If the last reconciliation is stale, blocks reads until a
-   fresh run is available (recovery is reconciliation-driven,
-   not a client-side re-query).
-
-The runtime holds **no in-RAM `Set<clientOrderId>` cache**. It
-does not rehydrate any duplicate-suppression state from Postgres
-on boot. Correctness after restart depends only on:
-
-- the `client_order_id UNIQUE` constraint on `proposed_orders`,
-- the submission-service idempotency-replay outcome union, and
-- reconciliation-driven recovery of any ambiguous row.
-
-Non-overlap within a single runtime process is enforced by a
-process-local `Map<instrumentId, Promise<void>>` in
-`trading-loop-service.ts` — a liveness convenience only.
-
-### `execution-engine` restart
-
-Already handled today. Phase 2 invariant: on boot, if any
-`proposed_orders` row is in status `SUBMITTED` without a
-`broker_order_id`, `execution-engine` treats it as **unknown
-submission** (fail-closed, per AGENTS.md Safety Rules) and
-raises `SAFETY:UNKNOWN_SUBMISSION`. Never assume "cancelled".
-
-## Reconciliation
-
-- **Owner.** `apps/execution-engine`
-  (`apps/execution-engine/src/reconciliation/`).
-- **Frequency.** Defaults from `RECONCILIATION_*`
-  (`.env.example:115–128`); `/ready` gates on
-  `EXECUTION_READY_RECONCILIATION_MAX_AGE_S` (ADR-001 §3.6).
-- **runtime consumption.** Poll
-  `GET /execution/reconciliation/latest` (returns `stale`,
-  `maxAgeSeconds`, `run.snapshotComplete`, `run.status`) and
-  `GET /execution/reconciliation/holds?active=true`. On any active
-  hold or `stale=true`, the runtime stops issuing new tickets for
-  the affected instrument and defers to
-  hold-resolution runbooks — it does **not** auto-close positions.
-- **POST endpoints** (`/reconciliation/run`,
-  `/holds/:id/acknowledge`, `/holds/:id/resolve`) are operator /
-  automation actions, never called by the read-only verify tool.
-
-## Duplicate submission prevention (authoritative layers)
-
-1. `client_order_id UNIQUE` on `proposed_orders` — the
-   authoritative gate.
-2. Submission-service replay path returns HTTP 200 with
-   `duplicate: true` and one of
-   `DUPLICATE_SUBMITTED | DUPLICATE_TERMINAL |
-   DUPLICATE_PENDING_AMBIGUOUS | PENDING_CLAIMED`.
-3. Server-recomputed `clientOrderHash` echoed back on duplicate.
-4. `orderRef` echoed to IBKR — deduplicated by broker for the
-   session.
-5. Reconciliation resolves ambiguous rows.
-
-Process-local: `trading-loop-service.ts` holds a
-`Map<instrumentId, Promise<void>>` (`#inFlight`) that prevents
-overlapping ticks for the same instrument within a single
-runtime process. This is a liveness convenience only — it does
-NOT protect against duplicates across restarts or across
-processes. That is what layers 1–5 above are for.
-
-## Paper vs Live separation
-
-Handled by existing `IBKR_ENVIRONMENT`, `ALLOWED_PAPER_ACCOUNTS`,
-`ALLOWED_LIVE_ACCOUNTS`, `TRADING_ENABLED` (see
-[ADR-001](../../adr/ADR-001-execution-security.md) §3.1–§3.3).
-Phase 2 additions:
-
-- signal-engine runtime reads `IBKR_ENVIRONMENT` and refuses to
-  start in `live` unless PR18 checklist passes.
-- No config knob shortens or bypasses reconciliation freshness.
-
-OUT OF SCOPE: cross-account netting, multi-broker.
+The current signal execution runtime is Paper-only. There is no implemented PR18
+checklist that enables Live by a flag in this path.

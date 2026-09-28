@@ -1,5 +1,23 @@
 # Market Data Runtime (PR12)
 
+## Documentation status — 2026-09-28
+
+The dry-run data module remains read-only, but is now consumed by the entry runtime
+and scheduler. Binding-aware resolution uses exact broker conId. Generic broker
+session schedules and native closed-candle finality/warmup feed the strategy context
+loader. Current context provider wiring is still price-only; a dry run does not
+prove research coverage, AI approval or execution readiness.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Dry-run only. Composes ingestion's existing read paths with the
 > shared `MarketContextBuilder` and `TradingPipeline` into a single
 > HTTP endpoint that returns a raw `TradingPipelineResult`. No

@@ -1,19 +1,35 @@
 # Phase 2 — Roadmap (PR11 → PR18)
 
-> **Status (r2):** PR11–PR15 shipped as commit `87eff1c`.
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading. The earlier entry-only/PKO-first ordering is superseded by the owner's
+production-style Paper objective with independent strategy and instrument
+configuration. Mandatory AI and narrow full-close have since been implemented.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
+> **Status (reviewed 2026-09-23):** PR11–PR15 shipped as commit `87eff1c`.
+> Current local and remotely verified `main`: `9361313` (PR15.5E).
+> PR15.5F is uncommitted work; its independent preparation review found
+> blockers. See current audit (unpublished local draft `PROJECT_STATUS_REVIEW_2026_09_23.md`).
 > PR15.1 (doc reconciliation + read-only paper-verify tool),
 > PR15.2 (authoritative instrument binding), and PR15.3
 > (entry-only Paper E2E) are follow-up sub-tracks under PR15.
 > The pipeline is still **entry-only**; exit management lands
-> in PR16. The legacy `apps/llm-agent` EXECUTE/REJECT gate
-> continues to run outside the new pipeline against `PROPOSED`
-> orders (unchanged) — this is intentional and independent of
-> the trading-loop.
+> in the lifecycle track. The legacy `apps/llm-agent` EXECUTE/REJECT gate
+> is currently isolated from the new pipeline; its freshly generated legacy
+> proposals lack required execution identity. This historical separation is
+> the next integration gap to close, not the intended target architecture.
 >
 > One-line summary per PR; full plans land as
 > `docs/implementation/phase2/PR<n>_PLAN.md` when the PR is picked up.
-> Each PR must satisfy AGENTS.md workflow: PLAN → approval → implement →
-> typecheck / test / build → hostile review → REPORT → stop.
+> Each PR follows the owner's updated workflow: detailed PLAN → independent
+> plan acceptance → implementation → new independent implementation review
+> and corrections → all checks → REPORT → commit/push → GitHub CI → stop.
 
 ## PR15 sub-tracks
 
@@ -25,16 +41,59 @@
 | PR15.3    | Entry-only Paper E2E window against IB Gateway paper                                                                                                                                                                                 | **blocked, not ready** — activation rolled back after r2 (Findings 1 & 2), further hardened in r3 (Findings 1–4) and r4 (Findings 1–5: exempt-routes account allowlist, `docker compose exec` fix, full Phase D verifier env, cancel-identifier disambiguation, doc sweep). See [PR15_3_PLAN.md](PR15_3_PLAN.md) §11 and [PR15_3_REPORT.md](PR15_3_REPORT.md). |
 | PR15.4    | Strategy attribution + fail-closed direction gate; loop-owned `StrategyPortfolioManager` + attribution chain; typed `SignalBlocker`; exact-`conId` `StrategyContextLoader`; `ExecutionRuntime.executePrepared` four-stage validation | **shipped `53213fe`**; independent review and PR15.4.1 stabilization complete (see [PR15_4_PLAN.md](PR15_4_PLAN.md), [PR15_4_REPORT.md](PR15_4_REPORT.md), and [PR15_4_1_REPORT.md](PR15_4_1_REPORT.md)) |
 | PR15.4.1  | Clean-checkout CI, direct dependency declaration, trading-loop error redaction, and vulnerable transitive dependency updates | **shipped `8a2f923`**; CI run `34979744641` green |
-| PR15.5    | Controlled entry-only Paper E2E unlock for one instrument | **blocked**; ES compatibility evidence is not credible yet |
+| PR15.5    | Controlled entry-only Paper E2E unlock for one instrument | **blocked**; credible D.3 evidence is negative (`REJECTED_FOR_ES`), so ES activation is not eligible |
 | PR15.5A   | Static ES compatibility prerequisite closure, profile correction, and contract tests | **shipped `70f7f9b`; terminal `INCONCLUSIVE`; CI run `34986037525` green** |
 | PR15.5B   | Futures backtest execution and economics model | **shipped `bcf0344`; CI run `34998202271` green; independent hostile review approved** (see [PR15_5B_REPORT.md](PR15_5B_REPORT.md)) |
 | PR15.5C   | Reproducible, fingerprinted ES dataset and contract/calendar metadata | **shipped `5de9de6`; CI run `35064103236` green; independent hostile review approved; data readiness `INCONCLUSIVE`** (see [PR15_5C_REPORT.md](PR15_5C_REPORT.md)) |
 | PR15.5C.1 | IBKR ES source parity and immutable dataset acquisition | **COMPLETE / READY: IBKR bundle acquired and imported; provenance `ibkr-es-20250622-20260831-e39a59790324`, fingerprint `6dc425610feb44665226228bbd2c561b64504b47588b4dd38d26cc9dab93e026`, 99.9858% selected-contract completeness; dataset remains frozen for PR15.5D.2 and any separately approved future attempt** (see [PR15_5C_1_REPORT.md](PR15_5C_1_REPORT.md)) |
 | PR15.5D   | Pre-registered ES compatibility experiment on the finalized real dataset | **Authorized attempt closed `INCONCLUSIVE`: continuous-contract projection defect before any order or fill; dataset unchanged; experiment incomplete and remediation required; no ES activation** (see [PR15_5D_STAGE_B_REPORT.md](PR15_5D_STAGE_B_REPORT.md), [PR15_5D_ES_DECISION_RECORD.md](PR15_5D_ES_DECISION_RECORD.md)) |
 | PR15.5D.1 | Active-contract projection remediation and newly registered ES compatibility experiment | **TERMINAL `INCONCLUSIVE`: v2 was operator-aborted after 3,085 seconds without reaching the first 10,000-event checkpoint; recovery hash `4bd17e9fab5ea15150810b784da3afa4a04e959ab5511b72dae666ddd520b44c`; performance remediation required** (see [Stage B report](PR15_5D_1_STAGE_B_REPORT.md)) |
-| PR15.5D.2 | Backtest hot-path performance remediation and newly versioned ES attempt | **OWNER APPROVED / STAGE A IN PROGRESS; no v3 experiment started** (see [PR15_5D_2_PERFORMANCE_REMEDIATION_PLAN.md](PR15_5D_2_PERFORMANCE_REMEDIATION_PLAN.md)) |
+| PR15.5D.2 | Backtest hot-path performance remediation and benchmark tooling | **code committed `4bf079f`, `e814a99`, `50a8b07`; separate Stage A closure evidence incomplete; real attempt moved to D.3**. Do not repeat D.2 as the next stage or mark its full benchmark protocol passed (see [plan](PR15_5D_2_PERFORMANCE_REMEDIATION_PLAN.md), [D.3 deviations](PR15_5D_3_STAGE_B_REPORT.md)) |
 | PR15.5D.3 | Three-worker parallel execution of the registered ES scenarios | **TERMINAL `REJECTED_FOR_ES`: all three 423,300-event scenarios completed concurrently and reproducibly with zero trades; artifact `9fc53b1618a489524db1717e0b5eb812fb1d7ebdc03e9ac675f1a7198fb129d5`** (see [Stage B report](PR15_5D_3_STAGE_B_REPORT.md)) |
-| PR15.5E | Deterministic mechanical backtest E2E through signal, risk, order, fill, lifecycle, persistence, and metrics | **IMPLEMENTED / VERIFIED LOCALLY; exact 6-trade primary, stress, and reproduction paths passed in PostgreSQL and compiled Docker image** (see [plan](PR15_5E_MECHANICAL_BACKTEST_E2E_PLAN.md), [report](PR15_5E_REPORT.md)) |
+| PR15.5E | Deterministic mechanical backtest E2E through signal, risk, order, fill, lifecycle, persistence, and metrics | **committed `9361313`; exact 6-trade primary, stress, and reproduction paths verified; PostgreSQL fixture rechecked 2026-09-23**. No broker/Paper proof (see [report](PR15_5E_REPORT.md)) |
+| PR15.5F | Research-only diagnosis of the terminal ES zero-signal result | **LOCAL IMPLEMENTATION; preparation review BLOCKED: shutdown supervision, effective memory, peak RSS, durable failure reasons, and test coverage**. Full replay remains pending (see plan (unpublished local draft `PR15_5F_ES_SIGNAL_DIAGNOSTICS_PLAN.md`), review (unpublished local draft `PROJECT_STATUS_REVIEW_2026_09_23.md`)) |
+
+## Current priority — owner direction after the 2026-09-23 audit
+
+**Single-instrument Paper mechanics first; instrument-specific strategy tuning
+later.** The [mechanics delivery track](PAPER_MECHANICS_DELIVERY.md) supersedes
+the ES-first ordering below. PR15.5F remains deferred, unfinished local work,
+not a prerequisite for the next Paper mechanics PR. Its findings remain open.
+
+The first integration gap is mandatory AI adjudication of bound runtime
+proposals: the runtime currently dispatches directly, while legacy proposals
+consumed by `llm-agent` lack the idempotency identity required for execution.
+Neither existing path alone proves the requested complete flow. Do not simply
+enable the legacy agent or the trading loop and label this Paper-ready.
+
+Implementation PRs follow the owner's process: detailed plan → independent
+plan review and correction until accepted → implementation → a new independent
+implementation reviewer and correction until accepted → all local checks →
+commit/push → verify GitHub CI. The owner authorized this engineering workflow
+without repeated approval requests. A plan review does not authorize a broker
+window; that remains separate. Keep unrelated unfinished F code out of commits.
+
+## Deferred ES PR sequence — historical proposal from the 2026-09-23 audit
+
+The following sequence is retained for a possible future return to ES research;
+it is not the next implementation queue. This sequence does not authorize research runs, strategy changes,
+activation, or broker writes. PR labels below are repository work packages;
+they are not verified GitHub pull-request numbers.
+
+| Order | Work package | Completion gate |
+| --- | --- | --- |
+| 1 | Finish PR15.5F preparation in the current PR | Resolve the review findings and §7 checklist; repository gates, disposable fixture/store failure tests, real-source read-only preflight, compiled-image evidence, independent re-review, refreshed forecast |
+| 2 | PR15.5F Stage B (separate launch decision) | Owner confirms AC and approves the reviewed replay; exactly 423,300 events, frozen histogram, zero orders/fills, reconciled cohorts, unchanged source, archived artifact and resource/recovery evidence; report one ranked hypothesis |
+| 3 | Proposed PR15.5G — one research hypothesis, only if F supports it | Preregister one candidate, frozen economics, independent validation period and acceptance/rejection gates before testing. No broad sweep or retroactive D.3 verdict change; absent a defensible hypothesis, stop the ES branch. A new strategy needs explicit separate scope |
+| 4 | Proposed PR17A — minimum operator monitoring | Structured correlation across intent/submission/reconciliation, alerts for unknown submission, stale broker state, disconnect and kill switch, and tested runbooks before any Paper window. Can be developed independently of ES research |
+| 5 | Separate production eligibility/activation PR, then PR15.5 controlled Paper window | Positive compatibility evidence plus explicit approval of production strategy/profile support and one exact instrument/contract/policy; fresh binding, risk, reconciliation and rollback/abort checks. Start with one instrument; no automatic `FUT` flag or seed activation |
+| 6 | PR16A/B/C — Phase 3 lifecycle work | Ownership/recovery first, then one-instrument full close, then partial close/replace/trailing behavior; separate plans and tests below. Mock/fixture preparation can precede Paper, broker acceptance cannot |
+| 7 | PR17B then PR18 | Complete lifecycle observability after PR16; readiness evidence/gates only after Paper acceptance. No live enablement |
+
+An alternative supported non-ES instrument may be proposed in a separate
+approved plan; this review does not silently replace the ES research scope.
+Do not require three-symbol expansion before the one-instrument lifecycle is
+proven. Expand only with explicit per-instrument compatibility and risk gates.
 
 ## Ordering rationale
 
@@ -43,8 +102,10 @@ We wire the data edge before the write edge: **Market Data Runtime
 built on stale or fake prices is worse than no submission at all.
 Once real snapshots produce real tickets in memory, we add the
 write edge (HTTP + persistence + idempotency) in a single PR,
-then layer scheduling, reconciliation, an E2E paper window,
-observability, and a live-readiness gate that never flips live on.
+then layer scheduling, reconciliation, mandatory AI entry adjudication,
+minimum safe full-close capability and monitoring, the one-instrument Paper
+round-trip window, advanced lifecycle/observability, and a live-readiness gate
+that never flips live on.
 
 | PR   | Name                          | Gates on                     |
 | ---- | ----------------------------- | ---------------------------- |
@@ -53,9 +114,10 @@ observability, and a live-readiness gate that never flips live on.
 | PR13 | Execution Runtime             | PR12, OD-1, OD-2, OD-3, OD-4 |
 | PR14 | Scheduler / trading loop      | PR13, OD-5                   |
 | PR15 | Reconciliation loop           | PR14                         |
-| PR16 | Position / exit management    | PR15                         |
-| PR17 | Observability                 | PR16                         |
-| PR18 | Live-readiness (docs + gates) | PR17                         |
+| PR16A/B/C | Position / exit management (Phase 3) | PR15 reliability; controlled Paper gate for broker acceptance |
+| PR17A | Minimum operator monitoring | PR15; required before Paper window |
+| PR17B | Lifecycle observability | PR16 and PR17A |
+| PR18 | Live-readiness (docs + gates) | PR17B and completed Paper evidence |
 
 ---
 
@@ -320,17 +382,33 @@ observability, and a live-readiness gate that never flips live on.
 
 ## PR16 — Position / exit management
 
-- **Goal.** Automated exit-side flow — close-position triggers,
-  trailing stop management, partial close, and per-strategy exit
-  signals fed back into `ExecutionRuntime`. Removes the PR14
-  restriction to entry-only trading.
-- **Acceptance.** Green end-to-end paper run across ≥ 3 symbols,
-  ≥ 24 hours, with reconciliation clean and both entries and
-  exits driven by the loop.
-- **Excludes.** Go/no-go for live. Perf tuning.
+- **Phase boundary.** This is Phase 3 Order Lifecycle in the main roadmap,
+  retained here for sequencing. It does not expand the Phase 2 reliability
+  scope or replace existing close/cancel primitives.
+- **PR16A — ownership and recovery.** Resolve account, conId, strategy,
+  loop-owned position and broker child orders before producing an exit intent.
+  Cover restart, manual/foreign positions, partial fills and stale snapshots;
+  ambiguous ownership fails closed. Fixtures first, no broker activation.
+- **PR16B — full close for one instrument.** Route deterministic exit intent
+  through the existing validated execution layer. Reconcile pending entries
+  and TP/SL children; cap close quantity to fresh broker exposure; test
+  concurrent fill/close/cancel, duplicate intents, timeout/unknown submission
+  and restart. No retry of an unknown submission or accidental reversal.
+- **PR16C — advanced lifecycle.** Only after the full-close path is accepted,
+  add partial close, replace and trailing-stop flows incrementally. Each flow
+  must prove child-order quantities, idempotency and recovery independently.
+- **Acceptance.** Approved one-instrument Paper window with actual entry and
+  exit evidence, restart/reconciliation evidence, and at least 24 hours of
+  observation. Elapsed time alone is not a pass. Broader symbol rollout is a
+  separately approved follow-up, not a prerequisite for proving the first exit.
+- **Excludes.** New strategies, automatic futures roll, live activation.
 
 ## PR17 — Observability
 
+- **Split.** PR17A ships minimum entry/reconciliation monitoring before the
+  first Paper window; PR17B adds lifecycle metrics and runbooks after PR16.
+  Waiting until all exit functionality exists would leave the initial Paper
+  validation without a complete operational evidence path.
 - **Goal.** Structured logs, Prometheus-style counters/gauges,
   and alert routing (Telegram already in
   [apps/execution-engine/src/alerts.ts](../../../apps/execution-engine/src/alerts.ts))
@@ -349,10 +427,14 @@ observability, and a live-readiness gate that never flips live on.
   checklist is copy-pasted into
   [TESTING_AND_ROLLOUT.md](TESTING_AND_ROLLOUT.md) and
   `LIVE_GO_NOGO.md` is created (empty template).
+- **Boundary.** An empty checklist or startup gate is not Phase 9 completion.
+  Actual live readiness additionally requires the long-term roadmap's security,
+  operations and disaster-recovery reviews and a separate rollout decision.
 - **Excludes.** Actually flipping live.
 
 ---
 
-OUT OF SCOPE across Phase 2: modify / cancel / replace lifecycle
-(Phase 3), new strategies, futures roll, multi-account, LLM in the
-execution path.
+OUT OF SCOPE for the original Phase 2 reliability PRs: modify / cancel / replace
+lifecycle (Phase 3 / PR16 above), new strategies, futures roll, multi-account,
+and LLM adjudication. The new mechanics track explicitly adds the mandatory
+AI entry gate outside execution-engine; execution remains deterministic.

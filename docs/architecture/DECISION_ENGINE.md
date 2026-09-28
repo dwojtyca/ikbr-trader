@@ -1,5 +1,22 @@
 # Decision Engine — Skeleton (PR7)
 
+## Documentation status — 2026-09-28
+
+The shared deterministic DecisionEngine is wired into signal-engine runtime through
+runtime/engines.ts. It has no LLM I/O; mandatory entry AI adjudication is a separate
+persisted llm-agent stage. The original PR7 statements about absent consumers are
+historical. Rule support does not establish actual macro/news provider coverage.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Status: **Phase 1, foundation only.** This document describes the
 > `packages/shared/src/decision-engine/` module introduced in PR7.
 > The engine is entirely deterministic and rule-based. There is **no**

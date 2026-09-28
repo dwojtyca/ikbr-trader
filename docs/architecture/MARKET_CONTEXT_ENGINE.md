@@ -1,5 +1,23 @@
 # Market Context Engine — Foundation (PR6)
 
+## Documentation status — 2026-09-28
+
+MarketContextBuilder is consumed by signal-engine runtime with only the price
+provider registered. Strategy technical context uses its dedicated candle/indicator
+loader; llm-agent independently composes persisted order/account/news evidence.
+Financial statements, earnings and ETF research are not implemented. Rich shared
+types do not mean sources are available. PP4 adds immutable research snapshots.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Status: **Phase 1, foundation only.** This document describes the
 > `packages/shared/src/market-context/` module introduced in PR6.
 > No consumer (ingestion, signal-engine, execution-engine, llm-agent,

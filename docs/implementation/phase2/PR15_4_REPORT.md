@@ -1,5 +1,15 @@
 # PR15.4 — Strategy Attribution & Direction Gate — REPORT
 
+## Documentation status — 2026-09-28
+
+Historical plan/report: dates, test counts, commit evidence, limitations and
+next-step instructions below describe the original work package. They are retained
+as evidence, not the current delivery queue or authorization to activate trading.
+
+Current authority: [capability/evidence matrix](../CURRENT_STATE.md) and [detailed delivery plan](../phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
+## Historical work-package record
+
 **Status:** committed as `53213fe`; independent review completed on
 2026-09-15. Review findings are addressed locally by PR15.4.1 and await
 commit/push/green CI.

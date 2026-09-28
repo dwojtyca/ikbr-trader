@@ -1,67 +1,53 @@
-# Configuration — Phase 2
+# Current runtime configuration
 
-> Status (r2, PR15 shipped as commit `87eff1c`): the earlier
-> `ORCH_*` table described a hypothetical orchestrator that
-> never landed. PR11–PR15 shipped as an in-process
-> `signal-engine` runtime (`apps/signal-engine/src/runtime/`)
-> with its own env family. The original `ORCH_*` narrative is
-> **superseded** by the tables below and by
-> [PHASE_2_ROADMAP.md](PHASE_2_ROADMAP.md).
->
-> Existing security / broker vars (`IBKR_ENVIRONMENT`,
-> `TRADING_ENABLED`, `EXECUTION_API_TOKEN`,
-> `ALLOWED_PAPER_ACCOUNTS`, `ALLOWED_LIVE_ACCOUNTS`,
-> `EXECUTION_READY_RECONCILIATION_MAX_AGE_S`) are owned by
-> [ADR-001](../../adr/ADR-001-execution-security.md) and are
-> **not** duplicated here.
+Reviewed 2026-09-26. This page describes settings implemented in the audited code.
+The [proposed independent strategy/instrument format](../../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md)
+is not loadable yet. [Current state](../CURRENT_STATE.md) records support limits.
 
-## Signal-engine runtime (`apps/signal-engine/src/runtime/`)
+## Authoritative sources and flags
 
-Verified defaults from
-`apps/signal-engine/src/runtime/execution/config.ts`,
-`apps/signal-engine/src/runtime/trading-loop/config.ts`, and
-`apps/signal-engine/src/config.ts`.
-
-| Name | Default | Description |
+| Purpose | Current setting / source | Meaning |
 | --- | --- | --- |
-| `RUNTIME_ENABLED` | `true` | Master switch for `/runtime/*` endpoints. When `false`, `/runtime/health`, `/runtime/ready`, `POST /runtime/dry-run` are NOT registered (return HTTP 404). |
-| `EXECUTION_RUNTIME_ENABLED` | `false` | Registers `POST /runtime/execute`, `GET /runtime/execute/ready`, AND the trading-loop routes (`GET /runtime/trading-loop/status`, `/ready`, `POST /run-once`). Trading-loop endpoints exist **only** when this flag is `true`; when `true` they always exist regardless of `TRADING_LOOP_ENABLED`. |
-| `TRADING_LOOP_ENABLED` | `false` | Starts the internal trading-loop scheduler. Requires `EXECUTION_RUNTIME_ENABLED=true`. When `false`, `GET /runtime/trading-loop/status` still responds and reports `enabled: false`. |
-| `TRADING_LOOP_INTERVAL_MS` | see `.env.example:229–235` | Loop tick interval used by the scheduler. |
-| `INSTRUMENT_BINDINGS_JSON` | `""` (empty) | PR15.2 — shared JSON payload binding logical `instrumentId`s to exact IBKR contract identity. Read verbatim by ingestion, signal-engine, and execution-engine. Empty means no bound instruments. NEVER logged. See [../../architecture/INSTRUMENT_REGISTRY.md](../../architecture/INSTRUMENT_REGISTRY.md#11-instrument-bindings-pr152). |
+| Environment | IBKR_ENVIRONMENT | Explicit paper/live identity; never inferred from socket port |
+| Accounts | ALLOWED_PAPER_ACCOUNTS / ALLOWED_LIVE_ACCOUNTS | Allowlisted actual broker account, kept private |
+| Broker writes | TRADING_ENABLED | Master gate; full close currently requires true; false does not flatten or cancel protection |
+| Auth | EXECUTION_API_TOKEN | Shared current internal bearer, required length/activation checks; never a browser bundle value |
+| Runtime | RUNTIME_ENABLED, default true | Registers data runtime |
+| Entry runtime | EXECUTION_RUNTIME_ENABLED, default false | Registers entry runtime and trading-loop routes |
+| Scheduler | TRADING_LOOP_ENABLED, default false | Starts periodic entry evaluation; false does not imply data/strategy readiness |
+| Cadence | TRADING_LOOP_INTERVAL_MS, default30000, minimum5000 | Entry loop frequency |
+| Scope | TRADING_LOOP_INSTRUMENT_IDS | Registry ID allowlist; does not define instruments or subscriptions |
+| Binding | INSTRUMENT_BINDINGS_JSON | Exact existing registry instrument to broker contract binding, validated independently by consumers |
+| Legacy watchlist | WATCHLIST_SYMBOLS / WATCHLIST_CONTRACT_OVERRIDES | Additional legacy data scope; explicitly empty for current exclusive bound test |
+| Test profiles | GPW_PROFILE_ENABLED / AAPL_PROFILE_ENABLED | Mutually exclusive Paper stock opt-ins, not a general instrument configuration loader |
+| Momentum variant | GPW_MOMENTUM_PROFILE | default / pko_mild_v1 / pko_moderate_v1, with explicit PKO opt-in rules |
+| Broker windows | GPW_RUN_* / AAPL_RUN_* | Current separate bounded one-attempt profiles, defined in their runbooks |
+| Reconciliation | RECONCILIATION_* / EXECUTION_READY_RECONCILIATION_MAX_AGE_S | Coverage cadence and freshness; consult schema, not old line-number references |
 
-## Reconciliation (`apps/execution-engine/src/reconciliation/`)
+Source: [signal config](../../../apps/signal-engine/src/config.ts),
+[loop config](../../../apps/signal-engine/src/runtime/trading-loop/config.ts),
+[execution config](../../../apps/execution-engine/src/config.ts),
+[ingestion config](../../../apps/ingestion/src/config.ts),
+[AI config](../../../apps/llm-agent/src/config.ts),
+[configured registry](../../../packages/shared/src/instruments/configured-registry.ts).
 
-| Name | Default | Description |
-| --- | --- | --- |
-| `RECONCILIATION_*` | see `.env.example:115–128` | Reconciliation cadence, max age, and hold policy. `GET /execution/reconciliation/latest` returns `stale`, `maxAgeSeconds`, `run.snapshotComplete`, `run.status`. |
+## Current execution shape
 
-## Ticket submission
+Bound entries require immutable clientOrderId/clientOrderHash in the body,
+instrument identity, persisted proposal/AI review and fresh risk. A binding does
+not grant execution. Current scope is one whole long stock share, LMT bracket,
+USD or WSE/PLN with supported account evidence. Direct unpersisted tickets are
+refused by the production HTTP route. No Idempotency-Key header or separate
+execution_tickets table is introduced by these docs.
 
-- Endpoint: `POST /execution/execute-ticket`
-  (`apps/execution-engine/src/index.ts:1474`).
-- Idempotency: JSON body carries `clientOrderId +
-  clientOrderHash`. There is **no** `Idempotency-Key` header
-  and no separate `execution_tickets` table; all fields live
-  on `proposed_orders` (migration 000005:
-  `partial_take_profits`, `trailing_stop_pct`,
-  `trailing_stop_activation_r`).
-- Server-recomputes `clientOrderHash` via
-  `@ikbr/shared/client-order-hash`; mismatch rejects the
-  submission.
+Use the current [PKO](../../runbooks/GPW_PAPER_ROUND_TRIP.md) or
+[AAPL](../../runbooks/AAPL_PAPER_ROUND_TRIP.md) runbook only after authorized scope
+and live preflight. Do not combine both opt-ins; PP1–PP3 remove that restriction.
 
-## Retired / never-implemented vars
+## Target migration
 
-The following env vars appear only in earlier drafts and do
-NOT exist in any `config.ts`:
-
-- `ORCH_*` (10 vars) — replaced by `TRADING_LOOP_*`,
-  `EXECUTION_RUNTIME_*`, `RECONCILIATION_*`, `RUNTIME_ENABLED`.
-- `EXECUTION_TICKET_ENDPOINT_PATH` — path is fixed as
-  `/execution/execute-ticket`.
-- `EXECUTION_IDEMPOTENCY_HEADER` — idempotency is in body,
-  not a header.
-- `LIVE_STARTUP_DRY_READ` — never implemented.
-
-OUT OF SCOPE: per-strategy overrides, dynamic config reload,
-secrets management (already covered in ADR-001).
+PP1 introduces a read-only versioned bundle with strategyInstances and instruments.
+PP2 resolves parameterized factories and assignment-aware evaluation. PP3 generalizes
+windows/budgets. Until delivered, no invented CONFIG_PATH/strategy JSON setting is
+accepted. Old ORCH_*, EXECUTION_TICKET_ENDPOINT_PATH, EXECUTION_IDEMPOTENCY_HEADER
+and LIVE_STARTUP_DRY_READ names in early drafts are not runtime configuration.

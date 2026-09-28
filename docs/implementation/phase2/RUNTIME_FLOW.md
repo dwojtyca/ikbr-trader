@@ -1,128 +1,60 @@
-# Runtime Flow — Phase 2
+# Current bound runtime flow
 
-> Status (r2, PR15 shipped as commit `87eff1c`): the earlier
-> orchestrator-as-separate-process narrative is superseded.
-> PR11–PR15 shipped the runtime as an in-process module inside
-> `apps/signal-engine/src/runtime/`, still **entry-only**. The
-> legacy `apps/llm-agent` EXECUTE/REJECT gate continues to run
-> outside the new pipeline against `PROPOSED` orders (unchanged).
+Reviewed 2026-09-26. [Capability limits](../CURRENT_STATE.md).
+The production path uses existing services; there is no separate orchestrator app.
 
-## End-to-end diagram
+## Entry sequence
 
-```mermaid
-flowchart TD
-  subgraph ingestion["apps/ingestion (unchanged)"]
-    IB1[IBKR market data socket]
-    AGG[Candle aggregators]
-    PG1[(Postgres: candles)]
-    RDS[(Redis: market state)]
-    IB1 --> AGG --> PG1
-    AGG --> RDS
-  end
+1. Ingestion resolves exact bound contracts, obtains broker schedules and native
+   closed candles, subscribes to market data, persists history and updates Redis.
+2. Signal runtime verifies binding, exposure/reconciliation and session/history
+   readiness. It resolves enabled strategies, loads technical context and evaluates
+   the portfolio. Strategy attribution/direction must agree with instrument policy.
+3. The shared deterministic decision/risk/ticket pipeline produces an attributed
+   intent. The current market-context builder registers only price; technical
+   strategy context comes through the dedicated context loader.
+4. Authenticated execution ticket handoff validates identity/hash and persists the
+   proposal plus pending AI review. It cannot bypass the mandatory review.
+5. llm-agent claims the review, builds available technical/order/account/news
+   evidence, calls the configured model and stores EXECUTE/REJECT under the claim.
+   Missing configured sources or invalid output reject; company reports are not
+   currently fetched. Delivery marker is persisted before one execution request.
+6. Execution validates persisted approval, immutable identity, current policy/run
+   window and fresh deterministic risk. A durable broker plan/reservation precedes
+   dispatch. Unknown outcomes remain unresolved until broker evidence proves state.
+7. Broker events and reconciliation update orders/fills/ownership. Entry response,
+   AI approval and HTTP2xx are not proof of broker fill or complete protection.
 
-  subgraph signal["apps/signal-engine (host of runtime)"]
-    MCB[MarketContextBuilder]
-    SIG[SignalEngine]
-    TIX[ExecutionTicketBuilder]
-    LOOP[trading-loop-service]
-    MCB --> SIG --> TIX --> LOOP
-  end
+## Ownership
 
-  subgraph exec["apps/execution-engine (sole broker writer)"]
-    API["HTTP: /execution/execute-ticket\n/execution/kill-switch\n/execution/reconciliation/*"]
-    SUB[submission-service]
-    TWS[TWS execution client]
-    PG2[("Postgres: proposed_orders,\nbroker_execution_fills,\nexecution_audit_log")]
-    RECON[Reconciliation]
-    API --> SUB --> PG2
-    SUB --> TWS
-    RECON --> PG2
-    RECON --> TWS
-  end
-
-  IBKR[(IBKR Paper Gateway :4002)]
-  LLM[apps/llm-agent — legacy EXECUTE/REJECT gate]
-
-  RDS -.snapshot read.-> MCB
-  PG1 -.candles read.-> MCB
-  LOOP -- POST /execution/execute-ticket\n(clientOrderId + clientOrderHash) --> API
-  LLM -. reads PROPOSED / writes decisions .-> PG2
-  TWS -- ib.placeOrder --> IBKR
-  IBKR -- fills / open orders --> TWS
-  RECON -. GET /reconciliation/latest .-> LOOP
-```
-
-## Component responsibilities
-
-| Component | Owns | Never does |
+| Service/module | Owns | Boundary |
 | --- | --- | --- |
-| `apps/ingestion` | Market data socket, candle persistence, Redis cache | Places orders, evaluates strategies |
-| `MarketContextBuilder` | Deterministic snapshot assembly from candles + cache | Fetches data, mutates state |
-| `SignalEngine` | Orchestrates Decision + Risk into a `SignalEvaluation` | Talks to broker or LLM |
-| `ExecutionTicketBuilder` | Turns a `GENERATED` signal into a deep-frozen ticket | Persists, submits, retries |
-| `signal-engine/src/runtime/execution` | Submits tickets to `execution-engine`; holds `clientOrderId + clientOrderHash`; classifies outcomes | Calls IBKR directly, holds broker session, runs LLM, manages exits |
-| `signal-engine/src/runtime/trading-loop` | Internal scheduler that drives the entry-only loop | Owns state beyond the tick; performs exit management (PR16) |
-| `apps/execution-engine` | Only writer to IBKR. Persists `proposed_orders`. Runs reconciliation. Emits alerts | Contains strategy or AI logic |
-| `apps/llm-agent` | Autonomous EXECUTE/REJECT gate for `PROPOSED` orders (legacy path, unchanged) | Bypass Risk Engine or proposal flow |
+| Ingestion | Quote/history/session evidence | Never submits orders |
+| Signal app | Strategy/regime/portfolio evaluation and ticket handoff | No broker write or AI execution reasoning |
+| Shared pipeline | Deterministic decision/risk/ticket composition | No broker/network/persistence |
+| llm-agent | Persisted entry adjudication and one-shot delivery request | No bypass of risk, identity or proposal flow |
+| Execution | Broker submission, audit, reconciliation, ownership and supported close | No LLM reasoning |
+| Backtest | Isolated simulation/research | Not evidence of real broker acceptance |
+| UI | Operator reads/actions through APIs | Never a second execution path |
 
-## Module boundaries
+## Exits
 
-- Shared library (`packages/shared`): pure. No `pg`, no `ib`, no
-  `fs`, no timers except injected `now()`.
-- `signal-engine/runtime`: HTTP client to `execution-engine`,
-  Postgres read on candles, Redis read on market state. **No**
-  direct `ib` import, **no** Postgres writes to execution tables.
-- `execution-engine`: sole holder of the broker session and the
-  sole writer of `proposed_orders`, `broker_execution_fills`,
-  `execution_audit_log`.
+SL/TP can execute at the broker. An owner-requested supported full close uses
+original ownership, current quantity, deterministic close risk and cancellation
+confirmation, then a bounded SELL limit. It does not need new entry AI approval.
+Current close completion requires explicit reconciliation observation; background
+close supervision is planned in PP5. An unfilled close after protective cancellation
+requires attention and is not safe unattended completion.
 
-## Sync vs async
+## Current versus target selection
 
-| Hop | Mode | Notes |
-| --- | --- | --- |
-| Ingestion → Postgres/Redis | async, continuous | Existing. |
-| Trigger → trading-loop tick | async, timer-driven | `TRADING_LOOP_INTERVAL_MS`. |
-| Snapshot → Signal → Ticket | **sync** in-process | Deterministic, no I/O, ~ms budget. |
-| runtime → `POST /execution/execute-ticket` | sync HTTP with strict timeout | See [FAILURE_AND_RECOVERY.md](FAILURE_AND_RECOVERY.md). |
-| `execution-engine` → IBKR `placeOrder` | async at broker level | Order status flows back over the same socket. |
-| Broker → fills / open-order updates | async push | Handled by `tws-execution-client`. |
-| Reconciliation → runtime | async pull | `GET /execution/reconciliation/latest` + `/holds`. |
+Today enabled algorithm candidates are evaluated before the winner is matched to
+instrument strategy policy. PP2 replaces this with explicitly assigned named
+strategy instances and separate parameters/state. See
+[configuration contract](../../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md).
+The legacy /signals/run-once and /signals/on-candle routes return503; use the
+supported authenticated bound runtime, not the existing stale UI action.
 
-The runtime's HTTP call is a **ticket handoff**, not a broker
-submission. A `2xx` from `execution-engine` means "we accepted
-responsibility and recorded intent" — not "the order is live at
-the broker". Broker-live is observed via reconciliation and
-existing status updates.
-
-## Idempotency (PR15)
-
-- Every ticket carries `clientOrderId + clientOrderHash` in the
-  JSON body of `POST /execution/execute-ticket`. There is no
-  `Idempotency-Key` header.
-- On duplicate submissions, the server replies HTTP 200 with
-  `duplicate: true` and one of
-  `outcome: DUPLICATE_SUBMITTED | DUPLICATE_TERMINAL |
-  DUPLICATE_PENDING_AMBIGUOUS | PENDING_CLAIMED`.
-- Ambiguous rows stay `PROPOSED` with the persisted plan and the
-  ambiguous marker; recovery is reconciliation-driven, not a
-  client-side re-query.
-
-## Entry-only scope (PR15)
-
-- The trading-loop performs entries only. Exit management (SL/TP
-  updates, cancels, partial closes) lands in PR16.
-- Every `Instrument` in
-  `packages/shared/src/instruments/definitions.ts` has
-  `executionEnabled: false` by default (RiskEngine rejects with
-  `INSTRUMENT_DISABLED`), and `TRADING_LOOP_ENABLED=false`.
-- Enabling any instrument or turning the loop on is a deliberate
-  operator action, tracked under PR15.2 / PR15.3.
-
-## Where Phase 2 does NOT change flow
-
-- `apps/llm-agent`, `apps/ui`, `apps/backtest-engine`,
-  `apps/ingestion` are untouched by Phase 2 except for read paths.
-
-OUT OF SCOPE for this document: modify / cancel / partial-close
-flows (Phase 3 in [main ROADMAP.md](../ROADMAP.md)) and exit
-management (PR16).
+Implementation entry points: [trading loop](../../../apps/signal-engine/src/runtime/trading-loop/trading-loop-service.ts),
+[AI worker](../../../apps/llm-agent/src/bound-review-worker.ts),
+[submission service](../../../apps/execution-engine/src/reconciliation/submission-service.ts).

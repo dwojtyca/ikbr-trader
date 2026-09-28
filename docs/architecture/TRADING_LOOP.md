@@ -1,5 +1,24 @@
 # Trading Loop
 
+## Documentation status — 2026-09-28
+
+The current Paper scheduler owns bound entry evaluation and strategy attribution,
+with mandatory downstream AI adjudication. It is disabled by default; disabled
+/ready can return ready:true without proving history/quotes or launch readiness.
+Execution-engine now has a separate narrow full-close lifecycle; this entry loop
+does not automatically supervise exits. PP2 adds instance assignment and PP5 adds
+automated lifecycle supervision before PP7 production-style Paper acceptance.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Paper-only scheduler that periodically drives the PR13
 > `ExecutionRuntime` per instrument. Adds NO new broker path.
 

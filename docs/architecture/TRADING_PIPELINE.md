@@ -1,5 +1,22 @@
 # Trading Pipeline — Skeleton (PR11)
 
+## Documentation status — 2026-09-28
+
+The pure TradingPipeline is integrated by signal-engine runtime/engines.ts and
+the bound strategy loop. The pipeline does not itself call IBKR; its result feeds
+the execution HTTP handoff, persisted AI adjudication and execution risk recheck.
+Old statements that no consumers have migrated describe the original PR11 only.
+
+Use [current capabilities](../implementation/CURRENT_STATE.md), [delivery sequence](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) and the current
+[runtime flow](../implementation/phase2/RUNTIME_FLOW.md) for integration/operations.
+
+## Historical module specification
+
+The original specification follows to preserve API/design context. Its PR-scoped
+status, future-work and non-goal statements describe that historical version;
+they are not current deployment or launch instructions. The current wiring above
+supersedes contradictory integration claims below.
+
 > Status: **Phase 2, first runtime orchestrator.** This document
 > describes the `packages/shared/src/trading-pipeline/` module
 > introduced in PR11. The pipeline is entirely deterministic and

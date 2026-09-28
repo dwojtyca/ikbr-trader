@@ -1,5 +1,16 @@
 # Supervised one-share AAPL Paper test
 
+## Documentation status — 2026-09-28
+
+Current reference for its stated narrow capability, not production-style
+unattended acceptance. PKO and AAPL profiles are currently mutually exclusive;
+AI/research coverage and broker readiness must be checked at actual operation time.
+The September26 preflight is a dated observation, not today's broker state.
+The [production acceptance specification](PRODUCTION_PAPER_ACCEPTANCE.md) is planned
+and cannot be executed until its implementation prerequisites are delivered.
+
+See [current capabilities](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
+
 Use only after the reviewed adapter fix and AAPL code pass exact-commit CI. This
 runbook changes instrument, not the strategy → AI → risk → execution flow. Never
 submit directly through IBKR or manufacture an entry signal.
