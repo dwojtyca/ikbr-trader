@@ -10,7 +10,8 @@ Independent review, all required local checks, publication and exact-commit CI
 passed; evidence is in the
 [PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). PP2 adds configured factories,
 assignment-only diagnostic/scheduled evaluation, durable attribution and stable
-safety counters; final delivery evidence is in the
+safety counters; accepted review, required checks and successful exact-source-commit
+CI are recorded in the
 [PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md). These source updates establish
 no operational deployment or broker readiness.
 
@@ -42,7 +43,7 @@ None of these labels implies profitability or permission to activate Live.
 | --- | --- | --- |
 | Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
 | Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
-| Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applies instance parameters, assignment-only evaluation and isolated state; final publication evidence in PP2 report |
+| Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applies instance parameters, assignment-only evaluation and isolated state; review/checks/publication/CI passed; see PP2 report |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
 | Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |
 | Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | Current AI-entry account evidence requires USD base currency; wider asset/currency/quantity support not generic |

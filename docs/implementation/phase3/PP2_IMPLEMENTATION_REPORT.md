@@ -1,8 +1,8 @@
 # PP2 implementation report
 
-Date: 2026-09-28. Status: implementation, independent hostile/document review and
-all required local checks passed. Publication and exact-commit CI remain pending.
-Local completion is not deployment or broker-readiness evidence.
+Date: 2026-09-28. Status: **PP2 delivered**. Independent hostile/document review,
+all required local checks, main publication and exact-source-commit CI passed.
+This source delivery is not deployment or broker-readiness evidence.
 
 ## Scope and preservation
 
@@ -186,7 +186,7 @@ revision/hashes.
 | Independent plan review | `gpt-6-astra` high / same | Accepted plan/contract after four initial findings and follow-up clarifications; reviewer authored no implementation |
 | Independent implementation/document review | Different `gpt-6-astra` high / same | Accepted frozen source and nine documents; verified final check logs |
 | Mechanical infrastructure preparation | `gpt-5.6-luna` low / disclosed `gpt-6-luna` low fallback | Requested model unavailable; isolated PostgreSQL/Colima and clean baseline archive only; no source changes |
-| Final checks/publication | `gpt-5.6-luna` low / capable lead fallback | Resuming mechanical workers hit the collaboration thread limit; lead ran commands and will publish exact reviewed scope |
+| Final checks/publication | `gpt-5.6-luna` low / capable lead fallback | Resuming mechanical workers hit the collaboration thread limit; lead ran commands and published the exact reviewed scope |
 
 Agent token usage and individual elapsed telemetry are unavailable, not zero. No
 model quality or percentage-savings claim is made. Package elapsed time is measured
@@ -231,6 +231,12 @@ same VM as PostgreSQL. The operational database/profile is untouched. A syntheti
 Compose omission check with an empty temporary env file confirms missing account,
 environment and matching allowlists remain empty; the file was removed afterward.
 
-Commit/push and exact-commit GitHub CI are pending. PP3 remains planned and bundle
-entries remain denied. This report records no deployment, broker action or trading
-activation.
+Source commit: [`7da3832f61459bde3880241c17161130f8225ba3`](https://github.com/dwojtyca/ikbr-trader/commit/7da3832f61459bde3880241c17161130f8225ba3),
+pushed to `origin/main`. Its exact-commit [GitHub CI run 36457062279](https://github.com/dwojtyca/ikbr-trader/actions/runs/36457062279)
+completed with **success** on 2026-09-28. The published 69 source hashes match the
+validated candidate; all 25 pre-existing dirty files remain byte-identical and
+unstaged. This documentation-only follow-up records verified delivery evidence;
+it changes no runtime source.
+
+PP3 remains planned and bundle entries remain denied. This report records no
+deployment, broker action or trading activation.

@@ -1,12 +1,13 @@
 # Strategy and instrument configuration contract
 
-Status updated 2026-09-28: **PP1 published; PP2 implemented, final publication checks pending**.
+Status updated 2026-09-28: **PP1 and PP2 published; exact-source-commit CI verified**.
 The normative implemented format is the [PP1 contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md)
 and additive [PP2 runtime contract](../implementation/phase3/PP2_RUNTIME_CONTRACT.md),
 with [disabled JSON example](../../config/trading/paper.v1.json) and
 [configuration runbook](../runbooks/TRADING_CONFIGURATION.md). Independent review, local checks, publication
 and exact-commit CI passed; see the [PP1 report](../implementation/phase3/PP1_IMPLEMENTATION_REPORT.md).
-The illustrative shape below is not accepted by the PP1 parser. There is no YAML
+PP2 delivery evidence is in the [PP2 report](../implementation/phase3/PP2_IMPLEMENTATION_REPORT.md).
+The illustrative shape below is not accepted by the PP1/PP2 parser. There is no YAML
 loader. Do not paste this example into `INSTRUMENT_BINDINGS_JSON` or the bundle.
 See [current state](../implementation/CURRENT_STATE.md) and
 [delivery stages](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).

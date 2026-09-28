@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-09-28 (PP2 implemented; final review/publication evidence pending).
+Updated: 2026-09-28 (PP2 published; exact-source-commit CI verified).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -37,7 +37,8 @@ entry and retained monitoring/management. Independent hostile review, required l
 CI passed; evidence is in the
 [PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). PP2 adds parameterized factories,
 assignment-only evaluation, stable safety state and immutable attribution; see the
-[PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md) for remaining final delivery gates.
+[PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md) for accepted review, required local
+checks, publication and successful exact-source-commit CI.
 PP3–PP7 remain **planned**.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
@@ -47,7 +48,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | --- | --- | --- |
 | PP0 | Secure operator/API surface; dependency remediation and accurate UI entry point | Current baseline |
 | PP1 | Delivered: versioned configuration, validation, rollout identity and monitoring; checks/review/CI passed | Current baseline; PP0 before operational use |
-| PP2 | Implemented: parameterized factories, assignment-only runtime and durable instance attribution; final publication pending | PP1 |
+| PP2 | Delivered: parameterized factories, assignment-only runtime and durable instance attribution; checks/review/CI passed | PP1 |
 | PP3 | Generic bounded stock Paper execution/windows/budgets/round-trip evidence for PKO+AAPL | PP1, PP2 |
 | PP4 | Cached instrument research and source-bound AI evidence for both initial issuers | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Automated protection/exit observation, recovery and entry-pause semantics | PP3 |

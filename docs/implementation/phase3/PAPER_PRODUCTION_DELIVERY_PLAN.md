@@ -5,7 +5,8 @@ PP0 is implemented and published with successful CI, recorded in the [PP0 report
 PP1 source implements the bounded [configuration contract](PP1_CONFIGURATION_CONTRACT.md),
 with independent review, local checks and exact-commit CI passed; evidence is in the [PP1 report](PP1_IMPLEMENTATION_REPORT.md).
 PP2 source implements the [bounded runtime contract](PP2_RUNTIME_CONTRACT.md);
-its [report](PP2_IMPLEMENTATION_REPORT.md) records final validation/publication gates.
+its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required local
+checks, publication and successful exact-source-commit CI.
 PP3–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
