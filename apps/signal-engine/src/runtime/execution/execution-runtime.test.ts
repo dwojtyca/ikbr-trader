@@ -972,3 +972,36 @@ describe("ExecutionRuntime — AI approval wait", () => {
     assert.equal(submitter.calls[0].clientOrderHash.length, 64);
   });
 });
+
+for (const entry of ["execute", "executePrepared"] as const) {
+  it(`configuration admission denies ${entry} before downstream reads/submission`, async () => {
+    let reads = 0;
+    const dryRun = buildDryRun(buildSuccessPipeline(), { readMarketState: async () => { reads++; return freshState(); } });
+    const prepared = await dryRun.dryRun(INSTRUMENT.id, POLICY);
+    reads = 0;
+    const submitter = trackingSubmitter({ kind: "unknown", reason: "must not call" });
+    const runtime = new ExecutionRuntime({ dryRun, paperGuard: paperOkGuard(), submitter,
+      assertEntryAllowed: async () => { throw new Error("CONFIG_MIGRATION_PREPARATION"); } });
+    const result = entry === "execute" ? await runtime.execute({ instrumentId: INSTRUMENT.id, policy: POLICY, idempotencyKey: "config" }) :
+      await runtime.executePrepared({ dryRunResult: prepared, idempotencyKey: "config", strategyId: "test" });
+    assert.equal(result.outcome, "NOT_SUBMITTED");
+    if (result.outcome === "NOT_SUBMITTED") assert.equal(result.reason, "CONFIGURATION_NOT_READY");
+    assert.equal(reads, 0);
+    assert.equal(submitter.calls.length, 0);
+  });
+}
+
+it("configuration drift during awaited paper readiness prevents ticket persistence", async () => {
+  let allowed = true;
+  const paperGuard = new PaperGuard({ expectedEnvironment: "paper", probe: { probeReady: async () => {
+    allowed = false;
+    return { kind: "ok", ready: true, environment: "paper", accountMatchesEnvironment: true, tradingEnabled: true };
+  } } });
+  const submitter = trackingSubmitter({ kind: "unknown", reason: "must not call" });
+  const runtime = new ExecutionRuntime({ dryRun: buildDryRun(buildSuccessPipeline()), paperGuard, submitter,
+    assertEntryAllowed: async () => { if (!allowed) throw new Error("CONFIG_DRIFT"); } });
+  const result = await runtime.execute({ instrumentId: INSTRUMENT.id, policy: POLICY, idempotencyKey: "drift" });
+  assert.equal(result.outcome, "NOT_SUBMITTED");
+  if (result.outcome === "NOT_SUBMITTED") assert.equal(result.reason, "CONFIGURATION_NOT_READY");
+  assert.equal(submitter.calls.length, 0);
+});

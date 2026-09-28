@@ -90,6 +90,7 @@ export interface StrategyRuntimeStateRepository
 }
 
 export interface TradingLoopServiceOptions {
+  readonly assertEntryAllowed?: () => Promise<void>;
   readonly config: TradingLoopConfig;
   readonly wseMetadataReader?: WseStrategyMetadataReader;
   readonly registry: InstrumentRegistry;
@@ -188,6 +189,7 @@ function mapAssetClassToSecType(
 }
 
 export class TradingLoopService {
+  readonly #assertEntryAllowed?: () => Promise<void>;
   readonly #config: TradingLoopConfig;
   readonly #registry: InstrumentRegistry;
   readonly #bindingAuthority: InstrumentBindingAuthority | null;
@@ -240,6 +242,7 @@ export class TradingLoopService {
     }
     if (!options.logger)
       throw new Error("TradingLoopService: logger is required");
+    this.#assertEntryAllowed = options.assertEntryAllowed;
     this.#config = options.config;
     this.#registry = options.registry;
     this.#bindingAuthority = options.bindingAuthority ?? null;
@@ -402,6 +405,7 @@ export class TradingLoopService {
   }
 
   async #runCycle(): Promise<TradingLoopCycleReport> {
+    await this.#assertEntryAllowed?.();
     const cycleId = randomUUID();
     const startedAt = this.#clock();
     this.#lastCycleAt = startedAt;

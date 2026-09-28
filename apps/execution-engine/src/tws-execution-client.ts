@@ -312,6 +312,8 @@ export class TwsExecutionClient {
     private readonly dependencies: {
       ib?: unknown;
       resolveBoundInstrument?: (id: string) => BoundInstrument | undefined;
+      resolveManagementInstrument?: (id: string) => BoundInstrument | undefined;
+      assertEntryAllowed?: () => Promise<void>;
       loadWseMetadata?: (bound: BoundInstrument, accountId: string) => Promise<WseMarketMetadata>;
     } = {},
   ) {
@@ -328,8 +330,15 @@ export class TwsExecutionClient {
     bound: BoundInstrument; metadata: WseMarketMetadata; generation: number; accountId: string; fingerprint: string;
   }>();
 
+  private resolveTicketBinding(ticket: SignalTicket): BoundInstrument | undefined {
+    const resolver = ticket.positionEffect === "CLOSE_OR_REDUCE"
+      ? this.dependencies.resolveManagementInstrument ?? this.dependencies.resolveBoundInstrument
+      : this.dependencies.resolveBoundInstrument;
+    return ticket.instrumentId ? resolver?.(ticket.instrumentId) : undefined;
+  }
+
   private isKnownWseTicket(ticket: SignalTicket): boolean {
-    const bound = ticket.instrumentId ? this.dependencies.resolveBoundInstrument?.(ticket.instrumentId) : undefined;
+    const bound = this.resolveTicketBinding(ticket);
     return !!(bound && (bound.exchange === "WSE" || bound.currency === "PLN")) ||
       defaultInstrumentRegistry.listAll().some(i => i.exchange === "WSE" &&
         (i.id === ticket.instrumentId || (i.conId !== undefined && String(i.conId) === ticket.conid)));
@@ -499,6 +508,7 @@ export class TwsExecutionClient {
       allowDirectTicket: this.config.allowDirectTicket === true,
     });
 
+    if (ticket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     await this.connect();
 
     if (this.isKnownWseTicket(ticket)) throw new Error("WSE_BOUND_PREPARATION_REQUIRED");
@@ -609,9 +619,10 @@ export class TwsExecutionClient {
       environment: this.config.environment ?? "paper",
       allowDirectTicket: this.config.allowDirectTicket === true,
     });
+    if (ticket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     await this.connect();
     const generation = this.connectionGeneration;
-    const bound = ticket.instrumentId ? this.dependencies.resolveBoundInstrument?.(ticket.instrumentId) : undefined;
+    const bound = this.resolveTicketBinding(ticket);
     let metadata: WseMarketMetadata | undefined;
     let contract: ContractShape;
     let normalizedTicket: SignalTicket;
@@ -701,7 +712,9 @@ export class TwsExecutionClient {
     windowDeadlineMs?: number,
     sendWithEntryPermit?: (send: () => void) => Promise<void>,
   ): Promise<PlaceOrderResult> {
+    if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     await this.connect();
+    if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     this.assertWseDispatch(prepared);
     if (isPkoIdentity(prepared.normalizedTicket) &&
       (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
@@ -721,6 +734,7 @@ export class TwsExecutionClient {
     prepared: PreparedBrokerOrder,
     expectedGeneration: number,
   ): Promise<PlaceOrderResult> {
+    if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") throw new Error("CLOSE_POSITION_EFFECT_REQUIRED");
     this.assertConnectionGeneration(expectedGeneration);
     this.assertWseDispatch(prepared);
     return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration);

@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-09-28 (PP0 implementation; later package scope unchanged).
+Updated: 2026-09-28 (PP1 locally accepted; publication/CI pending).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -29,16 +29,21 @@ see the evidence matrix in CURRENT_STATE.
 
 ## Current sequence
 
-PP0 is implemented, reviewed and published with successful CI. Its delivery gates are recorded in the
-[PP0 report](phase3/PP0_IMPLEMENTATION_REPORT.md). No operational deployment or
-trading activation is included. PP1–PP7 remain **planned**.
+PP0 is implemented, reviewed and published with successful CI; see the
+[PP0 report](phase3/PP0_IMPLEMENTATION_REPORT.md). PP1 source now implements the
+[normative configuration contract](phase3/PP1_CONFIGURATION_CONTRACT.md): strict
+startup JSON, canonical identity, snapshots/service observations, denied bundle
+entry and retained monitoring/management. Independent hostile review and required local checks passed; publication and
+exact-commit CI remain pending in the
+[PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP7 remain **planned**.
+No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
 
 | Package | Result | Depends on |
 | --- | --- | --- |
 | PP0 | Secure operator/API surface; dependency remediation and accurate UI entry point | Current baseline |
-| PP1 | Versioned strategy-instance and instrument configuration; shared validation and rollout identity | Current baseline; PP0 before operational use |
+| PP1 | Locally accepted: versioned configuration, validation, rollout identity and monitoring; publication/CI pending | Current baseline; PP0 before operational use |
 | PP2 | Parameterized strategy factories, explicit per-instrument selection and durable instance attribution | PP1 |
 | PP3 | Generic bounded stock Paper execution/windows/budgets/round-trip evidence for PKO+AAPL | PP1, PP2 |
 | PP4 | Cached instrument research and source-bound AI evidence for both initial issuers | PP1; integrate with PP2/PP3 before entries |

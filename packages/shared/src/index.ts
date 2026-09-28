@@ -424,3 +424,6 @@ export * from "./aapl-candles.js";
 export * from "./aapl-sessions.js";
 
 export * from "./instrument-sessions.js";
+export type * from "./trading-configuration/types.js";
+export { MOMENTUM_CONFIGURATION_DEFAULTS_V1 } from "./trading-configuration/defaults.js";
+export { parseTradingConfiguration } from "./trading-configuration/parser.js";

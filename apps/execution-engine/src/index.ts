@@ -1,8 +1,9 @@
+import { ConfigurationMetadataClient } from "./configuration-metadata-client.js";
+import { registerConfigurationMetadataRoutes } from "./configuration-metadata-routes.js";
 import { createSessionEntryGuard } from "./session-entry-guard.js";
 import { readZeroDayRows, evaluateZeroDay } from "./daily-loss-evidence.js";
 import { CompletedOrdersClient } from "./reconciliation/completed-orders-client.js";
 import { registerGpwRoutes } from "./gpw-routes.js";
-import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
 import { WseMetadataClient } from "./wse-metadata-client.js";
 import { isWseBound } from "./wse-market-rules.js";
 import { shouldInvalidateExecutionFill } from "./execution-fill-invalidation.js";
@@ -21,8 +22,8 @@ import { Pool } from "pg";
 import { z } from "zod";
 import { ProposedOrder, ProposedOrderStatus, SignalTicket } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
-import { config } from "./config.js";
-import { buildExecutionInstrumentBindingAuthority } from "./instrument-bindings-config.js";
+import { config, tradingConfiguration } from "./config.js";
+import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
 import {
   DecisionActor,
   ExecutionRepository,
@@ -63,6 +64,11 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const configurationStore = new TradingConfigurationStore(pool);
+const configurationRuntime = createTradingConfigurationRuntime({
+  service: "execution-engine", loaded: tradingConfiguration.loaded, store: configurationStore,
+  legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
+});
 const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)));
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
@@ -78,6 +84,8 @@ const EXECUTION_PROCESS_OWNER_ID = `execution-engine:${hostname()}:${randomUUID(
 // windowStart baseline. Wall-clock capture at boot; safe to reuse
 // for the entire process lifetime.
 const EXECUTION_SESSION_STARTED_AT = new Date();
+const configurationMetadata = new ConfigurationMetadataClient({ host: config.IB_SOCKET_HOST,
+  port: config.IB_SOCKET_PORT, clientId: config.IB_CONFIG_METADATA_CLIENT_ID });
 const wseMetadata = new WseMetadataClient({ host: config.IB_SOCKET_HOST,
   port: config.IB_SOCKET_PORT, clientId: config.IB_METADATA_CLIENT_ID });
 let lastBrokerFillObservedAt = 0;
@@ -279,6 +287,8 @@ const tws = new TwsExecutionClient(
     });
   },
   { resolveBoundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
+    resolveManagementInstrument: id => configurationRuntime.resolveManagementInstrument(id),
+    assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
 
@@ -294,8 +304,10 @@ const reconRunner = new ReconciliationRunner(
   reconRepo,
   reconBrokerAdapter,
   app.log,
-  () => ({ approvals: config.EXECUTION_EXTERNAL_ORDERS_JSON, protectedConIds: instrumentBindingAuthority.listBoundInstruments()
-    .filter(b => b.instrument.trading.executionEnabled).map(b => String(b.conId)) }),
+  () => ({ approvals: config.EXECUTION_EXTERNAL_ORDERS_JSON, protectedConIds: [...new Set([
+    ...instrumentBindingAuthority.listBoundInstruments().filter(b => b.instrument.trading.executionEnabled).map(b => String(b.conId)),
+    ...configurationRuntime.diagnostics().retainedManagementConIds,
+  ])] }),
 );
 const reconScheduler = new ReconciliationScheduler(
   reconRunner,
@@ -901,10 +913,29 @@ async function ensureBrokerSession(): Promise<{
  * The raw configuration value is NEVER logged; only bound
  * counts / ids appear in the boot log.
  */
-const instrumentBindingAuthority = buildExecutionInstrumentBindingAuthority(
-  config.INSTRUMENT_BINDINGS_JSON,
-  buildConfiguredInstrumentRegistry(process.env),
-);
+const instrumentBindingAuthority = tradingConfiguration.authority;
+const configurationMetadataRoutes = registerConfigurationMetadataRoutes(app, {
+  instruments: () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.configuration.instruments : [],
+  currentAccountId: () => lastActiveAccountId,
+  assertAccountAllowed: accountId => assertActiveAccountAllowed(envGuardConfig(), accountId, { requireKnownAccount: true }),
+  loadMetadata: (instrument, accountId) => configurationMetadata.load(instrument, accountId),
+  readSessionEvidence: async instrument => {
+    const { rows } = await pool.query(`SELECT generation,status,evidence,updated_at FROM instrument_session_schedules
+      WHERE instrument_id=$1 AND conid=$2 AND use_rth=$3`, [instrument.id, String(instrument.contract.conId), instrument.session.useRTH]);
+    const row = rows[0];
+    return row ? { generation: Number(row.generation), status: row.status, schedule: row.evidence,
+      updatedAt: new Date(row.updated_at).toISOString() } : null;
+  },
+  readWatchlist: async () => {
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error("INGESTION_WATCHLIST_UNAVAILABLE");
+    return response.json();
+  },
+});
+app.get("/execution/configuration", async () => {
+  await configurationRuntime.admission();
+  return { ...configurationRuntime.diagnostics(configurationMetadataRoutes.evidence()), consumers: await configurationStore.readAdmissionState() };
+});
 app.get('/execution/aapl-window', async () => repo.getAaplWindowStatus(lastActiveAccountId));
 registerGpwRoutes(app, {
   currentAccountId: () => lastActiveAccountId,
@@ -930,6 +961,7 @@ app.log.info(
  * `BrokerOrderDispatcher` is fake in tests.
  */
 const submissionService = buildSubmissionApplicationService({
+  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
   repo,
   assessAiRisk: async (order, bound, accountId, sessionId) => {
     const [snapshot, response, metadata] = await Promise.all([
@@ -1280,7 +1312,12 @@ app.get("/ready", async (request, reply) => {
     reconciliationRunHealth: durable.reconciliationRunHealth,
   });
 
-  return reply.code(result.statusCode).send(result.body);
+  const admission = await configurationRuntime.admission();
+  return reply.code(admission.allowed ? result.statusCode : 503).send({ ...result.body,
+    ready: result.body.ready && admission.allowed,
+    reasons: [...result.body.reasons, ...admission.reasons],
+    configuration: configurationRuntime.diagnostics(configurationMetadataRoutes.evidence()),
+  });
 });
 
 app.setErrorHandler((error, request, reply) => {
@@ -1591,7 +1628,7 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
   context: (instrumentId) => lastActiveAccountId && tws.isConnected() ? {
     accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
     clientId: tws.getClientId(), generation: tws.getConnectionGeneration(), nowMs: Date.now(),
-    bound: instrumentBindingAuthority?.getBoundInstrument(instrumentId) ?? null,
+    bound: configurationRuntime.resolveManagementInstrument(instrumentId) ?? null,
   } : null,
   refresh: async () => {
     if (!lastActiveAccountId) throw new CloseConflict("close_account_unavailable");
@@ -1641,7 +1678,7 @@ registerLifecycleRoutes(app, {
   repository: repo,
   currentAccountId: () => lastActiveAccountId,
   currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
-  boundInstrument: (id) => instrumentBindingAuthority?.getBoundInstrument(id) ?? null,
+  boundInstrument: (id) => configurationRuntime.resolveManagementInstrument(id) ?? null,
 });
 
 app.post("/execution/execute-ticket", async (request, reply) => {
@@ -1711,6 +1748,8 @@ async function main(): Promise<void> {
   // the scheduler / broker never come online against a partial schema.
   try {
     await repo.init();
+    await configurationRuntime.initialize();
+    configurationRuntime.startHeartbeat(error => app.log.error({ err: error }, "configuration heartbeat failed"));
     app.log.info("database migrations up to date");
   } catch (err) {
     app.log.error(
@@ -1848,6 +1887,7 @@ main().catch((err) => {
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
+    configurationRuntime.stopHeartbeat();
     try {
       await reconScheduler.stop();
       tws.disconnect();

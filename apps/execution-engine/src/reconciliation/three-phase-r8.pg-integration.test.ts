@@ -113,6 +113,7 @@ function buildTestService(
     },
   };
   const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {},
     repo,
     ensureBrokerSession: async () => ({ accountId: ACCOUNT }),
     buildPositionGuard: () => ({
@@ -378,6 +379,7 @@ suite("PR15 r8 §6 — executeProposed happy path with rich fields (PG)", () => 
       const capturedLegs: { legs?: PreparedBrokerOrder["legs"] } = {};
       const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {},
         repo,
         ensureBrokerSession: async () => ({ accountId: ACCOUNT }),
         buildPositionGuard: () => ({

@@ -1,7 +1,10 @@
+import { loadServiceTradingConfiguration } from "./trading-configuration-bootstrap.js";
 import dotenv from "dotenv";
 import { z } from "zod";
 
 dotenv.config();
+
+export const tradingConfiguration = loadServiceTradingConfiguration(process.env);
 
 const optionalTrimmedString = z.preprocess(
   (value) =>

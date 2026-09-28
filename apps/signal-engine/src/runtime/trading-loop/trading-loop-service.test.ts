@@ -699,6 +699,7 @@ function makeRealStrategy(
 
 function makeService(
   overrides: {
+    assertEntryAllowed?: () => Promise<void>;
     config?: ReturnType<typeof makeConfig>;
     instruments?: readonly Instrument[];
     exposure?: TradingExposure;
@@ -729,6 +730,7 @@ function makeService(
   );
   const exposureReader = makeExposureReader(overrides.exposure);
   const svc = new TradingLoopService({
+    assertEntryAllowed: overrides.assertEntryAllowed,
     config: overrides.config ?? makeConfig(),
     registry: makeRegistry(instruments),
     marketDataRuntime,
@@ -2195,4 +2197,14 @@ describe('AAPL bounded profile strategy inputs', () => {
     assert.equal(env.marketDataRuntime.calls.length, 0);
     assert.equal(env.executionRuntime.preparedCalls.length, 0);
   });
+});
+
+
+it("configuration preparation stops the actual loop before market/provider/proposal work", async () => {
+  const { svc, marketDataRuntime, executionRuntime } = makeService({
+    assertEntryAllowed: async () => { throw new Error("CONFIG_MIGRATION_PREPARATION"); },
+  });
+  await assert.rejects(svc.runOnce(), /CONFIG_MIGRATION_PREPARATION/);
+  assert.equal(marketDataRuntime.calls.length, 0);
+  assert.equal(executionRuntime.preparedCalls.length, 0);
 });

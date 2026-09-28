@@ -92,6 +92,7 @@ export type BrokerPlanPreparer = (input: {
 }) => Promise<PreparedBrokerOrder>;
 
 export interface SubmissionServiceDeps {
+  readonly assertEntryAllowed: () => Promise<void>;
   readonly assessAiRisk?: (order: ProposedOrder, bound: BoundInstrument, accountId: string, sessionId: string) => Promise<{ok:true; evidence: AiEntryRiskEvidence} | {ok:false; reason:string}>;
   readonly repo: ExecutionRepository;
   readonly ensureBrokerSession: () => Promise<{ accountId: string }>;
@@ -241,6 +242,10 @@ export interface SubmissionApplicationService {
 export function buildSubmissionApplicationService(
   deps: SubmissionServiceDeps,
 ): SubmissionApplicationService {
+  async function configurationFailure(): Promise<SubmissionOutcome | null> {
+    try { await deps.assertEntryAllowed(); return null; }
+    catch (error) { return { kind: "risk_rejected", reason: error instanceof Error ? error.message : "CONFIG_ADMISSION_UNAVAILABLE" }; }
+  }
   async function runDispatch(input: {
     readonly order: ProposedOrder;
     readonly prepared: PreparedBrokerOrder;
@@ -263,12 +268,14 @@ export function buildSubmissionApplicationService(
         if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
         windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
       }
+      const denied = await configurationFailure();
+      if (denied) return denied;
       const result = await deps.dispatcher.dispatch({
         proposedOrderId: order.id!,
         accountId,
         prepared,
         windowDeadlineMs,
-        sendWithEntryPermit: send => deps.repo.withEntryDispatchPermit(order, accountId, send),
+        sendWithEntryPermit: send => deps.repo.withEntryDispatchPermit(order, accountId, send, deps.assertEntryAllowed),
       });
       if (result.status === "FILLED") {
         // PR14 round-8 — invalidate snapshot BEFORE local FILLED
@@ -477,6 +484,8 @@ export function buildSubmissionApplicationService(
     }
     const session = await deps.repo.checkSessionEntry(validatedOrder);
     if (!session.ok) return { kind: "risk_rejected", reason: session.reason };
+    const deniedBeforePrepare = await configurationFailure();
+    if (deniedBeforePrepare) return deniedBeforePrepare;
     // Phase A — pure prepare. Any exception surfaces to caller
     // as execution_error (contract resolution / RTH / tick).
     let prepared: PreparedBrokerOrder;
@@ -502,6 +511,8 @@ export function buildSubmissionApplicationService(
     // Phase B — atomic claim + full plan persistence + identity
     // binding under the same tx.
     const positionGuard = await deps.buildPositionGuard();
+    const deniedBeforeClaim = await configurationFailure();
+    if (deniedBeforeClaim) return deniedBeforeClaim;
     const claim = await deps.repo.tryStartSubmissionWithPlan({
       id: validatedOrder.id!,
       owner: deps.ownerId,
@@ -610,6 +621,8 @@ export function buildSubmissionApplicationService(
 
   return {
     async submitTicket(input) {
+      const denied = await configurationFailure();
+      if (denied) return denied;
       if (input.ticket.riskCheckStatus !== "PASS") return { kind: "risk_rejected", reason: "risk_check_not_pass" };
       if (input.ticket.instrumentId && input.ticket.positionEffect === "CLOSE_OR_REDUCE")
         return { kind: "ai_review_required", reason: "bound_close_requires_lifecycle_flow" };
@@ -722,6 +735,8 @@ export function buildSubmissionApplicationService(
       }
       // Fresh INSERT.
       const positionGuard = await deps.buildPositionGuard();
+      const deniedBeforeInsert = await configurationFailure();
+      if (deniedBeforeInsert) return deniedBeforeInsert;
       let insertOutcome:
         | Awaited<ReturnType<ExecutionRepository["insertProposedFromTicket"]>>
         | { readonly kind: "unique_violation" };
@@ -834,6 +849,8 @@ export function buildSubmissionApplicationService(
     },
 
     async executeProposed(input) {
+      const denied = await configurationFailure();
+      if (denied) return denied;
       const record = await deps.repo.getExecutableProposedById(
         input.proposedOrderId,
       );

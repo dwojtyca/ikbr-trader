@@ -1,7 +1,12 @@
 # Strategy and instrument configuration contract
 
-Status: **proposed for PP1/PP2**, 2026-09-26. No file loader or environment variable
-for the format below exists today. Do not paste it into INSTRUMENT_BINDINGS_JSON.
+Status updated 2026-09-28: **PP1 source implemented; PP2 runtime design proposed**.
+The normative implemented format is the [PP1 contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md),
+with [disabled JSON example](../../config/trading/paper.v1.json) and
+[configuration runbook](../runbooks/TRADING_CONFIGURATION.md). Independent review and local checks passed;
+publication and exact CI remain pending in the [PP1 report](../implementation/phase3/PP1_IMPLEMENTATION_REPORT.md).
+The illustrative shape below is not accepted by the PP1 parser. There is no YAML
+loader. Do not paste this example into `INSTRUMENT_BINDINGS_JSON` or the bundle.
 See [current state](../implementation/CURRENT_STATE.md) and
 [delivery stages](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -22,10 +27,12 @@ Adding a new algorithm requires source implementation and its own reviewed scope
 ## Proposed input shape
 
 This is a **design example**, not operational configuration or permission to trade.
-The strategy parameter values below mirror selected existing default momentum
-thresholds; PP2 must enumerate and validate every supported parameter. Omitted
-parameters resolve to versioned implementation defaults and become explicit in
-the effective configuration hash. The first rollout enables only one instance.
+Its inline policy objects differ from PP1's separate referenced catalogues, and
+its contract fields are incomplete for PP1. The implemented parser exposes three
+existing momentum thresholds with versioned defaults; PP2 must apply them through
+reviewed factories and parity tests. PP1 records resolved parameters in the hash
+but does not apply them to strategy objects. The versioned production example
+contains disabled entries and a disabled instance.
 
 ```json
 {
@@ -94,18 +101,21 @@ provider credentials and activation windows remain separate deployment inputs.
 
 ## Validation and effective configuration
 
-PP1 introduces one shared strict parser/resolver consumed by ingestion, signal,
-execution and AI; backtests use the same strategy resolution contract. Proposed
-operator interface: a versioned JSON file mounted read-only, with the path supplied
-by an explicitly documented setting added in PP1. No silent fallback to old
-watchlists when that file is configured. Loading and validation happen at boot;
-hot reload is deferred. Restart must revalidate the whole bundle before entries.
+PP1 now supplies one shared strict parser and loader consumed at startup by
+ingestion, signal-engine, execution-engine and llm-agent. `TRADING_CONFIG_MODE=bundle`
+selects a versioned read-only JSON file through `TRADING_CONFIG_PATH`, with an exact
+`TRADING_CONFIG_EXPECTED_HASH`. Configured-file failures stop startup without legacy
+fallback. The bundle is immutable until restart; hot reload remains deferred.
+Shared snapshots and service observations record identity/drift and retain legacy
+management evidence. Every bundle entry stays denied because PP2 runtime and PP3
+execution policy are unavailable; PP4 research remains unavailable too. Backtest
+strategy construction and parameter application are later PP2 work.
 
 Validation rejects unknown fields/versions, duplicate IDs or broker identities,
 missing instance references, empty assignment for entry-enabled instruments,
 invalid finite/range/unit values, unsupported strategies/directions/order types,
 missing required risk/research policy and contradictory venue/currency/session.
-`mode=single` requires exactly one instance reference. A disabled instance may be
+`mode=single` requires exactly one instance reference for an entry-enabled instrument. A disabled instance may be
 referenced but makes entry readiness disabled with a reason; it never silently
 selects a different instance. Monitoring-only instruments need not have a strategy.
 
@@ -122,7 +132,7 @@ execution/risk/research policy and contract identity. Never include secrets in i
 Provider entitlement and fresh broker observations are readiness evidence rather
 than static promises in configuration.
 
-## Selection and parameter isolation
+## Selection and parameter isolation (future PP2)
 
 - Evaluate only enabled instances assigned to that instrument, intersected with
   implementation capabilities and persisted runtime restrictions.
@@ -142,7 +152,7 @@ than static promises in configuration.
 - Required history is derived from selected strategies and regime requirements;
   unassigned strategies must not impose extra timeframes or block evaluation.
 
-## Durable attribution and compatibility
+## Durable attribution and compatibility (future PP2)
 
 Preserve existing algorithm `strategyId` semantics; add separate instance ID,
 instance revision/hash and effective configuration hash to proposal/AI/risk/audit
@@ -164,10 +174,12 @@ position. Protect/reconcile existing broker state before considering a config ro
 
 ## Migration and acceptance
 
-PP1 imports current PKO/AAPL definitions and explicit operator choices; no opt-in
-flags are silently translated into active trading. Keep legacy config support
-only as a separately tested migration path, reject simultaneous old/new authority,
-and publish deprecation diagnostics. Resolve conflicts before enabling entries.
+PP1 provides disabled PKO/AAPL definitions and explicit legacy preparation/conversion,
+with snapshots and a durable bundle entry hold. It rejects simultaneous old/new
+authority and publishes legacy deprecation diagnostics. Retained original management
+bindings preserve the supported close flow and mandatory ingestion monitoring;
+conversion never resets attempted/unknown state or budgets. See the normative
+contract and runbook for the exact migration and rollback rules.
 
 PP2 factories receive validated parameters and preserve current default behavior
 through parity tests and relevant backtests. The current profile restrictions

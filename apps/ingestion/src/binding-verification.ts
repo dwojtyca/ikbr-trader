@@ -149,6 +149,10 @@ export function verifyBoundSubscriptions(input: {
       });
       continue;
     }
+    if (bound.instrument.primaryExchange && toUpperOrEmpty(contract.primaryExch ?? contract.primaryExchange) !== bound.instrument.primaryExchange.toUpperCase()) {
+      mismatches.push({ instrumentId: bound.instrumentId, reason: "primaryExchange missing or mismatched in contractDetails" });
+      continue;
+    }
     const returnedCurrency = toUpperOrEmpty(contract.currency);
     if (!returnedCurrency) {
       mismatches.push({

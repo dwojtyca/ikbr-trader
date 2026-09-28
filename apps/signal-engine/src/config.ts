@@ -1,3 +1,4 @@
+import { loadServiceTradingConfiguration } from "./trading-configuration-bootstrap.js";
 import dotenv from "dotenv";
 import { z } from "zod";
 
@@ -11,6 +12,8 @@ import {
 } from "./runtime/trading-loop/config.js";
 
 dotenv.config();
+
+export const tradingConfiguration = loadServiceTradingConfiguration(process.env);
 
 const schema = z
   .object({
@@ -172,7 +175,9 @@ function parsePriceMultiplierOverrides(raw: string): Record<string, number> {
 
 export const config = {
   ...env,
-  watchlistSymbols: parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
+  watchlistSymbols: tradingConfiguration.loaded.mode === "bundle"
+    ? tradingConfiguration.loaded.configuration.instruments.filter(item => item.monitoringEnabled).map(item => item.contract.symbol)
+    : parseWatchlistSymbols(env.WATCHLIST_SYMBOLS),
   signalEventDriven: env.SIGNAL_EVENT_DRIVEN.toLowerCase() === "true",
   runtimeEnabled: env.RUNTIME_ENABLED.toLowerCase() === "true",
   marketContextMaxTickAgeMs: env.MARKET_CONTEXT_MAX_TICK_AGE_S * 1000,

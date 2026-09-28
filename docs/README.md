@@ -2,7 +2,10 @@
 
 Documentation updated 2026-09-28 with [PP0 implementation evidence](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md).
 Other runtime/broker observations retain the September26 audit of `6cbd2c7`.
-PP1–PP7 remain planned; PP0 does not activate or deploy trading.
+PP1 configuration source passed independent review and required local checks;
+publication and exact CI remain pending in the
+[PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP7 remain planned.
+These changes do not activate or deploy trading.
 
 ## Start here
 
@@ -15,8 +18,10 @@ PP1–PP7 remain planned; PP0 does not activate or deploy trading.
    Its [model assignments](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#31-model-assignments)
    and [routing guide](implementation/phase3/MODEL_ROUTING_GUIDE.md) allocate coding,
    integration and independent review with quality ahead of token savings.
-4. [Strategy/parameter/instrument contract](architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md):
-   reusable named strategy instances selected by separately configured instruments.
+4. [PP1 configuration contract](implementation/phase3/PP1_CONFIGURATION_CONTRACT.md)
+   and [configuration runbook](runbooks/TRADING_CONFIGURATION.md): implemented startup
+   JSON and denied bundle entry. [Strategy/instrument architecture](architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md)
+   also describes future PP2 runtime behavior.
 5. [Instrument research contract](architecture/INSTRUMENT_RESEARCH_CONTEXT.md):
    company reports/news/earnings, asset-specific evidence and immutable AI context.
 6. [Current runtime flow](implementation/phase2/RUNTIME_FLOW.md) and
@@ -59,7 +64,7 @@ and are intentionally unpublished/preserved.
 | [architecture/RECONCILIATION_RUNTIME.md](architecture/RECONCILIATION_RUNTIME.md) | Current wiring plus retained module specification |
 | [architecture/RISK_ENGINE.md](architecture/RISK_ENGINE.md) | Current wiring plus retained module specification |
 | [architecture/SIGNAL_ENGINE.md](architecture/SIGNAL_ENGINE.md) | Current wiring plus retained module specification |
-| [architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md](architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md) | Proposed contract; not implemented |
+| [architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md](architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md) | PP1 source boundary and future PP2 design; illustrative shape is not loadable |
 | [architecture/TRADING_LOOP.md](architecture/TRADING_LOOP.md) | Current wiring plus retained module specification |
 | [architecture/TRADING_PIPELINE.md](architecture/TRADING_PIPELINE.md) | Current wiring plus retained module specification |
 | [implementation/CURRENT_STATE.md](implementation/CURRENT_STATE.md) | Current implementation and dated evidence |
@@ -153,9 +158,13 @@ and are intentionally unpublished/preserved.
 | [implementation/phase3/MODEL_ROUTING_GUIDE.md](implementation/phase3/MODEL_ROUTING_GUIDE.md) | Current coding-agent routing, review and escalation policy |
 | [implementation/phase3/MODEL_ROUTING_PLAN.md](implementation/phase3/MODEL_ROUTING_PLAN.md) | Bounded documentation/instruction change plan |
 | [implementation/phase3/MODEL_ROUTING_REPORT.md](implementation/phase3/MODEL_ROUTING_REPORT.md) | Model-routing change review and validation evidence |
-| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1–PP7 planned |
+| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1 locally accepted; publication/CI pending; PP2–PP7 planned |
 | [implementation/phase3/PP0_IMPLEMENTATION_PLAN.md](implementation/phase3/PP0_IMPLEMENTATION_PLAN.md) | Accepted operator-security implementation contract |
 | [implementation/phase3/PP0_IMPLEMENTATION_REPORT.md](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md) | PP0 implementation, review and validation evidence |
+| [implementation/phase3/PP1_CONFIGURATION_CONTRACT.md](implementation/phase3/PP1_CONFIGURATION_CONTRACT.md) | Normative implemented PP1 field, identity, admission and migration contract |
+| [implementation/phase3/PP1_IMPLEMENTATION_PLAN.md](implementation/phase3/PP1_IMPLEMENTATION_PLAN.md) | Accepted bounded PP1 implementation scope |
+| [implementation/phase3/PP1_IMPLEMENTATION_REPORT.md](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md) | PP1 final review, validation and publication status |
+| [runbooks/TRADING_CONFIGURATION.md](runbooks/TRADING_CONFIGURATION.md) | JSON configuration and disabled migration/rollback; requires separate deployment authorization |
 | [runbooks/OPERATOR_SECURITY.md](runbooks/OPERATOR_SECURITY.md) | Authenticated operator access, disabled rollout and rollback |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md) | Current documentation change plan/report |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md) | Current documentation change plan/report |

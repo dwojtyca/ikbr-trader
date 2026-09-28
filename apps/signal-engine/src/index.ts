@@ -5,9 +5,8 @@ import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
-import { buildConfiguredInstrumentRegistry } from "@ikbr/shared";
-import { buildInstrumentBindingAuthority } from "@ikbr/shared";
-import { config } from "./config.js";
+import { config, tradingConfiguration } from "./config.js";
+import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
 import { SignalRepository } from "./repository.js";
 import { StrategyPortfolioManager } from "./portfolio/strategy-portfolio-manager.js";
 import { listStrategyProfiles } from "./strategy-profiles.js";
@@ -35,11 +34,21 @@ import { ReconciliationReader } from "./runtime/trading-loop/reconciliation-read
 import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
-const defaultInstrumentRegistry = buildConfiguredInstrumentRegistry(process.env);
+const defaultInstrumentRegistry = tradingConfiguration.registry;
+const instrumentBindingAuthority = tradingConfiguration.authority;
 const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(config.LOG_LEVEL) });
 app.addHook("onResponse", logSafeResponse);
 app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? "", SIGNAL_MUTATING_READS));
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const configurationStore = new TradingConfigurationStore(pool);
+const configurationRuntime = createTradingConfigurationRuntime({
+  service: "signal-engine", loaded: tradingConfiguration.loaded, store: configurationStore,
+  legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
+});
+app.get("/configuration", async () => {
+  await configurationRuntime.admission();
+  return configurationRuntime.diagnostics();
+});
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
 /**
@@ -149,26 +158,7 @@ if (config.runtimeEnabled) {
   // without a binding; the wrapped resolver returns the exact
   // operator-selected `conId` for market-data reads. The raw
   // config value is NEVER logged (only counts + ids).
-  const bindingResult = buildInstrumentBindingAuthority(
-    config.INSTRUMENT_BINDINGS_JSON,
-    defaultInstrumentRegistry,
-  );
-  if (!bindingResult.ok) {
-    const summary = bindingResult.errors
-      .slice(0, 5)
-      .map(
-        (e) =>
-          `#${e.index}${e.instrumentId ? ` (${e.instrumentId})` : ""}: ${e.message}`,
-      )
-      .join("; ");
-    throw new Error(
-      `INSTRUMENT_BINDINGS_JSON is invalid — refusing to start. ${summary}` +
-        (bindingResult.errors.length > 5
-          ? ` (+${bindingResult.errors.length - 5} more)`
-          : ""),
-    );
-  }
-  const bindingAuthority = bindingResult.authority;
+  const bindingAuthority = instrumentBindingAuthority;
   app.log.info(
     {
       component: "instrument-bindings",
@@ -239,6 +229,7 @@ if (config.runtimeEnabled) {
       requestTimeoutMs: config.executionRuntime.requestTimeoutMs,
     });
     const executionRuntime = new ExecutionRuntime({
+      assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
       dryRun: marketDataRuntime,
       paperGuard,
       submitter,
@@ -287,6 +278,7 @@ if (config.runtimeEnabled) {
       },
     });
     tradingLoopService = new TradingLoopService({
+      assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
       wseMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
       config: config.tradingLoop,
       registry: defaultInstrumentRegistry,
@@ -328,6 +320,8 @@ if (config.runtimeEnabled) {
 }
 
 async function main(): Promise<void> {
+  await configurationRuntime.initialize();
+  configurationRuntime.startHeartbeat();
   await repo.init();
 
   // Initial cleanup of terminal-status proposals beyond retention window.
@@ -382,6 +376,7 @@ main().catch((err) => {
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
+    configurationRuntime.stopHeartbeat();
     try {
       // Stop the loop FIRST so no new instrument runs start while
       // the HTTP server is closing. `stop()` is idempotent and

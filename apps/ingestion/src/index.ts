@@ -6,7 +6,9 @@ import { buildInstrumentSessionIdentity, type InstrumentSessionIdentity } from "
 import Fastify from "fastify";
 import { Pool } from "pg";
 import { Redis } from "ioredis";
-import { config } from "./config.js";
+import { config, tradingConfiguration } from "./config.js";
+import { buildMergedWatchlist } from "./bound-watchlist.js";
+import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
 import { NativeFinalBarRequestError, TwsClient } from "./tws-client.js";
 import { MarketRepository } from "./db.js";
 import { CandleAggregator } from "./candle-aggregator.js";
@@ -33,6 +35,17 @@ const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(co
 app.addHook("onResponse", logSafeResponse);
 app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? ""));
 const pg = new Pool({ connectionString: config.POSTGRES_URL });
+const configurationStore = new TradingConfigurationStore(pg);
+const configurationRuntime = createTradingConfigurationRuntime({
+  service: "ingestion", loaded: tradingConfiguration.loaded, store: configurationStore,
+  legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
+});
+let instrumentBindingAuthority = tradingConfiguration.authority;
+let watchlistInstruments = config.watchlistInstruments;
+app.get("/configuration", async () => {
+  await configurationRuntime.admission();
+  return configurationRuntime.diagnostics();
+});
 const redis = new Redis(config.REDIS_URL);
 const repo = new MarketRepository(pg);
 const aggregator = new CandleAggregator();
@@ -193,7 +206,7 @@ const twsClient = new TwsClient(
 );
 
 function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIdentity {
-  const bound = sub.instrumentId ? config.instrumentBindingAuthority.getBoundInstrument(sub.instrumentId) : undefined;
+  const bound = sub.instrumentId ? instrumentBindingAuthority.getBoundInstrument(sub.instrumentId) : undefined;
   if (!bound || sub.conid !== String(bound.conId) || sub.symbol !== bound.brokerSymbol || sub.instrumentContract?.source !== 'ibkr')
     throw new Error('session_bound_contract_unverified');
   return buildInstrumentSessionIdentity(bound.instrument, bound);
@@ -250,7 +263,7 @@ app.get("/watchlist", async () => {
   const latestCandles = await repo.getLatestCandles1mByConids(conids);
 
   const watchlist = await Promise.all(
-    config.watchlistInstruments.map(async ({ symbol, instrumentId }) => {
+    watchlistInstruments.map(async ({ symbol, instrumentId }) => {
       const subscription = subscriptionsBySymbol.get(symbol);
       const marketState = subscription
         ? await repo.readMarketState(redis, subscription.conid)
@@ -283,7 +296,7 @@ app.get("/watchlist", async () => {
     // PR15.2 — safe diagnostics only (bound count + ids).
     // The raw `INSTRUMENT_BINDINGS_JSON` is NEVER exposed via
     // this endpoint or logged.
-    bindings: config.instrumentBindingAuthority.toDiagnostics(),
+    bindings: instrumentBindingAuthority.toDiagnostics(),
   };
 });
 
@@ -327,7 +340,7 @@ app.post("/bootstrap", async () => {
     }
 
     const rawSubscriptions = await twsClient.resolveContracts(
-      config.watchlistInstruments,
+      watchlistInstruments,
     );
     // PR15.2 — verify every bound subscription's resolved
     // contract identity against the shared binding authority.
@@ -336,8 +349,8 @@ app.post("/bootstrap", async () => {
     // publish market state under a substituted identity. No
     // raw configuration payload appears in the log.
     const bindingCheck = verifyBoundSubscriptions({
-      authority: config.instrumentBindingAuthority,
-      watchlist: config.watchlistInstruments,
+      authority: instrumentBindingAuthority,
+      watchlist: watchlistInstruments,
       subscriptions: rawSubscriptions,
     });
     for (const mismatch of bindingCheck.mismatches) {
@@ -591,9 +604,15 @@ app.post("/stop", async () => {
 });
 
 async function main(): Promise<void> {
+  await configurationRuntime.initialize();
+  configurationRuntime.startHeartbeat();
+  instrumentBindingAuthority = configurationRuntime.monitoringAuthority(tradingConfiguration.authority);
+  watchlistInstruments = [...buildMergedWatchlist({ authority: instrumentBindingAuthority,
+    legacyWatchlist: tradingConfiguration.loaded.mode === "bundle" ? [] : config.watchlistInstruments.filter(item => !item.instrumentId),
+  }).mergedWatchlist];
   await repo.init();
   // Invalidate persisted evidence before serving requests, even before contract bootstrap creates subscriptions.
-  for (const bound of config.instrumentBindingAuthority.listBoundInstruments()) {
+  for (const bound of instrumentBindingAuthority.listBoundInstruments()) {
     await coordinatorFor(buildInstrumentSessionIdentity(bound.instrument, bound)).invalidate();
   }
 
@@ -605,9 +624,9 @@ async function main(): Promise<void> {
   app.log.info(
     "call POST /bootstrap once TWS/IB Gateway socket session is ready",
   );
-  if (config.watchlistInstruments.length > 100) {
+  if (watchlistInstruments.length > 100) {
     app.log.warn(
-      { size: config.watchlistInstruments.length },
+      { size: watchlistInstruments.length },
       "watchlist exceeds default IBKR 100 market data lines; trim symbols or shard subscriptions",
     );
   }
@@ -620,6 +639,7 @@ main().catch((err) => {
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
+    configurationRuntime.stopHeartbeat();
     try {
       await stopIngestionSession();
       await pg.end();

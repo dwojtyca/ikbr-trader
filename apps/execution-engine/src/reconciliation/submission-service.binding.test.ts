@@ -183,6 +183,7 @@ function buildService(
   const reconciliationGate: ReconciliationSubmissionGate = async () => null;
   const dispatcher = buildDispatcher(dispatchCounter);
   const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {},
     repo,
     ensureBrokerSession: async () => ({ accountId: ACCOUNT }),
     buildPositionGuard: () => positionGuard,

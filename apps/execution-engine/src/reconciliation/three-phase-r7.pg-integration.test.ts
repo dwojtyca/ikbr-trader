@@ -133,6 +133,7 @@ function buildTestService(
     },
   };
   const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {},
     repo,
     ensureBrokerSession: async () => ({ accountId: ACCOUNT }),
     buildPositionGuard: () => ({

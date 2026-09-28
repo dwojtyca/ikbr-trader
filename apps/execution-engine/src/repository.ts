@@ -439,7 +439,7 @@ export class ExecutionRepository {
     return this.sessionEntryGuard(this.pool, order);
   }
 
-  async withEntryDispatchPermit(order: ProposedOrder, accountId: string, send: () => void): Promise<void> {
+  async withEntryDispatchPermit(order: ProposedOrder, accountId: string, send: () => void, beforeSend?: () => Promise<void>): Promise<void> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -457,6 +457,7 @@ export class ExecutionRepository {
         if (!permit.ok) throw new Error(permit.reason);
         deadline = Math.min(deadline, permit.endsAtMs);
       }
+      if (beforeSend) await beforeSend();
       if (Date.now() >= deadline) throw new Error("session_dispatch_expired");
       send();
       await client.query("COMMIT");

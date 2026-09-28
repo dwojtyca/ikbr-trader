@@ -62,6 +62,7 @@ import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { toLegacySignalTicket } from "./ticket-mapper.js";
 
 export type NotSubmittedReason =
+  | "CONFIGURATION_NOT_READY"
   | "NO_TRADE"
   | "PIPELINE_FAILURE"
   | "PAPER_GUARD_FAILED"
@@ -144,6 +145,7 @@ export type ExecutionRuntimeOutcome =
     };
 
 export interface ExecutionRuntimeOptions {
+  readonly assertEntryAllowed?: () => Promise<void>;
   readonly dryRun: MarketDataRuntime;
   readonly paperGuard: PaperGuard;
   readonly submitter: ExecutionTicketSubmitter;
@@ -201,6 +203,7 @@ export interface ExecutePreparedInput {
 }
 
 export class ExecutionRuntime {
+  readonly #assertEntryAllowed?: () => Promise<void>;
   readonly #dryRun: MarketDataRuntime;
   readonly #paperGuard: PaperGuard;
   readonly #submitter: ExecutionTicketSubmitter;
@@ -217,6 +220,7 @@ export class ExecutionRuntime {
     if (!options.submitter) {
       throw new Error("ExecutionRuntime: submitter is required");
     }
+    this.#assertEntryAllowed = options.assertEntryAllowed;
     this.#dryRun = options.dryRun;
     this.#paperGuard = options.paperGuard;
     this.#submitter = options.submitter;
@@ -225,6 +229,8 @@ export class ExecutionRuntime {
   }
 
   async execute(input: ExecuteInput): Promise<ExecutionRuntimeOutcome> {
+    const denied = await this.#configurationDenial();
+    if (denied) return denied;
     // PR15.2 hostile-review fix — bound-identity gate BEFORE the
     // pipeline runs. `/runtime/execute` MUST use the same
     // authoritative binding mechanism as the trading loop; a
@@ -300,6 +306,8 @@ export class ExecutionRuntime {
   async executePrepared(
     input: ExecutePreparedInput,
   ): Promise<ExecutionRuntimeOutcome> {
+    const denied = await this.#configurationDenial(input.dryRunResult.pipeline);
+    if (denied) return denied;
     // 1. Canonical strategyId required. Guarded before touching the
     //    pipeline / paper guard / submitter so a bad caller cannot
     //    reach any write path.
@@ -356,6 +364,11 @@ export class ExecutionRuntime {
     );
   }
 
+  async #configurationDenial(pipeline = bindingUnavailablePipeline()): Promise<ExecutionRuntimeOutcome | null> {
+    try { await this.#assertEntryAllowed?.(); return null; }
+    catch { return { outcome: "NOT_SUBMITTED", pipeline, reason: "CONFIGURATION_NOT_READY" }; }
+  }
+
   async #submitFromDryRun(
     dryRunResult: DryRunResult,
     idempotencyKey: string,
@@ -410,6 +423,8 @@ export class ExecutionRuntime {
     }
     const clientOrderHash = computeClientOrderHash(legacyTicket);
 
+    const denied = await this.#configurationDenial(pipeline);
+    if (denied) return denied;
     const submission = await this.#submitter.submit({
       ticket: legacyTicket,
       strategy: strategyLabel,

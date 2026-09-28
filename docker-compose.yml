@@ -37,7 +37,14 @@ services:
     command: pnpm --filter @ikbr/ingestion start
     env_file:
       - .env
+    volumes:
+      - ./config/trading:/app/config/trading:ro
     environment:
+      TRADING_CONFIG_MODE: ${TRADING_CONFIG_MODE:-legacy}
+      TRADING_CONFIG_PATH: ${TRADING_CONFIG_PATH:-}
+      TRADING_CONFIG_EXPECTED_HASH: ${TRADING_CONFIG_EXPECTED_HASH:-}
+      TRADING_CONFIG_LEGACY_SOURCE_HASH: ${TRADING_CONFIG_LEGACY_SOURCE_HASH:-}
+      TRADING_CONFIG_MIGRATION_PREPARE: ${TRADING_CONFIG_MIGRATION_PREPARE:-false}
       INGESTION_PORT: 3101
       INGESTION_BIND_HOST: 0.0.0.0
       EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
@@ -64,7 +71,14 @@ services:
     command: pnpm --filter @ikbr/signal-engine start
     env_file:
       - .env
+    volumes:
+      - ./config/trading:/app/config/trading:ro
     environment:
+      TRADING_CONFIG_MODE: ${TRADING_CONFIG_MODE:-legacy}
+      TRADING_CONFIG_PATH: ${TRADING_CONFIG_PATH:-}
+      TRADING_CONFIG_EXPECTED_HASH: ${TRADING_CONFIG_EXPECTED_HASH:-}
+      TRADING_CONFIG_LEGACY_SOURCE_HASH: ${TRADING_CONFIG_LEGACY_SOURCE_HASH:-}
+      TRADING_CONFIG_MIGRATION_PREPARE: ${TRADING_CONFIG_MIGRATION_PREPARE:-false}
       SIGNAL_PORT: 3102
       SIGNAL_BIND_HOST: 0.0.0.0
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
@@ -102,7 +116,14 @@ services:
     command: pnpm --filter @ikbr/execution-engine start
     env_file:
       - .env
+    volumes:
+      - ./config/trading:/app/config/trading:ro
     environment:
+      TRADING_CONFIG_MODE: ${TRADING_CONFIG_MODE:-legacy}
+      TRADING_CONFIG_PATH: ${TRADING_CONFIG_PATH:-}
+      TRADING_CONFIG_EXPECTED_HASH: ${TRADING_CONFIG_EXPECTED_HASH:-}
+      TRADING_CONFIG_LEGACY_SOURCE_HASH: ${TRADING_CONFIG_LEGACY_SOURCE_HASH:-}
+      TRADING_CONFIG_MIGRATION_PREPARE: ${TRADING_CONFIG_MIGRATION_PREPARE:-false}
       EXECUTION_PORT: 3103
       EXECUTION_BROKER_TIME_ZONE: ${EXECUTION_BROKER_TIME_ZONE:-}
       EXECUTION_INGESTION_BASE_URL: http://ingestion:3101
@@ -139,7 +160,15 @@ services:
     command: pnpm --filter @ikbr/llm-agent start
     env_file:
       - .env
+    volumes:
+      - ./config/trading:/app/config/trading:ro
     environment:
+      INSTRUMENT_BINDINGS_JSON: ${INSTRUMENT_BINDINGS_JSON:-}
+      TRADING_CONFIG_MODE: ${TRADING_CONFIG_MODE:-legacy}
+      TRADING_CONFIG_PATH: ${TRADING_CONFIG_PATH:-}
+      TRADING_CONFIG_EXPECTED_HASH: ${TRADING_CONFIG_EXPECTED_HASH:-}
+      TRADING_CONFIG_LEGACY_SOURCE_HASH: ${TRADING_CONFIG_LEGACY_SOURCE_HASH:-}
+      TRADING_CONFIG_MIGRATION_PREPARE: ${TRADING_CONFIG_MIGRATION_PREPARE:-false}
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       LLM_AGENT_EXECUTION_BASE_URL: http://execution-engine:3103
       # Phase 1 / PR1 (schema-only). Runtime attach in PR2.

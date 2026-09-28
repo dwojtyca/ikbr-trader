@@ -5,6 +5,7 @@ import type { DecisionContext, LlmDecision } from "./openai-decider.js";
 import type { MarketNewsItem } from "./marketaux-client.js";
 
 interface BoundWorkerDependencies {
+  assertEntryAllowed?: () => Promise<void>;
   repository: BoundReviewStore;
   resolveAaplIdentity?: AaplIdentityResolver;
   execution: {
@@ -23,11 +24,15 @@ export class BoundReviewWorker {
   constructor(private readonly deps: BoundWorkerDependencies) {}
 
   async pollOnce(): Promise<boolean> {
+    await this.deps.assertEntryAllowed?.();
     const claim = await this.deps.repository.claim();
     if (!claim) return false;
+    await this.deps.assertEntryAllowed?.();
     const decision = await this.evaluate(claim);
+    await this.deps.assertEntryAllowed?.();
     const mayDeliver = await this.deps.repository.finalize(claim, decision);
     if (mayDeliver) {
+      await this.deps.assertEntryAllowed?.();
       // The durable marker precedes this call. Transport failures cannot become rejection or retry.
       let outcome: DeliveryOutcome = "UNKNOWN";
       try { outcome = await this.deps.execution.executeBoundProposed(claim.order.id); } catch { /* uncertain delivery */ }
@@ -74,6 +79,7 @@ export class BoundReviewWorker {
       if (account.accountId !== claim.identity.accountId || !Array.isArray(account.positions) || !account.totals ||
           !Number.isFinite(Date.parse(account.retrievedAt))) return reject("ACCOUNT_CONTEXT_INVALID");
     } catch { return reject("ACCOUNT_UNAVAILABLE"); }
+    await this.deps.assertEntryAllowed?.();
     let news: MarketNewsItem[];
     try {
       news = await this.deps.news.getNewsForSymbol(claim.order.instrument, this.deps.newsWindowHours, this.deps.maxNewsItems);
@@ -84,6 +90,7 @@ export class BoundReviewWorker {
       context.news = { items: news, unverifiedItemsCount, receivedAt: new Date().toISOString(), availability: coverage.instrumentMatchedNews };
     } catch { return reject("NEWS_UNAVAILABLE"); }
     const current = account.positions.find((position) => position.conid === claim.identity.conid);
+    await this.deps.assertEntryAllowed?.();
     let decision: LlmDecision;
     try {
       decision = await this.deps.decider.decide({ order: claim.order,

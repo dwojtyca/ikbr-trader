@@ -16,6 +16,10 @@
     "./http-auth": {
       "types": "./dist/http-auth.d.ts",
       "default": "./dist/http-auth.js"
+    },
+    "./trading-config": {
+      "types": "./dist/trading-config.d.ts",
+      "default": "./dist/trading-config.js"
     }
   },
   "scripts": {

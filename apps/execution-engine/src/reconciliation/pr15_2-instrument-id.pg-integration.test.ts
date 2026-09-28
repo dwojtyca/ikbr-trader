@@ -202,6 +202,7 @@ function buildService(
     },
   };
   const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {},
     repo,
     ensureBrokerSession: async () => ({ accountId: ACCOUNT }),
     buildPositionGuard: () => ({

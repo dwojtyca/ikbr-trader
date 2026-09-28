@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "strategyInstances": [
+    { "id": "momentum_default", "implementationId": "momentum_breakout_long_v1", "revision": 1, "enabled": true },
+    { "id": "momentum_custom", "implementationId": "momentum_breakout_long_v1", "revision": 2, "enabled": true, "parameters": { "dailyReturn20MinPct": 12, "h1Return4MinPct": 2, "return60MinPct": 0.5 } },
+    { "id": "momentum_paused", "implementationId": "momentum_breakout_long_v1", "revision": 1, "enabled": false }
+  ],
+  "instruments": [
+    { "id": "pko_wse", "assetClass": "stock", "contract": { "broker": "ibkr", "symbol": "PKO", "conId": 12345, "exchange": "WSE", "primaryExchange": "WSE", "currency": "PLN", "localSymbol": "PKO", "tradingClass": "PKO", "expectedMinTick": 0.01 }, "session": { "useRTH": true, "timeZone": "Europe/Warsaw" }, "monitoringEnabled": true, "entryEnabled": true, "strategySelection": { "mode": "single", "instanceIds": ["momentum_default"] }, "accountPolicyId": "paper_account", "entryPolicyId": "one_attempt", "executionPolicyId": "one_share", "riskPolicyId": "pln_risk", "researchPolicyId": "issuer_news", "issuerMappingId": "pko_issuer" },
+    { "id": "aapl_smart", "assetClass": "stock", "contract": { "broker": "ibkr", "symbol": "AAPL", "conId": 265598, "exchange": "SMART", "primaryExchange": "NASDAQ", "currency": "USD", "localSymbol": "AAPL", "tradingClass": "NMS", "expectedMinTick": 0.01 }, "session": { "useRTH": true, "timeZone": "America/New_York" }, "monitoringEnabled": true, "entryEnabled": true, "strategySelection": { "mode": "single", "instanceIds": ["momentum_default"] }, "accountPolicyId": "paper_account", "entryPolicyId": "one_attempt", "executionPolicyId": "one_share", "riskPolicyId": "usd_risk", "researchPolicyId": "issuer_news", "issuerMappingId": "aapl_issuer" },
+    { "id": "xyz_nyse", "assetClass": "stock", "contract": { "broker": "ibkr", "symbol": "QZXP", "conId": 987654, "exchange": "SMART", "primaryExchange": "NYSE", "currency": "USD", "localSymbol": "QZXP", "tradingClass": "QZXP", "expectedMinTick": 0.01 }, "session": { "useRTH": true, "timeZone": "America/New_York" }, "monitoringEnabled": true, "entryEnabled": true, "strategySelection": { "mode": "single", "instanceIds": ["momentum_custom"] }, "accountPolicyId": "paper_account", "entryPolicyId": "one_attempt", "executionPolicyId": "one_share", "riskPolicyId": "usd_risk", "researchPolicyId": "issuer_news", "issuerMappingId": "xyz_issuer" },
+    { "id": "monitor_only", "assetClass": "stock", "contract": { "broker": "ibkr", "symbol": "MON", "conId": 222222, "exchange": "SMART", "primaryExchange": "NASDAQ", "currency": "USD", "localSymbol": "MON", "tradingClass": "MON", "expectedMinTick": 0.01 }, "session": { "useRTH": true, "timeZone": "America/New_York" }, "monitoringEnabled": true, "entryEnabled": false, "strategySelection": { "mode": "single", "instanceIds": [] }, "accountPolicyId": "paper_account", "entryPolicyId": "one_attempt", "executionPolicyId": "one_share", "riskPolicyId": "usd_risk", "researchPolicyId": "issuer_news", "issuerMappingId": "mon_issuer" },
+    { "id": "disabled_assignment", "assetClass": "stock", "contract": { "broker": "ibkr", "symbol": "DIS", "conId": 333333, "exchange": "SMART", "primaryExchange": "NASDAQ", "currency": "USD", "localSymbol": "DIS", "tradingClass": "DIS", "expectedMinTick": 0.01 }, "session": { "useRTH": true, "timeZone": "America/New_York" }, "monitoringEnabled": true, "entryEnabled": false, "strategySelection": { "mode": "single", "instanceIds": ["momentum_paused"] }, "accountPolicyId": "paper_account", "entryPolicyId": "one_attempt", "executionPolicyId": "one_share", "riskPolicyId": "usd_risk", "researchPolicyId": "issuer_news", "issuerMappingId": "dis_issuer" }
+  ],
+  "accountPolicies": [{ "id": "paper_account", "maxOpenPositions": 1, "accountDayTimeZone": "Europe/Warsaw" }],
+  "entryPolicies": [{ "id": "one_attempt", "kind": "supervised_one_attempt", "maxAttemptsPerAccountDay": 1 }],
+  "executionPolicies": [{ "id": "one_share", "direction": "LONG", "quantity": 1, "quantityUnit": "shares", "orderType": "LMT", "timeInForce": "DAY", "outsideRth": false, "protection": "bracket" }],
+  "riskPolicies": [
+    { "id": "pln_risk", "maxPositionQuantity": 1, "maxEntryNotional": { "amount": 1000, "currency": "PLN" }, "maxSpread": 1, "maxSlippage": 1, "allowOvernight": false },
+    { "id": "usd_risk", "maxPositionQuantity": 1, "maxEntryNotional": { "amount": 1000, "currency": "USD" }, "maxSpread": 1, "maxSlippage": 1, "allowOvernight": false }
+  ],
+  "researchPolicies": [{ "id": "issuer_news", "required": true, "kind": "issuer_news_required_v1" }],
+  "issuerMappings": [
+    { "id": "pko_issuer", "issuerId": "pko", "providerSymbol": "PKO.WA", "currency": "PLN", "primaryExchange": "WSE" },
+    { "id": "aapl_issuer", "issuerId": "apple", "providerSymbol": "AAPL", "currency": "USD", "primaryExchange": "NASDAQ" },
+    { "id": "xyz_issuer", "issuerId": "generic_issuer", "providerSymbol": "QZXP", "currency": "USD", "primaryExchange": "NYSE" },
+    { "id": "mon_issuer", "issuerId": "monitor_issuer", "providerSymbol": "MON", "currency": "USD", "primaryExchange": "NASDAQ" },
+    { "id": "dis_issuer", "issuerId": "disabled_issuer", "providerSymbol": "DIS", "currency": "USD", "primaryExchange": "NASDAQ" }
+  ]
+}

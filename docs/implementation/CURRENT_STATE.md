@@ -1,10 +1,15 @@
 # Current project state
 
-Security update: 2026-09-28. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+Source update: 2026-09-28. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
-PP0 changes source/security controls, not operational deployment or broker readiness.
+PP0 changes source/security controls. PP1 source adds versioned JSON configuration,
+canonical hashes, snapshots/service observations and monitoring diagnostics.
+Independent review and all required local checks passed; publication and exact CI
+remain pending in the
+[PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). Neither source update establishes
+operational deployment or broker readiness.
 
 ## Delivery objective
 
@@ -14,7 +19,9 @@ strategy parameter sets. Instruments select previously configured strategies.
 Automated evaluation, persisted AI adjudication, risk, execution, protection,
 exits, recovery and operator visibility are required. A supervised one-share round
 trip is an intermediate proof, not final delivery. See the [delivery plan](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
-and [configuration contract](../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md).
+and [PP1 configuration contract](phase3/PP1_CONFIGURATION_CONTRACT.md).
+The [architecture page](../architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md)
+separates implemented PP1 configuration from future PP2 runtime design.
 
 ## Evidence vocabulary
 
@@ -31,8 +38,8 @@ None of these labels implies profitability or permission to activate Live.
 | Capability | Implemented state | Remaining gap / evidence |
 | --- | --- | --- |
 | Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
-| Instrument registry | Shared typed registry and exact contract binding | Catalogue is code-defined; runtime opt-ins are mutually exclusive PKO/AAPL special cases |
-| Strategy framework | Seven registered implementations; enabled profiles select a subset; portfolio selection and regime detection exist | No general reusable parameterized instance catalogue or per-instrument instance assignment |
+| Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | Final PP1 delivery gates pending; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
+| Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applying instance parameters, assignment-aware evaluation and isolated mutable state remains planned |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
 | Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |
 | Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | Current AI-entry account evidence requires USD base currency; wider asset/currency/quantity support not generic |
@@ -46,6 +53,15 @@ None of these labels implies profitability or permission to activate Live.
 
 ## Source-backed implementation map
 
+- PP1 configuration: [parser](../../packages/shared/src/trading-configuration/parser.ts),
+  [loader](../../packages/shared/src/trading-configuration/loader.ts),
+  [canonical identity](../../packages/shared/src/trading-configuration/identity.ts),
+  [store](../../packages/shared/src/trading-configuration/store.ts),
+  [admission](../../packages/shared/src/trading-configuration/admission.ts),
+  [monitoring projection](../../packages/shared/src/trading-configuration/projection.ts)
+  and [configuration runbook](../runbooks/TRADING_CONFIGURATION.md).
+  Bundle readiness keeps PP2/PP3 unavailable and PP4 research unavailable;
+  configured parameters do not reach current strategy constructors.
 - Registry: [definitions](../../packages/shared/src/instruments/definitions.ts),
   [configured profiles](../../packages/shared/src/instruments/configured-registry.ts),
   [binding authority](../../packages/shared/src/instruments/bindings.ts).
@@ -75,8 +91,9 @@ None of these labels implies profitability or permission to activate Live.
 
 ## Important current limits
 
-1. PKO and AAPL cannot currently both opt into execution through the configured
-   registry. Seed entries remain disabled without opt-in.
+1. PP1 can load PKO and AAPL together for configuration and monitoring. Every bundle
+   entry remains denied until later delivery stages; the legacy registry still
+   rejects simultaneous execution opt-ins. Seed entries remain disabled without opt-in.
 2. ETFs map to IBKR STK at the binding layer but `assetClass=etf` is rejected by
    production entry/close risk. Futures/index types likewise do not prove tradability.
 3. Current run windows, daily attempt accounting and completion reports use

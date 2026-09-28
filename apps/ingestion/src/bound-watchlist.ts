@@ -109,6 +109,7 @@ function expandBoundEntries(
         boundInstrument.instrument.assetClass,
       ),
       exchange: boundInstrument.exchange,
+      primaryExchange: boundInstrument.instrument.primaryExchange,
       currency: boundInstrument.currency,
       localSymbol: boundInstrument.localSymbol,
       tradingClass: boundInstrument.tradingClass,

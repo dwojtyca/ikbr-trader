@@ -1,14 +1,15 @@
+import { loadServiceTradingConfiguration } from "./trading-configuration-bootstrap.js";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { WatchlistInstrument } from "./types.js";
 import {
-  buildInstrumentBindingAuthority,
-  buildConfiguredInstrumentRegistry,
   InstrumentBindingAuthority,
 } from "@ikbr/shared";
 import { buildMergedWatchlist } from "./bound-watchlist.js";
 
 dotenv.config();
+
+export const tradingConfiguration = loadServiceTradingConfiguration(process.env);
 
 const DEFAULT_SECURITY_TYPE = "STK";
 
@@ -60,7 +61,7 @@ const schema = z.object({
 
 const env = schema.parse(process.env);
 const otherClientIds = [env.INGESTION_CLIENT_ID, ...Object.entries({ EXECUTION_CLIENT_ID: 102, BACKTEST_INGESTION_CLIENT_ID: 104,
-  IB_METADATA_CLIENT_ID: 119, IB_COMPLETED_ORDERS_CLIENT_ID: 120, IBKR_ES_ACQUISITION_CLIENT_ID: 91551 })
+  IB_METADATA_CLIENT_ID: 119, IB_CONFIG_METADATA_CLIENT_ID: 155, IB_COMPLETED_ORDERS_CLIENT_ID: 120, IBKR_ES_ACQUISITION_CLIENT_ID: 91551 })
   .map(([key, fallback]) => Number(process.env[key] ?? fallback))];
 if (otherClientIds.includes(env.SESSION_SCHEDULE_CLIENT_ID)) throw new Error("SESSION_SCHEDULE_CLIENT_ID must be distinct from existing broker clients");
 
@@ -156,27 +157,7 @@ const ingestionPort = env.INGESTION_PORT ?? 3101;
 // from the same shared JSON as signal-engine and execution-engine.
 // Failure here throws at module load so the process refuses to
 // start on a bad configuration. Raw payload is never logged.
-const bindingResult = buildInstrumentBindingAuthority(
-  env.INSTRUMENT_BINDINGS_JSON,
-  buildConfiguredInstrumentRegistry(process.env),
-);
-if (!bindingResult.ok) {
-  const summary = bindingResult.errors
-    .slice(0, 5)
-    .map(
-      (e) =>
-        `#${e.index}${e.instrumentId ? ` (${e.instrumentId})` : ""}: ${e.message}`,
-    )
-    .join("; ");
-  throw new Error(
-    `INSTRUMENT_BINDINGS_JSON is invalid — refusing to start. ${summary}` +
-      (bindingResult.errors.length > 5
-        ? ` (+${bindingResult.errors.length - 5} more)`
-        : ""),
-  );
-}
-const instrumentBindingAuthority: InstrumentBindingAuthority =
-  bindingResult.authority;
+const instrumentBindingAuthority: InstrumentBindingAuthority = tradingConfiguration.authority;
 
 // PR15.2 hostile-review round-6 — a single production merge
 // function owns the collision-aware combining of the legacy
@@ -186,7 +167,7 @@ const instrumentBindingAuthority: InstrumentBindingAuthority =
 // same function so a wiring regression is caught by CI.
 const mergedResult = buildMergedWatchlist({
   authority: instrumentBindingAuthority,
-  legacyWatchlist: watchlistInstruments,
+  legacyWatchlist: tradingConfiguration.loaded.mode === "bundle" ? [] : watchlistInstruments,
 });
 const boundWatchlistInstruments = mergedResult.boundWatchlist;
 const mergedWatchlistInstruments: WatchlistInstrument[] = [

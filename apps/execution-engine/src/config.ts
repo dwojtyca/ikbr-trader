@@ -1,3 +1,4 @@
+import { loadServiceTradingConfiguration } from "./trading-configuration-bootstrap.js";
 import { parseAaplWindow } from "./aapl-window.js";
 import { parseExternalOrders } from "./reconciliation/external-orders.js";
 import { parseGpwWindow } from "./gpw-window.js";
@@ -5,6 +6,8 @@ import dotenv from "dotenv";
 import { z } from "zod";
 
 dotenv.config();
+
+export const tradingConfiguration = loadServiceTradingConfiguration(process.env);
 
 const DEFAULT_SECURITY_TYPE = "STK";
 
@@ -42,6 +45,8 @@ const rawSchema = z.object({
   IB_SOCKET_PORT: z.coerce.number().default(4002),
   EXECUTION_CLIENT_ID: z.coerce.number().default(102),
   IB_COMPLETED_ORDERS_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(120),
+  IB_CONFIG_METADATA_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(155),
+  SESSION_SCHEDULE_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(154),
   IB_METADATA_CLIENT_ID: z.coerce.number().int().positive().max(2147483647).default(119),
   INGESTION_CLIENT_ID: z.coerce.number().default(101),
   BACKTEST_INGESTION_CLIENT_ID: z.coerce.number().default(104),
@@ -240,6 +245,11 @@ function validateExecutionSecurity(
     if (data.IB_COMPLETED_ORDERS_CLIENT_ID === data[key]) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["IB_COMPLETED_ORDERS_CLIENT_ID"],
         message: `IB_COMPLETED_ORDERS_CLIENT_ID must differ from ${key}` });
+    }
+  }
+  for (const key of ["EXECUTION_CLIENT_ID", "INGESTION_CLIENT_ID", "BACKTEST_INGESTION_CLIENT_ID", "IBKR_ES_ACQUISITION_CLIENT_ID", "IB_METADATA_CLIENT_ID", "IB_COMPLETED_ORDERS_CLIENT_ID", "SESSION_SCHEDULE_CLIENT_ID"] as const) {
+    if (data.IB_CONFIG_METADATA_CLIENT_ID === data[key] || (key === "IBKR_ES_ACQUISITION_CLIENT_ID" && data[key] === undefined && data.IB_CONFIG_METADATA_CLIENT_ID === 91551)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["IB_CONFIG_METADATA_CLIENT_ID"], message: `IB_CONFIG_METADATA_CLIENT_ID must differ from ${key}` });
     }
   }
   const tradingEnabled = parseBoolFlag(data.TRADING_ENABLED);

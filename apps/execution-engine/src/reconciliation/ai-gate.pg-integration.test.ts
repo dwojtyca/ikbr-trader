@@ -65,7 +65,8 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = false) {
     alteredPreparedPrice: false, rejectDuringPrepare: false, missingPlnEvidence: false, expireWindowDuringPrepare: false,
     wseFailure: "" as string,
     session: sessionId, account: accountId };
-  const service = buildSubmissionApplicationService({ repo, bindingAuthority: authority,
+  const service = buildSubmissionApplicationService({
+    assertEntryAllowed: async () => {}, repo, bindingAuthority: authority,
     ensureBrokerSession: async () => ({ accountId: state.account }),
     buildPositionGuard: () => ({ kind: "available", accountId: state.account, sessionId: state.session, maxSnapshotAgeMs: 60000 }),
     reconciliationGate: () => async () => null,
