@@ -1,6 +1,7 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-09-26. Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
+Updated: 2026-09-28 (model routing; delivery scope unchanged).
+Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
 ## Owner-selected outcome
@@ -46,6 +47,20 @@ PP4 research implementation may proceed independently after the identity contrac
 is fixed. Final integration and broker activation remain sequential and gated.
 Do not fund broad external-data subscriptions before checking coverage for both
 initial issuers. A missing provider contract is an explicit delivery blocker.
+
+## Implementation models
+
+The [task-level model matrix](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#31-model-assignments)
+assigns Luna medium to bounded implementation, Sol medium to noncritical integration
+and Astra high to critical semantics and integration. Mechanical duties retain
+GPT-5.6 Luna low. Full PP packages require independent Astra plan and implementation
+reviews; separately bounded noncritical deliveries may use Sol high reviewers.
+Quality, acceptance and required checks take priority over token savings.
+
+Use the [routing guide](phase3/MODEL_ROUTING_GUIDE.md) for task packets, promotion,
+review independence and usage reporting. The first Luna implementation pilot is
+PP1-B after the PP1-A contract is accepted, with no trading activation. This does
+not reorder delivery dependencies or change the bot's trading-decision model.
 
 ## Completion criteria
 

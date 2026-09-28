@@ -11,6 +11,9 @@ Documentation reconciled 2026-09-28 against the September26 audit of runtime
    **Paper**, initially PKO+AAPL with independent strategy and instrument configuration.
 3. [Detailed implementation plan](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md):
    PP0–PP7 dependencies, code boundaries, acceptance, migrations, recovery and soak.
+   Its [model assignments](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#31-model-assignments)
+   and [routing guide](implementation/phase3/MODEL_ROUTING_GUIDE.md) allocate coding,
+   integration and independent review with quality ahead of token savings.
 4. [Strategy/parameter/instrument contract](architecture/STRATEGY_INSTRUMENT_CONFIGURATION.md):
    reusable named strategy instances selected by separately configured instruments.
 5. [Instrument research contract](architecture/INSTRUMENT_RESEARCH_CONTEXT.md):
@@ -146,6 +149,9 @@ and are intentionally unpublished/preserved.
 | [implementation/phase3/GPW_PREFLIGHT_DOCKER_REPORT.md](implementation/phase3/GPW_PREFLIGHT_DOCKER_REPORT.md) | Historical scoped plan/report; current queue supersedes ordering |
 | [implementation/phase3/INSTRUMENT_SESSION_READINESS_PLAN.md](implementation/phase3/INSTRUMENT_SESSION_READINESS_PLAN.md) | Historical scoped plan/report; current queue supersedes ordering |
 | [implementation/phase3/INSTRUMENT_SESSION_READINESS_REPORT.md](implementation/phase3/INSTRUMENT_SESSION_READINESS_REPORT.md) | Historical scoped plan/report; current queue supersedes ordering |
+| [implementation/phase3/MODEL_ROUTING_GUIDE.md](implementation/phase3/MODEL_ROUTING_GUIDE.md) | Current coding-agent routing, review and escalation policy |
+| [implementation/phase3/MODEL_ROUTING_PLAN.md](implementation/phase3/MODEL_ROUTING_PLAN.md) | Bounded documentation/instruction change plan |
+| [implementation/phase3/MODEL_ROUTING_REPORT.md](implementation/phase3/MODEL_ROUTING_REPORT.md) | Model-routing change review and validation evidence |
 | [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | Planned PP0–PP7 implementation; not shipped |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md) | Current documentation change plan/report |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md) | Current documentation change plan/report |

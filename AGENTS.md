@@ -294,6 +294,66 @@ unchanged runtime suites just for prose. Commit/push and verify CI normally.
 Read-only operational diagnostics and applying existing runbook settings during
 an authorized deployment do not require a new code implementation plan.
 
+## Model selection and task delegation
+
+Code quality, working mechanisms and safety invariants take priority over token
+savings. Delegate bounded implementation as well as mechanical work. Use the
+[routing guide](docs/implementation/phase3/MODEL_ROUTING_GUIDE.md) and the
+[PP task matrix](docs/implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#31-model-assignments)
+to select the smallest adequate model for each task, not one model for an entire
+delivery phase. These are coding-agent settings, not the trading bot's AI settings.
+
+| Work | Default model | Reasoning |
+| --- | --- | --- |
+| Specified checks, reviewed commit/push, exact-commit CI monitoring | `gpt-5.6-luna` | `low` |
+| Bounded code, pure data mapping/validation, read-only UI, associated tests under an accepted contract | `gpt-6-luna` | `medium` |
+| Coordinated noncritical integration, known-contract service wiring and ordinary debugging | `gpt-6-sol` | `medium` |
+| Architecture, safety/security semantics, critical integration/debugging | `gpt-6-astra` | `high` |
+| Independent noncritical plan or implementation review | `gpt-6-sol` | `high` |
+| Independent critical or mixed-package plan/hostile implementation review | `gpt-6-astra` | `high` |
+
+Critical work includes auth/secret boundaries, entry and close risk, broker writes,
+unknown outcomes, reconciliation/ownership, concurrent reservations, identity and
+canonical hashes, safety-counter/state migrations, and research eligibility/AI
+decision binding. A short diff in these areas is still critical. Luna may implement
+pure helpers only after Astra establishes their semantics and test obligations;
+Luna does not select defaults or relax a rejection to make a test pass.
+
+Before delegation, the lead supplies a bounded task packet: accepted plan/contract,
+exact model/effort, permitted file scope and actions, dependencies, failure
+invariants, acceptance/check commands, stop conditions and expected evidence.
+Use minimal sufficient context rather than full chat history. A worker must read
+AGENTS.md and relevant contracts/source; context savings never justify guessing.
+Assign disjoint files to concurrent writers and integrate shared contracts first.
+Batch coherent small edits when agent startup/review would cost more than the work.
+Do not delegate solely to create an agent while the lead idles.
+
+Escalate immediately if assumptions, critical semantics, cross-service contracts or
+scope change. After one failed targeted repair attempt for the same noncritical
+problem, return evidence to the lead: Luna -> Sol; persistent or critical problems
+-> Astra. Do not use escalation as permission for broader edits, broker retries,
+extra provider calls, test weakening or changes to acceptance criteria.
+
+Independent plan and implementation reviewers must be different agents; neither
+reviews its own authored work. The final reviewer must not have implemented the
+change. A single review may cover a coherent package at its highest required tier;
+do not spawn redundant reviewers for each helper. Critical packages always receive
+Astra review, even when Luna authored part of them. Required tests/build/backtests,
+Docker checks and exact-commit CI from Development Workflow remain unchanged.
+
+Mechanical workers report commands, exit codes, failures, commit SHA and CI
+URL/conclusion. They do not diagnose by changing source, broaden staging, force-push
+or retry broker actions. Implementation workers return changed files, acceptance
+evidence and unresolved risks; only the lead approves a reviewed publication scope.
+
+Record requested and actual model/effort, repair/escalation count, review findings,
+elapsed time and available token usage in the package report. Judge efficiency per
+accepted result including reviews/rework; unavailable token data is "unavailable",
+not zero. No savings percentage or model quality guarantee is assumed. If a model
+is unavailable, disclose it and use an available equal-or-stronger route or the
+capable lead, retaining review independence. Never silently downgrade critical work
+or invent an "Astra Light" model ID. See the guide for the bounded pilot and fallback.
+
 ## Operational authorization and capability
 
 - Carry forward explicit owner authorization within its scope. Read-only checks

@@ -4,6 +4,7 @@ Date: 2026-09-26. Status: **planned delivery specification; runtime work not sta
 by the documentation refresh**. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
+Model assignments added 2026-09-28; they do not change the product acceptance gates.
 
 ## 1. Product outcome and boundaries
 
@@ -56,6 +57,69 @@ extensions. Do not unblock them by bypassing a guard or marking them as stocks.
 PP numbers identify new delivery packages, not historical PR numbers or GitHub PRs.
 Work directly on main under the existing repository workflow. ES diagnostics are
 not prerequisites and must remain preserved outside these commits.
+
+### 3.1 Model assignments
+
+The assignments below split implementation within each package. Quality and working
+mechanisms take priority over token use. [Routing guide](MODEL_ROUTING_GUIDE.md)
+defines task packets, eligibility, review independence, escalation and the first
+pilot. These are development-agent settings; the bot's decision model is unchanged.
+
+| Route | Exact model | Reasoning | Role |
+| --- | --- | --- | --- |
+| M | `gpt-5.6-luna` | `low` | Specified checks and reviewed publication/CI |
+| L | `gpt-6-luna` | `medium` | Bounded implementation under accepted semantics |
+| S | `gpt-6-sol` | `medium` | Noncritical integration and ordinary debugging |
+| A | `gpt-6-astra` | `high` | Critical design, implementation and integration |
+| RS | `gpt-6-sol` | `high` | Independent noncritical review |
+| RA | `gpt-6-astra` | `high` | Independent critical/mixed review |
+
+The review column is a minimum for an independently delivered task. One RA review
+of the integrated PP package covers its L/S/A tasks together; do not add redundant
+reviews for each helper. All complete PP packages include critical work, so their
+bounded plans and final integrated changes require RA, with different agents for
+plan and implementation review. Neither reviewer may author the change it accepts.
+RS is allowed for a separately bounded noncritical delivery with accepted contracts.
+
+| Task / coverage in the package below | Implement | Review | Prerequisite or boundary |
+| --- | --- | --- | --- |
+| PP0-A: route/threat inventory; loopback exposure; operator auth, CSRF/origin, proxy trust/secrets; security acceptance and rollback | A | RA | Owns steps 1–2 and security semantics of 3–4; never delegate credential or permission decisions as UI work |
+| PP0-B: UI action/response rendering, old-route UI removal and component tests (step 3) | L | RS | PP0-A defines authenticated endpoint/response; backend forwarding and auth enforcement stay A |
+| PP0-C: dependency update and compatibility integration (step 4), Docker build fixes | S | RA | A assesses exposure and approves target/compatibility boundary; changed auth/network semantics return to A |
+| PP1-A: configuration contract/defaults/units, references, capabilities, broker identity/session/grid, canonical hashes/drift admission, migration and rollback (steps 1–5 semantics) | A | RA | Shared authority and fail-closed behavior agreed before helpers; no code-generation shortcut decides semantics |
+| PP1-B: pure schema/parser implementation, error diagnostics and fixture tests (steps 1/5 details) | L | RS | PP1-A accepted field/range/reference/rejection contract; excludes hashes, migration, broker calls and activation; first pilot |
+| PP1-C: startup loader consumers, read-only mount plumbing and readiness projection (steps 2/5 wiring) | S | RA | PP1-A/B artifacts exist; enforcement of drift/unknown versions stays A; A integrates rollout and existing-position compatibility |
+| PP2-A: existing momentum parameter schema/factory, defaults fixtures and pure parameter tests (step 1) | L | RS | A-approved parameter units/ranges/defaults and isolation interface; no strategy formula/threshold redesign |
+| PP2-B: binding isolation, selection/conflicts, cooldown/revision fences, durable identity and proposal migration (steps 2–5) | A | RA | PP1 identity contract; owns race/exception/restart tests and preserving old-position exit policy |
+| PP2-C: attribution read models, simulator construction/parity harness and service wiring (steps 1/5 integration) | S | RA | PP2-A/B interfaces fixed; simulator behavior/risk or hashing changes return to A; relevant backtests required |
+| PP3-A: generic contract/venue/currency risk, window/attempt reservation, budget migration, dispatch and close evidence, bounded policy transition (steps 1–5) | A | RA | PP1/PP2; owns accounting/day/DST/races, invariants and all broker-facing integration |
+| PP3-B: generic round-trip report formatting and fixture presentation (step 3 details) | L | RS | PP3-A defines completion/evidence contract; formatter cannot declare flat/completed, consume/reset budget or clear holds |
+| PP4-A: issuer/listing/time/period/unit contract; provider coverage selection; required research policy; snapshot/decision binding; lease/deadline/retry/cost semantics; ETF rejection (steps 1–6) | A | RA | PP1 identity plus PP2/PP3 integration before entries; paid diagnostics require separately scoped authorization |
+| PP4-B: provider response parsers/normalizers, news/report mapping and fixtures (steps 1/3 details) | L | RS | Verified A-selected source contract, collision/time/unit rules and fixtures; no invented facts or eligibility decisions |
+| PP4-C: fetch/cache scheduler, storage/audit wiring, prompt assembly and source display (steps 3–5 integration) | S | RA | A defines immutable hashes, schema migration, coverage/claim rules and untrusted-text boundary; changes to them return to A |
+| PP5-A: durable lifecycle observer, pause/close permissions, session exit deadline, protective cancellation/reprotection, unknown holds and recovery (steps 1–5) | A | RA | PP3; includes lifecycle race/crash tests, state migration, shutdown and critical-alert trigger semantics |
+| PP5-B: alert transport/delivery ledger/dedup wiring and observability (step 5 integration) | S | RA | PP5-A defines fault IDs, persistence/ack contract and unattended gate; stubs only; critical suppression or retry semantics remain A |
+| PP6-A: operator read-only panels, filters, source links and state rendering tests | L | RS | Accepted PP0–PP5 read contracts; display unavailable/unknown faithfully; no calculation of safety state or authorization |
+| PP6-B: read API aggregation, authenticated control UI wiring, metrics and reporting | S | RA | Existing A-reviewed controls and contracts; no new write route, P&L/currency rule or resume/close authorization semantics |
+| PP6-C: control permissions, deployment/retention/backup/restore contract, recovery drill and operational fallback | A | RA | PP0–PP5; owns restored-state/broker mismatch gates, secrets/account privacy and rollback compatibility |
+| PP7-A: prepare manifest; judge Gates A–D; authorized supervised entry/exit, soak and restart coordination; incident decisions | A | RA | PP0–PP6 complete plus explicit Paper/provider authorization; model routing is not operational permission |
+| PP7-B: execute specified read-only evidence queries, collect/format session observations and CI/check results | M | A judges evidence | PP7-A supplies exact commands and scope; no broker writes, paid calls, repairs, activation or automatic go/no-go |
+| PP7-C: isolated failure/restart harness integration and evidence summaries (Gate D) | S | RA | A specifies failures and invariant assertions; new broker/race/recovery semantics stay A; disposable state/stub adapters |
+
+Every row includes implementation of its relevant positive/negative tests and
+documentation; critical acceptance tests are designed and reviewed by A/RA, not
+merely generated from the code under test. Package acceptance, migration and
+rollback obligations below remain binding even if not repeated in a row. The
+package's A task owns unresolved requirements and critical integration; a task
+discovered later is classified before delegation, never implicitly assigned to L.
+
+For all packages, M runs the exact checks specified by the lead, commits only the
+reviewed scope, pushes and monitors exact-commit CI. The lead owns diagnosis and
+acceptance. M may transcribe evidence into the report; A verifies critical claims.
+Follow section 12 and AGENTS.md in full. A failed targeted repair promotes L -> S
+and persistent/critical work -> A under the guide; promotion never weakens a gate.
+Each package report records actual model/effort, acceptance, repair/review effort
+and usage when available. Do not promise savings before the PP1-B pilot is measured.
 
 ## 4. PP0 — Operational security and usable controls
 
