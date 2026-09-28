@@ -30,7 +30,7 @@ for (const present of [false, true]) test(`retained WSE close resolver handles $
   const close: SignalTicket = { instrumentId: original.instrumentId, conid: String(original.conId), instrument: original.brokerSymbol,
     positionEffect: "CLOSE_OR_REDUCE", side: "SELL", quantity: 1, entry: 100, orderType: "LMT", reason: "fixture", confidence: 1, riskCheckStatus: "PASS", timestamp: new Date().toISOString() };
   const prepared = await client.prepareBrokerOrderPlan(close, "PAPER", "DAY", { proposedOrderId: 42, clientOrderId: "fixture-close" });
-  await client.dispatchPreparedClose(prepared, client.getConnectionGeneration());
+  await client.dispatchPreparedClose(prepared, client.getConnectionGeneration(), Date.now() + 10000);
   assert.equal(entryChecks, 0); assert.ok(managementReads > 0); assert.equal(metadataReads, 1); assert.equal(ib.writes.length, 1);
   const oldManagementReads = managementReads;
   const entry = { ...close, side: "BUY" as const, positionEffect: "OPEN_OR_ADD" as const, stop: 99, takeProfit: 102 };

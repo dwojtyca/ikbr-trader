@@ -1,3 +1,4 @@
+import { parsePaperRunPolicy } from "./paper-run-policy.js";
 import { loadServiceTradingConfiguration } from "./trading-configuration-bootstrap.js";
 import { parseAaplWindow } from "./aapl-window.js";
 import { parseExternalOrders } from "./reconciliation/external-orders.js";
@@ -365,11 +366,14 @@ export function buildExecutionConfig(
   rawEnv: NodeJS.ProcessEnv | Record<string, unknown>,
 ) {
   const env = schema.parse(rawEnv);
+  const paperRunPolicy = rawEnv.PAPER_RUN_POLICY_JSON === undefined || rawEnv.PAPER_RUN_POLICY_JSON === ""
+    ? undefined : parsePaperRunPolicy(rawEnv, loadServiceTradingConfiguration(rawEnv).loaded);
   const gpwWindow = parseGpwWindow(rawEnv);
   const aaplWindow = parseAaplWindow(rawEnv);
   if (aaplWindow && env.IBKR_ENVIRONMENT !== "paper") throw new Error("AAPL window requires paper environment");
   if (gpwWindow && env.IBKR_ENVIRONMENT !== "paper") throw new Error("GPW window requires paper environment");
   return {
+    paperRunPolicy,
     gpwWindow,
     aaplWindow,
     ...env,

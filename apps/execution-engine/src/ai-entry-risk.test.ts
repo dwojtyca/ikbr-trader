@@ -1,3 +1,5 @@
+import { stockMetadataFixture } from './stock-market-test-fixture.js';
+import { paperAccountDate, paperAccountDayStart } from './paper-daily-loss.js';
 import { wseMetadataFixture } from "./wse-market-rules.fixture.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -11,7 +13,7 @@ function fixture() {
   const bound: BoundInstrument = {
     instrumentId: "test", conId: 123, brokerSymbol: "TEST", currency: "USD",
     broker: "ibkr", localSymbol: "TEST", tradingClass: "TEST", exchange: "SMART", minTick: 0.01,
-    instrument: { id: "test", displayName: "Synthetic test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART",
+    instrument: { id: "test", displayName: "Synthetic test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART", primaryExchange: "NASDAQ", conId: 123, localSymbol: "TEST", tradingClass: "TEST",
       session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" }, metadata: { tags: [] }, assetClass: "stock", currency: "USD", trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },
       risk: { maxLeverage: 1, allowOvernight: false, quantityUnit: "shares", maxQuantity: 1, maxSpread: 1, maxSlippage: 1 },
       executionPolicy: { timeframe: "1m", defaultOrderType: "LMT", timeInForce: "DAY", outsideRth: false, transmit: true, priceTickSize: 0.01, priceRoundingMode: "nearest", strategyId: "test_strategy", expectedDirection: "LONG", quantityUnit: "shares",
@@ -53,7 +55,13 @@ test("attributed risk requires the server's current configuration and trusted tr
   assert.deepEqual(assessAiEntryRisk({ ...input, watchlist }), { ok: false, reason: "risk_strategy_configuration_mismatch" });
   assert.deepEqual(assessAiEntryRisk({ ...input, watchlist, effectiveConfigHash: "c".repeat(64) }),
     { ok: false, reason: "risk_strategy_configuration_mismatch" });
-  const valid = assessAiEntryRisk({ ...input, watchlist, effectiveConfigHash: hash });
+  input.snapshot.riskEvidence!.connectionGeneration = 1;
+  input.snapshot.riskEvidence!.cashByCurrency = { USD: 1000 };
+  const generic = { stockMetadata: stockMetadataFixture(input.bound, input.accountId, nowMs),
+    dailyLossEvidence: { accountId: input.accountId, sessionId: input.sessionId, connectionGeneration: 1, positionGeneration: 1, reconciliationRunId: 1,
+      accountDate: paperAccountDate(nowMs), periodStart: new Date(paperAccountDayStart(nowMs)).toISOString(), coveredThrough: stamp(-100), capturedAt: stamp(), debits: { USD: 0, PLN: 0 }, fingerprint: "e".repeat(64) },
+    limits: { ...input.limits, quoteCurrency: { currency: "USD" as const, maxNotional: 500, maxStopRisk: 5, feeReserve: 5, maxDailyLoss: 10 } } };
+  const valid = assessAiEntryRisk({ ...input, ...generic, watchlist, effectiveConfigHash: hash });
   assert.equal(valid.ok, true);
   if (valid.ok) assert.equal(valid.evidence.strategyEffectiveConfigHash, hash);
   const stale = { ...watchlist, watchlist: [{ ...watchlist.watchlist[0], marketState: { ...watchlist.watchlist[0].marketState, ts: stamp(-60001) } }] };
@@ -128,7 +136,7 @@ test("risk rejects untrusted malformed HTTP values without throwing", () => {
 function plnFixture() {
   const f = fixture();
   f.bound = { ...f.bound, currency: "PLN", exchange: "WSE", instrument: {
-    ...f.bound.instrument, currency: "PLN", exchange: "WSE",
+    ...f.bound.instrument, currency: "PLN", exchange: "WSE", primaryExchange: "WSE",
     session: { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" },
   } };
   f.snapshot.riskEvidence!.exchangeRatesToBase = { USD: 1, PLN: .25 };
@@ -169,9 +177,9 @@ test("WSE entry still counts unrelated SMR in broker account-wide exposure", () 
 
 type PlnFixture = ReturnType<typeof plnFixture>;
 const plnCases: Array<[string, (f: PlnFixture) => void, string]> = [
-  ["foreign venue", f => { f.bound = { ...f.bound, exchange: "SMART" }; }, "risk_unsupported_shape"],
-  ["wrong registry currency", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, currency: "USD" } }; }, "risk_unsupported_shape"],
-  ["wrong registry venue", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, exchange: "SMART" } }; }, "risk_unsupported_shape"],
+  ["foreign venue", f => { f.bound = { ...f.bound, exchange: "SMART" }; }, "risk_unsupported_capability"],
+  ["wrong registry currency", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, currency: "USD" } }; }, "risk_unsupported_capability"],
+  ["wrong registry venue", f => { f.bound = { ...f.bound, instrument: { ...f.bound.instrument, exchange: "SMART" } }; }, "risk_unsupported_capability"],
   ["missing rates", f => { delete f.snapshot.riskEvidence!.exchangeRatesToBase; }, "risk_pln_fx_missing_or_invalid"],
   ["missing USD parity", f => { delete f.snapshot.riskEvidence!.exchangeRatesToBase!.USD; }, "risk_pln_fx_missing_or_invalid"],
   ["non USD base", f => { f.snapshot.riskEvidence!.configuredBaseCurrency = "PLN"; }, "risk_account_incomplete"],
@@ -243,8 +251,8 @@ for (const failure of ["missing", "stale", "foreign", "closed", "off-band"]) tes
 
 function aaplFixture() {
   const f = fixture();
-  f.bound = { ...f.bound, instrumentId: 'aapl_nasdaq', conId: 265598, brokerSymbol: 'AAPL', localSymbol: 'AAPL',
-    instrument: { ...f.bound.instrument, id: 'aapl_nasdaq', brokerSymbol: 'AAPL' } };
+  f.bound = { ...f.bound, instrumentId: 'aapl_nasdaq', conId: 265598, brokerSymbol: 'AAPL', localSymbol: 'AAPL', tradingClass: 'NMS',
+    instrument: { ...f.bound.instrument, id: 'aapl_nasdaq', brokerSymbol: 'AAPL', conId: 265598, localSymbol: 'AAPL', tradingClass: 'NMS' } };
   Object.assign(f.order, { instrumentId: 'aapl_nasdaq', conid: '265598', instrument: 'AAPL' });
   f.snapshot.riskEvidence!.cashByCurrency = { USD: 105 };
   Object.assign(f.watchlist.watchlist[0], { instrumentId: 'aapl_nasdaq', conid: '265598' });

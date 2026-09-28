@@ -431,3 +431,4 @@ export type * from "./trading-configuration/types.js";
 export { MOMENTUM_CONFIGURATION_DEFAULTS_V1 } from "./trading-configuration/defaults.js";
 export { parseTradingConfiguration } from "./trading-configuration/parser.js";
 export * from "./strategy-attribution.js";
+export * from './stock-execution.js';

@@ -1,5 +1,3 @@
-import { isAaplIdentity } from "../aapl-window.js";
-import { isPkoIdentity } from "../gpw-window.js";
 import { isWseBound } from "../wse-market-rules.js";
 /**
  * PR15 r7 §1 — production submission application service.
@@ -260,16 +258,9 @@ export function buildSubmissionApplicationService(
       const session = await deps.repo.checkSessionEntry(order);
       if (!session.ok) return { kind: "risk_rejected", reason: session.reason };
       let windowDeadlineMs: number | undefined = session.endsAtMs;
-      if (isPkoIdentity(order)) {
-        const window = await deps.repo.checkGpwEntry(order, accountId, true);
-        if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-        windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
-      }
-      if (isAaplIdentity(order)) {
-        const window = await deps.repo.checkAaplEntry(order, accountId, true);
-        if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-        windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
-      }
+      const window = await deps.repo.checkPaperEntry(order, accountId, true);
+      if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
+      windowDeadlineMs = Math.min(windowDeadlineMs, window.endsAtMs);
       const denied = await configurationFailure();
       if (denied) return denied;
       const result = await deps.dispatcher.dispatch({
@@ -480,14 +471,8 @@ export function buildSubmissionApplicationService(
       }
       aiRiskEvidence = assessed.evidence;
     }
-    if (isPkoIdentity(validatedOrder)) {
-      const window = await deps.repo.checkGpwEntry(validatedOrder, accountId);
-      if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-    }
-    if (isAaplIdentity(validatedOrder)) {
-      const window = await deps.repo.checkAaplEntry(validatedOrder, accountId);
-      if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
-    }
+    const window = await deps.repo.checkPaperEntry(validatedOrder, accountId);
+    if (!window.ok) return { kind: "risk_rejected", reason: window.reason };
     const session = await deps.repo.checkSessionEntry(validatedOrder);
     if (!session.ok) return { kind: "risk_rejected", reason: session.reason };
     const deniedBeforePrepare = await configurationFailure();

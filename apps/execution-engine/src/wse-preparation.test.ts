@@ -21,10 +21,10 @@ async function setup(t: TestContext, close = false, pko = false) {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-24T10:00:00Z") });
   const bound = fixture().context.bound!;
   Object.assign(bound, { currency: "PLN", exchange: "WSE", minTick: .0001 });
-  Object.assign(bound.instrument, { currency: "PLN", exchange: "WSE" });
+  Object.assign(bound.instrument, { currency: "PLN", exchange: "WSE", primaryExchange: undefined, session: { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } });
   if (pko) {
     Object.assign(bound,{instrumentId:"pko_wse",brokerSymbol:"PKO",conId:35146360,localSymbol:"PKO",tradingClass:"PKO"});
-    Object.assign(bound.instrument,{id:"pko_wse",brokerSymbol:"PKO",conId:35146360,localSymbol:"PKO"});
+    Object.assign(bound.instrument,{id:"pko_wse",brokerSymbol:"PKO",conId:35146360,localSymbol:"PKO",tradingClass:"PKO"});
   }
   const metadata = wseMetadataFixture(bound, "PAPER", Date.now());
   metadata.priceIncrements = [{ lowEdge: 0, increment: .01 }, { lowEdge: 100, increment: .05 }];
@@ -45,7 +45,7 @@ for (const close of [false, true]) test(`strict WSE ${close ? "close" : "bracket
   const f = await setup(t, close), p = await f.prepare();
   assert.deepEqual(p.normalizedTicket, f.ticket);
   assert.equal(f.ib.contractRequests, 0);
-  if (close) await f.client.dispatchPreparedClose(p, f.client.getConnectionGeneration());
+  if (close) await f.client.dispatchPreparedClose(p, f.client.getConnectionGeneration(), Date.now() + 10000);
   else await f.client.dispatchPreparedOrder(p,Date.now()+10000,async send=>{send();});
   assert.deepEqual(f.ib.orders.map(x => x.order.orderType === "STP" ? x.order.auxPrice : x.order.lmtPrice), close ? [100.05] : [100.05, 102.1, 99.99]);
 });
@@ -108,5 +108,5 @@ test("PKO valid entry deadline allows bracket",async t=>{
 
 test("PKO lifecycle close remains possible without an entry window",async t=>{
  const f=await setup(t,true,true),p=await f.prepare();
- await f.client.dispatchPreparedClose(p,f.client.getConnectionGeneration());assert.equal(f.ib.orders.length,1);
+ await f.client.dispatchPreparedClose(p,f.client.getConnectionGeneration(), Date.now() + 10000);assert.equal(f.ib.orders.length,1);
 });

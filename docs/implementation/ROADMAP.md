@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-09-28 (PP2 published; exact-source-commit CI verified).
+Updated: 2026-09-28 (PP3 source implemented; final delivery gates pending).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -39,7 +39,9 @@ CI passed; evidence is in the
 assignment-only evaluation, stable safety state and immutable attribution; see the
 [PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md) for accepted review, required local
 checks, publication and successful exact-source-commit CI.
-PP3–PP7 remain **planned**.
+PP3 implements generic stock execution, immutable attempts and lifecycle evidence;
+see the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md) for current validation and
+publication gates. PP4–PP7 remain **planned**.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
@@ -49,7 +51,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP0 | Secure operator/API surface; dependency remediation and accurate UI entry point | Current baseline |
 | PP1 | Delivered: versioned configuration, validation, rollout identity and monitoring; checks/review/CI passed | Current baseline; PP0 before operational use |
 | PP2 | Delivered: parameterized factories, assignment-only runtime and durable instance attribution; checks/review/CI passed | PP1 |
-| PP3 | Generic bounded stock Paper execution/windows/budgets/round-trip evidence for PKO+AAPL | PP1, PP2 |
+| PP3 | Implemented, final delivery gates pending: generic stock capability/windows/budgets/audit for PKO, AAPL and configured fixtures | PP1, PP2 |
 | PP4 | Cached instrument research and source-bound AI evidence for both initial issuers | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Automated protection/exit observation, recovery and entry-pause semantics | PP3 |
 | PP6 | Operator readiness/decision/lifecycle view, alerts, deployment and recovery runbooks | PP0–PP5 |
@@ -123,4 +125,4 @@ support is a separately bounded extension using the same contracts.
 historical evidence. The current owner direction supersedes their next-step order.
 [Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
 records the original delivery-direction reconciliation. PP0/PP1 implementation
-evidence is linked above; PP2 implementation evidence is also linked. PP3–PP7 remain planned.
+evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4–PP7 remain planned.

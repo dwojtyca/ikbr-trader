@@ -16,7 +16,7 @@ test("production consumer loads generic bundle regardless of runtime flags", () 
   assert.equal(result.authority.getBoundInstrument("xyz_nyse")?.brokerSymbol, "QZXP");
   assert.equal(result.authority.getBoundInstrument("aapl_smart")?.instrument.primaryExchange, "NASDAQ");
   for (const instrument of result.registry.listAll()) {
-    assert.equal(instrument.trading.executionEnabled, false);
+    assert.equal(instrument.trading.executionEnabled, parsed.ok && parsed.configuration.instruments.find(row => row.id === instrument.id)!.entryEnabled);
     assert.equal(instrument.trading.signalGenerationEnabled, false);
     assert.equal(instrument.trading.aiAnalysisEnabled, false);
   }

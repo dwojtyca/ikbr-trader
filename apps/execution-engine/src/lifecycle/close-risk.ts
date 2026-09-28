@@ -1,5 +1,5 @@
 import { isWseBound, validateWseOrder } from "../wse-market-rules.js";
-import type { SignalTicket, BoundInstrument } from "@ikbr/shared";
+import { getSupportedStockCapability, isSupportedLegacyStockManagementBound, validateStockOrder, type SignalTicket, type BoundInstrument } from "@ikbr/shared";
 import type { CloseContext, ClosePrepared, CloseRisk } from "./close-types.js";
 import type { PreparedBrokerOrder } from "../tws-execution-client.js";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
@@ -13,10 +13,9 @@ const nonnegative = (value: unknown): value is number => typeof value === "numbe
 export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | null, context: CloseContext, watchlist: unknown, wseMetadata?: unknown): CloseRisk {
   const fail = (reason: string): CloseRisk => ({ ok: false, reasons: [reason], evidence: null, expiresAt: "" });
   const policy = bound?.instrument.executionPolicy;
+  const capability = bound ? getSupportedStockCapability(bound) : null;
   if (!bound || !policy || !bound.instrument.trading.executionEnabled || bound.instrument.assetClass !== "stock" ||
-    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
-      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
-        bound.exchange === "WSE" && bound.instrument.exchange === "WSE")) || order.instrumentId !== bound.instrumentId ||
+    !(capability || isSupportedLegacyStockManagementBound(bound)) || order.instrumentId !== bound.instrumentId ||
     order.conid !== String(bound.conId) || order.instrument !== bound.brokerSymbol)
     return fail("close_risk_binding_mismatch");
   if (order.side !== "SELL" || order.positionEffect !== "CLOSE_OR_REDUCE" || order.quantity !== 1 || order.orderType !== "LMT" ||
@@ -28,7 +27,7 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
     !positive(policy.maxQuantity) || policy.maxQuantity < 1 || !positive(bound.instrument.risk.maxQuantity) || bound.instrument.risk.maxQuantity < 1)
     return fail("close_risk_policy_mismatch");
   const tick = policy.priceTickSize;
-  if (!isWseBound(bound) && (!positive(tick) || !positive(bound.minTick) || Math.abs(tick - bound.minTick) > 1e-10 ||
+  if (!capability && !isWseBound(bound) && (!positive(tick) || !positive(bound.minTick) || Math.abs(tick - bound.minTick) > 1e-10 ||
     Math.abs(order.entry / tick - Math.round(order.entry / tick)) > 1e-7)) return fail("close_risk_tick_invalid");
   if (!context.accountId || !context.sessionId || !Number.isFinite(context.nowMs)) return fail("close_risk_context_invalid");
   const body = record(watchlist);
@@ -50,12 +49,15 @@ export function assessCloseRisk(order: SignalTicket, bound: BoundInstrument | nu
   if (!nonnegative(bound.instrument.risk.maxSpread) || !nonnegative(bound.instrument.risk.maxSlippage) ||
     ask - bid > bound.instrument.risk.maxSpread || Math.abs(order.entry - bid) > bound.instrument.risk.maxSlippage)
     return fail("close_risk_spread_or_slippage");
-  const wse = isWseBound(bound) ? validateWseOrder(wseMetadata, bound, context.accountId, order, context.nowMs) : undefined;
+  const stock = capability ? validateStockOrder(wseMetadata, bound, context.accountId, order, context.nowMs) : undefined;
+  if (stock && !stock.ok) return fail(stock.reason);
+  const wse = !capability && isWseBound(bound) ? validateWseOrder(wseMetadata, bound, context.accountId, order, context.nowMs) : undefined;
   if (wse && !wse.ok) return fail(wse.reason);
   const expiresAt = new Date(Math.min(Math.min(bidTime, askTime) + 10_000,
-    wse?.ok ? wse.expiresAtMs : Infinity)).toISOString();
+    wse?.ok ? wse.expiresAtMs : Infinity, stock?.ok ? stock.expiresAtMs : Infinity)).toISOString();
   return { ok: true, reasons: [], expiresAt, evidence: { accountId: context.accountId, sessionId: context.sessionId,
     ...(wse?.ok ? { wseMetadata: wse.metadata } : {}),
+    ...(stock?.ok ? { stockMetadata: stock.metadata } : {}),
     clientId: context.clientId, generation: context.generation, instrumentId: bound.instrumentId, conid: order.conid,
     orderHash: computeClientOrderHash(order), quoteCurrency: bound.currency, bid, ask, bidObservedAt: quote.bidObservedAt, askObservedAt: quote.askObservedAt,
     assessedAt: new Date(context.nowMs).toISOString(), expiresAt } };
@@ -66,12 +68,11 @@ export function validatePreparedClose(prepared: PreparedBrokerOrder, order: Sign
   if (computeClientOrderHash(prepared.normalizedTicket) !== computeClientOrderHash(order) ||
     prepared.normalizedTicket.instrumentId !== order.instrumentId) return "close_prepared_ticket_changed";
   if (!bound.instrument.trading.executionEnabled || bound.instrument.assetClass !== "stock" ||
-    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
-      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
-        bound.exchange === "WSE" && bound.instrument.exchange === "WSE"))) return "close_prepared_binding_unsupported";
+    !(getSupportedStockCapability(bound) || isSupportedLegacyStockManagementBound(bound))) return "close_prepared_binding_unsupported";
   const contract = prepared.contract;
   if (contract.conId !== bound.conId || contract.symbol !== bound.brokerSymbol || contract.secType !== "STK" ||
-    contract.currency !== bound.currency || contract.exchange !== bound.exchange) return "close_prepared_contract_changed";
+    contract.currency !== bound.currency || contract.exchange !== bound.exchange ||
+    (getSupportedStockCapability(bound) && contract.primaryExch !== bound.instrument.primaryExchange)) return "close_prepared_contract_changed";
   const { plan, legs } = prepared;
   if (legs.length !== 1 || plan.orders.length !== 1 || plan.bracket || (plan.bracketLegs?.length ?? 0) !== 0 ||
     plan.relatedOrderIds.size !== 1 || !plan.relatedOrderIds.has(plan.parentOrderId)) return "close_prepared_extra_orders";

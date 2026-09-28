@@ -1,3 +1,9 @@
+import { isProvenUnfilledPaperEntry } from "./paper-terminal-entry.js";
+import { checkPaperEntryBudget, bindPaperProposal, reservePaperEntryAttempt, readPaperRoundTripWindow } from "./paper-entry-budget.js";
+import type { PaperRunPolicy } from "./paper-run-policy.js";
+import { assertPaperDailyLossUnchanged, assessPaperDailyLoss, type PaperDailyLossContext, type PaperDailyLossEvidence } from "./paper-daily-loss.js";
+import { evaluateRoundTrip } from "./lifecycle/round-trip-evidence.js";
+import type { BoundInstrument } from "@ikbr/shared";
 import { unavailableSessionEntryGuard, type SessionEntryGuard, type SessionEntryOrder } from "./session-entry-guard.js";
 import { CashClassificationConflict, readReconciliationFills, type ReconciliationFill } from "./reconciliation/cash-classification.js";
 import { checkAaplWindow, bindAaplProposal, isAaplIdentity, isExactAaplIdentity, type AaplWindow } from "./aapl-window.js";
@@ -438,12 +444,65 @@ export interface Trade {
 }
 
 export class ExecutionRepository {
-  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined) {}
+  constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined,
+    private readonly paper?: { policy?: PaperRunPolicy; context: () => PaperDailyLossContext | null;
+      resolveManagement: (order: ProposedOrder, db: PoolClient) => Promise<BoundInstrument | undefined> }) {}
 
   assertCurrentStrategyConfiguration(order: SignalTicket): void {
     if (getClientOrderHashVersion(order) === 2 && (!this.strategyConfigurationHash ||
         this.strategyConfigurationHash() !== order.strategyAttribution!.effectiveConfigHash))
       throw new Error("STRATEGY_CURRENT_CONFIGURATION_MISMATCH");
+  }
+
+  async checkPaperEntry(order: ProposedOrder, accountId: string, dispatch = false) {
+    if (this.paper?.policy && !order.strategyAttribution) return { ok: false as const, reason: "paper_attribution_required" };
+    if (order.strategyAttribution || this.paper?.policy)
+      return checkPaperEntryBudget(this.pool, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch }, this.sessionEntryGuard);
+    if (isPkoIdentity(order)) return this.checkGpwEntry(order, accountId, dispatch);
+    if (isAaplIdentity(order)) return this.checkAaplEntry(order, accountId, dispatch);
+    return this.checkSessionEntry(order);
+  }
+
+  async getPaperWindowStatus(accountId: string | null) {
+    const policy = this.paper?.policy;
+    if (!policy || accountId !== policy.accountId) return { configured: Boolean(policy), status: "BLOCKED", reason: "paper_budget_unconfigured_or_account_mismatch" };
+    const windows = await Promise.all(policy.windows.map(async window => ({ instrumentId: window.instrumentId, conId: window.conId,
+      startsAt: window.startsAt, endsAt: window.endsAt,
+      ...(await checkPaperEntryBudget(this.pool, policy, accountId, { instrumentId: window.instrumentId, conid: String(window.conId), instrument: window.instrument }, {}, this.sessionEntryGuard)) })));
+    return { configured: true, readOnly: true, runId: policy.runId, policyKind: policy.kind, manifestHash: policy.manifestHash, effectiveConfigHash: policy.effectiveConfigHash, windows };
+  }
+
+  private async assertPaperRiskUnchanged(client: PoolClient, risk: AiEntryRiskEvidence): Promise<void> {
+    const context = this.paper?.context(), policy = this.paper?.policy;
+    const daily = risk.dailyLossEvidence as PaperDailyLossEvidence | undefined;
+    if (!context || !policy || !daily || context.accountId !== policy.accountId) throw new Error("paper_daily_loss_unavailable");
+    for (const [currency, caps] of Object.entries(policy.currencyCaps)) {
+      const assessment = assessPaperDailyLoss(daily, { ...context, quoteCurrency: currency as "USD" | "PLN", maxDailyLoss: caps.maxDailyLoss });
+      if (!assessment.ok) throw new Error(assessment.reason);
+    }
+    await assertPaperDailyLossUnchanged(client, daily, context);
+    const fresh = this.paper?.context();
+    if (!fresh || fresh.accountId !== context.accountId || fresh.sessionId !== context.sessionId || fresh.connectionGeneration !== context.connectionGeneration ||
+        fresh.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough) || fresh.nowMs >= risk.validUntilMs) throw new Error("paper_daily_loss_changed");
+  }
+
+  private async unresolvedPaperOwnership(client: PoolClient, accountId: string, exceptId?: number): Promise<number | undefined> {
+    if (!this.paper?.policy) return undefined;
+    const rows = await client.query(`SELECT p.id FROM proposed_orders p LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
+      WHERE (p.execution_account_id=$1 OR r.account_id=$1 OR (p.execution_account_id IS NULL AND r.account_id IS NULL))
+      AND p.execution_attempted_at IS NOT NULL AND COALESCE(p.position_effect,'OPEN_OR_ADD')<>'CLOSE_OR_REDUCE'
+      AND ($2::bigint IS NULL OR p.id<>$2) ORDER BY p.id`, [accountId, exceptId ?? null]);
+    for (const row of rows.rows) {
+      const id = Number(row.id);
+      const evidence = await this.getRoundTripEvidence(id, accountId, client, exceptId);
+      const context = this.paper.context();
+      if (!evidence || !context) return id;
+      const bound = await this.paper.resolveManagement(evidence.lifecycle.order, client);
+      const lifecycleContext = { accountId, sessionId: context.sessionId, nowMs: context.nowMs, bound: bound ?? null };
+      const report = evaluateRoundTrip(evidence, lifecycleContext);
+      if ((report.status !== "COMPLETED" || report.accounting !== "COMPLETE") && !isProvenUnfilledPaperEntry(evidence, lifecycleContext)) return id;
+    }
+    return undefined;
   }
 
   async checkAaplEntry(order: ProposedOrder, accountId: string, dispatch = false) {
@@ -459,17 +518,26 @@ export class ExecutionRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      if (order.strategyAttribution || this.paper?.policy) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill'))");
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`snap:${accountId}`]);
+      }
       const session = await this.sessionEntryGuard(client, order);
       if (!session.ok) throw new Error(session.reason);
       let deadline = session.endsAtMs;
       let strategyRiskDeadline = Infinity;
-      if (isAaplIdentity(order)) {
+      let finalPaperRisk: AiEntryRiskEvidence | undefined;
+      if (order.strategyAttribution || this.paper?.policy) {
+        const permit = await checkPaperEntryBudget(client, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch: true }, this.sessionEntryGuard);
+        if (!permit.ok) throw new Error(permit.reason);
+        deadline = Math.min(deadline, permit.endsAtMs);
+      } else if (isAaplIdentity(order)) {
         if (!isExactAaplIdentity(order)) throw new Error("aapl_window_identity_mismatch");
         const permit = await checkAaplWindow(client, this.aaplWindow, accountId, order.id, true, this.sessionEntryGuard);
         if (!permit.ok) throw new Error(permit.reason);
         deadline = Math.min(deadline, permit.endsAtMs);
       }
-      if (isPkoIdentity(order)) {
+      if (!order.strategyAttribution && !this.paper?.policy && isPkoIdentity(order)) {
         const permit = await checkGpwWindow(client, this.gpwWindow, accountId, order.id, true, this.sessionEntryGuard);
         if (!permit.ok) throw new Error(permit.reason);
         deadline = Math.min(deadline, permit.endsAtMs);
@@ -488,6 +556,8 @@ export class ExecutionRepository {
             canonicalJson(risk.strategyTrigger ?? null) !== canonicalJson(order.strategyTrigger)) throw new Error("STRATEGY_DISPATCH_RISK_CHANGED");
         const approvalFailure = aiApprovalFailure(review, persisted, stored.rows[0].client_order_hash, accountId, risk.sessionId);
         if (approvalFailure) throw new Error(approvalFailure);
+        await this.assertPaperRiskUnchanged(client, risk);
+        finalPaperRisk = risk;
         strategyRiskDeadline = Math.min(risk.validUntilMs, review!.expires_at.getTime());
         await validateStrategyInstanceEntry(client, persisted, persisted.strategy!, stored.rows[0].client_order_id,
           { effectiveConfigHash: risk.strategyEffectiveConfigHash, observedAt: risk.strategyObservedAt });
@@ -495,6 +565,12 @@ export class ExecutionRepository {
       if (order.strategyAttribution) this.assertCurrentStrategyConfiguration(order);
       if (Date.now() >= strategyRiskDeadline) throw new Error("STRATEGY_DISPATCH_RISK_EXPIRED");
       if (Date.now() >= deadline) throw new Error("session_dispatch_expired");
+      if (finalPaperRisk) {
+        const context = this.paper?.context(), daily = finalPaperRisk.dailyLossEvidence;
+        if (!context || !daily || context.accountId !== daily.accountId || context.sessionId !== daily.sessionId ||
+            context.connectionGeneration !== daily.connectionGeneration || context.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough) ||
+            context.nowMs >= finalPaperRisk.validUntilMs) throw new Error("paper_daily_loss_changed");
+      }
       send();
       await client.query("COMMIT");
     } catch (error) {
@@ -888,9 +964,9 @@ export class ExecutionRepository {
       )
       SELECT $1, $2, $3, $4, NOW() FROM fill_lock
       ON CONFLICT (exec_id) DO UPDATE
-      SET commission = COALESCE(EXCLUDED.commission, broker_execution_fills.commission),
-          commission_currency = COALESCE(EXCLUDED.commission_currency, broker_execution_fills.commission_currency),
-          realized_pnl = COALESCE(EXCLUDED.realized_pnl, broker_execution_fills.realized_pnl),
+      SET commission = EXCLUDED.commission,
+          commission_currency = EXCLUDED.commission_currency,
+          realized_pnl = EXCLUDED.realized_pnl,
           updated_at = NOW()
       `,
       [
@@ -1370,6 +1446,7 @@ export class ExecutionRepository {
     if (validationError) {
       return { kind: "invalid_ticket_shape", reason: validationError };
     }
+    if (this.paper?.policy && !ticket.strategyAttribution) return { kind: "invalid_ticket_shape", reason: "paper_attribution_required" };
     if (ticket.instrumentId && ticket.positionEffect === "CLOSE_OR_REDUCE")
       return { kind: "invalid_ticket_shape", reason: "bound_close_requires_lifecycle_flow" };
     if (ticket.riskCheckStatus !== "PASS")
@@ -1467,6 +1544,11 @@ export class ExecutionRepository {
       if (ticket.instrumentId && positionGuard.kind === "available") {
         const same = idempotency ? await client.query("SELECT id FROM proposed_orders WHERE client_order_id=$1", [idempotency.clientOrderId]) : undefined;
         const reservation = await findAccountReservation(client, positionGuard.accountId, same?.rows[0]?.id);
+        const ownedId = await this.unresolvedPaperOwnership(client, positionGuard.accountId, same?.rows[0]?.id);
+        if (ownedId) {
+          await client.query("ROLLBACK");
+          return { kind: "active_intent_exists", existingOrderId: ownedId, existingStatus: "SUBMITTED", existingClientOrderId: null };
+        }
         if (reservation) {
           await client.query("ROLLBACK");
           return { kind: "active_intent_exists", existingOrderId: Number(reservation.id),
@@ -1523,7 +1605,11 @@ export class ExecutionRepository {
         return guarded.outcome;
       }
 
-      if (isPkoIdentity(ticket)) {
+      if (ticket.strategyAttribution || this.paper?.policy) {
+        const window = positionGuard.kind === "available" ? await checkPaperEntryBudget(client, this.paper?.policy, positionGuard.accountId, ticket, {}, this.sessionEntryGuard)
+          : { ok: false as const, reason: "paper_budget_account_unavailable" };
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
+      } else if (isPkoIdentity(ticket)) {
         if (ticket.instrumentId !== "pko_wse" || ticket.conid !== "35146360" || ticket.instrument !== "PKO" || positionGuard.kind !== "available") {
           await client.query("ROLLBACK");
           return { kind: "invalid_ticket_shape", reason: "gpw_window_identity_mismatch" };
@@ -1531,7 +1617,7 @@ export class ExecutionRepository {
         const window = await checkGpwWindow(client, this.gpwWindow, positionGuard.accountId, undefined, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
       }
-      if (isAaplIdentity(ticket)) {
+      if (!ticket.strategyAttribution && !this.paper?.policy && isAaplIdentity(ticket)) {
         if (!isExactAaplIdentity(ticket) || positionGuard.kind !== "available") {
           await client.query("ROLLBACK");
           return { kind: "invalid_ticket_shape", reason: "aapl_window_identity_mismatch" };
@@ -1613,8 +1699,9 @@ export class ExecutionRepository {
         VALUES($1,'ibkr',$2,'LONG','evaluation_bucket','1m',$3,$4,$5,$6::jsonb)`,
         [positionGuard.accountId,ticket.conid,ticket.strategyTrigger!.bucketStartMs,result.rows[0].id,idempotency!.clientOrderHash,JSON.stringify(ticket.strategyTrigger)]);
 
-      if (isPkoIdentity(ticket)) await bindGpwProposal(client, this.gpwWindow!, Number(result.rows[0].id));
-      if (isAaplIdentity(ticket)) await bindAaplProposal(client, this.aaplWindow!, Number(result.rows[0].id));
+      if (ticket.strategyAttribution || this.paper?.policy) await bindPaperProposal(client, this.paper!.policy!, Number(result.rows[0].id), ticket);
+      else if (isPkoIdentity(ticket)) await bindGpwProposal(client, this.gpwWindow!, Number(result.rows[0].id));
+      if (!ticket.strategyAttribution && !this.paper?.policy && isAaplIdentity(ticket)) await bindAaplProposal(client, this.aaplWindow!, Number(result.rows[0].id));
 
       if (ticket.instrumentId) {
         if (positionGuard.kind !== "available" || !idempotency || !ticket.conid)
@@ -1701,22 +1788,23 @@ export class ExecutionRepository {
     return this.mapRow(result.rows[0] as ProposedOrderRow);
   }
 
-  async getRoundTripEvidence(id: number, accountId: string | null): Promise<RoundTripEvidence | null> {
-    const client = await this.pool.connect();
+  async getRoundTripEvidence(id: number, accountId: string | null, transaction?: PoolClient, excludeEntryProposalId?: number): Promise<RoundTripEvidence | null> {
+    const client = transaction ?? await this.pool.connect();
     try {
-      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      if (!transaction) await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const operation = await client.query("SELECT * FROM lifecycle_close_operations WHERE original_proposal_id=$1", [id]);
       const row = operation.rows[0];
       const closeId = row?.close_proposal_id == null ? null : Number(row.close_proposal_id);
-      const lifecycle = await this.getLifecycleEvidence(id, accountId, client, closeId);
-      if (!lifecycle) { await client.query("COMMIT"); return null; }
+      const lifecycle = await this.getLifecycleEvidence(id, accountId, client, closeId, excludeEntryProposalId);
+      if (!lifecycle) { if (!transaction) await client.query("COMMIT"); return null; }
       const closeLinks = closeId === null ? [] : (await client.query<LifecycleLegLink>(
         "SELECT * FROM broker_order_links WHERE proposed_order_id=$1", [closeId])).rows.map(link =>
           ({ ...link, proposed_order_id: Number(link.proposed_order_id) }));
       const snapshot = lifecycle.run?.broker_snapshot as { executions?: Array<{execId?: string; accountId?: string; conId?: string}> } | null;
       const execIds = Array.isArray(snapshot?.executions) ? snapshot.executions.filter(fill =>
         fill.accountId === accountId && fill.conId === lifecycle.order.conid).map(fill => fill.execId).filter(Boolean) : [];
-      const window = isAaplIdentity(lifecycle.order)
+      const paperWindow = lifecycle.order.strategyAttribution ? await readPaperRoundTripWindow(client, id) : null;
+      const window = lifecycle.order.strategyAttribution ? undefined : isAaplIdentity(lifecycle.order)
         ? (isExactAaplIdentity(lifecycle.order) ? (await client.query(`SELECT w.* FROM aapl_proposals p JOIN aapl_windows w ON w.run_id=p.run_id
           WHERE p.proposed_order_id=$1`, [id])).rows[0] : undefined)
         : (await client.query(`SELECT w.* FROM gpw_proposals p JOIN gpw_windows w ON w.run_id=p.run_id
@@ -1727,15 +1815,15 @@ export class ExecutionRepository {
           OR (account_id=$3 AND broker_order_id=ANY($4::text[])) ORDER BY exec_id`,
       [[id, ...(closeId === null ? [] : [closeId])], execIds, accountId,
         [...lifecycle.links, ...closeLinks].map(link => link.broker_order_id).filter(Boolean)]);
-      await client.query("COMMIT");
-      return { lifecycle, window: window ? { runId: window.run_id, accountId: window.account_id,
+      if (!transaction) await client.query("COMMIT");
+      return { lifecycle, window: paperWindow ?? (window ? { source: isAaplIdentity(lifecycle.order) ? "aapl" : "gpw", runId: window.run_id, accountId: window.account_id,
         startsAt: window.starts_at, endsAt: window.ends_at, consumedAt: window.consumed_at,
-        consumedProposalId: window.consumed_proposal_id == null ? null : Number(window.consumed_proposal_id) } : null,
+        consumedProposalId: window.consumed_proposal_id == null ? null : Number(window.consumed_proposal_id) } : null),
         close: row ? { state: row.state, accountId: row.account_id, conid: row.conid,
         originalHash: row.original_hash, closeProposalId: closeId, links: closeLinks } : null,
         fills: fills.rows.map(fill => ({ ...fill, proposed_order_id: fill.proposed_order_id === null ? null : Number(fill.proposed_order_id) })) };
-    } catch (error) { await client.query("ROLLBACK"); throw error; }
-    finally { client.release(); }
+    } catch (error) { if (!transaction) await client.query("ROLLBACK"); throw error; }
+    finally { if (!transaction) client.release(); }
   }
 
   async getLifecycleEvidence(
@@ -1743,6 +1831,7 @@ export class ExecutionRepository {
     accountId: string | null,
     transaction?: PoolClient,
     excludeCloseProposalId?: number | null,
+    excludeEntryProposalId?: number,
   ): Promise<LifecycleEvidence | null> {
     const client = transaction ?? (await this.pool.connect());
     try {
@@ -1776,7 +1865,7 @@ export class ExecutionRepository {
       const competing = await client.query<{ count: string }>(
         `SELECT count(*) FROM proposed_orders p
         LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
-        WHERE p.id<>$1 AND ($5::bigint IS NULL OR p.id<>$5) AND p.status IN ('PROPOSED','SUBMITTED')
+        WHERE p.id<>$1 AND ($5::bigint IS NULL OR p.id<>$5) AND ($6::bigint IS NULL OR p.id<>$6) AND p.status IN ('PROPOSED','SUBMITTED')
           AND (p.conid=$2 OR (p.conid IS NULL AND p.instrument=$3))
           AND (p.execution_account_id=$4 OR r.account_id=$4 OR
             (p.execution_account_id IS NULL AND r.account_id IS NULL))`,
@@ -1786,6 +1875,7 @@ export class ExecutionRepository {
           row.instrument,
           accountId,
           excludeCloseProposalId ?? null,
+          excludeEntryProposalId ?? null,
         ],
       );
       const sync = await client.query(
@@ -2491,6 +2581,7 @@ export class ExecutionRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      if (this.paper?.policy) await client.query("SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill'))");
       if (input.positionGuard.kind === "available") {
         await client.query(
           "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
@@ -2671,21 +2762,29 @@ export class ExecutionRepository {
             return { kind: "submission_identity_mismatch", reason: error instanceof Error ? error.message : "STRATEGY_IDENTITY_INVALID" };
           }
         }
-        if (await findAccountReservation(client, input.accountId, input.id)) {
+        if (await findAccountReservation(client, input.accountId, input.id) || await this.unresolvedPaperOwnership(client, input.accountId, input.id)) {
           await client.query("ROLLBACK");
           return { kind: "submission_identity_mismatch", reason: "account_active_intent_exists" };
+        }
+        if (order.strategyAttribution || this.paper?.policy) {
+          try { await this.assertPaperRiskUnchanged(client, risk); }
+          catch (error) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: error instanceof Error ? error.message : "paper_daily_loss_unavailable" }; }
         }
         await client.query("UPDATE proposal_ai_reviews SET risk_evidence=$2 WHERE proposed_order_id=$1",
           [input.id, JSON.stringify(risk)]);
       }
 
-      if (isPkoIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
+      if (row.strategy_attribution || this.paper?.policy) {
+        if (!this.paper?.policy) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: "paper_budget_unconfigured" }; }
+        const window = await reservePaperEntryAttempt(client, this.paper.policy, input.accountId, this.mapRow(row), this.sessionEntryGuard);
+        if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
+      } else if (isPkoIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
         const window = await checkGpwWindow(client, this.gpwWindow, input.accountId, input.id, false, this.sessionEntryGuard);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
         await client.query(`UPDATE gpw_windows SET consumed_proposal_id=$2,consumed_at=clock_timestamp()
           WHERE run_id=$1 AND consumed_proposal_id IS NULL`, [this.gpwWindow!.runId, input.id]);
       }
-      if (isAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
+      if (!row.strategy_attribution && !this.paper?.policy && isAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
         if (!isExactAaplIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
           await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: "aapl_window_identity_mismatch" };
         }
@@ -2707,7 +2806,7 @@ export class ExecutionRepository {
         UPDATE proposed_orders
         SET processing_owner = $2,
             processing_claimed_at = NOW(),
-            execution_attempted_at = clock_timestamp(),
+            execution_attempted_at = COALESCE((SELECT attempted_at FROM paper_entry_attempts WHERE proposed_order_id=$1),clock_timestamp()),
             execution_account_id = $3,
             decision_source = COALESCE($4, decision_source),
             decision_actor = COALESCE($5, decision_actor),

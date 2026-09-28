@@ -61,3 +61,26 @@ export function buildManagementMonitoringAuthority(current: InstrumentBindingAut
     localSymbol: row.localSymbol, tradingClass: row.tradingClass, exchange: row.exchange, currency: row.currency, minTick: row.minTick }));
   return new InstrumentBindingAuthority(registry, bindings);
 }
+
+export function validateAttributedManagementCompatibility(current: InstrumentBindingAuthority, legacy: InstrumentBindingAuthority | null,
+  attributed: readonly { bound: BoundInstrument }[]): void {
+  const previous: BoundInstrument[] = [];
+  for (const { bound } of attributed) {
+    const one = authorityForBounds([bound]);
+    assertManagementCompatibility(current, one);
+    if (legacy) assertManagementCompatibility(one, legacy);
+    for (const other of previous) assertManagementCompatibility(authorityForBounds([other]), one);
+    previous.push(bound);
+  }
+}
+function authorityForBounds(rows: readonly BoundInstrument[]): InstrumentBindingAuthority {
+  return new InstrumentBindingAuthority(new InstrumentRegistry(rows.map(row => row.instrument)), rows.map(row => ({ instrumentId: row.instrumentId,
+    broker: row.broker, conId: row.conId, localSymbol: row.localSymbol, tradingClass: row.tradingClass, exchange: row.exchange, currency: row.currency, minTick: row.minTick })));
+}
+export function retainAttributedMonitoring(current: InstrumentBindingAuthority, attributed: readonly { bound: BoundInstrument }[]): InstrumentBindingAuthority {
+  validateAttributedManagementCompatibility(current, null, attributed);
+  const rows = new Map(current.listBoundInstruments().map(bound => [bound.instrumentId, bound]));
+  for (const { bound } of attributed) rows.set(bound.instrumentId, { ...bound, instrument: { ...bound.instrument,
+    executionPolicy: undefined, trading: { executionEnabled: false, signalGenerationEnabled: false, aiAnalysisEnabled: false, monitoringEnabled: true } } });
+  return authorityForBounds([...rows.values()]);
+}

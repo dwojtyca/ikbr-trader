@@ -29,6 +29,7 @@ async function harness(scenario: "prepare" | "bundle" | "drift" | "store-failure
     getProposedOrderById: async () => order,
     getIdempotencyRecord: async () => { counts.reads++; await Promise.resolve(); if (scenario === "during-idempotency") latched = true; return null; },
     insertProposedFromTicket: async () => { counts.writes++; throw Error("must-not-insert"); },
+    checkPaperEntry: async () => ({ ok: true, endsAtMs: Date.now() + 30_000 }),
     checkSessionEntry: async () => ({ ok: true, endsAtMs: Date.now() + 30_000 }),
     tryStartSubmissionWithPlan: async () => { counts.claim++; order.executionAttemptedAt = new Date(); if (scenario === "after-claim") latched = true; return { kind: "claimed_with_persisted_plan" }; },
     withEntryDispatchPermit: async (_order: ProposedOrder, _account: string, send: () => void, beforeSend?: () => Promise<void>) => {

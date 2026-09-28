@@ -1,4 +1,3 @@
-import { isWseBound } from "../wse-market-rules.js";
 import type { BoundInstrument, SignalTicket } from "@ikbr/shared";
 import {
   CloseConflict,
@@ -15,7 +14,7 @@ import type {
   CloseTerminalEvidence,
 } from "./close-types.js";
 export interface FullCloseDependencies {
-  context(instrumentId: string): CloseContext | null;
+  context(instrumentId: string, originalProposalId?: number): CloseContext | null | Promise<CloseContext | null>;
   refresh(): Promise<void>;
   evaluate: CloseEvaluator;
   assessRisk(
@@ -57,14 +56,14 @@ export class FullCloseService {
   get(id: number) {
     return this.repo.get(id);
   }
-  private context(instrumentId: string): CloseContext {
-    const c = this.deps.context(instrumentId);
+  private async context(instrumentId: string, originalProposalId?: number): Promise<CloseContext> {
+    const c = await this.deps.context(instrumentId, originalProposalId);
     if (!c?.bound || !c.accountId || !c.sessionId)
       throw new CloseConflict("close_broker_context_unavailable");
     return c;
   }
-  private unchanged(op: CloseOperation): CloseContext {
-    const c = this.context(op.instrumentId);
+  private async unchanged(op: CloseOperation): Promise<CloseContext> {
+    const c = await this.context(op.instrumentId, op.originalProposalId);
     if (
       c.accountId !== op.accountId ||
       c.sessionId !== op.sessionId ||
@@ -81,7 +80,7 @@ export class FullCloseService {
   private async observeAndAlert(op: CloseOperation) {
     const observed = await this.repo.observe(
       op,
-      this.context(op.instrumentId),
+      await this.context(op.instrumentId, op.originalProposalId),
       this.deps.evaluate,
     );
     await this.alertUnresolved(observed);
@@ -129,9 +128,9 @@ export class FullCloseService {
     const original = await this.repo.execution.getLifecycleEvidence(id, null);
     if (!original?.order.instrumentId)
       throw new CloseConflict("original_proposal_missing");
-    const initial = this.context(original.order.instrumentId);
+    const initial = await this.context(original.order.instrumentId, id);
     await this.deps.refresh();
-    const fresh = this.context(original.order.instrumentId);
+    const fresh = await this.context(original.order.instrumentId, id);
     if (
       initial.accountId !== fresh.accountId ||
       initial.sessionId !== fresh.sessionId ||
@@ -165,12 +164,12 @@ export class FullCloseService {
         riskCheckStatus: "PASS",
         timestamp: new Date().toISOString(),
       };
-      if (isWseBound(fresh.bound!)) {
-        const preflight = await this.deps.assessRisk(ticket, fresh.bound!, this.unchanged(op));
+      {
+        const preflight = await this.deps.assessRisk(ticket, fresh.bound!, await this.unchanged(op));
         if (!preflight.ok) throw new CloseConflict(preflight.reasons.join(","));
       }
       for (const role of ["PARENT", "TP", "SL"] as const) {
-        const c = this.unchanged(op);
+        const c = await this.unchanged(op);
         const evidence = await this.repo.evidence(op);
         if (!evidence) throw new CloseConflict("original_missing");
         const report = this.deps.evaluate(
@@ -187,21 +186,21 @@ export class FullCloseService {
         await this.repo.markCancel(
           op,
           leg,
-          this.unchanged(op),
+          await this.unchanged(op),
           this.deps.evaluate,
         );
         cancellationInFlight = true;
-        const terminal = await this.deps.cancel(leg, this.unchanged(op));
-        this.unchanged(op);
+        const terminal = await this.deps.cancel(leg, await this.unchanged(op));
+        await this.unchanged(op);
         await this.repo.recordTerminal(op, terminal);
         cancellationInFlight = false;
         op = (await this.repo.get(id))!;
         await this.deps.refresh();
-        this.unchanged(op);
+        await this.unchanged(op);
       }
       // Even if all original legs were filled, capture starts after the cancellation loop.
       await this.deps.refresh();
-      const c = this.unchanged(op);
+      const c = await this.unchanged(op);
       const evidence = await this.repo.evidence(op);
       if (!evidence) throw new CloseConflict("original_missing");
       const report = this.deps.evaluate(
@@ -222,9 +221,9 @@ export class FullCloseService {
         `close-${op.requestId}`,
         op.originalProposalId,
       );
-      this.deps.validatePrepared(prepared, ticket, this.unchanged(op));
+      this.deps.validatePrepared(prepared, ticket, await this.unchanged(op));
       await this.deps.refresh();
-      const claimContext = this.unchanged(op);
+      const claimContext = await this.unchanged(op);
       const risk = await this.deps.assessRisk(
         ticket,
         claimContext.bound!,
@@ -237,9 +236,12 @@ export class FullCloseService {
         risk,
         claimContext,
         this.deps.evaluate,
-        () => this.deps.validatePrepared(prepared, ticket, this.unchanged(op)),
+        async () => this.deps.validatePrepared(prepared, ticket, await this.unchanged(op)),
       );
-      await this.deps.dispatch(prepared, op, this.unchanged(op));
+      const dispatchContext = await this.unchanged(op);
+      if (!op.riskExpiresAt || !Number.isFinite(Date.parse(op.riskExpiresAt)) || Date.parse(op.riskExpiresAt) <= Date.now())
+        throw new CloseConflict("close_dispatch_risk_expired");
+      await this.deps.dispatch(prepared, op, dispatchContext);
       op = await this.repo.submitted(op);
       await this.deps.refresh();
       return await this.observeAndAlert(op);
@@ -262,7 +264,7 @@ export class FullCloseService {
         await this.deps.refresh();
         op = await this.repo.observe(
           op,
-          this.context(op.instrumentId),
+          await this.context(op.instrumentId, op.originalProposalId),
           this.deps.evaluate,
         );
       } catch {

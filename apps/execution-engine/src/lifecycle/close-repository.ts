@@ -81,6 +81,7 @@ export class CloseRepository {
       closeProposalId: v.close_proposal_id ? Number(v.close_proposal_id) : null,
       closeLink,
       submissionAttemptedAt: iso(v.submission_attempted_at),
+      riskExpiresAt: typeof v.risk_evidence?.expiresAt === "string" ? v.risk_evidence.expiresAt : null,
       observation: v.observation,
       failureReason: v.failure_reason,
     };
@@ -416,7 +417,7 @@ export class CloseRepository {
     risk: CloseRisk,
     context: CloseContext,
     evaluate: CloseEvaluator,
-    validatePrepared: () => void,
+    validatePrepared: () => void | Promise<void>,
   ) {
     return this.transaction(op.accountId, async (db) => {
       const current = await this.owned(db, op);
@@ -454,7 +455,7 @@ export class CloseRepository {
         riskEvidence.expiresAt !== risk.expiresAt
       )
         throw new CloseConflict("close_risk_identity_invalid");
-      validatePrepared();
+      await validatePrepared();
       const hash = computeClientOrderHash(ticket);
       const p = prepared.persistence;
       const leg = p.legs[0];
@@ -549,7 +550,7 @@ export class CloseRepository {
         Date.parse(risk.expiresAt) <= Date.now()
       )
         throw new CloseConflict("close_claim_expired");
-      validatePrepared();
+      await validatePrepared();
       return (await this.read(db, op.originalProposalId))!;
     });
   }

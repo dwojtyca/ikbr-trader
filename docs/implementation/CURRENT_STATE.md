@@ -13,7 +13,10 @@ assignment-only diagnostic/scheduled evaluation, durable attribution and stable
 safety counters; accepted review, required checks and successful exact-source-commit
 CI are recorded in the
 [PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md). These source updates establish
-no operational deployment or broker readiness.
+no operational deployment or broker readiness. PP3 adds common stock capability,
+immutable Paper budgets and generic lifecycle evidence; the
+[PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md) records current final delivery gates.
+PP4 denial and unavailable certified Warsaw-day accounting still prevent entry.
 
 ## Delivery objective
 
@@ -45,8 +48,8 @@ None of these labels implies profitability or permission to activate Live.
 | Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
 | Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applies instance parameters, assignment-only evaluation and isolated state; review/checks/publication/CI passed; see PP2 report |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
-| Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |
-| Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | Current AI-entry account evidence requires USD base currency; wider asset/currency/quantity support not generic |
+| Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | PP3 validates WSE/WSE/PLN or SMART/NASDAQ|NYSE|AMEX/USD; one whole long stock share and LMT bracket; bundle entries denied |
+| Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | USD base account evidence remains required; generic daily loss additionally requires full Warsaw-day broker/fee coverage, unavailable in the current production adapter |
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
 | Exit/ownership | Durable ownership, bracket protection and supported audited full close | No automatic full-close observation worker; no general quantity/partial/replace lifecycle |
 | AI evidence | Persisted technical/order/account context, Marketaux news, AAPL-specific verified identity | Financial statements/earnings/macro are unavailable; PKO symbol-only news excluded; no ETF research pipeline |
@@ -64,7 +67,7 @@ None of these labels implies profitability or permission to activate Live.
   [admission](../../packages/shared/src/trading-configuration/admission.ts),
   [monitoring projection](../../packages/shared/src/trading-configuration/projection.ts)
   and [configuration runbook](../runbooks/TRADING_CONFIGURATION.md).
-  Bundle entry readiness keeps PP3 execution policy and PP4 research unavailable.
+  Bundle entry readiness keeps PP4 research unavailable; PP3 generic policy does not grant activation.
   PP2 applies parameters through fresh configured factories and exposes guarded
   diagnostic evaluation; see the [runtime contract](phase3/PP2_RUNTIME_CONTRACT.md).
 - Registry: [definitions](../../packages/shared/src/instruments/definitions.ts),
@@ -74,8 +77,8 @@ None of these labels implies profitability or permission to activate Live.
   [profiles](../../packages/shared/src/strategy-profiles.ts),
   [portfolio selection](../../apps/signal-engine/src/portfolio/strategy-portfolio-manager.ts),
   [runtime evaluation](../../apps/signal-engine/src/runtime/trading-loop/trading-loop-service.ts).
-  The current runtime evaluates enabled candidates before checking the winning
-  implementation against instrument policy; this is not an instance assignment system.
+  Bundle runtime uses PP2 assignment-only parameterized instances; the legacy
+  runtime retains its older implementation-policy evaluation.
 - Data/session: [context loader](../../apps/signal-engine/src/runtime/strategy/strategy-context-loader.ts),
   [session adapter](../../apps/ingestion/src/session-schedule-adapter.ts),
   [session report](phase3/INSTRUMENT_SESSION_READINESS_REPORT.md).
@@ -88,8 +91,11 @@ None of these labels implies profitability or permission to activate Live.
   [submission service](../../apps/execution-engine/src/reconciliation/submission-service.ts),
   [close risk](../../apps/execution-engine/src/lifecycle/close-risk.ts),
   [round-trip evidence](../../apps/execution-engine/src/lifecycle/round-trip-evidence.ts).
-  The broker adapter still classifies USD/STK as US stock; generic calendar support
-  upstream does not remove downstream venue/tick assumptions.
+  PP3 checks exact stock/route/primary-listing/currency capabilities, fresh metadata
+  and market-rule bands. Its [policy](../../apps/execution-engine/src/paper-run-policy.ts),
+  [budget](../../apps/execution-engine/src/paper-entry-budget.ts) and
+  [daily-loss evidence](../../apps/execution-engine/src/paper-daily-loss.ts) preserve
+  immutable attempts and fail closed on uncertified account-day coverage.
 - Security: [UI proxy](../../apps/ui/vite.config.ts), [Compose](../../docker-compose.yml),
   [signal controls](../../apps/signal-engine/src/index.ts),
   [ingestion controls](../../apps/ingestion/src/index.ts).
@@ -101,8 +107,11 @@ None of these labels implies profitability or permission to activate Live.
    rejects simultaneous execution opt-ins. Seed entries remain disabled without opt-in.
 2. ETFs map to IBKR STK at the binding layer but `assetClass=etf` is rejected by
    production entry/close risk. Futures/index types likewise do not prove tradability.
-3. Current run windows, daily attempt accounting and completion reports use
-   dedicated AAPL/GPW branches/tables. Changing a ticker is not sufficient.
+3. PP3 generic windows, immutable attempts and completion reports support configured
+   stock capabilities, including a third fixture without a source-registry addition.
+   Historical AAPL/GPW adapters preserve management and consumed budgets. First
+   generic adoption requires disabled writes; resets and unknown-submit retries
+   are forbidden. See the [policy runbook](../runbooks/PAPER_EXECUTION_POLICY.md).
 4. Full close cancels protection before submitting its bounded SELL limit. An
    unfilled/failed close may leave an unprotected position. No blind replacement;
    operator observation is currently necessary. `TRADING_ENABLED=false` neither
@@ -165,5 +174,5 @@ Use [ROADMAP](ROADMAP.md) for order, the [detailed plan](phase3/PAPER_PRODUCTION
 for acceptance and [docs index](../README.md) for document status. Historical plans
 are not the current queue. The root AGENTS.md contains an older PKO-only priority;
 the owner's September26 direction supersedes that ordering, while its safety,
-review and delivery rules remain applicable. This docs-only change leaves that
-pre-existing dirty file untouched.
+review and delivery rules remain applicable. PP3 preserves unrelated local ES diagnostics and legacy SignalEngine changes;
+only its reviewed package is staged.

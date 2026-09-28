@@ -1,5 +1,5 @@
 import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
-import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
+import { stockMetadataFixture } from "../stock-market-test-fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -75,7 +75,7 @@ const instrument: Instrument = {
 };
 async function createFixture(currency: "USD" | "PLN") {
   const exchange = currency === "PLN" ? "WSE" : "SMART";
-  const selectedInstrument: Instrument = { ...instrument, currency, exchange,
+  const selectedInstrument: Instrument = { ...instrument, currency, exchange, primaryExchange: currency === "PLN" ? "WSE" : "NASDAQ", conId: 123, localSymbol: "TEST", tradingClass: "TEST",
     session: currency === "PLN" ? { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } : instrument.session };
   const database = `close_${randomUUID().replaceAll("-", "")}`,
     url = new URL(connection!);
@@ -415,7 +415,10 @@ async function createFixture(currency: "USD" | "PLN") {
       )).rows[0].completed_at.getTime();
       const waitMs = completed - Date.now();
       assert.ok(waitMs <= 100, "fixture DB completion is more than 100ms ahead of the host clock");
-      if (waitMs >= 0) await new Promise(resolve => setTimeout(resolve, waitMs + 1));
+      const waitDeadline = performance.now() + 200;
+      while (completed > Date.now() && performance.now() < waitDeadline) {
+        await new Promise(resolve => setTimeout(resolve, Math.max(1, completed - Date.now())));
+      }
       assert.ok(completed <= Date.now(), "fixture host clock has not reached the completed run");
     } finally {
       db.release();
@@ -448,8 +451,8 @@ async function createFixture(currency: "USD" | "PLN") {
       // Pure market validation uses an open-session fixture clock; only the risk
       // expiry duration crosses into the real DB/service clock in this fake adapter.
       const riskNow = currency === "PLN" ? Date.parse("2026-09-24T10:00:00Z") : wallNow;
-      const metadata = currency === "PLN" ? wseMetadataFixture(b, c.accountId, riskNow) : undefined;
-      if (metadata && state.wseFailure === "closed") metadata.liquidHours = "20260924:CLOSED";
+      const metadata = stockMetadataFixture(b, c.accountId, riskNow);
+      if (metadata && state.wseFailure === "closed") metadata.sessionEvidence.schedule!.sessions[0].end = new Date(riskNow - 1000).toISOString();
       if (metadata && state.wseFailure === "stale") metadata.requestStartedAtMs -= 60000;
       if (metadata && state.wseFailure === "band") metadata.priceIncrements = [{ lowEdge: 0, increment: 3 }];
       const risk = assessCloseRisk(t, b, { ...c, nowMs: riskNow }, {
@@ -503,6 +506,7 @@ async function createFixture(currency: "USD" | "PLN") {
           secType: "STK",
           currency,
           exchange,
+          primaryExch: selectedInstrument.primaryExchange,
         },
         normalizedTicket,
         legs: [leg],
@@ -571,7 +575,7 @@ async function createFixture(currency: "USD" | "PLN") {
       assert.equal((p.payload as { contract: { exchange: string } }).contract.exchange, exchange);
       const riskRow = await pool.query("SELECT risk_evidence FROM lifecycle_close_operations WHERE id=$1", [op.id]);
       assert.equal(riskRow.rows[0].risk_evidence.quoteCurrency, currency);
-      if (currency === "PLN") assert.equal(riskRow.rows[0].risk_evidence.wseMetadata.marketRuleId, 1);
+      if (currency === "PLN") assert.equal(riskRow.rows[0].risk_evidence.stockMetadata.marketRuleId, 1);
       state.dispatches++;
       state.closeRef = p.persistence.legs[0].orderRef;
       state.closeWorking = true;
@@ -613,7 +617,7 @@ for (const currency of ["USD", "PLN"] as const) describe(
         f.state.wseFailure = failure;
         const op = await f.service.request(f.id, randomUUID(), 100, "test");
         assert.equal(op.state, "BLOCKED");
-        assert.match(op.failureReason ?? "", /wse_/);
+        assert.match(op.failureReason ?? "", failure === "closed" ? /^stock_session_closed$/ : /stock_/);
         assert.deepEqual(f.state.cancels, []);
         assert.equal(f.state.prepares, 0);
         assert.equal(f.state.dispatches, 0);

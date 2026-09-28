@@ -10,7 +10,7 @@ function fixture() {
   const bound: BoundInstrument = {
     instrumentId: "test", conId: 123, brokerSymbol: "TEST", currency: "USD", broker: "ibkr",
     localSymbol: "TEST", tradingClass: "TEST", exchange: "SMART", minTick: 0.01,
-    instrument: { id: "test", displayName: "Test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART",
+    instrument: { id: "test", displayName: "Test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART", primaryExchange: "NASDAQ", conId: 123, localSymbol: "TEST", tradingClass: "TEST",
       session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
       metadata: { tags: [] }, assetClass: "stock", currency: "USD",
       trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },
@@ -237,8 +237,8 @@ test("open order and execution permIds must agree for the same leg", () => {
 
 function plnFixture() {
   const f = fixture();
-  Object.assign(f.context.bound!, { currency: "PLN", exchange: "WSE" });
-  Object.assign(f.context.bound!.instrument, { currency: "PLN", exchange: "WSE" });
+  Object.assign(f.context.bound!, { currency: "PLN", exchange: "WSE", primaryExchange: "WSE", session: { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } });
+  Object.assign(f.context.bound!.instrument, { currency: "PLN", exchange: "WSE", primaryExchange: "WSE", session: { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } });
   return f;
 }
 test("WSE PLN ownership retains broker position and exact owned fills", () => {

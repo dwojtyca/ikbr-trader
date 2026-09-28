@@ -109,3 +109,30 @@ test("protective child without denormalized proposal id remains linked by exact 
   const f=roundTrip(); f.evidence.fills[1].proposed_order_id=null;
   assert.equal(evaluateRoundTrip(f.evidence,f.context).status,"COMPLETED");
 });
+
+for (const [name, change] of [
+  ['local FUT', (f: ReturnType<typeof roundTrip>) => { f.evidence.fills[0].sec_type = 'FUT'; }],
+  ['local missing type', f => { f.evidence.fills[0].sec_type = null; }],
+  ['local conflicting type', f => { f.evidence.fills[0].sec_type_conflict = true; }],
+  ['broker FUT', f => { Object.assign(f.snapshot.executions[0], { secType: 'FUT' }); }],
+  ['broker missing type', f => { Object.assign(f.snapshot.executions[0], { secType: undefined }); }],
+  ['broker foreign currency', f => { Object.assign(f.snapshot.executions[0], { currency: 'USD' }); }],
+] as Array<[string, (f: ReturnType<typeof roundTrip>) => void]>) test(`round-trip refuses typed fill mismatch: ${name}`, () => {
+  const f = roundTrip(); change(f); const report = evaluateRoundTrip(f.evidence, f.context);
+  assert.equal(report.status, 'NOT_PROVEN'); assert.equal(report.accounting, 'NOT_PROVEN'); assert.equal(report.netPnl, null);
+});
+
+for (const patch of [{ secType: "FUT" }, { currency: "USD" }]) {
+  for (const position of ["before", "after"] as const) test(`duplicate typed execution ${JSON.stringify(patch)} ${position} cannot complete`, () => {
+    const f = roundTrip();
+    const duplicate = { ...f.snapshot.executions[0], ...patch };
+    if (position === "before") f.snapshot.executions.unshift(duplicate);
+    else f.snapshot.executions.push(duplicate);
+    f.coverage.executions.count = f.snapshot.executions.length;
+    const report = evaluateRoundTrip(f.evidence, f.context);
+    assert.equal(report.status, "NOT_PROVEN");
+    assert.equal(report.accounting, "NOT_PROVEN");
+    assert.equal(report.netPnl, null);
+    assert.deepEqual(report.reasons, ["broker_fill_type_or_currency_mismatch"]);
+  });
+}

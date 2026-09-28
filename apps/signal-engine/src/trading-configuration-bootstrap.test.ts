@@ -16,7 +16,7 @@ test("production consumer loads generic bundle regardless of runtime flags", () 
   assert.equal(result.authority.getBoundInstrument("xyz_nyse")?.brokerSymbol, "QZXP");
   assert.equal(result.authority.getBoundInstrument("aapl_smart")?.instrument.primaryExchange, "NASDAQ");
   for (const instrument of result.registry.listAll()) {
-    assert.equal(instrument.trading.executionEnabled, false);
+    assert.equal(instrument.trading.executionEnabled, parsed.ok && parsed.configuration.instruments.find(row => row.id === instrument.id)!.entryEnabled);
     assert.equal(instrument.trading.signalGenerationEnabled, false);
     assert.equal(instrument.trading.aiAnalysisEnabled, false);
   }
@@ -47,9 +47,9 @@ test("configured state requires explicit environment and exact matching account 
 test("actual diagnostic readiness ignores only the fixed entry-policy blocker", async () => {
   const { assertConfiguredEvaluationReady } = await import("./trading-configuration-bootstrap.js");
   const account = { ok: true as const, accountId: "DU1", environment: "paper" as const };
-  await assertConfiguredEvaluationReady({ account, admission: async () => ({ reasons: ["PP3_EXECUTION_POLICY_UNAVAILABLE"] }) });
-  for (const reason of ["CONFIG_DRIFT", "CONFIG_STORE_UNAVAILABLE", "CONFIG_MIGRATION_PREPARATION", "CONFIG_SERVICE_UNAVAILABLE", "PP4_RESEARCH_UNAVAILABLE"]) {
-    await assert.rejects(assertConfiguredEvaluationReady({ account, admission: async () => ({ reasons: ["PP3_EXECUTION_POLICY_UNAVAILABLE", reason] }) }), new RegExp(reason));
+  await assertConfiguredEvaluationReady({ account, admission: async () => ({ reasons: ["PP4_RESEARCH_UNAVAILABLE"] }) });
+  for (const reason of ["CONFIG_DRIFT", "CONFIG_STORE_UNAVAILABLE", "CONFIG_MIGRATION_PREPARATION", "CONFIG_SERVICE_UNAVAILABLE", "PP3_EXECUTION_POLICY_UNAVAILABLE"]) {
+    await assert.rejects(assertConfiguredEvaluationReady({ account, admission: async () => ({ reasons: ["PP4_RESEARCH_UNAVAILABLE", reason] }) }), new RegExp(reason));
   }
   let peerReads = 0;
   await assert.rejects(assertConfiguredEvaluationReady({ account: { ok: false, reason: "PP2_ACCOUNT_NOT_ALLOWED" }, admission: async () => { peerReads++; return { reasons: [] }; } }), /PP2_ACCOUNT_NOT_ALLOWED/);

@@ -41,6 +41,6 @@ export async function assertConfiguredEvaluationReady(input: {
 }): Promise<void> {
   if (!input.account?.ok) throw new Error(input.account?.reason ?? "PP2_ACCOUNT_ID_UNAVAILABLE");
   const result = await input.admission();
-  const blockers = result.reasons.filter(reason => reason !== "PP3_EXECUTION_POLICY_UNAVAILABLE");
+  const blockers = result.reasons.filter(reason => reason !== "PP4_RESEARCH_UNAVAILABLE");
   if (blockers.length) throw new Error(blockers.join(","));
 }

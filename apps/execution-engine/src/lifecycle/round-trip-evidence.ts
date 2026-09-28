@@ -1,4 +1,4 @@
-import { isAaplBound } from "@ikbr/shared";
+import { getSupportedStockCapability, isSupportedLegacyStockManagementBound, sessionDateAt } from "@ikbr/shared";
 import { buildStrategyEconomicEvidence } from "@ikbr/shared/trading-config";
 import type { LifecycleContext, LifecycleEvidence, LifecycleLegLink } from "./ownership.js";
 import { evaluateLifecycleFacts } from "./ownership.js";
@@ -12,7 +12,9 @@ export interface RoundTripFill {
 }
 export interface RoundTripEvidence {
   lifecycle: LifecycleEvidence;
-  window: null | { runId: string; accountId: string; startsAt: Date | string; endsAt: Date | string;
+  window: null | { source?: "paper" | "gpw" | "aapl"; instrumentId?: string; conid?: string; effectiveConfigHash?: string;
+    runPolicyHash?: string; policyKind?: "supervised_one_attempt"; attemptId?: string; accountDate?: string; instrumentSessionDate?: string;
+    runId: string; accountId: string; startsAt: Date | string; endsAt: Date | string;
     consumedProposalId: number | null; consumedAt: Date | string | null };
   close: null | { state: string; accountId: string; conid: string; originalHash: string;
     closeProposalId: number | null; links: LifecycleLegLink[] };
@@ -27,8 +29,10 @@ const side = (v: string) => ["BUY", "BOT"].includes(v) ? "BUY" : ["SELL", "SLD"]
 
 export function evaluateRoundTrip(evidence: RoundTripEvidence, context: LifecycleContext) {
   const { lifecycle, close } = evidence;
-  const aapl = context.bound ? isAaplBound(context.bound) : false;
-  const quoteCurrency = aapl ? "USD" : "PLN";
+  const capability = context.bound ? getSupportedStockCapability(context.bound) : null;
+  const legacy = !lifecycle.order.strategyAttribution && context.bound && isSupportedLegacyStockManagementBound(context.bound);
+  const quoteCurrency = capability?.quoteCurrency ?? (legacy ? context.bound!.currency as "USD" | "PLN" : null);
+  const windowSource = evidence.window?.source ?? (!lifecycle.order.strategyAttribution && legacy ? (quoteCurrency === "USD" ? "aapl" : "gpw") : null);
   const review = record(lifecycle.review), decision = record(review?.decision_json), risk = record(review?.risk_evidence);
   const report = {
     clientOrderHash: lifecycle.clientOrderHash,
@@ -50,9 +54,18 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     completionScope: "INSTRUMENT" as const,
     outsideScope: null as null | { positionObservedAt: string; ordersObservedAt: string;
       positions: Array<{ conid: string; instrument: string; quantity: number }>; workingOrderCount: number },
-    reconciliationRunId: lifecycle.run?.id ?? null, gpwWindowRunId: aapl ? null : evidence.window?.runId ?? null,
-    aaplWindowRunId: aapl ? evidence.window?.runId ?? null : null,
+    reconciliationRunId: lifecycle.run?.id ?? null, gpwWindowRunId: windowSource === "gpw" ? evidence.window?.runId ?? null : null,
+    aaplWindowRunId: windowSource === "aapl" ? evidence.window?.runId ?? null : null,
+    paperRunId: windowSource === "paper" ? evidence.window?.runId ?? null : null,
+    runPolicyKind: evidence.window?.policyKind ?? null, runPolicyHash: evidence.window?.runPolicyHash ?? null,
+    attemptId: evidence.window?.attemptId ?? null, accountDate: evidence.window?.accountDate ?? null,
+    instrumentSessionDate: evidence.window?.instrumentSessionDate ?? null, quoteCurrency,
+    netPnl: null as { currency: "PLN" | "USD"; amount: number } | null,
     window: evidence.window, capturedAt: null as string | null,
+    entryRiskEvidence: null as Record<string, unknown> | null,
+    brokerLegs: lifecycle.links.map(link => ({ proposedOrderId: link.proposed_order_id, role: link.role, roleOrdinal: link.role_ordinal,
+      brokerOrderId: link.broker_order_id, orderRef: link.order_ref, permId: link.perm_id, accountId: link.account_id })),
+    closeOperation: close ? { state: close.state, accountId: close.accountId, conid: close.conid, originalHash: close.originalHash, closeProposalId: close.closeProposalId } : null,
     ai: decision ? { decision: decision.decision, model: decision.model, promptVersion: decision.promptVersion,
       coverage: record(decision.context)?.coverage ?? null } : null,
     fills: [] as Array<{ execId: string; role: string; quantity: number; price: number; currency: string;
@@ -64,7 +77,7 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     netPnlUSD: null as number | null,
   };
   const refuse = (reason: string) => { report.reasons.push(reason); return report; };
-  if (!aapl && (context.bound?.currency !== "PLN" || context.bound.exchange !== "WSE")) return refuse("scope_not_wse_pln");
+  if (!quoteCurrency || (!capability && !legacy)) return refuse("scope_stock_capability_unsupported");
   let closeLink: LifecycleLegLink | null = null;
   if (close) {
     if (close.state !== "COMPLETED" || close.accountId !== context.accountId || close.conid !== lifecycle.order.conid ||
@@ -107,21 +120,31 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     attempted < time(window.startsAt) || attempted >= time(window.endsAt) || time(window.consumedAt) < time(window.startsAt) ||
     time(window.consumedAt) >= time(window.endsAt) || time(window.consumedAt) > context.nowMs)
     return refuse("consumed_window_not_proven");
+  if (lifecycle.order.strategyAttribution && (window.source !== "paper" || window.instrumentId !== lifecycle.order.instrumentId ||
+    window.conid !== lifecycle.order.conid || window.effectiveConfigHash !== lifecycle.order.strategyAttribution.effectiveConfigHash ||
+    window.policyKind !== "supervised_one_attempt" || !window.runPolicyHash || !/^[a-f0-9]{64}$/.test(window.runPolicyHash) ||
+    window.attemptId !== String(lifecycle.order.id) || !/^[1-9]\d*$/.test(window.attemptId) ||
+    window.accountDate !== sessionDateAt(attempted, "Europe/Warsaw") ||
+    window.instrumentSessionDate !== sessionDateAt(attempted, capability!.timeZone))) return refuse("generic_attempt_identity_not_proven");
   if (!risk || risk.accountId !== context.accountId || risk.conid !== lifecycle.order.conid ||
     risk.instrumentId !== lifecycle.order.instrumentId || risk.sessionId !== review?.session_id || risk.quoteCurrency !== quoteCurrency ||
     !finite(risk.assessedAtMs) || !finite(risk.validUntilMs) || risk.assessedAtMs > attempted || risk.validUntilMs <= attempted)
     return refuse("entry_risk_evidence_missing");
+  report.entryRiskEvidence = JSON.parse(JSON.stringify(risk)) as Record<string, unknown>;
   const executions = (snapshot.executions as Record<string, unknown>[]).filter(row =>
     row.accountId === context.accountId && row.conId === lifecycle.order.conid);
   const unique = new Map<string, Record<string, unknown>>();
-  for (const execution of executions) unique.set(execution.execId as string, execution);
+  for (const execution of executions) {
+    if (execution.secType !== "STK" || execution.currency !== quoteCurrency) return refuse("broker_fill_type_or_currency_mismatch");
+    unique.set(execution.execId as string, execution);
+  }
   if (evidence.fills.length !== unique.size || new Set(evidence.fills.map(fill => fill.exec_id)).size !== evidence.fills.length)
     return refuse("persisted_fills_not_exact");
   const links = closeLink ? [...lifecycle.links, { ...closeLink, role: "CLOSE" }] : lifecycle.links;
   for (const fill of evidence.fills) {
     const execution = unique.get(fill.exec_id);
     const link = links.find(leg => execution && leg.broker_order_id === execution.brokerOrderId && leg.order_ref === execution.orderRef);
-    if (!execution || !link || (fill.proposed_order_id !== null && fill.proposed_order_id !== link.proposed_order_id) || fill.account_id !== context.accountId ||
+    if (!execution || !link || fill.sec_type !== "STK" || fill.sec_type_conflict === true || execution.secType !== "STK" || execution.currency !== quoteCurrency || (fill.proposed_order_id !== null && fill.proposed_order_id !== link.proposed_order_id) || fill.account_id !== context.accountId ||
       fill.conid !== lifecycle.order.conid || fill.broker_order_id !== link.broker_order_id || fill.currency !== quoteCurrency ||
       side(fill.side) !== side(String(execution.side)) || !finite(fill.shares) || fill.shares <= 0 || fill.shares !== execution.shares ||
       !finite(fill.price) || fill.price <= 0 || fill.price !== execution.price || !Number.isFinite(time(fill.executed_at)) ||
@@ -148,8 +171,11 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     Object.keys(report.commissionsByCurrency).some(currency => currency !== quoteCurrency) ? "MIXED_CURRENCY" : "COMPLETE";
   if (report.accounting === "COMPLETE") {
     const net = report.grossPnl.amount - (report.commissionsByCurrency[quoteCurrency] ?? 0);
-    if (aapl) report.netPnlUSD = net;
+    report.netPnl = { currency: quoteCurrency, amount: net };
+    if (quoteCurrency === "USD") report.netPnlUSD = net;
     else report.netPnlPLN = net;
   }
   return report;
 }
+
+export type RoundTripReport = ReturnType<typeof evaluateRoundTrip>;

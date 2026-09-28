@@ -12,3 +12,4 @@ export * from "./trading-configuration/broker-evidence.js";
 export * from "./trading-configuration/attribution.js";
 export * from "./trading-configuration/strategy-conversion.js";
 export * from "./trading-configuration/economic-evidence.js";
+export * from './trading-configuration/stock-management.js';

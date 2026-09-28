@@ -1,3 +1,4 @@
+import { getSupportedStockCapability, isSupportedLegacyStockManagementBound } from "@ikbr/shared";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import { validatePersistedOrderIdentity } from "../repository.js";
 import { canonicalJson } from "@ikbr/shared/trading-config";
@@ -89,9 +90,7 @@ export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: Lif
   if (!bound || bound.instrumentId !== order.instrumentId || String(bound.conId) !== order.conid ||
     bound.brokerSymbol !== order.instrument || !bound.instrument.trading.executionEnabled ||
     bound.instrument.assetClass !== "stock" ||
-    !((bound.currency === "USD" && bound.instrument.currency === "USD") ||
-      (bound.currency === "PLN" && bound.instrument.currency === "PLN" &&
-        bound.exchange === "WSE" && bound.instrument.exchange === "WSE")))
+    !(getSupportedStockCapability(bound) || (!order.strategyAttribution && isSupportedLegacyStockManagementBound(bound))))
     return refuse("binding_mismatch");
   const policy = bound.instrument.executionPolicy;
   if (!policy || policy.strategyId !== order.strategy || policy.expectedDirection !== "LONG" ||

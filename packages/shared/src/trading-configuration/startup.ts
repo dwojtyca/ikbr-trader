@@ -1,9 +1,10 @@
+import { canonicalJson } from "./identity.js";
 import { randomUUID } from "node:crypto";
 import type { InstrumentBindingAuthority, BoundInstrument } from "../instruments/bindings.js";
 import type { LoadedTradingConfiguration } from "./loader.js";
 import { assessTradingConfigurationAdmission, type TradingConfigurationAdmission, type TradingConfigurationService } from "./admission.js";
 import { TradingConfigurationStore, type TradingConfigurationRegistrationResult } from "./store.js";
-import { buildManagementMonitoringAuthority } from "./management.js";
+import { buildManagementMonitoringAuthority, retainAttributedMonitoring } from "./management.js";
 import { buildTradingConfigurationProjection } from "./projection.js";
 import type { TradingConfigurationBrokerEvidence } from "./broker-evidence.js";
 
@@ -59,14 +60,18 @@ export class TradingConfigurationRuntime {
     const result = await this.admission();
     if (!result.allowed) throw new Error(result.reasons.join(","));
   }
-  resolveManagementInstrument(instrumentId: string): BoundInstrument | undefined {
+  resolveManagementInstrument(instrumentId: string, originalProposalId?: number): BoundInstrument | undefined {
     if (!this.state || this.lastFailure) return undefined;
+    const matching = this.state.attributedManagement?.filter(item => item.bound.instrumentId === instrumentId &&
+      (originalProposalId === undefined || item.originalProposalId === originalProposalId)) ?? [];
+    if (matching.length) return matching.every(item => canonicalJson(item.bound) === canonicalJson(matching[0].bound)) ? matching[0].bound : undefined;
     if (this.state.managementAuthority) return this.state.managementAuthority.getBoundInstrument(instrumentId);
     return this.options.loaded.mode === "legacy" ? this.options.legacyAuthority?.getBoundInstrument(instrumentId) : undefined;
   }
   monitoringAuthority(base: InstrumentBindingAuthority): InstrumentBindingAuthority {
     if (!this.state || this.lastFailure) throw new Error("CONFIG_NOT_INITIALIZED");
-    return buildManagementMonitoringAuthority(base, this.state.managementAuthority, this.state.ownership);
+    const legacy = buildManagementMonitoringAuthority(base, this.state.managementAuthority, this.state.legacyOwnership ?? this.state.ownership);
+    return retainAttributedMonitoring(legacy, this.state.attributedManagement ?? []);
   }
   diagnostics(evidence?: ReadonlyMap<string, TradingConfigurationBrokerEvidence>) {
     const loaded = this.options.loaded;

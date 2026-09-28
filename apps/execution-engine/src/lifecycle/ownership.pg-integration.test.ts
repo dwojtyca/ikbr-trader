@@ -18,7 +18,7 @@ const connection = process.env.TEST_POSTGRES_URL;
 const accountId = "DU-LIFECYCLE";
 const sessionId = "current-session";
 function instrument(id = "test", symbol = "TEST"): Instrument {
-  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART",
+  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART", primaryExchange: "NASDAQ", conId: id === "test" ? 123 : 456, localSymbol: symbol, tradingClass: symbol,
     assetClass: "stock", currency: "USD", metadata: { tags: [] },
     session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
     trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },

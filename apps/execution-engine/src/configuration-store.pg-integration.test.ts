@@ -1,11 +1,12 @@
+import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { Pool } from "pg";
-import { InstrumentBindingAuthority, InstrumentRegistry } from "@ikbr/shared";
+import { InstrumentBindingAuthority, InstrumentRegistry, type SignalTicket } from "@ikbr/shared";
 import { TradingConfigurationStore, createTradingConfigurationRuntime, createLegacyManagementSnapshot, computeTradingConfigurationHash, loadTradingConfiguration, parseTradingConfiguration,
-  buildTradingConfigurationProjection, TRADING_CONFIGURATION_SERVICES, type LoadedTradingConfiguration } from "@ikbr/shared/trading-config";
+  buildTradingConfigurationProjection, buildStrategyAttribution, TRADING_CONFIGURATION_SERVICES, type LoadedTradingConfiguration } from "@ikbr/shared/trading-config";
 import { runMigrations } from "./migrations.js";
 import { ExecutionRepository } from "./repository.js";
 import { focusedSubmissionTestSessionGuard } from "./session-entry-guard.fixture.js";
@@ -86,7 +87,7 @@ suite("PP1 durable configuration authority on isolated PostgreSQL", () => {
     assert.deepEqual((await pool.query("SELECT client_order_hash,status,execution_attempted_at FROM proposed_orders")).rows, before);
     assert.equal((await restarted.admission()).allowed, false);
     const old = prepared.authority.getBoundInstrument("test")!;
-    const changedLegacy = new InstrumentBindingAuthority(new InstrumentRegistry([old.instrument]), [{ instrumentId: "test", conId: 999,
+    const changedLegacy = new InstrumentBindingAuthority(new InstrumentRegistry([{ ...old.instrument, conId: 999 }]), [{ instrumentId: "test", conId: 999,
       localSymbol: "TEST", tradingClass: "TEST", exchange: "SMART", currency: "USD", minTick: .01 }]);
     await assert.rejects(() => createTradingConfigurationRuntime({ service: "execution-engine", store, loaded: loadTradingConfiguration({}),
       legacyAuthority: changedLegacy, tradingEnabled: false }).initialize(), /IDENTITY_CONFLICT/);
@@ -137,5 +138,55 @@ suite("PP1 durable configuration authority on isolated PostgreSQL", () => {
     await assert.rejects(() => runtime.heartbeat());
     assert.equal(runtime.resolveManagementInstrument("test"), undefined);
     assert.equal(runtime.diagnostics().initialized, false);
+  }));
+});
+
+async function storedGenericAttempt(pool: Pool, loaded: LoadedTradingConfiguration) {
+  assert.equal(loaded.mode, "bundle"); if (loaded.mode !== "bundle") throw Error("fixture");
+  const row = loaded.configuration.instruments.find(item => item.id === "xyz_nyse")!;
+  const now = new Date(), attribution = buildStrategyAttribution(loaded.configuration, row.id, row.strategySelection.instanceIds[0]);
+  const ticket: SignalTicket = { instrument: row.contract.symbol, instrumentId: row.id, conid: String(row.contract.conId), side: "BUY", orderType: "LMT", quantity: 1,
+    entry: 100, stop: 99, takeProfit: 105, riskCheckStatus: "PASS", confidence: .8, reason: "historical fixture", timestamp: now.toISOString(), strategyAttribution: attribution,
+    strategyTrigger: { version: 1, source: "evaluation_bucket", timeframe: "1m", observedAt: now.toISOString(), bucketStartMs: Math.floor(now.getTime()/60000)*60000 } };
+  const result = await pool.query(`INSERT INTO proposed_orders(instrument,instrument_id,conid,side,order_type,quantity,entry,stop,take_profit,reason,confidence,risk_check_status,status,strategy,
+    execution_account_id,execution_attempted_at,client_order_hash,client_order_hash_version,strategy_attribution,strategy_trigger)
+    VALUES($1,$2,$3,'BUY','LMT',1,100,99,105,'historical fixture',.8,'PASS','UNKNOWN',$4,'DU_GENERIC',clock_timestamp(),$5,2,$6,$7) RETURNING id`,
+    [ticket.instrument, ticket.instrumentId, ticket.conid, attribution.implementationId, computeClientOrderHash(ticket), JSON.stringify(attribution), JSON.stringify(ticket.strategyTrigger)]);
+  return { id: Number(result.rows[0].id), ticket };
+}
+suite("PP3 attributed original ownership restart", () => {
+  for (const legacy of [false, true]) for (const removal of [false, true]) test(`third stock survives ${removal ? "removed" : "disabled"} configuration with legacy source ${legacy}`, async () => isolated(async pool => {
+    const source = legacy ? (await prepare(pool)).sourceHash : undefined;
+    const original = bundle(raw(), source), store = new TradingConfigurationStore(pool);
+    await createTradingConfigurationRuntime({ service: "execution-engine", store, loaded: original, tradingEnabled: false }).initialize();
+    const attempted = await storedGenericAttempt(pool, original);
+    const changed = raw();
+    if (removal) changed.instruments = changed.instruments.filter((item: {id:string}) => item.id !== "xyz_nyse");
+    else { const item = changed.instruments.find((item: {id:string}) => item.id === "xyz_nyse"); item.entryEnabled = false; item.monitoringEnabled = false; item.strategySelection.instanceIds = []; }
+    const loaded = bundle(changed, source);
+    const runtime = createTradingConfigurationRuntime({ service: "ingestion", store: new TradingConfigurationStore(pool), loaded, tradingEnabled: false });
+    await runtime.initialize(); await runtime.heartbeat();
+    const managed = runtime.resolveManagementInstrument("xyz_nyse", attempted.id);
+    assert.ok(managed); assert.equal(managed.brokerSymbol, "QZXP"); assert.equal(managed.instrument.executionPolicy!.strategyId, attempted.ticket.strategyAttribution!.implementationId);
+    assert.equal(managed.instrument.trading.executionEnabled, true);
+    if (loaded.mode !== "bundle") throw Error("fixture");
+    const monitoring = runtime.monitoringAuthority(buildTradingConfigurationProjection(loaded.configuration).authority);
+    assert.equal(monitoring.getBoundInstrument("xyz_nyse")!.instrument.trading.monitoringEnabled, true);
+    assert.equal(monitoring.getBoundInstrument("xyz_nyse")!.instrument.trading.executionEnabled, false);
+    const { buildMergedWatchlist } = await import(new URL("../../ingestion/src/bound-watchlist.ts", import.meta.url).href);
+    const watchlist = buildMergedWatchlist({ authority: monitoring, legacyWatchlist: [] }) as { boundWatchlist: Array<{instrumentId:string;conid:string}> };
+    assert.ok(watchlist.boundWatchlist.some(item => item.instrumentId === "xyz_nyse" && item.conid === attempted.ticket.conid));
+    assert.equal((await runtime.admission()).allowed, false);
+    const restart = createTradingConfigurationRuntime({ service: "execution-engine", store: new TradingConfigurationStore(pool), loaded, tradingEnabled: false });
+    await restart.initialize(); assert.equal(restart.resolveManagementInstrument("xyz_nyse", attempted.id)!.conId, managed.conId);
+  }));
+  test("foreign current contract and altered original economic hash block restart", async () => isolated(async pool => {
+    const loaded = bundle(); const store = new TradingConfigurationStore(pool);
+    await createTradingConfigurationRuntime({ service: "execution-engine", store, loaded, tradingEnabled: false }).initialize();
+    const attempt = await storedGenericAttempt(pool, loaded);
+    const conflicting = raw(); conflicting.instruments.find((item: {id:string}) => item.id === "xyz_nyse").contract.conId = 999999;
+    await assert.rejects(createTradingConfigurationRuntime({ service: "ingestion", store, loaded: bundle(conflicting), tradingEnabled: false }).initialize(), /IDENTITY_CONFLICT/);
+    await pool.query("UPDATE proposed_orders SET entry=101 WHERE id=$1", [attempt.id]);
+    await assert.rejects(createTradingConfigurationRuntime({ service: "execution-engine", store, loaded, tradingEnabled: false }).initialize(), /ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID/);
   }));
 });

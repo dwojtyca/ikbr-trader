@@ -7,7 +7,8 @@ with independent review, local checks and exact-commit CI passed; evidence is in
 PP2 source implements the [bounded runtime contract](PP2_RUNTIME_CONTRACT.md);
 its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required local
 checks, publication and successful exact-source-commit CI.
-PP3–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+PP3 source is implemented; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md) for
+final review/check/publication status. PP4–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -239,6 +240,12 @@ priority ties/conflicts, disabled assignment, restart and revision-change races.
 Run relevant backtests in addition to required repository suites.
 
 ## 7. PP3 — Generic bounded stock execution and evidence
+
+**Implementation:** [bounded contract](PP3_IMPLEMENTATION_PLAN.md),
+[report and validation](PP3_IMPLEMENTATION_REPORT.md),
+[policy runbook](../../runbooks/PAPER_EXECUTION_POLICY.md). Bundle entries retain
+PP4 research denial; full Warsaw-day accounting certification is an additional
+operational blocker. No deployment/activation or PP5 scheduled policy is included.
 
 **Touchpoints:** configured registry/policies, ai-entry-risk, broker order planning,
 market-rule/session adapters, submission service, generic window/budget repository,

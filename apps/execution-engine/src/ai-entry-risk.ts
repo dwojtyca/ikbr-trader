@@ -1,4 +1,5 @@
-import { isAaplBound } from '@ikbr/shared';
+import { isAaplBound, getSupportedStockCapability, isSupportedLegacyStockManagementBound, validateStockOrder, type StockMarketMetadata } from '@ikbr/shared';
+import { assessPaperDailyLoss, type PaperDailyLossEvidence } from './paper-daily-loss.js';
 import { validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import { getClientOrderHashVersion } from "@ikbr/shared/client-order-hash";
@@ -8,6 +9,7 @@ export interface AiEntryRiskLimits {
   maxNotionalPct: number;
   maxStopRiskPct: number;
   maxExposurePct: number;
+  quoteCurrency?: { currency: "PLN" | "USD"; maxNotional: number; maxStopRisk: number; feeReserve: number; maxDailyLoss: number };
   aaplUsd?: { maxNotional: number; maxStopRisk: number; feeReserve: number };
   pln?: { maxNotional: number; maxStopRisk: number; feeReserve: number };
 }
@@ -45,6 +47,8 @@ export interface AiEntryRiskEvidence {
   fxSource: "same_currency" | "ib_account_exchange_rate";
   limits: AiEntryRiskLimits;
   wseMetadata?: WseMarketMetadata;
+  stockMetadata?: StockMarketMetadata;
+  dailyLossEvidence?: PaperDailyLossEvidence;
 }
 
 const MAX_AGE_MS = 10_000;
@@ -66,6 +70,8 @@ export function assessAiEntryRisk(input: {
   limits: AiEntryRiskLimits;
   nowMs: number;
   wseMetadata?: unknown;
+  stockMetadata?: unknown;
+  dailyLossEvidence?: unknown;
   effectiveConfigHash?: string;
 }): { ok: true; evidence: AiEntryRiskEvidence } | { ok: false; reason: string } {
   const { order, bound, accountId, sessionId, snapshot, limits, nowMs } = input;
@@ -77,13 +83,16 @@ export function assessAiEntryRisk(input: {
   if (![limits.maxNotionalPct, limits.maxStopRiskPct, limits.maxExposurePct]
       .every(value => positive(value) && value <= 100))
     return reject("risk_limits_invalid");
+  const capability = getSupportedStockCapability(bound);
+  const generic = order.strategyAttribution !== undefined || input.stockMetadata !== undefined || limits.quoteCurrency !== undefined;
   const instrument = bound.instrument;
   const policy = instrument.executionPolicy;
   if (order.instrumentId !== bound.instrumentId || order.conid !== String(bound.conId) ||
       order.instrument !== bound.brokerSymbol || !instrument.trading.executionEnabled)
     return reject("risk_binding_mismatch");
-  if ((bound.instrumentId === "aapl_nasdaq" || bound.conId === 265598 || bound.brokerSymbol === "AAPL")
+  if (!generic && (bound.instrumentId === "aapl_nasdaq" || bound.conId === 265598 || bound.brokerSymbol === "AAPL")
     && !isAaplBound(bound)) return reject("risk_binding_mismatch");
+  if ((generic && !capability) || (!generic && !capability && !isSupportedLegacyStockManagementBound(bound))) return reject("risk_unsupported_capability");
   const isPln = bound.currency === "PLN" && instrument.currency === "PLN" &&
     bound.exchange === "WSE" && instrument.exchange === "WSE";
   if (instrument.assetClass !== "stock" || !(isPln || (bound.currency === "USD" && instrument.currency === "USD")) ||
@@ -148,7 +157,7 @@ export function assessAiEntryRisk(input: {
   const fxValuationBuffer = isPln ? 1.02 : 1;
   let quoteCashBalance: number | undefined;
   let quoteFeeReserve: number | undefined;
-  if (isPln) {
+  if (isPln && !generic) {
     const caps = limits.pln;
     if (!caps || ![caps.maxNotional, caps.maxStopRisk, caps.feeReserve].every(positive))
       return reject("risk_pln_limits_invalid");
@@ -162,7 +171,7 @@ export function assessAiEntryRisk(input: {
     if (quoteNotional > caps.maxNotional) return reject("risk_pln_notional_exceeded");
     if (quoteStopRisk > caps.maxStopRisk) return reject("risk_pln_stop_loss_exceeded");
   }
-  if (isAaplBound(bound)) {
+  if (isAaplBound(bound) && !generic) {
     const caps = limits.aaplUsd;
     if (!caps || ![caps.maxNotional, caps.maxStopRisk, caps.feeReserve].every(positive))
       return reject("risk_aapl_limits_invalid");
@@ -173,6 +182,23 @@ export function assessAiEntryRisk(input: {
     if (quoteNotional > caps.maxNotional) return reject("risk_aapl_notional_exceeded");
     if (quoteStopRisk > caps.maxStopRisk) return reject("risk_aapl_stop_loss_exceeded");
   }
+  let daily: ReturnType<typeof assessPaperDailyLoss> | undefined;
+  if (generic) {
+    const caps = limits.quoteCurrency;
+    if (!caps || caps.currency !== capability!.quoteCurrency || ![caps.maxNotional, caps.maxStopRisk, caps.feeReserve, caps.maxDailyLoss].every(positive)) return reject("risk_quote_limits_invalid");
+    if (isPln) {
+      if (account.exchangeRatesToBase?.USD !== 1 || !positive(account.exchangeRatesToBase?.PLN)) return reject("risk_pln_fx_missing_or_invalid");
+      fxToUsd = account.exchangeRatesToBase.PLN;
+    }
+    quoteCashBalance = account.cashByCurrency?.[caps.currency];
+    quoteFeeReserve = caps.feeReserve;
+    if (!nonnegative(quoteCashBalance) || !Number.isFinite(quoteNotional + quoteFeeReserve) || quoteNotional + quoteFeeReserve > quoteCashBalance) return reject("risk_quote_cash_insufficient");
+    if (quoteNotional > caps.maxNotional) return reject("risk_quote_notional_exceeded");
+    if (quoteStopRisk > caps.maxStopRisk) return reject("risk_quote_stop_loss_exceeded");
+    daily = assessPaperDailyLoss(input.dailyLossEvidence, { accountId, sessionId, quoteCurrency: caps.currency,
+      maxDailyLoss: caps.maxDailyLoss, nowMs, connectionGeneration: account.connectionGeneration });
+    if (!daily.ok) return reject(daily.reason);
+  }
   const notional = quoteNotional * fxToUsd * fxValuationBuffer;
   const stopRisk = quoteStopRisk * fxToUsd * fxValuationBuffer;
   if (!positive(notional) || !positive(stopRisk) || !Number.isFinite(grossPositionValue + notional))
@@ -182,20 +208,24 @@ export function assessAiEntryRisk(input: {
   if (stopRisk > netLiquidation * (limits.maxStopRiskPct / 100)) return reject("risk_stop_loss_exceeded");
   if (grossPositionValue + notional > netLiquidation * (limits.maxExposurePct / 100))
     return reject("risk_exposure_exceeded");
-  const wse = isPln ? validateWseOrder(input.wseMetadata, bound, accountId, order, nowMs) : undefined;
+  const stock = generic ? validateStockOrder(input.stockMetadata, bound, accountId, order, nowMs) : undefined;
+  if (stock && !stock.ok) return reject(stock.reason);
+  const wse = isPln && !generic ? validateWseOrder(input.wseMetadata, bound, accountId, order, nowMs) : undefined;
   if (wse && !wse.ok) return reject(wse.reason);
   return { ok: true, evidence: {
     ...(order.strategyAttribution ? { strategyAttribution: order.strategyAttribution, strategyTrigger: order.strategyTrigger, strategyObservedAt, strategyEffectiveConfigHash: input.effectiveConfigHash } : {}),
     accountId, sessionId, instrumentId: bound.instrumentId, conid: order.conid,
     assessedAtMs: nowMs, validUntilMs: Math.min(Math.min(started, completed, bidTime, askTime) + MAX_AGE_MS,
-      wse?.ok ? wse.expiresAtMs : Infinity),
+      wse?.ok ? wse.expiresAtMs : Infinity, stock?.ok ? stock.expiresAtMs : Infinity, daily?.ok ? daily.validUntilMs : Infinity),
     ...(wse?.ok ? { wseMetadata: wse.metadata } : {}),
+    ...(stock?.ok ? { stockMetadata: stock.metadata } : {}),
+    ...(daily?.ok ? { dailyLossEvidence: daily.evidence } : {}),
     accountRequestStartedAt: account.requestStartedAt, accountCompletedAt: account.completedAt,
     bidObservedAt: quote.bidObservedAt as string, askObservedAt: quote.askObservedAt as string,
     bid, ask, netLiquidation, availableFunds, grossPositionValue, notional, stopRisk,
     quoteCurrency: isPln ? "PLN" : "USD", valuationCurrency: "USD", quoteNotional, quoteStopRisk,
     fxToUsd, fxValuationBuffer, quoteCashBalance, quoteFeeReserve,
     fxSource: isPln ? "ib_account_exchange_rate" : "same_currency",
-    limits: { ...limits, ...(limits.aaplUsd ? { aaplUsd: { ...limits.aaplUsd } } : {}), ...(limits.pln ? { pln: { ...limits.pln } } : {}) },
+    limits: { ...limits, ...(limits.quoteCurrency ? { quoteCurrency: { ...limits.quoteCurrency } } : {}), ...(limits.aaplUsd ? { aaplUsd: { ...limits.aaplUsd } } : {}), ...(limits.pln ? { pln: { ...limits.pln } } : {}) },
   } };
 }

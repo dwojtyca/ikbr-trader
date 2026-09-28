@@ -3,7 +3,7 @@ import { parseIbExecutionTime, type ExecutionTimeZone } from "./execution-time.j
 import { isPkoIdentity } from "./gpw-window.js";
 import { isWseBound, validateWseOrder, type WseMarketMetadata } from "./wse-market-rules.js";
 import IB from "ib";
-import { SignalTicket, type BoundInstrument, defaultInstrumentRegistry } from "@ikbr/shared";
+import { SignalTicket, type BoundInstrument, defaultInstrumentRegistry, getSupportedStockCapability, validateStockOrder, type StockMarketMetadata } from "@ikbr/shared";
 import { assertClientDirectTicketAllowed } from "./direct-ticket-guard.js";
 import {
   deriveChildOrderRef,
@@ -312,8 +312,9 @@ export class TwsExecutionClient {
     private readonly dependencies: {
       ib?: unknown;
       resolveBoundInstrument?: (id: string) => BoundInstrument | undefined;
-      resolveManagementInstrument?: (id: string) => BoundInstrument | undefined;
+      resolveManagementInstrument?: (id: string, originalProposalId?: number) => BoundInstrument | undefined | Promise<BoundInstrument | undefined>;
       assertEntryAllowed?: () => Promise<void>;
+      loadStockMetadata?: (bound: BoundInstrument, accountId: string) => Promise<StockMarketMetadata>;
       loadWseMetadata?: (bound: BoundInstrument, accountId: string) => Promise<WseMarketMetadata>;
     } = {},
   ) {
@@ -330,11 +331,37 @@ export class TwsExecutionClient {
     bound: BoundInstrument; metadata: WseMarketMetadata; generation: number; accountId: string; fingerprint: string;
   }>();
 
+  private readonly stockPreparations = new WeakMap<PreparedBrokerOrder, {
+    bound: BoundInstrument; metadata: StockMarketMetadata; generation: number; accountId: string; fingerprint: string;
+  }>();
+
   private resolveTicketBinding(ticket: SignalTicket): BoundInstrument | undefined {
-    const resolver = ticket.positionEffect === "CLOSE_OR_REDUCE"
-      ? this.dependencies.resolveManagementInstrument ?? this.dependencies.resolveBoundInstrument
-      : this.dependencies.resolveBoundInstrument;
-    return ticket.instrumentId ? resolver?.(ticket.instrumentId) : undefined;
+    return ticket.instrumentId ? this.dependencies.resolveBoundInstrument?.(ticket.instrumentId) : undefined;
+  }
+
+  private assertStockDispatch(prepared: PreparedBrokerOrder): void {
+    const saved = this.stockPreparations.get(prepared);
+    if (!saved) {
+      if (prepared.normalizedTicket.strategyAttribution) throw new Error("STOCK_PREPARATION_REQUIRED");
+      return;
+    }
+    this.assertConnectionGeneration(saved.generation);
+    if (JSON.stringify([prepared, [...prepared.plan.relatedOrderIds]]) !== saved.fingerprint) throw new Error("STOCK_PREPARED_PLAN_CHANGED");
+    const checked = validateStockOrder(saved.metadata, saved.bound, saved.accountId, prepared.normalizedTicket, Date.now());
+    if (!checked.ok) throw new Error(checked.reason);
+    const c = prepared.contract, bound = saved.bound;
+    if (c.conId !== bound.conId || c.symbol !== bound.brokerSymbol || c.secType !== "STK" || c.exchange !== bound.exchange ||
+        c.primaryExch !== bound.instrument.primaryExchange || c.currency !== bound.currency) throw new Error("STOCK_PREPARED_CONTRACT_CHANGED");
+    const ticket = prepared.normalizedTicket;
+    const expected = ticket.positionEffect === "CLOSE_OR_REDUCE" ? [["SELL", "LMT", ticket.entry]] :
+      [["BUY", "LMT", ticket.entry], ["SELL", "LMT", ticket.takeProfit], ["SELL", "STP", ticket.stop]];
+    if (prepared.plan.orders.length !== expected.length) throw new Error("STOCK_PREPARED_LEGS_CHANGED");
+    for (const [index, planned] of prepared.plan.orders.entries()) {
+      const wire = planned.order, [side, type, price] = expected[index];
+      if (wire.action !== side || wire.orderType !== type || wire.totalQuantity !== 1 || wire.account !== saved.accountId ||
+          wire.tif !== "DAY" || wire.outsideRth === true || (type === "STP" ? wire.auxPrice : wire.lmtPrice) !== price)
+        throw new Error("STOCK_PREPARED_WIRE_CHANGED");
+    }
   }
 
   private isKnownWseTicket(ticket: SignalTicket): boolean {
@@ -345,6 +372,7 @@ export class TwsExecutionClient {
   }
 
   private assertWseDispatch(prepared: PreparedBrokerOrder): void {
+    if (this.stockPreparations.has(prepared)) return;
     const saved = this.wsePreparations.get(prepared);
     if (!saved && !this.isWseContract(prepared.contract) && prepared.contract.currency !== "PLN" &&
       !this.isKnownWseTicket(prepared.normalizedTicket)) return;
@@ -622,11 +650,26 @@ export class TwsExecutionClient {
     if (ticket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     await this.connect();
     const generation = this.connectionGeneration;
-    const bound = this.resolveTicketBinding(ticket);
+    const bound = ticket.positionEffect === "CLOSE_OR_REDUCE" && ticket.instrumentId && this.dependencies.resolveManagementInstrument
+      ? await this.dependencies.resolveManagementInstrument(ticket.instrumentId, context?.proposedOrderId == null ? undefined : Number(context.proposedOrderId)) : this.resolveTicketBinding(ticket);
+    this.assertConnectionGeneration(generation);
+    if (ticket.strategyAttribution && (!bound || !getSupportedStockCapability(bound))) throw new Error("STOCK_CAPABILITY_REQUIRED");
+    let stockMetadata: StockMarketMetadata | undefined;
     let metadata: WseMarketMetadata | undefined;
     let contract: ContractShape;
     let normalizedTicket: SignalTicket;
-    if (this.isKnownWseTicket(ticket)) {
+    if (bound && getSupportedStockCapability(bound)) {
+      if (!this.dependencies.loadStockMetadata) throw new Error("STOCK_METADATA_BINDING_REQUIRED");
+      stockMetadata = await this.dependencies.loadStockMetadata(bound, accountId);
+      this.assertConnectionGeneration(generation);
+      const result = validateStockOrder(stockMetadata, bound, accountId, ticket, Date.now());
+      if (!result.ok) throw new Error(result.reason);
+      if (tif !== "DAY") throw new Error("STOCK_DAY_REQUIRED");
+      stockMetadata = result.metadata;
+      contract = { conId: bound.conId, symbol: bound.brokerSymbol, secType: "STK", exchange: bound.exchange,
+        primaryExch: bound.instrument.primaryExchange, currency: bound.currency };
+      normalizedTicket = { ...ticket };
+    } else if (this.isKnownWseTicket(ticket) || (bound && isWseBound(bound))) {
       if (!bound || !isWseBound(bound) || !this.dependencies.loadWseMetadata)
         throw new Error("WSE_METADATA_BINDING_REQUIRED");
       metadata = await this.dependencies.loadWseMetadata(bound, accountId);
@@ -693,6 +736,10 @@ export class TwsExecutionClient {
       });
     }
     const prepared = { contract, normalizedTicket, plan, legs };
+    if (stockMetadata && bound) {
+      this.stockPreparations.set(prepared, { bound, metadata: stockMetadata, generation, accountId, fingerprint: JSON.stringify([prepared, [...prepared.plan.relatedOrderIds]]) });
+      this.assertStockDispatch(prepared);
+    }
     if (metadata && bound) {
       this.wsePreparations.set(prepared, { bound, metadata, generation, accountId, fingerprint: JSON.stringify([prepared, [...prepared.plan.relatedOrderIds]]) });
       this.assertWseDispatch(prepared);
@@ -716,6 +763,7 @@ export class TwsExecutionClient {
     await this.connect();
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     this.assertWseDispatch(prepared);
+    this.assertStockDispatch(prepared);
     if (isPkoIdentity(prepared.normalizedTicket) &&
       (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
     if (isAaplIdentity(prepared.normalizedTicket) && prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE" &&
@@ -727,17 +775,23 @@ export class TwsExecutionClient {
       this.connectionGeneration,
       windowDeadlineMs,
       sendWithEntryPermit,
+      () => { this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); },
     );
   }
 
   dispatchPreparedClose(
     prepared: PreparedBrokerOrder,
     expectedGeneration: number,
+    riskDeadlineMs?: number,
   ): Promise<PlaceOrderResult> {
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") throw new Error("CLOSE_POSITION_EFFECT_REQUIRED");
     this.assertConnectionGeneration(expectedGeneration);
+    const assertRiskDeadline = () => { if (!Number.isFinite(riskDeadlineMs) || Date.now() >= riskDeadlineMs!) throw new Error("CLOSE_RISK_EXPIRED"); };
+    assertRiskDeadline();
     this.assertWseDispatch(prepared);
-    return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration);
+    this.assertStockDispatch(prepared);
+    return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration, undefined, undefined,
+      () => { assertRiskDeadline(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); });
   }
 
   private dispatchPlan(
@@ -747,6 +801,7 @@ export class TwsExecutionClient {
     expectedGeneration?: number,
     windowDeadlineMs?: number,
     sendWithEntryPermit?: (send: () => void) => Promise<void>,
+    assertPrepared?: () => void,
   ): Promise<PlaceOrderResult> {
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
@@ -892,6 +947,7 @@ export class TwsExecutionClient {
       const send = () => {
         if (settled || sent) throw new Error("aapl_entry_permit_inactive");
         sent = true;
+        assertPrepared?.();
         if (isPkoIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("gpw_window_dispatch_expired");
         if (isAaplIdentity(ticket) && ticket.positionEffect !== "CLOSE_OR_REDUCE" &&

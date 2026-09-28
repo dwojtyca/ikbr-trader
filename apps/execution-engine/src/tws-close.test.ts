@@ -97,8 +97,20 @@ for (const reconnect of [false,true]) {
 }
 test("strict close dispatch uses existing persisted plan without reconnect", async () => {
   const {ib,client,input} = await fixture();
-  const result = await client.dispatchPreparedClose(prepared(),input.expectedGeneration);
+  const result = await client.dispatchPreparedClose(prepared(),input.expectedGeneration, Date.now() + 10000);
   assert.equal(result.brokerOrderId,"20");
   assert.deepEqual(ib.orders,[20]);
   assert.equal(ib.connections,1);
+});
+for (const deadline of [undefined, NaN, Infinity, 0]) test(`close dispatch requires finite fresh persisted risk deadline ${deadline}`, async () => {
+  const { ib, client, input } = await fixture();
+  assert.throws(() => client.dispatchPreparedClose(prepared(), input.expectedGeneration, deadline), /CLOSE_RISK_EXPIRED/);
+  assert.deepEqual(ib.orders, []);
+});
+test('close risk deadline is rechecked at synchronous send after dispatch setup', async () => {
+  const { ib, client, input } = await fixture(); const now = Date.now(), originalNow = Date.now; let reads = 0;
+  Date.now = () => ++reads === 1 ? now : now + 10000;
+  try { await assert.rejects(client.dispatchPreparedClose(prepared(), input.expectedGeneration, now + 10000), /CLOSE_RISK_EXPIRED/); }
+  finally { Date.now = originalNow; }
+  assert.deepEqual(ib.orders, []);
 });

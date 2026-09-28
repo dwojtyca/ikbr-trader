@@ -22,7 +22,8 @@ const decision = { decision: "EXECUTE", reason: "source evidence supports test",
   model: "fake-model", promptVersion: "test-v1", context: { news: [] } };
 
 function instrument(id = "test", symbol = "TEST"): Instrument {
-  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART",
+  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART", primaryExchange: "NASDAQ",
+    conId: id === "other" ? 456 : 123, localSymbol: symbol, tradingClass: symbol,
     assetClass: "stock", currency: "USD", metadata: { tags: [] },
     session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
     trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },
@@ -54,11 +55,13 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = false) {
   const repo = new ExecutionRepository(pool, pko ? window : undefined,undefined,focusedSubmissionTestSessionGuard);
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
-  const selectedInstrument = { ...instrument(pko ? "pko_wse" : "test", pko ? "PKO" : "TEST"), currency, exchange };
+  const selectedInstrument: Instrument = { ...instrument(pko ? "pko_wse" : "test", pko ? "PKO" : "TEST"), currency, exchange,
+    primaryExchange: currency === "PLN" ? "WSE" : "NASDAQ", conId: pko ? 35146360 : 123,
+    session: currency === "PLN" ? { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } : instrument().session };
   const makeTicket = (overrides: Partial<SignalTicket> = {}) => ticket({ ...(pko ? {instrumentId:"pko_wse",instrument:"PKO",conid:"35146360"} : {}), ...overrides });
   const authority = new InstrumentBindingAuthority(new InstrumentRegistry([selectedInstrument, instrument("other", "OTHER")]), [
     { instrumentId: selectedInstrument.id, conId: pko ? 35146360 : 123, localSymbol: selectedInstrument.brokerSymbol,
-      tradingClass: selectedInstrument.brokerSymbol, exchange, currency, minTick: 0.01 },
+      tradingClass: selectedInstrument.tradingClass!, exchange, currency, minTick: 0.01 },
     { instrumentId: "other", conId: 456, localSymbol: "OTHER", tradingClass: "OTHER", exchange: "SMART", currency: "USD", minTick: 0.01 },
   ]);
   const state = { prepares: 0, dispatches: 0, uncertain: false, staleQuote: false, ageDuringPrepare: false,

@@ -1,3 +1,7 @@
+import { buildSubmissionApplicationService, type SubmissionServiceDeps } from "./reconciliation/submission-service.js";
+import { parsePaperRunPolicy } from "./paper-run-policy.js";
+import { adoptPaperEntryBudget } from "./paper-entry-budget.js";
+import { buildPaperDailyLoss, paperAccountDayStart } from "./paper-daily-loss.js";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -29,8 +33,15 @@ async function install(pool:Pool,input=raw()){
 }
 async function prepare(pool:Pool){
  const configuration=await install(pool);let currentHash=computeTradingConfigurationHash(configuration);
- const repo=new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>currentHash);
  const at=(await pool.query("SELECT clock_timestamp() AS now")).rows[0].now as Date;
+ const loaded=loadTradingConfiguration({TRADING_CONFIG_MODE:"bundle",TRADING_CONFIG_PATH:"/test.json",TRADING_CONFIG_EXPECTED_HASH:currentHash},{readFile:()=>JSON.stringify(raw())});
+ const policy=parsePaperRunPolicy({IBKR_ENVIRONMENT:"paper",PAPER_RUN_POLICY_JSON:JSON.stringify({version:1,runId:"pp3-fixture",accountId,effectiveConfigHash:currentHash,accountDayTimeZone:"Europe/Warsaw",kind:"supervised_one_attempt",maxAttemptsPerAccountDay:1,maxAttemptsPerInstrumentDay:1,
+  windows:configuration.instruments.filter(i=>i.entryEnabled).map(i=>({instrumentId:i.id,conId:i.contract.conId,startsAt:new Date(at.getTime()-1000).toISOString(),endsAt:new Date(at.getTime()+120000).toISOString()})),
+  currencyCaps:{USD:{maxNotional:1000,maxStopRisk:10,feeReserve:5,maxDailyLoss:100},PLN:{maxNotional:1000,maxStopRisk:10,feeReserve:5,maxDailyLoss:100}}})},loaded)!;
+ const client=await pool.connect();try{await client.query("BEGIN");assert.ok((await adoptPaperEntryBudget(client,policy,{tradingEnabled:false})).ok);await client.query("COMMIT");}finally{client.release();}
+ let observed=0;
+ const context=()=>({accountId,sessionId,connectionGeneration:1,nowMs:Date.now(),lastBrokerFillObservedAt:observed});
+ const repo=new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>currentHash,{policy,context,resolveManagement:async()=>undefined});
  const bucket=Math.floor(at.getTime()/60_000)*60_000;
  await pool.query("INSERT INTO strategy_runtime_conversion(singleton,source_hash,v2_not_before_bucket_ms) VALUES(true,$1,$2)",[computeTradingConfigurationHash(configuration),bucket]);
  await pool.query("INSERT INTO broker_snapshot_syncs(account_id,session_id,generation,observed_at,complete) VALUES($1,$2,1,clock_timestamp(),true)",[accountId,sessionId]);
@@ -41,7 +52,7 @@ async function prepare(pool:Pool){
  };
  const insert=(t=ticket(),preflight=true,trustedObservedAt=at.toISOString())=>repo.insertProposedFromTicket(t,t.strategyAttribution!.implementationId,{clientOrderId:`loop:v4:${t.instrumentId}:${t.strategyAttribution!.implementationId}:${strategyTriggerId(t.strategyTrigger!)}`,clientOrderHash:computeClientOrderHash(t)},
   {kind:"available",accountId,sessionId,maxSnapshotAgeMs:60_000},preflight?{strategyPreflight:{effectiveConfigHash:t.strategyAttribution!.effectiveConfigHash,observedAt:trustedObservedAt}}:{});
- return {pool,repo,configuration,ticket,insert,at,setCurrentHash:(hash:string)=>{currentHash=hash;}};
+ return {pool,repo,configuration,ticket,insert,at,context,policy,observeEconomicEvent:()=>{observed=Date.now();},setCurrentHash:(hash:string)=>{currentHash=hash;}};
 }
 test("full migrations actual v2 insert/read and immutable proposal/review identity",{skip:!url},()=>fixture(async f=>{
  const t=f.ticket(),inserted=await f.insert(t);assert.equal(inserted.kind,"inserted",JSON.stringify(inserted));if(inserted.kind!=="inserted")return;
@@ -88,15 +99,21 @@ test("current loaded configuration rejects a historical but valid attributed pro
  assert.equal((await f.pool.query("SELECT count(*) n FROM proposed_orders")).rows[0].n,"0");
 }));
 
-async function submissionFixture(f:Awaited<ReturnType<typeof prepare>>){
- const inserted=await f.insert();assert.equal(inserted.kind,"inserted",JSON.stringify(inserted));if(inserted.kind!=="inserted")throw Error("fixture insert failed");
+async function submissionFixture(f:Awaited<ReturnType<typeof prepare>>, instrumentId="xyz_nyse"){
+ const inserted=await f.insert(f.ticket(f.configuration,instrumentId));assert.equal(inserted.kind,"inserted",JSON.stringify(inserted));if(inserted.kind!=="inserted")throw Error("fixture insert failed");
  const order=await f.repo.getProposedOrderById(inserted.id);assert.ok(order);
  const {BoundReviewRepository}=await import(new URL("../../llm-agent/src/bound-review-repository.ts",import.meta.url).href);
  const reviews=new BoundReviewRepository(f.pool,{effectiveConfigHash:computeTradingConfigurationHash(f.configuration)});
  const claim=await reviews.claim();assert.ok(claim);
  assert.equal(await reviews.finalize(claim,{decision:"EXECUTE",reason:"fixture evidence",confidence:.8,model:"fixture",promptVersion:"fixture_v1",context:{}}),true);
  const now=Date.now(),stamp=f.at.toISOString();
- const risk:AiEntryRiskEvidence={accountId,sessionId,instrumentId:order.instrumentId!,conid:order.conid!,assessedAtMs:now,validUntilMs:now+60_000,
+ const through=new Date(now-10).toISOString(),source=(count:number)=>({available:true,boundedWindow:true,timedOut:false,count});
+ const coverage={positions:source(0),openOrders:source(0),completedOrders:source(0),session:source(1),executions:{available:true,timedOut:false,count:0,window:{from:new Date(paperAccountDayStart(now)).toISOString(),certifiedFrom:new Date(paperAccountDayStart(now)).toISOString(),to:through,exposureWindowComplete:true,recoveryWindowComplete:true}}};
+ const snapshot={accountId,sessionId,connectionGeneration:1,capturedAt:through,exposureComplete:true,recoveryComplete:true,sourceCoverage:coverage,positions:[],openOrders:[],completedOrders:[],executions:[]};
+ const run=(await f.pool.query(`INSERT INTO reconciliation_runs(account_id,session_id,started_at,completed_at,status,snapshot_complete,source_coverage,broker_snapshot,position_generation) VALUES($1,$2,$3,$3,'CLEAN',true,$4,$5,1) RETURNING *`,[accountId,sessionId,through,JSON.stringify(coverage),JSON.stringify(snapshot)])).rows[0];
+ const sync=(await f.pool.query("SELECT * FROM broker_snapshot_syncs WHERE account_id=$1",[accountId])).rows[0];
+ const daily=buildPaperDailyLoss({run,sync,fills:[]},f.context());assert.ok(daily.ok,JSON.stringify(daily));
+ const risk:AiEntryRiskEvidence={dailyLossEvidence:daily.evidence,accountId,sessionId,instrumentId:order.instrumentId!,conid:order.conid!,assessedAtMs:now,validUntilMs:now+60_000,
   accountRequestStartedAt:stamp,accountCompletedAt:stamp,bidObservedAt:stamp,askObservedAt:stamp,bid:99.99,ask:100,
   netLiquidation:10000,availableFunds:5000,grossPositionValue:0,notional:100,stopRisk:1,quoteCurrency:"USD",valuationCurrency:"USD",
   quoteNotional:100,quoteStopRisk:1,fxToUsd:1,fxValuationBuffer:1,fxSource:"same_currency",limits:{maxNotionalPct:10,maxStopRiskPct:.5,maxExposurePct:25},
@@ -179,4 +196,73 @@ test("conversion cutoff rejects previous-bucket trigger and admits exact cutoff 
  assert.equal((await f.pool.query("SELECT count(*) n FROM strategy_trigger_fences")).rows[0].n,"0");
  const current=f.ticket();assert.equal(current.strategyTrigger!.bucketStartMs,cutoff);
  assert.equal((await f.insert(current)).kind,"inserted");
+}));
+
+for (const instrumentId of ["pko_wse","aapl_smart","xyz_nyse"]) test(`PP3 shared reservation/dispatch audit for ${instrumentId}`,{skip:!url},()=>fixture(async f=>{
+ const s=await submissionFixture(f,instrumentId);
+ const reserved=await s.reserve(s.risk);assert.equal(reserved.kind,"claimed_with_persisted_plan",JSON.stringify(reserved));
+ let sends=0;await f.repo.withEntryDispatchPermit(s.order,accountId,()=>{sends++;});assert.equal(sends,1);
+ const evidence=await f.repo.getRoundTripEvidence(s.id,accountId);assert.equal(evidence?.window?.source,"paper");
+ assert.equal(evidence?.window?.instrumentId,instrumentId);assert.equal(evidence?.window?.attemptId,String(s.id));
+ assert.equal(evidence?.window?.effectiveConfigHash,s.order.strategyAttribution!.effectiveConfigHash);
+ assert.equal((await s.reserve(s.risk)).kind,"not_claimed");
+}));
+test("PP3 competing instruments share one account intent and reservation",{skip:!url},()=>fixture(async f=>{
+ const results=await Promise.all([f.insert(f.ticket(f.configuration,"pko_wse")),f.insert(f.ticket(f.configuration,"aapl_smart")),f.insert()]);
+ assert.equal(results.filter(r=>r.kind==="inserted").length,1);
+ assert.equal(results.filter(r=>r.kind==="active_intent_exists").length,2);
+ assert.equal((await f.pool.query("SELECT count(*) n FROM proposed_orders")).rows[0].n,"1");
+}));
+test("PP3 crash/unknown send keeps attempt and restarted service never resends",{skip:!url},()=>fixture(async f=>{
+ const s=await submissionFixture(f);assert.equal((await s.reserve(s.risk)).kind,"claimed_with_persisted_plan");
+ let sends=0;await assert.rejects(f.repo.withEntryDispatchPermit(s.order,accountId,()=>{sends++;throw Error("lost broker acknowledgement");}),/lost broker acknowledgement/);
+ const repo=new ExecutionRepository(f.pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>s.risk.strategyEffectiveConfigHash,
+  {policy:f.policy,context:f.context,resolveManagement:async()=>undefined});
+ const service=buildSubmissionApplicationService({repo,assertEntryAllowed:async()=>{},dispatcher:{dispatch:async()=>{sends++;throw Error("must not resend");}}} as unknown as SubmissionServiceDeps);
+ const result=await service.executeProposed({proposedOrderId:s.id,overrideRejected:false});assert.equal(result.kind,"duplicate_pending_ambiguous");assert.equal(sends,1);
+ assert.equal((await f.pool.query("SELECT count(*) n FROM paper_entry_attempts WHERE proposed_order_id=$1",[s.id])).rows[0].n,"1");
+}));
+test("PP3 late accounting correction after reservation aborts callback and retains attempt",{skip:!url},()=>fixture(async f=>{
+ const s=await submissionFixture(f);assert.equal((await s.reserve(s.risk)).kind,"claimed_with_persisted_plan");
+ await f.repo.applyBrokerCommissionReport({execId:"late-unknown",commission:2,currency:"USD",realizedPnL:-5});
+ let sends=0;await assert.rejects(f.repo.withEntryDispatchPermit(s.order,accountId,()=>{sends++;}),/paper_daily_loss_changed/);
+ assert.equal(sends,0);assert.equal((await f.pool.query("SELECT count(*) n FROM paper_entry_attempts WHERE proposed_order_id=$1",[s.id])).rows[0].n,"1");
+}));
+test("PP3 FILLED status without proven terminal ownership blocks another instrument even on a later day",{skip:!url},()=>fixture(async f=>{
+ // An old attempted legacy fill has no complete lifecycle evidence. Adoption has already happened;
+ // fixture disables only the old-writer guard to model imported prior state, then restores it.
+ await f.pool.query("ALTER TABLE proposed_orders DISABLE TRIGGER paper_writer_guard");
+ await f.pool.query("ALTER TABLE proposed_orders DISABLE TRIGGER proposed_strategy_identity_immutable");
+ try {await f.pool.query(`INSERT INTO proposed_orders(instrument,instrument_id,conid,side,order_type,quantity,entry,reason,confidence,risk_check_status,status,execution_account_id,execution_attempted_at)
+ VALUES('OLD','old','888','BUY','LMT',1,10,'fixture',1,'PASS','FILLED',$1,clock_timestamp()-interval '1 day')`,[accountId]);}
+ finally {await f.pool.query("ALTER TABLE proposed_orders ENABLE TRIGGER paper_writer_guard");await f.pool.query("ALTER TABLE proposed_orders ENABLE TRIGGER proposed_strategy_identity_immutable");}
+ const result=await f.insert();assert.equal(result.kind,"active_intent_exists",JSON.stringify(result));
+}));
+
+test("PP3 observed fill or commission during final awaited validation blocks synchronous send",{skip:!url},()=>fixture(async f=>{
+ const s=await submissionFixture(f);assert.equal((await s.reserve(s.risk)).kind,"claimed_with_persisted_plan");
+ const connect=f.pool.connect.bind(f.pool);let injected=false;
+ f.pool.connect=(async()=>{const client=await connect();const query=client.query.bind(client);client.query=(async(...args:unknown[])=>{
+  const result=await (query as (...args:unknown[])=>Promise<unknown>)(...args);
+  // validateStrategyInstanceEntry reads original snapshot after daily proof revalidation.
+  if (!injected && String(args[0]).includes("trading_configuration_instance_revisions")) {injected=true;f.observeEconomicEvent();}
+  return result;
+ }) as typeof client.query;return client;}) as typeof f.pool.connect;
+ let sends=0;await assert.rejects(f.repo.withEntryDispatchPermit(s.order,accountId,()=>{sends++;}),/paper_daily_loss_changed/);
+ assert.equal(injected,true);assert.equal(sends,0);
+}));
+test("PP3 later unset commission P&L cannot inherit previously complete day economics",{skip:!url},()=>fixture(async f=>{
+ await submissionFixture(f);
+ const stamp=new Date(Date.now()-100).toISOString();
+ const exec={execId:"corrected",accountId,conId:"987654",secType:"STK",brokerOrderId:"9999",side:"SELL",shares:1,price:100,currency:"USD",executedAt:stamp};
+ await f.pool.query(`INSERT INTO broker_execution_fills(exec_id,account_id,conid,sec_type,broker_order_id,side,shares,price,currency,executed_at) VALUES($1,$2,$3,'STK',$4,'SELL',1,100,'USD',$5)`,[exec.execId,accountId,exec.conId,exec.brokerOrderId,stamp]);
+ await f.repo.applyBrokerCommissionReport({execId:"corrected",commission:1,currency:"USD",realizedPnL:-2});
+ const row=(await f.pool.query("SELECT * FROM reconciliation_runs ORDER BY id DESC LIMIT 1")).rows[0];
+ row.broker_snapshot.executions=[exec];row.broker_snapshot.sourceCoverage.executions.count=1;
+ await f.pool.query("UPDATE reconciliation_runs SET broker_snapshot=$2,source_coverage=$3 WHERE id=$1",[row.id,JSON.stringify(row.broker_snapshot),JSON.stringify(row.broker_snapshot.sourceCoverage)]);
+ const {readPaperDailyLoss}=await import('./paper-daily-loss.js');
+ const before=await readPaperDailyLoss(f.pool,f.context());assert.ok(before.ok,JSON.stringify(before));
+ await f.repo.applyBrokerCommissionReport({execId:"corrected",commission:1,currency:"USD",realizedPnL:1.7976931348623157e308});
+ const after=await readPaperDailyLoss(f.pool,f.context());assert.equal(after.ok,false);
+ assert.equal((await f.pool.query("SELECT realized_pnl FROM broker_execution_fills WHERE exec_id='corrected'")).rows[0].realized_pnl,null);
 }));

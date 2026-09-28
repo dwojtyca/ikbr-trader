@@ -23,7 +23,8 @@ const decision = { decision: "EXECUTE", reason: "source evidence supports test",
   model: "fake-model", promptVersion: "test-v1", context: { news: [] } };
 
 function instrument(id = "test", symbol = "TEST"): Instrument {
-  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART",
+  return { id, displayName: "Synthetic integration fixture", broker: "ibkr", brokerSymbol: symbol, exchange: "SMART", primaryExchange: "NASDAQ",
+    conId: id === "other" ? 456 : 123, localSymbol: symbol, tradingClass: symbol,
     assetClass: "stock", currency: "USD", metadata: { tags: [] },
     session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
     trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },
@@ -62,11 +63,13 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   const repo = new ExecutionRepository(pool, undefined, window, createSessionEntryGuard(id => authority.getBoundInstrument(id)));
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
-  const selectedInstrument = { ...instrument(pko ? "aapl_nasdaq" : "test", pko ? "AAPL" : "TEST"), currency, exchange };
+  const selectedInstrument: Instrument = { ...instrument(pko ? "aapl_nasdaq" : "test", pko ? "AAPL" : "TEST"), currency, exchange,
+    primaryExchange: currency === "PLN" ? "WSE" : "NASDAQ", conId: pko ? 265598 : 123, tradingClass: pko ? "NMS" : "TEST",
+    session: currency === "PLN" ? { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } : instrument().session };
   const makeTicket = (overrides: Partial<SignalTicket> = {}) => ticket({ ...(pko ? {instrumentId:"aapl_nasdaq",instrument:"AAPL",conid:"265598"} : {}), ...overrides });
   const authority = new InstrumentBindingAuthority(new InstrumentRegistry([selectedInstrument, instrument("other", "OTHER")]), [
     { instrumentId: selectedInstrument.id, conId: pko ? 265598 : 123, localSymbol: selectedInstrument.brokerSymbol,
-      tradingClass: selectedInstrument.brokerSymbol, exchange, currency, minTick: 0.01 },
+      tradingClass: selectedInstrument.tradingClass!, exchange, currency, minTick: 0.01 },
     { instrumentId: "other", conId: 456, localSymbol: "OTHER", tradingClass: "OTHER", exchange: "SMART", currency: "USD", minTick: 0.01 },
   ]);
   const bound = authority.getBoundInstrument(selectedInstrument.id)!;
@@ -380,7 +383,7 @@ describe('PKO morning window uses the same production calendar guard', {skip:!co
   it('Warsaw09:01 is allowed only by a matching active session; holiday and shortened-window crossing reject',async()=>{
     const f=await fixture('USD',false);
     try {
-      const profile:Instrument={...instrument('pko_wse','PKO'),exchange:'WSE',currency:'PLN',session:{useRegularTradingHours:true,timezone:'Europe/Warsaw',sessionTemplate:'wse_stock_rth'}};
+      const profile:Instrument={...instrument('pko_wse','PKO'),conId:35146360,primaryExchange:'WSE',exchange:'WSE',currency:'PLN',session:{useRegularTradingHours:true,timezone:'Europe/Warsaw',sessionTemplate:'wse_stock_rth'}};
       const authority=new InstrumentBindingAuthority(new InstrumentRegistry([profile]),[{instrumentId:'pko_wse',conId:35146360,localSymbol:'PKO',tradingClass:'PKO',exchange:'WSE',currency:'PLN',minTick:.01}]);
       const bound=authority.getBoundInstrument('pko_wse')!;
       const clock='2026-09-24T07:01:00.000Z';

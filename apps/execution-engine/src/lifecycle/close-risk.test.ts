@@ -1,4 +1,4 @@
-import { wseMetadataFixture } from "../wse-market-rules.fixture.js";
+import { stockMetadataFixture } from "../stock-market-test-fixture.js";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { SignalTicket } from "@ikbr/shared";
@@ -19,11 +19,12 @@ function setup() {
   const bound = f.context.bound!;
   const exchange = currency === "PLN" ? "WSE" : "SMART";
   Object.assign(bound, { currency, exchange });
-  Object.assign(bound.instrument, { currency, exchange });
-  const metadata = currency === "PLN" ? wseMetadataFixture(bound, context.accountId, nowMs) : undefined;
+  Object.assign(bound.instrument, { currency, exchange, primaryExchange: currency === "PLN" ? "WSE" : "NASDAQ",
+    session: { useRegularTradingHours: true, timezone: currency === "PLN" ? "Europe/Warsaw" : "America/New_York" } });
+  const metadata = stockMetadataFixture(bound, context.accountId, nowMs);
   const assess = () => assessCloseRisk(ticket, bound, context, watchlist, metadata);
   const ref = deriveParentOrderRef("close-test");
-  const prepared: PreparedBrokerOrder = { contract: { symbol: "TEST", conId: 123, secType: "STK", currency, exchange },
+  const prepared: PreparedBrokerOrder = { contract: { symbol: "TEST", conId: 123, secType: "STK", currency, exchange, primaryExch: bound.instrument.primaryExchange },
     normalizedTicket: { ...ticket }, legs: [{ role: "PARENT", roleOrdinal: 0, brokerOrderId: "200", orderRef: ref }],
     plan: { parentOrderId: 200, relatedOrderIds: new Set([200]), orders: [{ orderId: 200, order: {
       action: "SELL", totalQuantity: 1, orderType: "LMT", lmtPrice: 100, tif: "DAY", account: "DU_TEST", transmit: true, orderRef: ref } }] } };

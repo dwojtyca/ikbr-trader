@@ -2213,7 +2213,7 @@ it("configured scheduler evaluates with denied entry and never touches legacy or
  let evaluations=0;
  const forbidden=async()=>{throw Error("forbidden side effect");};
  const svc=new TradingLoopService({config:makeConfig(),registry:makeRegistry([makeInstrument("aapl")]),
-  configuredStrategyRuntime:{listInstrumentIds:()=>["aapl"],evaluate:async instrumentId=>{evaluations++;return {kind:"no_signal",instrumentId,reasons:[],entryAllowed:false,entryBlockers:["PP3_EXECUTION_POLICY_UNAVAILABLE"]};}},
+  configuredStrategyRuntime:{listInstrumentIds:()=>["aapl"],evaluate:async instrumentId=>{evaluations++;return {kind:"no_signal",instrumentId,reasons:[],entryAllowed:false,entryBlockers:["PP4_RESEARCH_UNAVAILABLE"]};}},
   assertEntryAllowed:forbidden,marketDataRuntime:{dryRun:forbidden} as unknown as MarketDataRuntime,
   executionRuntime:{executePrepared:forbidden} as unknown as ExecutionRuntime,exposureReader:{readExposure:forbidden,probeReady:forbidden},
   reconciliationReader:{checkInstrument:forbidden} as unknown as ReconciliationReader,repo:{syncStrategyRuntimeStates:forbidden} as unknown as StrategyRuntimeStateRepository,

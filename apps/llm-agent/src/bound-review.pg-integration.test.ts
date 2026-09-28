@@ -1,4 +1,4 @@
-import { after, before, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
@@ -15,7 +15,7 @@ describe("bound AI repository on real PostgreSQL", { skip: !connection }, () => 
   let pool: Pool;
   let repo: BoundReviewRepository;
   const database = `ikbr_ai_${randomUUID().replaceAll('-', '')}`;
-  before(async () => {
+  beforeEach(async () => {
     const url = new URL(connection!);
     url.pathname = "/postgres";
     admin = new Pool({ connectionString: url.toString() });
@@ -28,11 +28,10 @@ describe("bound AI repository on real PostgreSQL", { skip: !connection }, () => 
     }
     repo = new BoundReviewRepository(pool);
   });
-  after(async () => {
+  afterEach(async () => {
     await pool?.end();
     if (admin) { await admin.query(`DROP DATABASE IF EXISTS ${database}`); await admin.end(); }
   });
-  beforeEach(async () => { await pool.query("TRUNCATE proposed_orders CASCADE"); });
 
   async function seed(expires = "clock_timestamp() + interval '120 seconds'") {
     const order = await pool.query(`INSERT INTO proposed_orders

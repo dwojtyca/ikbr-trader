@@ -1,3 +1,4 @@
+import { stockMetadataFixture } from '../stock-market-test-fixture.js';
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { InstrumentRegistry, InstrumentBindingAuthority, type SignalTicket } from "@ikbr/shared";
@@ -66,7 +67,7 @@ for (const removal of [true, false]) test(`owned close preserves original author
       risks++;
       const watchlist = { connected: true, watchlist: ingested.boundWatchlist.map(row => ({ instrumentId: row.instrumentId, conid: row.conid, subscribed: true,
         marketState: { conid: row.conid, bid: 100, ask: 100.1, marketDataType: 1, bidObservedAt: new Date(clock - 1).toISOString(), askObservedAt: new Date(clock - 1).toISOString() } })) };
-      const risk = assessCloseRisk(ticket, retained, ctx, watchlist);
+      const risk = assessCloseRisk(ticket, retained, ctx, watchlist, stockMetadataFixture(retained, ctx.accountId, clock));
       assert.equal(risk.ok, true, risk.reasons.join(",")); return risk;
     },
     prepare: async () => { preparations++; throw Error("fixture_after_valid_close_risk"); },
@@ -75,7 +76,7 @@ for (const removal of [true, false]) test(`owned close preserves original author
   });
   const result = await service.request(42, "fixture-request", 100, "fixture");
   assert.equal(result.failureReason, "fixture_after_valid_close_risk");
-  assert.equal(risks, 1); assert.equal(preparations, 1);
+  assert.equal(risks, 2); assert.equal(preparations, 1);
   assert.equal(computeClientOrderHash(f.order), f.evidence.clientOrderHash);
 });
 
@@ -85,7 +86,7 @@ test("missing management or changed retained identity cannot manufacture close o
   const owned = [{ instrumentId: "test", conId: "123", symbol: "TEST", strategy: "test_strategy", clientOrderHash: f.evidence.clientOrderHash }];
   assert.throws(() => validateRetainedOwnership(null, owned), /SNAPSHOT_REQUIRED/);
   assert.throws(() => validateRetainedOwnership(authority, [{ ...owned[0], conId: "999" }]), /SNAPSHOT_REQUIRED/);
-  const changed = new InstrumentBindingAuthority(new InstrumentRegistry([b.instrument]), [{ ...binding, conId: 999 }]);
+  const changed = new InstrumentBindingAuthority(new InstrumentRegistry([{ ...b.instrument, conId: 999 }]), [{ ...binding, conId: 999 }]);
   assert.throws(() => assertManagementCompatibility(changed, authority), /IDENTITY_CONFLICT/);
   const ticket = { ...f.order, side: "SELL", positionEffect: "CLOSE_OR_REDUCE", stop: undefined, takeProfit: undefined } as SignalTicket;
   assert.equal(assessCloseRisk(ticket, null, { accountId: "DU_TEST", sessionId: "current", clientId: 7, generation: 1, nowMs, bound: null }, {}).ok, false);

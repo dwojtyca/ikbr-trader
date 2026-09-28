@@ -35,13 +35,13 @@ export class ConfigurationMetadataClient {
     createSocket?: () => ConfigurationMetadataSocket; now?: () => number; timeoutMs?: number;
   } = {}) {}
 
-  load(instrument: TradingInstrumentV1, accountId: string): Promise<TradingConfigurationBrokerObservation> {
+  load(instrument: Pick<TradingInstrumentV1, "contract">, accountId: string): Promise<TradingConfigurationBrokerObservation> {
     const result = this.queue.then(() => this.read(instrument, accountId));
     this.queue = result.catch(() => undefined);
     return result;
   }
 
-  private read(instrument: TradingInstrumentV1, accountId: string): Promise<TradingConfigurationBrokerObservation> {
+  private read(instrument: Pick<TradingInstrumentV1, "contract">, accountId: string): Promise<TradingConfigurationBrokerObservation> {
     const now = this.deps.now ?? Date.now;
     const requestStartedAt = new Date(now()).toISOString();
     return new Promise(resolve => {

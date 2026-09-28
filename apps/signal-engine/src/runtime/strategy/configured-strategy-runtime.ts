@@ -48,7 +48,7 @@ export class ConfiguredStrategyRuntime {
   listInstrumentIds(): readonly string[] { return this.options.configuration.instruments.map(row => row.id); }
   async evaluate(instrumentId: string): Promise<ConfiguredStrategyEvaluation> {
     const result = (kind: ConfiguredStrategyEvaluation["kind"], reasons: string[], rest: Partial<ConfiguredStrategyEvaluation> = {}): ConfiguredStrategyEvaluation =>
-      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(["PP3_EXECUTION_POLICY_UNAVAILABLE", "PP4_RESEARCH_UNAVAILABLE"]) });
+      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(["PP4_RESEARCH_UNAVAILABLE"]) });
     const row = this.options.configuration.instruments.find(i => i.id === instrumentId);
     if (!row) return result("error", ["INSTRUMENT_NOT_CONFIGURED"]);
     if (!row.entryEnabled || !row.monitoringEnabled) return result("disabled", ["ENTRY_DISABLED"]);

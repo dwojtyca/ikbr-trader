@@ -1,3 +1,5 @@
+import { adoptPaperEntryBudget } from "./paper-entry-budget.js";
+import { readPaperDailyLoss, assessPaperDailyLoss } from "./paper-daily-loss.js";
 import { ConfigurationMetadataClient } from "./configuration-metadata-client.js";
 import { registerConfigurationMetadataRoutes } from "./configuration-metadata-routes.js";
 import { createSessionEntryGuard } from "./session-entry-guard.js";
@@ -20,10 +22,10 @@ import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { z } from "zod";
-import { ProposedOrder, ProposedOrderStatus, SignalTicket } from "@ikbr/shared";
+import { ProposedOrder, ProposedOrderStatus, SignalTicket, getSupportedStockCapability, type BoundInstrument } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { config, tradingConfiguration } from "./config.js";
-import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
+import { createTradingConfigurationRuntime, TradingConfigurationStore, readOriginalStockManagementInstrument, stockMetadataFromObservation } from "@ikbr/shared/trading-config";
 import {
   DecisionActor,
   ExecutionRepository,
@@ -70,7 +72,9 @@ const configurationRuntime = createTradingConfigurationRuntime({
   legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
 });
 const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)),
-  () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined);
+  () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
+  { policy: config.paperRunPolicy, context: paperDailyContext, resolveManagement: async (order, db) => order.strategyAttribution
+    ? readOriginalStockManagementInstrument(db, order.strategyAttribution) : configurationRuntime.resolveManagementInstrument(order.instrumentId!) });
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -280,6 +284,7 @@ const tws = new TwsExecutionClient(
     })();
   },
   (report) => {
+    lastBrokerFillObservedAt = Date.now();
     void repo.applyBrokerCommissionReport(report).catch((err) => {
       app.log.warn(
         { report, err },
@@ -288,7 +293,8 @@ const tws = new TwsExecutionClient(
     });
   },
   { resolveBoundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
-    resolveManagementInstrument: id => configurationRuntime.resolveManagementInstrument(id),
+    resolveManagementInstrument: resolveOriginalManagementInstrument,
+    loadStockMetadata,
     assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
@@ -937,6 +943,7 @@ app.get("/execution/configuration", async () => {
   await configurationRuntime.admission();
   return { ...configurationRuntime.diagnostics(configurationMetadataRoutes.evidence()), consumers: await configurationStore.readAdmissionState() };
 });
+app.get("/execution/paper-window", async () => repo.getPaperWindowStatus(lastActiveAccountId));
 app.get('/execution/aapl-window', async () => repo.getAaplWindowStatus(lastActiveAccountId));
 registerGpwRoutes(app, {
   currentAccountId: () => lastActiveAccountId,
@@ -982,12 +989,34 @@ const submissionService = buildSubmissionApplicationService({
       tws.getAccountSnapshot(accountId),
       fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
         { signal: AbortSignal.timeout(5000) }),
-      isWseBound(bound) ? wseMetadata.load(bound, accountId) : Promise.resolve(undefined),
+      order.strategyAttribution ? loadStockMetadata(bound, accountId) : isWseBound(bound) ? wseMetadata.load(bound, accountId) : Promise.resolve(undefined),
     ]);
     if (!response.ok) return { ok: false, reason: "ingestion_unavailable" };
-    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot, wseMetadata: metadata,
+    let dailyLossEvidence;
+    let quoteCurrency;
+    if (order.strategyAttribution) {
+      const policy = config.paperRunPolicy;
+      const capability = getSupportedStockCapability(bound);
+      const instrument = tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.configuration.instruments.find(row => row.id === bound.instrumentId) : undefined;
+      const riskPolicy = instrument && tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.configuration.riskPolicies.find(row => row.id === instrument.riskPolicyId) : undefined;
+      const caps = capability ? policy?.currencyCaps[capability.quoteCurrency] : undefined;
+      const context = paperDailyContext();
+      if (!policy || !caps || !riskPolicy || !capability || !context || context.accountId !== accountId || context.sessionId !== sessionId)
+        return { ok: false, reason: "paper_risk_policy_unavailable" };
+      const day = await readPaperDailyLoss(pool, context);
+      if (!day.ok) return day;
+      for (const [currency, limit] of Object.entries(policy.currencyCaps)) {
+        const checked = assessPaperDailyLoss(day.evidence, { ...context, quoteCurrency: currency as "USD" | "PLN", maxDailyLoss: limit.maxDailyLoss });
+        if (!checked.ok) return checked;
+      }
+      dailyLossEvidence = day.evidence;
+      quoteCurrency = { ...caps, currency: capability.quoteCurrency, maxNotional: Math.min(caps.maxNotional, riskPolicy.maxEntryNotional.amount) };
+    }
+    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot,
+      ...(order.strategyAttribution ? { stockMetadata: metadata, dailyLossEvidence } : { wseMetadata: metadata }),
       effectiveConfigHash: tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
       watchlist: await response.json(), nowMs: Date.now(), limits: {
+        quoteCurrency,
         maxNotionalPct: config.EXECUTION_AI_MAX_NOTIONAL_PCT,
         maxStopRiskPct: config.EXECUTION_AI_MAX_STOP_RISK_PCT,
         maxExposurePct: config.EXECUTION_AI_MAX_EXPOSURE_PCT,
@@ -1639,12 +1668,44 @@ registerCancelProposedRoute(app, {
   requestReconciliation: () => reconScheduler.triggerNow(),
 });
 
+function paperDailyContext() {
+  return lastActiveAccountId && tws.isConnected() ? { accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
+    connectionGeneration: tws.getConnectionGeneration(), nowMs: Date.now(), lastBrokerFillObservedAt } : null;
+}
+async function resolveOriginalManagementInstrument(id: string, originalProposalId?: number): Promise<BoundInstrument | undefined> {
+  if (originalProposalId !== undefined) {
+    const order = await repo.getProposedOrderById(originalProposalId);
+    if (!order || order.instrumentId !== id) return undefined;
+    if (order.strategyAttribution) return readOriginalStockManagementInstrument(pool, order.strategyAttribution);
+  }
+  return configurationRuntime.resolveManagementInstrument(id);
+}
+async function loadStockMetadata(bound: BoundInstrument, accountId: string) {
+  const capability = getSupportedStockCapability(bound);
+  if (!capability || accountId !== lastActiveAccountId || !tws.isConnected()) throw new Error("stock_metadata_account_unavailable");
+  const generation = tws.getConnectionGeneration();
+  const [observation, result] = await Promise.all([
+    configurationMetadata.load({ contract: { broker: "ibkr", symbol: bound.brokerSymbol, conId: bound.conId,
+      exchange: capability.exchange, primaryExchange: capability.primaryExchange, currency: capability.quoteCurrency,
+      localSymbol: bound.localSymbol!, tradingClass: bound.tradingClass!, expectedMinTick: bound.minTick } }, accountId),
+    pool.query(`SELECT generation,status,evidence,updated_at FROM instrument_session_schedules
+      WHERE instrument_id=$1 AND conid=$2 AND use_rth=true`, [bound.instrumentId, String(bound.conId)]),
+  ]);
+  if (generation !== tws.getConnectionGeneration() || accountId !== lastActiveAccountId || !tws.isConnected()) throw new Error("stock_metadata_session_changed");
+  const row = result.rows[0];
+  return stockMetadataFromObservation(bound, accountId, { ...observation, sessionEvidence: row ? {
+    generation: Number(row.generation), status: row.status, schedule: row.evidence, updatedAt: new Date(row.updated_at).toISOString(),
+  } : null });
+}
+
 const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
-  context: (instrumentId) => lastActiveAccountId && tws.isConnected() ? {
-    accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
-    clientId: tws.getClientId(), generation: tws.getConnectionGeneration(), nowMs: Date.now(),
-    bound: configurationRuntime.resolveManagementInstrument(instrumentId) ?? null,
-  } : null,
+  context: async (instrumentId, originalProposalId) => {
+    const accountId = lastActiveAccountId, generation = tws.getConnectionGeneration();
+    if (!accountId || !tws.isConnected()) return null;
+    const bound = await resolveOriginalManagementInstrument(instrumentId, originalProposalId);
+    if (accountId !== lastActiveAccountId || generation !== tws.getConnectionGeneration() || !tws.isConnected()) return null;
+    return { accountId, sessionId: EXECUTION_PROCESS_OWNER_ID, clientId: tws.getClientId(), generation, nowMs: Date.now(), bound: bound ?? null };
+  },
   refresh: async () => {
     if (!lastActiveAccountId) throw new CloseConflict("close_account_unavailable");
     await refreshBrokerPositionSnapshot(lastActiveAccountId);
@@ -1655,7 +1716,7 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
     const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
       { signal: AbortSignal.timeout(5000) });
     if (!response.ok) throw new CloseConflict("close_quote_unavailable");
-    const metadata = isWseBound(bound) ? await wseMetadata.load(bound, context.accountId) : undefined;
+    const metadata = getSupportedStockCapability(bound) ? await loadStockMetadata(bound, context.accountId) : isWseBound(bound) ? await wseMetadata.load(bound, context.accountId) : undefined;
     return assessCloseRisk(ticket, bound, { ...context, nowMs: Date.now() }, await response.json(), metadata);
   },
   prepare: async (ticket, clientOrderId, originalProposalId) => {
@@ -1677,8 +1738,8 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
     return { ...leg, status: "CANCELLED", confirmedAt: terminal.confirmedAt,
       generation: terminal.connectionGeneration, sessionId: context.sessionId };
   },
-  dispatch: async (prepared, _operation, context) => {
-    await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation);
+  dispatch: async (prepared, operation, context) => {
+    await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation, Date.parse(operation.riskExpiresAt ?? ""));
   },
   alert: async (operation, reason) => {
     await alerts.record({ severity: "CRITICAL", kind: "system",
@@ -1693,7 +1754,7 @@ registerLifecycleRoutes(app, {
   repository: repo,
   currentAccountId: () => lastActiveAccountId,
   currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
-  boundInstrument: (id) => configurationRuntime.resolveManagementInstrument(id) ?? null,
+  boundInstrument: async (id, order) => (await resolveOriginalManagementInstrument(id, order?.id)) ?? null,
 });
 
 app.post("/execution/execute-ticket", async (request, reply) => {
@@ -1764,6 +1825,16 @@ async function main(): Promise<void> {
   try {
     await repo.init();
     await configurationRuntime.initialize();
+    if (config.paperRunPolicy) {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const adoption = await adoptPaperEntryBudget(client, config.paperRunPolicy, { tradingEnabled: config.TRADING_ENABLED === "true" });
+        await client.query("COMMIT");
+        if (!adoption.ok) throw new Error(adoption.reason);
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    }
     configurationRuntime.startHeartbeat(error => app.log.error({ err: error }, "configuration heartbeat failed"));
     app.log.info("database migrations up to date");
   } catch (err) {

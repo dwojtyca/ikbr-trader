@@ -1,9 +1,13 @@
 import type { LoadedTradingConfiguration } from "./loader.js";
 import { canonicalizeTradingConfiguration, computeStrategyInstanceHash, decodeTradingConfigurationSnapshot } from "./identity.js";
-import { createLegacyManagementSnapshot, decodeLegacyManagementSnapshot, validateRetainedOwnership, assertManagementCompatibility, type RetainedOwnershipIdentity } from "./management.js";
+import { createLegacyManagementSnapshot, decodeLegacyManagementSnapshot, validateRetainedOwnership, assertManagementCompatibility, type RetainedOwnershipIdentity, validateAttributedManagementCompatibility } from "./management.js";
 import { buildTradingConfigurationProjection } from "./projection.js";
 import { TRADING_CONFIGURATION_SERVICES, type TradingConfigurationAdmissionState, type TradingConfigurationObservation, type TradingConfigurationService } from "./admission.js";
-import type { InstrumentBindingAuthority } from "../instruments/bindings.js";
+import type { BoundInstrument, InstrumentBindingAuthority } from "../instruments/bindings.js";
+import { readOriginalStockManagementInstrument } from "./stock-management.js";
+import { computeClientOrderHash } from "../client-order-hash.js";
+import { parseStrategyAttribution, parseStrategyTrigger } from "../strategy-attribution.js";
+import type { SignalTicket } from "../index.js";
 import { preparePP2Conversion } from "./strategy-conversion.js";
 
 export interface TradingConfigurationDb { query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }
@@ -13,8 +17,12 @@ export interface TradingConfigurationRegistration {
   readonly service: TradingConfigurationService; readonly processId: string; readonly loaded: LoadedTradingConfiguration;
   readonly tradingEnabled: boolean; readonly legacyAuthority?: InstrumentBindingAuthority;
 }
+export interface AttributedManagementOwnership { readonly originalProposalId: number; readonly bound: BoundInstrument; readonly identity: RetainedOwnershipIdentity }
+interface StoredOwnership extends RetainedOwnershipIdentity { readonly originalProposalId: number; readonly attributed: boolean }
 export interface TradingConfigurationRegistrationResult {
   readonly preparationPending: boolean; readonly managementAuthority: InstrumentBindingAuthority | null;
+  readonly attributedManagement?: readonly AttributedManagementOwnership[];
+  readonly legacyOwnership?: readonly RetainedOwnershipIdentity[];
   readonly ownership: readonly RetainedOwnershipIdentity[]; readonly legacySourceHash: string | null;
 }
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : typeof v === "string" ? v : "";
@@ -34,15 +42,43 @@ export class TradingConfigurationStore {
     } catch (error) { await db.query("ROLLBACK"); throw error; }
     finally { db.release(); }
   }
-  private async ownership(db: TradingConfigurationDb): Promise<RetainedOwnershipIdentity[]> {
-    const result = await db.query(`SELECT DISTINCT po.instrument_id, po.conid, po.instrument, po.strategy, po.client_order_hash
+  private async ownership(db: TradingConfigurationDb): Promise<StoredOwnership[]> {
+    const result = await db.query(`SELECT po.id, po.client_order_hash_version, po.strategy_attribution, po.strategy_trigger, po.instrument_id, po.conid, po.instrument, po.strategy, po.client_order_hash
       FROM proposed_orders po LEFT JOIN lifecycle_close_operations close_op ON close_op.original_proposal_id=po.id
       WHERE (po.execution_attempted_at IS NOT NULL OR EXISTS(SELECT 1 FROM broker_order_links l WHERE l.proposed_order_id=po.id)
         OR (close_op.id IS NOT NULL AND close_op.state<>'COMPLETED'))
         AND COALESCE(po.position_effect,'OPEN_OR_ADD')<>'CLOSE_OR_REDUCE'
         AND (close_op.id IS NULL OR close_op.state<>'COMPLETED')`);
-    return result.rows.map(row => ({ instrumentId: typeof row.instrument_id === "string" ? row.instrument_id : "", conId: typeof row.conid === "string" ? row.conid : "",
+    return result.rows.map(row => ({ originalProposalId: Number(row.id), attributed: row.client_order_hash_version === 2 || row.strategy_attribution != null || row.strategy_trigger != null, instrumentId: typeof row.instrument_id === "string" ? row.instrument_id : "", conId: typeof row.conid === "string" ? row.conid : "",
       symbol: typeof row.instrument === "string" ? row.instrument : "", strategy: typeof row.strategy === "string" ? row.strategy : null, clientOrderHash: typeof row.client_order_hash === "string" ? row.client_order_hash : null }));
+  }
+  private async attributedHistory(db: TradingConfigurationDb): Promise<AttributedManagementOwnership[]> {
+    const result = await db.query(`SELECT po.* FROM proposed_orders po WHERE
+      (po.client_order_hash_version=2 OR po.strategy_attribution IS NOT NULL OR po.strategy_trigger IS NOT NULL)
+      AND COALESCE(po.position_effect,'OPEN_OR_ADD')<>'CLOSE_OR_REDUCE'
+      AND (po.execution_attempted_at IS NOT NULL OR EXISTS(SELECT 1 FROM broker_order_links l WHERE l.proposed_order_id=po.id)
+        OR EXISTS(SELECT 1 FROM lifecycle_close_operations c WHERE c.original_proposal_id=po.id))`);
+    const retained: AttributedManagementOwnership[] = [];
+    for (const row of result.rows) {
+      if (row.client_order_hash_version !== 2 || !Number.isSafeInteger(Number(row.id)) || Number(row.id) <= 0)
+        throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID");
+      const attribution = parseStrategyAttribution(row.strategy_attribution), trigger = parseStrategyTrigger(row.strategy_trigger);
+      const optionalNumber = (v: unknown): number | undefined => v == null ? undefined : typeof v === "number" && Number.isFinite(v) ? v : (() => { throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID"); })();
+      const ticket = { instrument: row.instrument, instrumentId: row.instrument_id, conid: row.conid, side: row.side, positionEffect: row.position_effect ?? undefined,
+        orderType: row.order_type, quantity: optionalNumber(row.quantity), entry: optionalNumber(row.entry), stop: optionalNumber(row.stop), takeProfit: optionalNumber(row.take_profit),
+        partialTakeProfits: row.partial_take_profits ?? undefined, trailingStopPct: optionalNumber(row.trailing_stop_pct), trailingStopActivationR: optionalNumber(row.trailing_stop_activation_r),
+        riskCheckStatus: row.risk_check_status, clientOrderHashVersion: 2, strategyAttribution: attribution, strategyTrigger: trigger } as SignalTicket;
+      if (ticket.side !== "BUY" || ticket.orderType !== "LMT" || ticket.quantity !== 1 || ticket.riskCheckStatus !== "PASS" ||
+          (ticket.positionEffect !== undefined && ticket.positionEffect !== "OPEN_OR_ADD") || row.strategy !== attribution.implementationId ||
+          typeof row.client_order_hash !== "string" || computeClientOrderHash(ticket) !== row.client_order_hash)
+        throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID");
+      const bound = await readOriginalStockManagementInstrument(db, attribution);
+      if (bound.instrumentId !== row.instrument_id || String(bound.conId) !== row.conid || bound.brokerSymbol !== row.instrument)
+        throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID");
+      retained.push({ originalProposalId: Number(row.id), bound, identity: { instrumentId: bound.instrumentId, conId: String(bound.conId), symbol: bound.brokerSymbol,
+        strategy: attribution.implementationId, clientOrderHash: row.client_order_hash } });
+    }
+    return retained;
   }
   private async observe(db: TradingConfigurationDb, input: TradingConfigurationRegistration, sourceHash: string | null): Promise<void> {
     const loaded = input.loaded;
@@ -99,12 +135,16 @@ export class TradingConfigurationStore {
         const sourceHash = typeof rollout.legacy_source_hash === "string" ? rollout.legacy_source_hash : null;
         const retained = sourceHash ? await this.readManagement(db, sourceHash) : null;
         const ownership = rollout.bundle_latched ? await this.ownership(db) : [];
+        const attributed = rollout.bundle_latched ? await this.attributedHistory(db) : [];
+        const attributedManagement = attributed.filter(item => ownership.some(row => row.attributed && row.originalProposalId === item.originalProposalId));
+        if (ownership.some(row => row.attributed && !attributedManagement.some(item => item.originalProposalId === row.originalProposalId))) throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID");
         if (retained) {
           if (!input.legacyAuthority) throw new Error("LEGACY_MANAGEMENT_SNAPSHOT_REQUIRED");
           assertManagementCompatibility(input.legacyAuthority, retained);
-          validateRetainedOwnership(retained, ownership);
+          validateRetainedOwnership(retained, ownership.filter(row => !row.attributed));
         }
-        return { preparationPending: pending, managementAuthority: retained, ownership, legacySourceHash: loaded.migrationPrepare ? snapshot!.sourceHash : sourceHash };
+        if (input.legacyAuthority) validateAttributedManagementCompatibility(input.legacyAuthority, retained, attributedManagement);
+        return { preparationPending: pending, managementAuthority: retained, attributedManagement, legacyOwnership: ownership.filter(row => !row.attributed), ownership, legacySourceHash: loaded.migrationPrepare ? snapshot!.sourceHash : sourceHash };
       }
       const canonical = canonicalizeTradingConfiguration(loaded.configuration);
       decodeTradingConfigurationSnapshot(canonical, loaded.effectiveHash);
@@ -118,18 +158,26 @@ export class TradingConfigurationStore {
         if (result.rows[0]?.instance_hash !== hash) throw new Error("INSTANCE_REVISION_REUSED");
       }
       const ownership = await this.ownership(db);
+      const attributed = await this.attributedHistory(db);
+      const attributedManagement = attributed.filter(item => ownership.some(row => row.attributed && row.originalProposalId === item.originalProposalId));
+      if (ownership.some(row => row.attributed && !attributedManagement.some(item => item.originalProposalId === row.originalProposalId))) throw new Error("ATTRIBUTED_MANAGEMENT_IDENTITY_INVALID");
       const storedSource = typeof rollout.legacy_source_hash === "string" ? rollout.legacy_source_hash : undefined;
       if (rollout.bundle_latched && loaded.legacySourceHash !== storedSource) throw new Error("CONFIG_LEGACY_SOURCE_CHANGED");
       const sourceHash = loaded.legacySourceHash;
       if (!sourceHash) {
-        const history = await db.query(`SELECT 1 FROM proposed_orders po WHERE po.execution_attempted_at IS NOT NULL
+        const history = await db.query(`SELECT 1 FROM proposed_orders po WHERE (po.execution_attempted_at IS NOT NULL
           OR EXISTS(SELECT 1 FROM broker_order_links links WHERE links.proposed_order_id=po.id)
-          OR EXISTS(SELECT 1 FROM lifecycle_close_operations close_op WHERE close_op.original_proposal_id=po.id OR close_op.close_proposal_id=po.id) LIMIT 1`);
+          OR EXISTS(SELECT 1 FROM lifecycle_close_operations close_op WHERE close_op.original_proposal_id=po.id OR close_op.close_proposal_id=po.id))
+          AND NOT (po.id=ANY($1::bigint[]) OR EXISTS(SELECT 1 FROM lifecycle_close_operations c JOIN proposed_orders original ON original.id=c.original_proposal_id
+            WHERE c.close_proposal_id=po.id AND c.original_proposal_id=ANY($1::bigint[]) AND c.original_hash=original.client_order_hash)) LIMIT 1`,
+          [rollout.bundle_latched ? attributed.map(item => item.originalProposalId) : []]);
         if (history.rows.length) throw new Error("LEGACY_MANAGEMENT_SNAPSHOT_REQUIRED");
       }
       const retained = sourceHash ? await this.readManagement(db, sourceHash) : null;
-      validateRetainedOwnership(retained, ownership);
-      if (retained) assertManagementCompatibility(buildTradingConfigurationProjection(loaded.configuration).authority, retained);
+      validateRetainedOwnership(retained, ownership.filter(row => !row.attributed));
+      const current = buildTradingConfigurationProjection(loaded.configuration).authority;
+      if (retained) assertManagementCompatibility(current, retained);
+      validateAttributedManagementCompatibility(current, retained, attributedManagement);
       if (!rollout.bundle_latched) {
         if (input.tradingEnabled) throw new Error("CONFIG_CONVERSION_REQUIRES_DISABLED_WRITES");
         if (sourceHash && !(await this.prepared(db, sourceHash))) throw new Error("CONFIG_PREPARATION_INCOMPLETE");
@@ -141,7 +189,7 @@ export class TradingConfigurationStore {
         await db.query("INSERT INTO trading_configuration_transitions(kind,old_hash,new_hash,entries_disabled) VALUES('BUNDLE_ACTIVATED',$1,$2,TRUE)", [sourceHash ?? null, loaded.effectiveHash]);
       }
       await this.observe(db, input, sourceHash ?? null);
-      return { preparationPending: false, managementAuthority: retained, ownership, legacySourceHash: sourceHash ?? null };
+      return { preparationPending: false, managementAuthority: retained, attributedManagement, legacyOwnership: ownership.filter(row => !row.attributed), ownership, legacySourceHash: sourceHash ?? null };
     });
   }
   async readAdmissionState(): Promise<TradingConfigurationAdmissionState> {

@@ -1,4 +1,4 @@
-import { before, after, beforeEach, describe, it } from 'node:test';
+import { beforeEach, afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -12,16 +12,15 @@ const indicators={ema20:99,ema50:98,rsi14:55,strategyPriceEvidence:{raw:{entry:1
 describe('AAPL identity through production PostgreSQL repository and bound worker',{skip:!connection},()=>{
  let admin:Pool,pool:Pool,repo:BoundReviewRepository;
  const db=`aapl_ai_${randomUUID().replaceAll('-','')}`;
- before(async()=>{
+ beforeEach(async()=>{
   const url=new URL(connection!);url.pathname='/postgres';admin=new Pool({connectionString:url.toString()});await admin.query(`CREATE DATABASE ${db}`);
   url.pathname=`/${db}`;pool=new Pool({connectionString:url.toString()});
   const dir=new URL('../../../infra/sql/migrations/',import.meta.url);
   for(const file of readdirSync(dir).filter(x=>x.endsWith('.sql')).sort())await pool.query(readFileSync(new URL(file,dir),'utf8'));
   repo=new BoundReviewRepository(pool);
  });
- after(async()=>{await pool?.end();if(admin){await admin.query(`DROP DATABASE IF EXISTS ${db}`);await admin.end();}});
+ afterEach(async()=>{await pool?.end();if(admin){await admin.query(`DROP DATABASE IF EXISTS ${db}`);await admin.end();}});
  beforeEach(async()=>{
-  await pool.query('TRUNCATE proposed_orders CASCADE');await pool.query('TRUNCATE instrument_contracts');
   await pool.query(`INSERT INTO instrument_contracts(symbol,conid,sec_type,exchange,primary_exchange,currency,local_symbol,trading_class,min_tick,source,resolved_at)
     VALUES('AAPL','265598','STK','SMART','NASDAQ','USD','AAPL','NMS',.01,'ibkr','2026-09-01T12:00:00Z')`);
  });

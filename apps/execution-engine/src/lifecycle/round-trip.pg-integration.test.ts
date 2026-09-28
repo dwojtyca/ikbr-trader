@@ -34,8 +34,8 @@ test("read-only round-trip collector uses exact persisted evidence and fill curr
     await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,observed_at,complete,generation) VALUES ('DU_TEST','current',$1,true,1)`,
       [f.evidence.lifecycle.positionSnapshot!.observedAt]);
     for (const fill of f.evidence.fills) await pool.query(`INSERT INTO broker_execution_fills
-      (exec_id,broker_order_id,proposed_order_id,account_id,conid,symbol,currency,side,shares,price,executed_at,commission,commission_currency,realized_pnl)
-      VALUES ($1,$2,42,'DU_TEST','123','TEST','PLN',$3,$4,$5,$6,$7,$8,$9)`,
+      (exec_id,broker_order_id,proposed_order_id,account_id,conid,symbol,currency,side,shares,price,executed_at,commission,commission_currency,realized_pnl,sec_type)
+      VALUES ($1,$2,42,'DU_TEST','123','TEST','PLN',$3,$4,$5,$6,$7,$8,$9,'STK')`,
       [fill.exec_id,fill.broker_order_id,fill.side,fill.shares,fill.price,fill.executed_at,fill.commission,fill.commission_currency,fill.realized_pnl]);
     const evidence=await repo.getRoundTripEvidence(42,"DU_TEST"); assert.ok(evidence);
     assert.equal(evaluateRoundTrip(evidence,f.context).status,"COMPLETED");

@@ -7,7 +7,7 @@ export function fixture() {
   const bound: BoundInstrument = {
     instrumentId: "test", conId: 123, brokerSymbol: "TEST", currency: "USD", broker: "ibkr",
     localSymbol: "TEST", tradingClass: "TEST", exchange: "SMART", minTick: 0.01,
-    instrument: { id: "test", displayName: "Test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART",
+    instrument: { id: "test", displayName: "Test", broker: "ibkr", brokerSymbol: "TEST", exchange: "SMART", primaryExchange: "NASDAQ", conId: 123, localSymbol: "TEST", tradingClass: "TEST",
       session: { useRegularTradingHours: true, timezone: "America/New_York", sessionTemplate: "us_stock_rth" },
       metadata: { tags: [] }, assetClass: "stock", currency: "USD",
       trading: { executionEnabled: true, signalGenerationEnabled: true, aiAnalysisEnabled: true, monitoringEnabled: true },
