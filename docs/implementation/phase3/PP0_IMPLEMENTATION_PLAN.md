@@ -1,7 +1,8 @@
 # PP0 implementation plan — authenticated operator surface
 
 Date: 2026-09-28. Baseline: `ff013988259ca4094d0fc7c7b557cdd7b25bf9cd`.
-Status: independent Astra plan accepted 2026-09-28; implementation in progress.
+Status: independent Astra plan accepted 2026-09-28; implemented and verified.
+Completion evidence: [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 Parent: [Paper production delivery §4](PAPER_PRODUCTION_DELIVERY_PLAN.md#4-pp0--operational-security-and-usable-controls).
 Sequencing: [ROADMAP](../ROADMAP.md); evidence baseline: [CURRENT_STATE](../CURRENT_STATE.md).
 

@@ -88,11 +88,11 @@ None of these labels implies profitability or permission to activate Live.
 5. The bound AI worker has a 30-second claim with sequential account/news/model
    requests and no renewal. It does not persist returned `riskFlags`. News response
    mapping does not enforce matched entity or publication-time validity.
-6. UI's legacy signal action receives 503. Vite proxy inserts execution credentials
-   without authenticating the browser caller; Compose exposes its port on all host
-   interfaces. Ingestion stop/bootstrap and strategy-toggle controls also lack a
-   complete authentication boundary. Exploitability depends on network reachability;
-   this audit did not establish Internet exposure or perform mutating probes.
+6. The September 26 operator-security gap is fixed in the reviewed PP0 source:
+   authenticated UI delegation, direct mutation gates, loopback defaults and the
+   supported bound runtime action are implemented and CI-verified. Retired direct
+   signal routes still return 503. Operational deployment of PP0 remains separate;
+   source verification does not establish the security state of an older running image.
 
 ## Dated operational evidence
 

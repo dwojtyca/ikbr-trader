@@ -23,12 +23,13 @@ new strategy development and ES research are outside this delivery track.
 Bound contracts, strategy attribution, durable proposal identity, mandatory AI
 reviews, submission/reconciliation, ownership, one-share full-close and generic
 session/native-candle readiness are implemented. Do not restart those subsystems.
-Configuration generality, company research, operator security/UI and automated
-lifecycle remain incomplete. See the evidence matrix in CURRENT_STATE.
+Configuration generality, company research, richer operator visibility and automated
+lifecycle remain incomplete. PP0 supplies the reviewed operator security baseline;
+see the evidence matrix in CURRENT_STATE.
 
 ## Current sequence
 
-PP0 implementation and its delivery gates are recorded in the
+PP0 is implemented, reviewed and published with successful CI. Its delivery gates are recorded in the
 [PP0 report](phase3/PP0_IMPLEMENTATION_REPORT.md). No operational deployment or
 trading activation is included. PP1–PP7 remain **planned**.
 Each package receives its own bounded plan, independent plan review, implementation,

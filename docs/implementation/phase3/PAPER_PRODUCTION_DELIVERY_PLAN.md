@@ -1,7 +1,7 @@
 # Production-style Paper bot delivery plan
 
 Date: 2026-09-26; PP0 status updated 2026-09-28. Status: **delivery specification**;
-PP0 implementation/checks are recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
+PP0 is implemented and published with successful CI, recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 PP1–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.

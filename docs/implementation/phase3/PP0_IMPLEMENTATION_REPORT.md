@@ -1,8 +1,9 @@
 # PP0 — operator security delivery report
 
 Date: 2026-09-28. Baseline: `ff013988259ca4094d0fc7c7b557cdd7b25bf9cd`.
-Status: implementation and independent hostile review accepted; all local delivery
-checks passed. Commit/push and exact-commit CI are the remaining publication gates.
+Status: PP0 implemented, independently accepted and published on main; all local
+delivery checks and exact implementation-commit CI passed. No operational deployment
+or trading activation is included.
 Scope: [accepted bounded plan](PP0_IMPLEMENTATION_PLAN.md),
 [PP0 delivery specification](PAPER_PRODUCTION_DELIVERY_PLAN.md#4-pp0--operational-security-and-usable-controls),
 [operator runbook](../../runbooks/OPERATOR_SECURITY.md).
@@ -62,10 +63,10 @@ files, excluding the pre-existing ES/signal work and private `.env`:
 | `docker buildx build --load --no-cache -t ikbr-trader-pp0:verify .` | PASS on isolated daemon; final image `sha256:8da3d312d958f6b97ff2f4978095f53f94ead50b3504708e22ce09cd993aba81` |
 | `git diff --check` and unrelated-file preservation | PASS before publication |
 
-Unit suite passes by package: shared438, verifier163, llm48, execution1,130,
-ingestion102, UI10, signal485, backtest105. Unit-only database skips are covered by
-the standard integration chain: execution1,418, backtest18, llm13, ingestion106,
-signal487. Local logs are `/tmp/pp0-check-{lint,typecheck,test,build}.log`,
+Unit suite passes by package: shared 438, verifier 163, llm 48, execution 1,130,
+ingestion 102, UI 10, signal 485, backtest 105. Unit-only database skips are covered by
+the standard integration chain: execution 1,418, backtest 18, llm 13, ingestion 106,
+signal 487. Local logs are `/tmp/pp0-check-{lint,typecheck,test,build}.log`,
 `/tmp/pp0-check-integration-container.log` and
 `/tmp/pp0-check-docker-build-final.log`; the bundle scan is retained in
 `/tmp/pp0-check-sentinel.log`. These temporary paths are not durable CI
@@ -74,15 +75,15 @@ simulator behavior. Unrelated local ES diagnostics are not shipped functionality
 
 The first sandboxed unit attempt could not open local fixture sockets and was
 interrupted. The permitted full run exposed a successful proxy request exceeding
-the fixture's artificial100ms deadline under parallel scheduling. A increased
-only that test deadline to5s, RA independently accepted the change, and the full
-unit rerun passed. Production30s limits and timeout/no-retry assertions are unchanged.
+the fixture's artificial 100 ms deadline under parallel scheduling. A increased
+only that test deadline to 5 s, RA independently accepted the change, and the full
+unit rerun passed. Production 30 s limits and timeout/no-retry assertions are unchanged.
 
 The first host-to-VM integration attempt had six ownership-fixture failures:
-PostgreSQL timestamps were39–40ms ahead of host time in three measured samples,
+PostgreSQL timestamps were 39–40 ms ahead of host time in three measured samples,
 so the existing future-snapshot rejection correctly blocked the fixtures. The
-later retained samples in `/tmp/pp0-clock-samples.json` confirm31–33ms skew at
-12:47UTC; the skew changes over time. The
+later retained samples in `/tmp/pp0-clock-samples.json` confirm 31–33 ms skew at
+12:47 UTC; the skew changes over time. The
 standard integration command then passed in the clean application image sharing
 the isolated PostgreSQL guest clock and network namespace. No freshness guard,
 production behavior or integration assertion was relaxed. The subsequent clean
@@ -90,8 +91,8 @@ Docker rebuild includes the accepted test-only deadline change; later documentat
 updates do not alter the tested runtime. Both Docker builds passed.
 
 Available command wall-time estimates from the mechanical worker's execution
-sessions: install1.4s, lint1.3s, typecheck6.8s, final unit33.0s, container
-integration52.8s, build4.0s and the final clean Docker build23.3s. These are
+sessions: install 1.4 s, lint 1.3 s, typecheck 6.8 s, final unit 33.0 s, container
+integration 52.8 s, build 4.0 s and the final clean Docker build 23.3 s. These are
 approximate command times, not total package/agent time; failed attempts and
 reviews are not silently counted as zero. Per-agent elapsed/token telemetry is
 unavailable.
@@ -104,11 +105,11 @@ Docker Desktop was not started. A stalled Desktop credential-helper pull was
 terminated; the isolated build client uses an empty temporary Docker configuration
 to fetch public images. This changes no user credentials.
 
-Host toolchain: Node24.4.1 and declared pnpm9.5.0. The Docker build/integration
-image uses Node24.20.0 and pnpm9.5.0; PostgreSQL16 is isolated from operational data.
+Host toolchain: Node 24.4.1 and declared pnpm 9.5.0. The Docker build/integration
+image uses Node 24.20.0 and pnpm 9.5.0; PostgreSQL 16 is isolated from operational data.
 Baseline GitHub CI was successful
 for `ff013988259ca4094d0fc7c7b557cdd7b25bf9cd`
-([run36417298276](https://github.com/dwojtyca/ikbr-trader/actions/runs/36417298276));
+([run 36417298276](https://github.com/dwojtyca/ikbr-trader/actions/runs/36417298276));
 this is baseline evidence only, not the PP0 publication gate.
 
 ## Dependency assessment
@@ -155,7 +156,7 @@ Windows development-server use. Audit JSON was retained locally for review.
 | PP0-C dependencies and Compose | `gpt-6-sol/medium` selected | Targeted checks pass; 0 ordinary repair rounds; 1 escalation to A for logger integration typing | Elapsed/tokens unavailable |
 | Lead integration and documentation | Capable lead | Scope integration and document review accepted; local work preservation verified | Runtime model/token telemetry unavailable |
 | Independent hostile implementation review | `gpt-6-astra/high` selected | ACCEPT; 4 findings resolved; distinct from plan reviewer and implementers | Elapsed/tokens unavailable |
-| Mechanical checks/publication | M requested `gpt-5.6-luna/low`; selected fallback `gpt-6-luna/low` | All local gates passed; two validation failures escalated to lead/A, no worker source repairs; publication pending | Elapsed/tokens unavailable |
+| Mechanical checks/publication | M requested `gpt-5.6-luna/low`; selected fallback `gpt-6-luna/low` | All local gates and exact implementation-commit CI passed; two validation failures escalated to lead/A, no worker source repairs | Elapsed/tokens unavailable |
 
 Selections above are the exact requested/accepted dispatch settings. Tools do not
 report a separate runtime model identifier or token counters, so those actual
@@ -173,15 +174,26 @@ broker/provider retry or operational change.
 
 ## Publication and rollback
 
-Preserve all 25 pre-existing dirty files captured at task start. For the already
-modified backtest manifest, stage only the reviewed Fastify dependency change;
-retain the local ES diagnostic scripts. Preserve dirty signal-engine and simulator
-files byte-for-byte. No blanket staging or branch/PR creation is permitted.
+Implementation commit:
+[`574200ae4fa4e4e4b77c7122b8bba81516778c8e`](https://github.com/dwojtyca/ikbr-trader/commit/574200ae4fa4e4e4b77c7122b8bba81516778c8e).
+Pushed to main; remote SHA verified. [Exact-commit CI run 36424513729](https://github.com/dwojtyca/ikbr-trader/actions/runs/36424513729)
+completed **success**, including frozen install, lint, typecheck, unit tests,
+PostgreSQL integration and build. The [build-test job](https://github.com/dwojtyca/ikbr-trader/actions/runs/36424513729/job/108935068456)
+provides durable command evidence.
 
-Publication remains pending scoped commit/push on main and successful GitHub CI
-for that exact commit. The implementation commit's immutable SHA/run URL will be
-recorded in a documentation follow-up after its CI succeeds; that follow-up also
-requires successful exact-commit CI. Baseline success is not substituted.
+The reviewed 40-file index matched the tested candidate byte-for-byte. All 25
+pre-existing dirty files were preserved: 24 remain byte-identical; the mixed
+backtest manifest differs from its original bytes only by the Fastify pin, with
+its local ES diagnostic scripts excluded from the commit. Dirty signal-engine and
+simulator changes remain local. The ignored pre-existing compiled Vite config was
+also restored byte-for-byte; supported UI scripts explicitly select `vite.config.ts`.
+No blanket staging, branch or PR was used.
+
+This documentation follow-up records immutable implementation evidence after its
+CI passed. It changes no runtime/configuration behavior and therefore does not
+repeat unchanged local runtime suites. Its own exact-commit CI must also pass;
+the final delivery response links that run without requiring a self-referential
+commit hash inside this file.
 
 No schema rollback is needed. Keep authentication and loopback restrictions during
 rollback; an older unprotected UI must remain unpublished/stopped. Existing broker
