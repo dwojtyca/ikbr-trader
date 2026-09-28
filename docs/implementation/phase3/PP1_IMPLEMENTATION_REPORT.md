@@ -1,8 +1,8 @@
 # PP1 implementation report
 
-Date: 2026-09-28. Status: implementation and documentation accepted by independent review; all
-required local checks passed. Publication and exact-commit CI verification follow
-this recorded local acceptance. No operational deployment was performed.
+Date: 2026-09-28. Status: PP1 implemented, independently reviewed and published on `main`; all
+required local checks and implementation exact-commit CI passed. No operational
+deployment was performed.
 
 ## Baseline and scope
 
@@ -147,7 +147,7 @@ Final frozen-candidate results:
 | Clean Docker build | `buildx --load --no-cache`, exit 0; `ikbr-trader-pp1:verify` |
 | Synthetic Compose and local documentation links | Passed; 228 relative file-link targets exist |
 | Independent hostile implementation review | Accepted; no remaining must-fix findings |
-| Exact-commit GitHub CI | Pending publication |
+| Exact-commit GitHub CI | Implementation `7a4f249716f507d890e2e3ca325ffb8121fcacf6`: [success](https://github.com/dwojtyca/ikbr-trader/actions/runs/36442731251) |
 
 The frozen candidate was exported from the baseline to an isolated temporary
 directory and all 75 PP1 files were hash-checked before overlay. Frozen dependency
@@ -169,6 +169,21 @@ All 75 frozen candidate hashes were rechecked after validation. Source did not
 change; subsequent report/status edits record this evidence and receive document
 review. The candidate excludes private `.env` and unrelated dirty research files. No new
 strategy/simulator behavior is implemented, so strategy backtests are not required.
+
+## Publication
+
+Implementation commit: `7a4f249716f507d890e2e3ca325ffb8121fcacf6` on `main`.
+GitHub CI for that exact SHA [completed successfully](https://github.com/dwojtyca/ikbr-trader/actions/runs/36442731251). Publication staged
+only the 75 reviewed PP1 files. All 25 pre-existing dirty files were checked against
+the initial SHA-256 inventory and remained unchanged and outside the commit.
+
+This document/status follow-up records the successful implementation CI. It changes
+only documentation. Its independent review required one prose repair round to
+remove stale pending-status wording; no runtime code changed. It receives local link/diff validation,
+and its own exact-commit CI verification after push. The final delivery message links
+that latest run; no unchanged runtime suite was rerun locally for prose alone.
+The disposable Colima verification profile was stopped, preserving logs and leaving
+the original Docker context and operational services untouched.
 
 ## Remaining boundaries
 

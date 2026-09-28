@@ -3,8 +3,7 @@
 Date: 2026-09-26; PP1 source status updated 2026-09-28. Status: **delivery specification**;
 PP0 is implemented and published with successful CI, recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 PP1 source implements the bounded [configuration contract](PP1_CONFIGURATION_CONTRACT.md),
-with independent review and local checks passed; publication and exact CI are pending
-in the [PP1 report](PP1_IMPLEMENTATION_REPORT.md).
+with independent review, local checks and exact-commit CI passed; evidence is in the [PP1 report](PP1_IMPLEMENTATION_REPORT.md).
 PP2–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
@@ -165,7 +164,7 @@ unprotected proxy to regain convenience. No schema migration anticipated.
 **Implemented source scope:** strict four-service JSON startup consumers, versioned
 momentum parameter declarations, canonical hashes, durable snapshots/observations,
 entry admission barriers, retained management monitoring and broker-evidence reads.
-Independent review and local checks passed; publication and exact CI remain pending.
+Independent review, local checks, publication and exact-commit CI passed.
 No strategy factory parameter application,
 trading activation or deployment is included. Bundle entries remain denied even
 with matching hashes and entry-enabled declarations.

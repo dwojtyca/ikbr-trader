@@ -6,8 +6,8 @@ retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
 PP0 changes source/security controls. PP1 source adds versioned JSON configuration,
 canonical hashes, snapshots/service observations and monitoring diagnostics.
-Independent review and all required local checks passed; publication and exact CI
-remain pending in the
+Independent review, all required local checks, publication and exact-commit CI
+passed; evidence is in the
 [PP1 report](phase3/PP1_IMPLEMENTATION_REPORT.md). Neither source update establishes
 operational deployment or broker readiness.
 
@@ -38,7 +38,7 @@ None of these labels implies profitability or permission to activate Live.
 | Capability | Implemented state | Remaining gap / evidence |
 | --- | --- | --- |
 | Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
-| Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | Final PP1 delivery gates pending; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
+| Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
 | Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applying instance parameters, assignment-aware evaluation and isolated mutable state remains planned |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
 | Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | Current policy/risk supports one whole long stock share, USD or WSE/PLN, LMT bracket |

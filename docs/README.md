@@ -2,8 +2,8 @@
 
 Documentation updated 2026-09-28 with [PP0 implementation evidence](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md).
 Other runtime/broker observations retain the September26 audit of `6cbd2c7`.
-PP1 configuration source passed independent review and required local checks;
-publication and exact CI remain pending in the
+PP1 configuration is implemented, independently reviewed and published with
+successful exact-commit CI; see the
 [PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP7 remain planned.
 These changes do not activate or deploy trading.
 
@@ -158,7 +158,7 @@ and are intentionally unpublished/preserved.
 | [implementation/phase3/MODEL_ROUTING_GUIDE.md](implementation/phase3/MODEL_ROUTING_GUIDE.md) | Current coding-agent routing, review and escalation policy |
 | [implementation/phase3/MODEL_ROUTING_PLAN.md](implementation/phase3/MODEL_ROUTING_PLAN.md) | Bounded documentation/instruction change plan |
 | [implementation/phase3/MODEL_ROUTING_REPORT.md](implementation/phase3/MODEL_ROUTING_REPORT.md) | Model-routing change review and validation evidence |
-| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1 locally accepted; publication/CI pending; PP2–PP7 planned |
+| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1 delivered with review, local checks and CI evidence; PP2–PP7 planned |
 | [implementation/phase3/PP0_IMPLEMENTATION_PLAN.md](implementation/phase3/PP0_IMPLEMENTATION_PLAN.md) | Accepted operator-security implementation contract |
 | [implementation/phase3/PP0_IMPLEMENTATION_REPORT.md](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md) | PP0 implementation, review and validation evidence |
 | [implementation/phase3/PP1_CONFIGURATION_CONTRACT.md](implementation/phase3/PP1_CONFIGURATION_CONTRACT.md) | Normative implemented PP1 field, identity, admission and migration contract |
