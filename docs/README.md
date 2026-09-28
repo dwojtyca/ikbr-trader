@@ -1,7 +1,8 @@
 # Project documentation
 
-Documentation reconciled 2026-09-28 against the September26 audit of runtime
-`6cbd2c7`. This update describes and plans work; it does not implement or activate it.
+Documentation updated 2026-09-28 with [PP0 implementation evidence](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md).
+Other runtime/broker observations retain the September26 audit of `6cbd2c7`.
+PP1–PP7 remain planned; PP0 does not activate or deploy trading.
 
 ## Start here
 
@@ -152,7 +153,10 @@ and are intentionally unpublished/preserved.
 | [implementation/phase3/MODEL_ROUTING_GUIDE.md](implementation/phase3/MODEL_ROUTING_GUIDE.md) | Current coding-agent routing, review and escalation policy |
 | [implementation/phase3/MODEL_ROUTING_PLAN.md](implementation/phase3/MODEL_ROUTING_PLAN.md) | Bounded documentation/instruction change plan |
 | [implementation/phase3/MODEL_ROUTING_REPORT.md](implementation/phase3/MODEL_ROUTING_REPORT.md) | Model-routing change review and validation evidence |
-| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | Planned PP0–PP7 implementation; not shipped |
+| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1–PP7 planned |
+| [implementation/phase3/PP0_IMPLEMENTATION_PLAN.md](implementation/phase3/PP0_IMPLEMENTATION_PLAN.md) | Accepted operator-security implementation contract |
+| [implementation/phase3/PP0_IMPLEMENTATION_REPORT.md](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md) | PP0 implementation, review and validation evidence |
+| [runbooks/OPERATOR_SECURITY.md](runbooks/OPERATOR_SECURITY.md) | Authenticated operator access, disabled rollout and rollback |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md) | Current documentation change plan/report |
 | [implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md](implementation/phase3/PAPER_PRODUCTION_DOCUMENTATION_REPORT.md) | Current documentation change plan/report |
 | [implementation/phase3/PR16A_OWNERSHIP_PLAN.md](implementation/phase3/PR16A_OWNERSHIP_PLAN.md) | Historical scoped plan/report; current queue supersedes ordering |

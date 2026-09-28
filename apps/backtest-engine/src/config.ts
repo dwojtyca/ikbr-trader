@@ -24,6 +24,7 @@ const optionalTrimmedString = z.preprocess(
 );
 
 const schema = z.object({
+  BACKTEST_BIND_HOST: z.string().trim().min(1).default("127.0.0.1"),
   BACKTEST_PORT: z.coerce.number().default(3104),
   LOG_LEVEL: z.string().default("info"),
   BACKTEST_POSTGRES_ADMIN_URL: z

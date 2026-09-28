@@ -1,3 +1,4 @@
+import { createMutationAuth, logSafeResponse, operatorSafeLogger, SIGNAL_MUTATING_READS } from "@ikbr/shared/http-auth";
 import { HttpWseStrategyMetadataReader } from "./runtime/trading-loop/wse-metadata-reader.js";
 import Fastify from "fastify";
 import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js";
@@ -35,7 +36,9 @@ import { tradingLoopRoutesPlugin } from "./runtime/trading-loop/routes.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
 
 const defaultInstrumentRegistry = buildConfiguredInstrumentRegistry(process.env);
-const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(config.LOG_LEVEL) });
+app.addHook("onResponse", logSafeResponse);
+app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? "", SIGNAL_MUTATING_READS));
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new SignalRepository(pool, redis);
@@ -357,7 +360,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({
     port: config.SIGNAL_PORT,
-    host: "0.0.0.0",
+    host: config.SIGNAL_BIND_HOST,
   });
   app.log.info(`signal-engine listening on ${address}`);
 

@@ -25,6 +25,7 @@ const optionalNumberFromEnv = z.preprocess(
 );
 
 const schema = z.object({
+  INGESTION_BIND_HOST: z.string().trim().min(1).default("127.0.0.1"),
   INGESTION_PORT: optionalNumberFromEnv,
   LOG_LEVEL: z.string().default("info"),
   IB_SOCKET_HOST: z.string().default("127.0.0.1"),

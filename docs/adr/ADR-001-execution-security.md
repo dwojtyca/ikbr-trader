@@ -4,9 +4,11 @@
 
 This ADR preserves the original security decisions and rollout history. Current
 production HTTP refuses unpersisted direct tickets; old emergency direct-ticket
-opt-in descriptions below are not an available bypass. Shared API credentials do
-not authenticate UI callers: operator proxy and ingestion/signal controls still
-need PP0 hardening. Read [current state](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) before
+opt-in descriptions below are not an available bypass. PP0 adds a separate operator
+credential before UI delegation and authenticates ingestion/signal/backtest
+mutations; shared backend credentials remain server-side. See the
+[PP0 report](../implementation/phase3/PP0_IMPLEMENTATION_REPORT.md) and
+[operator runbook](../runbooks/OPERATOR_SECURITY.md). Read [current state](../implementation/CURRENT_STATE.md) and [delivery plan](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) before
 applying historical rollout examples. Paper-only runtime restrictions remain.
 
 ## Historical decision text

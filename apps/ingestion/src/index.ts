@@ -1,3 +1,4 @@
+import { createMutationAuth, logSafeResponse, operatorSafeLogger } from "@ikbr/shared/http-auth";
 import { SessionScheduleAdapter } from "./session-schedule-adapter.js";
 import { SessionScheduleRefresh } from "./session-schedule-refresh.js";
 import { SessionNativeRefresh, sessionKey, SESSION_POLLING_CAPACITY } from "./session-native-refresh.js";
@@ -28,7 +29,9 @@ const TIMEFRAME_INTERVAL_MS: Record<
   "1w": 7 * 24 * 60 * 60_000,
 };
 
-const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(config.LOG_LEVEL) });
+app.addHook("onResponse", logSafeResponse);
+app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? ""));
 const pg = new Pool({ connectionString: config.POSTGRES_URL });
 const redis = new Redis(config.REDIS_URL);
 const repo = new MarketRepository(pg);
@@ -596,7 +599,7 @@ async function main(): Promise<void> {
 
   const address = await app.listen({
     port: config.ingestionPort,
-    host: "0.0.0.0",
+    host: config.INGESTION_BIND_HOST,
   });
   app.log.info(`ingestion service listening on ${address}`);
   app.log.info(

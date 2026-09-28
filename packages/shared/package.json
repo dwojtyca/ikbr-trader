@@ -12,6 +12,10 @@
     "./client-order-hash": {
       "types": "./dist/client-order-hash.d.ts",
       "default": "./dist/client-order-hash.js"
+    },
+    "./http-auth": {
+      "types": "./dist/http-auth.d.ts",
+      "default": "./dist/http-auth.js"
     }
   },
   "scripts": {

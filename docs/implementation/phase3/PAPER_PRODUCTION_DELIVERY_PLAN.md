@@ -1,7 +1,8 @@
 # Production-style Paper bot delivery plan
 
-Date: 2026-09-26. Status: **planned delivery specification; runtime work not started
-by the documentation refresh**. [Current state](../CURRENT_STATE.md) is the baseline;
+Date: 2026-09-26; PP0 status updated 2026-09-28. Status: **delivery specification**;
+PP0 implementation/checks are recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
+PP1–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -122,6 +123,11 @@ Each package report records actual model/effort, acceptance, repair/review effor
 and usage when available. Do not promise savings before the PP1-B pilot is measured.
 
 ## 4. PP0 — Operational security and usable controls
+
+Implementation evidence: [bounded plan](PP0_IMPLEMENTATION_PLAN.md),
+[report](PP0_IMPLEMENTATION_REPORT.md) and
+[operator security runbook](../../runbooks/OPERATOR_SECURITY.md).
+This package does not authorize operational deployment or entries.
 
 **Problem:** UI delegates its execution token to unauthenticated callers, published
 ports default to all host interfaces, ingestion/strategy mutations lack complete

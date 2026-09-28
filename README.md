@@ -81,8 +81,11 @@ cd ikbr-trader
 
 # 2. configure env
 cp .env.example .env
-# edit .env: at minimum set WATCHLIST_SYMBOLS, IB_SOCKET_PORT,
-# and (optional) LLM_AGENT_OPENAI_API_KEY / LLM_AGENT_MARKETAUX_API_KEY
+# edit .env: set instruments and the Paper account configuration;
+# create distinct EXECUTION_API_TOKEN and UI_OPERATOR_PASSWORD values.
+# Keep TRADING_ENABLED, EXECUTION_RUNTIME_ENABLED, TRADING_LOOP_ENABLED
+# and LLM_AGENT_ENABLED=false until separately authorized.
+# See docs/runbooks/OPERATOR_SECURITY.md before deployment.
 
 # 3. start IB Gateway on the host and log in (paper)
 
@@ -90,14 +93,23 @@ cp .env.example .env
 docker compose up -d --build
 
 # 5. bootstrap ingestion and execution (resolves contracts, backfills candles)
-curl -X POST http://localhost:3101/bootstrap
-curl -X POST http://localhost:3103/execution/bootstrap
+# Run only within the authorized deployment scope, with the private token
+# available in this shell. Execution bootstrap retains its existing guards.
+curl --fail-with-body -X POST -H "Authorization: Bearer $EXECUTION_API_TOKEN" http://127.0.0.1:3101/bootstrap
+curl --fail-with-body -X POST -H "Authorization: Bearer $EXECUTION_API_TOKEN" http://127.0.0.1:3103/execution/bootstrap
 
 # 6. open the UI
-open http://localhost:5173
+open http://127.0.0.1:5173
 ```
 
 The UI shows account summary, ingestion progress, live signals, proposed/active orders, FIFO-matched trades with realized P&L, and backtest controls.
+
+All published ports default to loopback. The UI asks for username `operator` and
+the separate `UI_OPERATOR_PASSWORD`; its backend token stays on the server.
+Use the exact configured `UI_PUBLIC_ORIGIN`. See the
+[operator security runbook](docs/runbooks/OPERATOR_SECURITY.md) for credentials,
+direct API authentication, remote access and rollback. This quick start does not
+authorize trading or paid provider calls.
 
 To stop everything: `docker compose down`. Data persists in the `pgdata` volume.
 
@@ -135,6 +147,11 @@ Key things to set the first time:
 - `SIGNAL_MAX_RISK_PER_TRADE_PCT`, `SIGNAL_MAX_EXPOSURE_PCT`, `MAX_NOTIONAL_PER_TRADE_PCT`, `SIGNAL_MAX_OPEN_POSITIONS` — risk caps.
 - `SIGNAL_FRACTIONAL_SYMBOLS` — only IBKR-fractional-eligible US mega-caps. Don't add WSE/LSE or leveraged ETFs.
 - `LLM_AGENT_ENABLED` — set to `false` if you don't have an OpenAI key.
+- `EXECUTION_API_TOKEN` and `UI_OPERATOR_PASSWORD` — distinct private credentials;
+  see the [security runbook](docs/runbooks/OPERATOR_SECURITY.md).
+- `UI_PUBLIC_ORIGIN` — exact browser origin, default `http://127.0.0.1:5173`.
+- `HOST_BIND_ADDRESS` — defaults to `127.0.0.1`; changing it exposes all published
+  services, including Postgres and Redis, and needs separate network controls.
 
 ---
 
@@ -142,17 +159,19 @@ Key things to set the first time:
 
 ```bash
 # ingestion
-curl http://localhost:3101/ingestion/progress
-curl -X POST http://localhost:3101/bootstrap
+curl http://127.0.0.1:3101/backfill-progress
+curl -X POST -H "Authorization: Bearer $EXECUTION_API_TOKEN" http://127.0.0.1:3101/bootstrap
 
 # signal-engine
-curl -X POST http://localhost:3102/signals/run-once
-curl http://localhost:3102/signals/recent?limit=50
+curl 'http://127.0.0.1:3102/signals/recent?limit=50'
+# Only within authorized Paper scope: evaluate server-configured instruments.
+# This can enter the normal proposal/AI/risk flow when already enabled.
+curl -X POST -H "Authorization: Bearer $EXECUTION_API_TOKEN" http://127.0.0.1:3102/runtime/trading-loop/run-once
 
 # execution-engine
-curl http://localhost:3103/execution/account/summary
-curl http://localhost:3103/execution/orders?limit=50
-curl http://localhost:3103/execution/trades?limit=50
+curl -H "Authorization: Bearer $EXECUTION_API_TOKEN" http://127.0.0.1:3103/execution/account/summary
+curl -H "Authorization: Bearer $EXECUTION_API_TOKEN" 'http://127.0.0.1:3103/execution/orders?limit=50'
+curl -H "Authorization: Bearer $EXECUTION_API_TOKEN" 'http://127.0.0.1:3103/execution/trades?limit=50'
 
 # backtest-engine
 curl http://localhost:3104/backtest/dataset
@@ -168,9 +187,9 @@ pnpm typecheck
 pnpm test
 pnpm build
 
-# Real-Postgres integration tests (execution-engine only).
-# Requires a running Postgres — either the compose service or a local install.
-TEST_POSTGRES_URL=postgresql://postgres@localhost:5432/postgres pnpm test:integration
+# Standard integration suites: use a disposable test PostgreSQL only.
+# Never point this variable at an operational database.
+TEST_POSTGRES_URL=postgresql://postgres:fixture_password@127.0.0.1:55439/ikbr_trader_test pnpm test:integration
 ```
 
 Tests use the Node.js native test runner (`node --test`). No Jest.

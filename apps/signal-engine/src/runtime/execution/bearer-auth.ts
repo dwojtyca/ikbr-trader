@@ -16,7 +16,7 @@
  * replacement for it.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { bearerAuthorized } from "@ikbr/shared/http-auth";
 import type {
   FastifyReply,
   FastifyRequest,
@@ -40,31 +40,8 @@ export function createRuntimeBearerAuth(
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> {
-    if (!expected) {
+    if (!bearerAuthorized(request.headers.authorization, expected)) {
       reply.code(401).send({ error: "unauthorized" });
-      return;
-    }
-    const header = request.headers.authorization;
-    if (typeof header !== "string" || !header.startsWith("Bearer ")) {
-      reply.code(401).send({ error: "unauthorized" });
-      return;
-    }
-    const presented = header.slice("Bearer ".length).trim();
-    if (!presented || !constantTimeEqual(presented, expected)) {
-      reply.code(401).send({ error: "unauthorized" });
-      return;
     }
   };
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  // Pad both buffers to a common length so a size mismatch cannot
-  // leak the expected length via an early short-circuit. Matches
-  // the execution-engine implementation.
-  const maxLen = Math.max(a.length, b.length);
-  const bufA = Buffer.alloc(maxLen, 0);
-  const bufB = Buffer.alloc(maxLen, 0);
-  bufA.write(a, "utf8");
-  bufB.write(b, "utf8");
-  return a.length === b.length && timingSafeEqual(bufA, bufB);
 }

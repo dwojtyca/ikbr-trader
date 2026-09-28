@@ -15,6 +15,15 @@ import {
 const TOKEN = "a".repeat(64);
 const WRONG_TOKEN = "b".repeat(64);
 
+it('rejects the former final-byte XOR collision and UTF-8/padding mismatches', () => {
+  const expected = 'a'.repeat(31) + '?';
+  assert.equal(verifyBearerToken('Bearer ' + 'a'.repeat(31), expected).ok, false);
+  assert.equal(verifyBearerToken('Bearer ' + expected, expected).ok, true);
+  for (const [provided, configured] of [['é', 'é\0'], ['a', 'a\0'], ['é', 'e']]) {
+    assert.equal(verifyBearerToken('Bearer ' + provided, configured).ok, false);
+  }
+});
+
 interface Harness {
   app: ReturnType<typeof Fastify>;
   audits: ExecutionAuditRecord[];

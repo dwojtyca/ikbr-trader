@@ -1,8 +1,10 @@
 # Current project state
 
-Reviewed: 2026-09-26. Code baseline: `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
-The audit also tested the existing dirty workspace; those results do not mean its
-uncommitted ES work shipped. Documentation changes do not change this runtime baseline.
+Security update: 2026-09-28. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+supersedes the operator-security gap below. Other capability and broker observations
+retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
+That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
+PP0 changes source/security controls, not operational deployment or broker readiness.
 
 ## Delivery objective
 
@@ -37,7 +39,7 @@ None of these labels implies profitability or permission to activate Live.
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
 | Exit/ownership | Durable ownership, bracket protection and supported audited full close | No automatic full-close observation worker; no general quantity/partial/replace lifecycle |
 | AI evidence | Persisted technical/order/account context, Marketaux news, AAPL-specific verified identity | Financial statements/earnings/macro are unavailable; PKO symbol-only news excluded; no ETF research pipeline |
-| Operator control | API health/readiness, lifecycle/round-trip endpoints, existing UI | UI calls retired signal route; proxy authority and unauthenticated ingestion/signal mutations need hardening |
+| Operator control | PP0 adds authenticated UI delegation, direct mutation gates, loopback defaults and the supported bound runtime UI action; existing lifecycle/round-trip endpoints remain | Operator lifecycle/research visibility and deployment/recovery work in PP6 remain planned; see PP0 report for security checks and residual dependencies |
 | Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |
@@ -127,12 +129,13 @@ passed for `6cbd2c7`. It excludes local uncommitted changes. The local toolchain
 Node24.4.1/pnpm9.15.4; the repository declares pnpm9.5.0, so this is not an exact
 local reproduction of the declared package-manager version.
 
-Production dependency audit reported two moderate Fastify5.8.5 advisories and no
+The historical production dependency audit reported two moderate Fastify5.8.5 advisories and no
 high/critical findings in that scan. Patched version is5.12.1:
 [schema coercion advisory](https://github.com/advisories/GHSA-w2qp-rph6-63g4),
 [trustProxy advisory](https://github.com/advisories/GHSA-3m5p-2c4r-xxw2).
 No vulnerable route configuration was demonstrated; this is dependency evidence,
-not a penetration-test result. Refresh dependency evidence in the security stage.
+not a penetration-test result. The [PP0 report](phase3/PP0_IMPLEMENTATION_REPORT.md)
+records patched versions, refreshed full/production audits and residual exposure.
 
 ## Authority and next work
 

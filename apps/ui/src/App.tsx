@@ -1,5 +1,11 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { deriveOrderDiagnostics } from "@ikbr/shared";
+import { TradingLoopResultView } from "./TradingLoopResult";
+import {
+  fetchOperatorApi,
+  requestTradingLoopRunOnce,
+  type TradingLoopResult,
+} from "./trading-loop";
 
 type HealthResponse = {
   ok: boolean;
@@ -120,11 +126,6 @@ type Order = {
     | "manual_cancel"
     | "unknown";
   cancelReasonDetail?: string;
-};
-
-type SignalOrder = {
-  id: number;
-  order: Omit<Order, "id">;
 };
 
 type OrderFilters = {
@@ -373,7 +374,7 @@ async function requestJson<T>(
   input: RequestInfo,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(input, init);
+  const response = await fetchOperatorApi(input, init);
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`${response.status} ${response.statusText}: ${body}`);
@@ -535,6 +536,8 @@ export function App() {
   });
 
   const [lastAction, setLastAction] = useState<string>("Ready");
+  const [tradingLoopResult, setTradingLoopResult] =
+    useState<TradingLoopResult | null>(null);
   const [lastError, setLastError] = useState<string | null>(null);
 
   const orderFiltersRef = useRef(orderFilters);
@@ -927,12 +930,16 @@ export function App() {
     }
   }
 
-  async function handleAction(name: string, fn: () => Promise<unknown>) {
+  async function handleAction(
+    name: string,
+    fn: () => Promise<unknown>,
+    refreshAfter = true,
+  ) {
     setBusyAction(name);
     setLastError(null);
     try {
       await fn();
-      await refreshAll();
+      if (refreshAfter) await refreshAll();
       setLastAction(`${name} completed at ${new Date().toLocaleTimeString()}`);
     } catch (error) {
       setLastError((error as Error).message);
@@ -977,15 +984,9 @@ export function App() {
   }
 
   async function runSignalsOnce() {
-    const result = await requestJson<{
-      generated: number;
-      results: SignalOrder[];
-    }>("/api/signal/signals/run-once", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-    });
-    setLastAction(`signals/run-once generated ${result.generated}`);
+    setTradingLoopResult(null);
+    const result = await requestTradingLoopRunOnce();
+    setTradingLoopResult(result);
   }
 
   async function bootstrapExecution() {
@@ -1906,10 +1907,14 @@ export function App() {
               <button
                 disabled={Boolean(busyAction)}
                 onClick={() =>
-                  void handleAction("Signals run-once", runSignalsOnce)
+                  void handleAction(
+                    "Evaluate configured instruments",
+                    runSignalsOnce,
+                    false,
+                  )
                 }
               >
-                Run Signals Once
+                Evaluate configured instruments
               </button>
               <button
                 disabled={Boolean(busyAction)}
@@ -1926,6 +1931,15 @@ export function App() {
                 Refresh
               </button>
             </div>
+
+            <p>
+              Evaluates the server-configured instruments. Normal proposal, AI, and
+              risk gates apply; an entry may follow when trading is already enabled.
+              The symbol filter does not change this scope.
+            </p>
+            {tradingLoopResult ? (
+              <TradingLoopResultView result={tradingLoopResult} />
+            ) : null}
 
             <div className="action-grid compact">
               <button

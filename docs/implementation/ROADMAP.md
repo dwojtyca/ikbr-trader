@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-09-28 (model routing; delivery scope unchanged).
+Updated: 2026-09-28 (PP0 implementation; later package scope unchanged).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -28,8 +28,10 @@ lifecycle remain incomplete. See the evidence matrix in CURRENT_STATE.
 
 ## Current sequence
 
-All work packages below are **planned, not implemented by this documentation**.
-Each receives its own bounded plan, independent plan review, implementation,
+PP0 implementation and its delivery gates are recorded in the
+[PP0 report](phase3/PP0_IMPLEMENTATION_REPORT.md). No operational deployment or
+trading activation is included. PP1–PP7 remain **planned**.
+Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
 
 | Package | Result | Depends on |

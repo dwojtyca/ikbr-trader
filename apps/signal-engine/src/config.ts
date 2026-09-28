@@ -14,6 +14,7 @@ dotenv.config();
 
 const schema = z
   .object({
+    SIGNAL_BIND_HOST: z.string().trim().min(1).default("127.0.0.1"),
     SIGNAL_PORT: z.coerce.number().default(3102),
     LOG_LEVEL: z.string().default("info"),
     POSTGRES_URL: z

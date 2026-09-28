@@ -1,4 +1,5 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { secretsEqual } from "@ikbr/shared/http-auth";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   FastifyInstance,
   FastifyReply,
@@ -10,9 +11,8 @@ import type {
 // audit log, and process-local burst detector for failed auth attempts.
 //
 // Design notes (see docs/adr/ADR-001-execution-security.md §PR2):
-//  - Bearer compare is constant-time via `crypto.timingSafeEqual`, with
-//    both buffers padded to a common length so shorter tokens do NOT leak
-//    the expected length via a size mismatch short-circuit.
+//  - Bearer comparison uses timing-safe fixed-size SHA-256 digests through
+//    the shared Node-only helper; credential bytes are never modified for padding.
 //  - The token value is never logged. Only `sha256(token).slice(0, 12)`
 //    hex is emitted as `tokenFingerprint` for correlation across logs.
 //  - Empty `EXECUTION_API_TOKEN` at startup is treated as "no client can
@@ -101,9 +101,7 @@ export type BearerVerifyResult =
   | { ok: false; reason: "missing_header" | "malformed" | "wrong_token" };
 
 /**
- * Verifies a Bearer token in constant time. The comparison pads both
- * buffers to `max(len(provided), len(expected), 32)` so no branch depends
- * on the provided token's length. Returns a discriminated union so the
+ * Verifies a Bearer token using timing-safe fixed-size digest comparison. Returns a discriminated union so the
  * caller can decide how to report the reason (but never leaks it to the
  * client — every failure surfaces as HTTP 401 with a generic body).
  */
@@ -126,22 +124,7 @@ export function verifyBearerToken(
   if (!provided) return { ok: false, reason: "malformed" };
   if (!expectedToken) return { ok: false, reason: "wrong_token" };
 
-  const providedBuf = Buffer.from(provided, "utf8");
-  const expectedBuf = Buffer.from(expectedToken, "utf8");
-  const size = Math.max(providedBuf.length, expectedBuf.length, 32);
-  const a = Buffer.alloc(size, 0);
-  const b = Buffer.alloc(size, 0);
-  providedBuf.copy(a);
-  expectedBuf.copy(b);
-
-  // Also compare declared lengths in constant time by XORing a length delta
-  // into the padded buffers' final byte — otherwise `Buffer.alloc(size, 0)`
-  // would let two different-length tokens with a shared prefix compare
-  // equal. This keeps timing constant while making length a discriminant.
-  a[size - 1] ^= providedBuf.length & 0xff;
-  b[size - 1] ^= expectedBuf.length & 0xff;
-
-  const equal = timingSafeEqual(a, b);
+  const equal = secretsEqual(provided, expectedToken);
   if (!equal) return { ok: false, reason: "wrong_token" };
   return { ok: true, tokenFingerprint: fingerprintToken(expectedToken) };
 }

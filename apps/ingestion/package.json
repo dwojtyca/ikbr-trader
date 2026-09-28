@@ -15,7 +15,7 @@
     "@ikbr/shared": "workspace:*",
     "@stoqey/ib": "1.6.10",
     "dotenv": "^16.4.5",
-    "fastify": "^5.0.0",
+    "fastify": "5.12.1",
     "ib": "^0.2.8",
     "ioredis": "^5.4.1",
     "pg": "^8.13.0",

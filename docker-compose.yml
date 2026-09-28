@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:5432:5432"
     volumes:
       - ./infra/sql:/docker-entrypoint-initdb.d
       - pgdata:/var/lib/postgresql/data
@@ -25,7 +25,7 @@ services:
   redis:
     image: redis:7
     ports:
-      - "6379:6379"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -39,6 +39,8 @@ services:
       - .env
     environment:
       INGESTION_PORT: 3101
+      INGESTION_BIND_HOST: 0.0.0.0
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
       IB_SOCKET_HOST: host.docker.internal
@@ -52,7 +54,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3101:3101"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3101:3101"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -64,6 +66,7 @@ services:
       - .env
     environment:
       SIGNAL_PORT: 3102
+      SIGNAL_BIND_HOST: 0.0.0.0
       POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader
       REDIS_URL: redis://redis:6379
       SIGNAL_EXECUTION_BASE_URL: http://execution-engine:3103
@@ -91,7 +94,7 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "3102:3102"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3102:3102"
     restart: unless-stopped
 
   execution-engine:
@@ -126,7 +129,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3103:3103"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3103:3103"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -155,6 +158,8 @@ services:
       - .env
     environment:
       BACKTEST_PORT: 3104
+      BACKTEST_BIND_HOST: 0.0.0.0
+      EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
       BACKTEST_POSTGRES_ADMIN_URL: postgresql://postgres:postgres@postgres:5432/postgres
       BACKTEST_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader_backtest
       BACKTEST_RESEARCH_POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/ikbr_trader_backtest_pr15_5a
@@ -168,7 +173,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "3104:3104"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:3104:3104"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -179,11 +184,13 @@ services:
     environment:
       UI_HOST: 0.0.0.0
       UI_PORT: 5173
+      UI_PUBLIC_ORIGIN: ${UI_PUBLIC_ORIGIN:-http://127.0.0.1:5173}
+      UI_OPERATOR_PASSWORD: ${UI_OPERATOR_PASSWORD:-}
       UI_INGESTION_PROXY_TARGET: http://ingestion:3101
       UI_SIGNAL_PROXY_TARGET: http://signal-engine:3102
       UI_EXECUTION_PROXY_TARGET: http://execution-engine:3103
       UI_BACKTEST_PROXY_TARGET: http://backtest-engine:3104
-      # Phase 1 / PR1 (schema-only). Vite proxy attaches this header from PR2.
+      # Server-only delegation after operator authentication and origin checks.
       EXECUTION_API_TOKEN: ${EXECUTION_API_TOKEN:-}
     depends_on:
       - ingestion
@@ -192,7 +199,7 @@ services:
       - llm-agent
       - backtest-engine
     ports:
-      - "5173:5173"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:5173:5173"
     restart: unless-stopped
 
 volumes:

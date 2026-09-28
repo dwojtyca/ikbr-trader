@@ -1,3 +1,4 @@
+import { createMutationAuth, logSafeResponse, operatorSafeLogger } from "@ikbr/shared/http-auth";
 import Fastify from "fastify";
 import { z } from "zod";
 import { config, type WatchlistInstrument } from "./config.js";
@@ -26,7 +27,9 @@ import { REGISTERED_ES_V2_PROJECTION } from "./research-v2-run-request.js";
 import { runResearchEsV3Experiment } from "./research-es-v3-experiment.js";
 import { installResearchEsV3Routes, researchV3RuntimeCapacity } from "./research-es-v3-routes.js";
 
-const app = Fastify({ logger: { level: config.LOG_LEVEL } });
+const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(config.LOG_LEVEL) });
+app.addHook("onResponse", logSafeResponse);
+app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? ""));
 installProtectedResearchRouteGuard(app, config.BACKTEST_POSTGRES_URL);
 let historyJob: Promise<void> | null = null;
 let runJob: Promise<void> | null = null;
@@ -842,7 +845,7 @@ app.addHook("onClose", async () => {
   await repo.close();
 });
 
-app.listen({ port: config.BACKTEST_PORT, host: "0.0.0.0" }).catch((err) => {
+app.listen({ port: config.BACKTEST_PORT, host: config.BACKTEST_BIND_HOST }).catch((err) => {
   app.log.error(err);
   process.exit(1);
 });
