@@ -4,6 +4,8 @@ import { TradingConfigurationRuntime, TradingConfigurationStore, type TradingCon
 import { BoundReviewWorker } from "./bound-review-worker.js";
 import { createLegacyReviewWorker } from "./legacy-review-worker.js";
 import type { BoundClaim } from "./bound-review-repository.js";
+import { reviewFixture } from "./research-review.testfixture.js";
+import { researchRequestHash } from "./research-decision.js";
 import type { AccountSummary } from "./execution-api-client.js";
 
 const claim: BoundClaim = {
@@ -33,23 +35,22 @@ async function admission(initial: "allowed" | "prepare" | "latched" | "drift" | 
   return { check: () => runtime.assertEntryAllowed(), pause: () => { state = "latched"; } };
 }
 
-for (const pauseAt of ["prepare", "latched", "drift", "db-failure", "claim", "account", "news", "model", "finalize", "allowed"] as const) {
-  test(`bound actual worker configuration barrier: ${pauseAt}`, async () => {
-    const gate = await admission(["prepare", "latched", "drift", "db-failure"].includes(pauseAt) ? pauseAt as "prepare" | "latched" | "drift" | "db-failure" : "allowed");
-    const calls: string[] = [];
-    const hit = (step: string) => { calls.push(step); if (step === pauseAt) gate.pause(); };
-    const worker = new BoundReviewWorker({ assertEntryAllowed: gate.check,
-      repository: { claim: async () => { hit("claim"); return claim; }, finalize: async () => { hit("finalize"); return true; }, recordDelivery: async () => { hit("record"); } },
-      execution: { getAccountSummary: async () => { hit("account"); return account; }, executeBoundProposed: async () => { hit("delivery"); return "SUBMITTED"; } },
-      news: { isConfigured: () => true, getNewsForSymbol: async () => { hit("news"); return []; } },
-      decider: { isConfigured: () => true, decide: async () => { hit("model"); return { decision: "EXECUTE", reason: "fixture", confidence: .8, riskFlags: [] }; } },
-      model: "fixture", promptVersion: "fixture", newsWindowHours: 1, maxNewsItems: 1 });
-    if (pauseAt === "allowed") { assert.equal(await worker.pollOnce(), true); assert.deepEqual(calls, ["claim", "account", "news", "model", "finalize", "delivery", "record"]); }
-    else { await assert.rejects(worker.pollOnce()); assert.equal(calls.includes("delivery"), false); assert.equal(calls.includes("record"), false);
-      if (["prepare", "latched", "drift", "db-failure"].includes(pauseAt)) assert.deepEqual(calls, []);
-      else assert.equal(calls.at(-1), pauseAt);
-    }
-  });
+for (const pauseAt of ["prepare", "latched", "drift", "db-failure", "claim", "account", "research", "reservation", "model", "finalize", "allowed"] as const) {
+ test(`bound actual worker configuration barrier: ${pauseAt}`,async()=>{
+  const gate=await admission(["prepare","latched","drift","db-failure"].includes(pauseAt)?pauseAt as "prepare"|"latched"|"drift"|"db-failure":"allowed");
+  const f=reviewFixture(),calls:string[]=[];const hit=(step:string)=>{calls.push(step);if(step===pauseAt)gate.pause();};
+  const worker=new BoundReviewWorker({assertEntryAllowed:gate.check,
+   repository:{claim:async()=>{hit("claim");return f.claim;},prepareResearch:async()=>{hit("research");return f.research;},
+    reserveModel:async(_c,r)=>{hit("reservation");return{startedAt:new Date().toISOString(),deadlineAt:new Date(Date.now()+10000).toISOString(),requestHash:researchRequestHash(r),callKey:"fixture"};},
+    recordModelOutcome:async()=>{},finalize:async(_c,d)=>{hit("finalize");return d.decision==="EXECUTE";},recordDelivery:async()=>{hit("record");}},
+   execution:{getAiContext:async()=>{hit("account");return f.context;},executeBoundProposed:async()=>{hit("delivery");return"SUBMITTED";}},
+   researchDecider:{isConfigured:()=>true,decide:async()=>{hit("model");return{decision:{decision:"EXECUTE",confidence:.8,reason:"fixture",riskFlags:[],evidenceRefs:["reports"]},actualModel:"fixture",usage:null};}},model:"fixture",promptVersion:"pp4-research-v1"});
+  if(pauseAt==="allowed"){await worker.pollOnce();assert.deepEqual(calls,["claim","research","account","reservation","model","finalize","delivery","record"]);}
+  else{await assert.rejects(worker.pollOnce());assert.equal(calls.includes("delivery"),false);assert.equal(calls.includes("record"),false);
+   if(["prepare","latched","drift","db-failure"].includes(pauseAt))assert.deepEqual(calls,[]);
+   if(pauseAt==="reservation")assert.equal(calls.includes("model"),false);
+  }
+ });
 }
 
 for (const pauseAt of ["prepare", "latched", "drift", "db-failure", "claim", "account", "news", "model", "decision", "cooldown", "allowed"] as const) {

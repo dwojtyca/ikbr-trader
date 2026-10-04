@@ -1,3 +1,7 @@
+import { registerResearchAuditRoute } from "./research-audit-routes.js";
+import { createResearchEntryValidator } from "./research-entry-guard.js";
+import { loadResearchManifest, ResearchStore } from "@ikbr/shared/instrument-research";
+import { registerResearchOrderContextRoute, readContextReconciliation, type FreshAiRiskReader } from "./research-order-context.js";
 import { adoptPaperEntryBudget } from "./paper-entry-budget.js";
 import { readPaperDailyLoss, assessPaperDailyLoss } from "./paper-daily-loss.js";
 import { ConfigurationMetadataClient } from "./configuration-metadata-client.js";
@@ -67,6 +71,9 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const configurationStore = new TradingConfigurationStore(pool);
+const loadedResearch = loadResearchManifest(process.env, tradingConfiguration.loaded);
+const researchStore = new ResearchStore(pool);
+const researchIdentity = () => loadedResearch ? { configHash: loadedResearch.manifest.configHash, manifestHash: loadedResearch.manifestHash } : null;
 const configurationRuntime = createTradingConfigurationRuntime({
   service: "execution-engine", loaded: tradingConfiguration.loaded, store: configurationStore,
   legacyAuthority: tradingConfiguration.authority, tradingEnabled: process.env.TRADING_ENABLED === "true",
@@ -74,7 +81,8 @@ const configurationRuntime = createTradingConfigurationRuntime({
 const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)),
   () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
   { policy: config.paperRunPolicy, context: paperDailyContext, resolveManagement: async (order, db) => order.strategyAttribution
-    ? readOriginalStockManagementInstrument(db, order.strategyAttribution) : configurationRuntime.resolveManagementInstrument(order.instrumentId!) });
+    ? readOriginalStockManagementInstrument(db, order.strategyAttribution) : configurationRuntime.resolveManagementInstrument(order.instrumentId!) },
+  createResearchEntryValidator({ store: researchStore, loadedIdentity: researchIdentity }));
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -968,23 +976,7 @@ app.log.info(
  * Tests use the SAME module by construction; only the injected
  * `BrokerOrderDispatcher` is fake in tests.
  */
-const submissionService = buildSubmissionApplicationService({
-  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
-  strategyPreflight: async ticket => {
-    if (tradingConfiguration.loaded.mode !== "bundle") throw new Error("STRATEGY_CONFIGURATION_UNAVAILABLE");
-    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error("STRATEGY_PRICE_UNAVAILABLE");
-    const body = await response.json() as { connected?: boolean; watchlist?: Array<{ instrumentId?: string; conid?: string; subscribed?: boolean;
-      marketState?: { conid?: string; marketDataType?: number; ts?: string } }> };
-    const matches = Array.isArray(body.watchlist) ? body.watchlist.filter(row => row.instrumentId === ticket.instrumentId) : [];
-    const row = matches[0];
-    if (body.connected !== true || matches.length !== 1 || row.subscribed !== true || row.conid !== ticket.conid ||
-        !row.marketState || row.marketState.conid !== ticket.conid || row.marketState.marketDataType !== 1 || typeof row.marketState.ts !== "string")
-      throw new Error("STRATEGY_PRICE_UNAVAILABLE");
-    return { effectiveConfigHash: tradingConfiguration.loaded.effectiveHash, observedAt: row.marketState.ts };
-  },
-  repo,
-  assessAiRisk: async (order, bound, accountId, sessionId) => {
+const readFreshAiRisk: FreshAiRiskReader = async (order, bound, accountId, sessionId) => {
     const [snapshot, response, metadata] = await Promise.all([
       tws.getAccountSnapshot(accountId),
       fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`,
@@ -1012,7 +1004,7 @@ const submissionService = buildSubmissionApplicationService({
       dailyLossEvidence = day.evidence;
       quoteCurrency = { ...caps, currency: capability.quoteCurrency, maxNotional: Math.min(caps.maxNotional, riskPolicy.maxEntryNotional.amount) };
     }
-    return assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot,
+    const assessed = assessAiEntryRisk({ order, bound, accountId, sessionId, snapshot,
       ...(order.strategyAttribution ? { stockMetadata: metadata, dailyLossEvidence } : { wseMetadata: metadata }),
       effectiveConfigHash: tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
       watchlist: await response.json(), nowMs: Date.now(), limits: {
@@ -1031,7 +1023,43 @@ const submissionService = buildSubmissionApplicationService({
           feeReserve: config.EXECUTION_AI_FEE_RESERVE_PLN,
         },
       } });
+    return assessed.ok ? { ...assessed, snapshot } : assessed;
+};
+
+registerResearchOrderContextRoute(app, { repo, prepare: async order => {
+  if (tradingConfiguration.loaded.mode !== "bundle" || !order.instrumentId || !order.strategyAttribution) throw new Error("RESEARCH_CONTEXT_CONFIGURATION_UNAVAILABLE");
+  const accountId = lastActiveAccountId;
+  if (!accountId || !tws.isConnected()) throw new Error("RESEARCH_CONTEXT_ACCOUNT_UNAVAILABLE");
+  assertActiveAccountAllowed(envGuardConfig(), accountId, { requireKnownAccount: true });
+  const generation = tws.getConnectionGeneration();
+  const bound = instrumentBindingAuthority.getBoundInstrument(order.instrumentId);
+  if (!bound) throw new Error("RESEARCH_CONTEXT_BINDING_UNAVAILABLE");
+  const assessed = await readFreshAiRisk(order, bound, accountId, EXECUTION_PROCESS_OWNER_ID);
+  if (!assessed.ok) throw new Error(assessed.reason);
+  const reconciliation = await readContextReconciliation(pool, accountId);
+  if (!tws.isConnected() || generation !== tws.getConnectionGeneration() || lastActiveAccountId !== accountId) throw new Error("RESEARCH_CONTEXT_SESSION_CHANGED");
+  if (!assessed.evidence.dailyLossEvidence || lastBrokerFillObservedAt >= Date.parse(assessed.evidence.dailyLossEvidence.coveredThrough)) throw new Error("RESEARCH_CONTEXT_BROKER_FILL_CHANGED");
+  return { effectiveConfigHash: tradingConfiguration.loaded.effectiveHash, accountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
+    connectionGeneration: generation, snapshot: assessed.snapshot, risk: assessed.evidence, reconciliation };
+} });
+
+const submissionService = buildSubmissionApplicationService({
+  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
+  strategyPreflight: async ticket => {
+    if (tradingConfiguration.loaded.mode !== "bundle") throw new Error("STRATEGY_CONFIGURATION_UNAVAILABLE");
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error("STRATEGY_PRICE_UNAVAILABLE");
+    const body = await response.json() as { connected?: boolean; watchlist?: Array<{ instrumentId?: string; conid?: string; subscribed?: boolean;
+      marketState?: { conid?: string; marketDataType?: number; ts?: string } }> };
+    const matches = Array.isArray(body.watchlist) ? body.watchlist.filter(row => row.instrumentId === ticket.instrumentId) : [];
+    const row = matches[0];
+    if (body.connected !== true || matches.length !== 1 || row.subscribed !== true || row.conid !== ticket.conid ||
+        !row.marketState || row.marketState.conid !== ticket.conid || row.marketState.marketDataType !== 1 || typeof row.marketState.ts !== "string")
+      throw new Error("STRATEGY_PRICE_UNAVAILABLE");
+    return { effectiveConfigHash: tradingConfiguration.loaded.effectiveHash, observedAt: row.marketState.ts };
   },
+  repo,
+  assessAiRisk: readFreshAiRisk,
   ensureBrokerSession: async () => {
     const { accountId } = await ensureBrokerSession();
     return { accountId };
@@ -1554,6 +1582,8 @@ app.get("/execution/account/summary", async (request, reply) => {
   };
 });
 
+registerResearchAuditRoute(app, { pool, store: researchStore });
+
 app.get("/execution/orders", async (request) => {
   const query = z
     .object({
@@ -1825,6 +1855,16 @@ async function main(): Promise<void> {
   try {
     await repo.init();
     await configurationRuntime.initialize();
+    if (loadedResearch && tradingConfiguration.loaded.mode === "bundle") {
+      await researchStore.registerManifest({ manifest: loadedResearch.manifest, configuration: tradingConfiguration.loaded.configuration,
+        tradingEnabled: config.TRADING_ENABLED === "true", adopt: process.env.RESEARCH_ADOPT_MANIFEST === "true" });
+      const observeResearch = () => researchStore.observe({ ...researchIdentity()!, service: "execution-engine",
+        processId: EXECUTION_PROCESS_OWNER_ID, tradingEnabled: config.TRADING_ENABLED === "true" });
+      await observeResearch();
+      const heartbeat = setInterval(() => { void observeResearch().catch(error => app.log.error({ err: error }, "research observation failed")); }, 10_000);
+      heartbeat.unref();
+      app.addHook("onClose", async () => { clearInterval(heartbeat); });
+    }
     if (config.paperRunPolicy) {
       const client = await pool.connect();
       try {

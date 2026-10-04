@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "./research-entry-guard.fixture.js";
 import { buildSubmissionApplicationService, type SubmissionServiceDeps } from "./reconciliation/submission-service.js";
 import { parsePaperRunPolicy } from "./paper-run-policy.js";
 import { adoptPaperEntryBudget } from "./paper-entry-budget.js";
@@ -41,7 +42,7 @@ async function prepare(pool:Pool){
  const client=await pool.connect();try{await client.query("BEGIN");assert.ok((await adoptPaperEntryBudget(client,policy,{tradingEnabled:false})).ok);await client.query("COMMIT");}finally{client.release();}
  let observed=0;
  const context=()=>({accountId,sessionId,connectionGeneration:1,nowMs:Date.now(),lastBrokerFillObservedAt:observed});
- const repo=new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>currentHash,{policy,context,resolveManagement:async()=>undefined});
+ const repo=new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>currentHash,{policy,context,resolveManagement:async()=>undefined});
  const bucket=Math.floor(at.getTime()/60_000)*60_000;
  await pool.query("INSERT INTO strategy_runtime_conversion(singleton,source_hash,v2_not_before_bucket_ms) VALUES(true,$1,$2)",[computeTradingConfigurationHash(configuration),bucket]);
  await pool.query("INSERT INTO broker_snapshot_syncs(account_id,session_id,generation,observed_at,complete) VALUES($1,$2,1,clock_timestamp(),true)",[accountId,sessionId]);
@@ -216,7 +217,7 @@ test("PP3 competing instruments share one account intent and reservation",{skip:
 test("PP3 crash/unknown send keeps attempt and restarted service never resends",{skip:!url},()=>fixture(async f=>{
  const s=await submissionFixture(f);assert.equal((await s.reserve(s.risk)).kind,"claimed_with_persisted_plan");
  let sends=0;await assert.rejects(f.repo.withEntryDispatchPermit(s.order,accountId,()=>{sends++;throw Error("lost broker acknowledgement");}),/lost broker acknowledgement/);
- const repo=new ExecutionRepository(f.pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>s.risk.strategyEffectiveConfigHash,
+ const repo=new LegacyResearchCompatibilityRepository(f.pool,undefined,undefined,focusedSubmissionTestSessionGuard,()=>s.risk.strategyEffectiveConfigHash,
   {policy:f.policy,context:f.context,resolveManagement:async()=>undefined});
  const service=buildSubmissionApplicationService({repo,assertEntryAllowed:async()=>{},dispatcher:{dispatch:async()=>{sends++;throw Error("must not resend");}}} as unknown as SubmissionServiceDeps);
  const result=await service.executeProposed({proposedOrderId:s.id,overrideRejected:false});assert.equal(result.kind,"duplicate_pending_ambiguous");assert.equal(sends,1);

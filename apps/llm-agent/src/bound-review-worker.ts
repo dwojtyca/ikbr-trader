@@ -1,113 +1,105 @@
-import { needsAaplIdentity, exactAaplClaim, type AaplIdentityResolver } from "./aapl-identity.js";
 import type { BoundClaim, BoundDecision, BoundReviewStore, DeliveryOutcome } from "./bound-review-repository.js";
-import type { AccountSummary } from "./execution-api-client.js";
-import type { DecisionContext, LlmDecision } from "./openai-decider.js";
-import type { MarketNewsItem } from "./marketaux-client.js";
+import type { ResearchReviewStore, ModelReservation } from "./research-review-repository.js";
+import { buildResearchModelRequest, validateResearchModelDecision, type ResearchModelRequest, type ResearchModelResult } from "./research-decision.js";
+import { validateResearchOrderContext, type ResearchOrderContextV1 } from "@ikbr/shared/instrument-research";
 
 interface BoundWorkerDependencies {
   assertEntryAllowed?: () => Promise<void>;
-  repository: BoundReviewStore;
-  resolveAaplIdentity?: AaplIdentityResolver;
+  repository: BoundReviewStore & Partial<ResearchReviewStore>;
   execution: {
-    getAccountSummary(force?: boolean): Promise<AccountSummary>;
+    getAiContext?(id: number): Promise<unknown>;
     executeBoundProposed(id: number): Promise<DeliveryOutcome>;
   };
-  news: { isConfigured(): boolean; getNewsForSymbol(symbol: string, hours: number, limit: number): Promise<MarketNewsItem[]> };
-  decider: { isConfigured(): boolean; decide(context: DecisionContext): Promise<LlmDecision> };
+  researchDecider?: { isConfigured(): boolean; decide(request: ResearchModelRequest, signal: AbortSignal): Promise<ResearchModelResult> };
   model: string;
   promptVersion: string;
-  newsWindowHours: number;
-  maxNewsItems: number;
+
 }
 
 export class BoundReviewWorker {
   constructor(private readonly deps: BoundWorkerDependencies) {}
-
   async pollOnce(): Promise<boolean> {
     await this.deps.assertEntryAllowed?.();
     const claim = await this.deps.repository.claim();
     if (!claim) return false;
-    await this.deps.assertEntryAllowed?.();
     const decision = await this.evaluate(claim);
     await this.deps.assertEntryAllowed?.();
     const mayDeliver = await this.deps.repository.finalize(claim, decision);
     if (mayDeliver) {
       await this.deps.assertEntryAllowed?.();
-      // The durable marker precedes this call. Transport failures cannot become rejection or retry.
       let outcome: DeliveryOutcome = "UNKNOWN";
-      try { outcome = await this.deps.execution.executeBoundProposed(claim.order.id); } catch { /* uncertain delivery */ }
+      try { outcome = await this.deps.execution.executeBoundProposed(claim.order.id); } catch { /* durable delivery marker forbids retry */ }
       await this.deps.repository.recordDelivery(claim, outcome);
     }
     return true;
   }
-
   private async evaluate(claim: BoundClaim): Promise<BoundDecision> {
-    const isPko = claim.identity.instrumentId === "pko_wse" && claim.identity.conid === "35146360" && claim.order.instrument === "PKO";
-    const coverage = {
-      technicalIndicators: claim.order.indicators ? "AVAILABLE" : "UNAVAILABLE",
-      instrumentMatchedNews: "UNAVAILABLE",
-      financialStatements: "UNAVAILABLE", earnings: "UNAVAILABLE", macro: "UNAVAILABLE", broaderMarketTrends: "UNAVAILABLE",
-    };
-    const context: Record<string, unknown> = {
-      coverage,
-      instrument: { ...claim.identity, symbol: claim.order.instrument,
-        currency: isPko ? "PLN" : "UNVERIFIED", exchange: isPko ? "WSE" : "UNVERIFIED" },
-      accountValuationCurrency: "UNVERIFIED",
-      proposal: claim.proposalSnapshot ?? claim.order, identity: claim.identity,
-      indicatorAvailability: claim.order.indicators ? "AVAILABLE" : "UNAVAILABLE",
-      startedAt: new Date().toISOString(),
-    };
+    const started = Date.now();
+    let request: ResearchModelRequest | undefined;
+    let reservation: ModelReservation | undefined;
     const reject = (reason: string): BoundDecision => ({ decision: "REJECT", confidence: 0, reason,
-      model: this.deps.model, promptVersion: this.deps.promptVersion, context });
-    if (needsAaplIdentity(claim)) {
-      if (!exactAaplClaim(claim)) return reject("AAPL_IDENTITY_CLAIM_MISMATCH");
-      if (!this.deps.resolveAaplIdentity) return reject("AAPL_IDENTITY_RESOLVER_MISSING");
-      try {
-        const resolved = await this.deps.resolveAaplIdentity(claim);
-        if (!resolved.ok) return reject(resolved.reason);
-        context.instrument = { ...claim.identity, ...resolved.evidence };
-      } catch { return reject("AAPL_IDENTITY_LOOKUP_FAILED"); }
-    }
+      model: request?.model ?? this.deps.model, promptVersion: request?.promptVersion ?? this.deps.promptVersion,
+      outputSchemaVersion: request?.outputSchemaVersion, riskFlags: [reason], evidenceRefs: [],
+      context: request?.context ?? { identity: claim.identity, coverage: "UNAVAILABLE" },
+      ...(reservation ? { contextHash: reservation.requestHash, research: request!.context.research.binding,
+        timings: { startedAt: reservation.startedAt, completedAt: new Date().toISOString(), latencyMs: Date.now() - Date.parse(reservation.startedAt), outcome: reason } } : {}) });
+    const repository = this.deps.repository;
+    if (!repository.prepareResearch || !repository.reserveModel || !repository.recordModelOutcome || !this.deps.execution.getAiContext)
+      return reject("RESEARCH_UNAVAILABLE");
     if (claim.order.riskCheckStatus !== "PASS") return reject("RISK_NOT_PASS");
-    if (!this.deps.news.isConfigured()) return reject("NEWS_NOT_CONFIGURED");
-    if (!this.deps.decider.isConfigured()) return reject("AI_NOT_CONFIGURED");
-
-    let account: AccountSummary;
+    if (!this.deps.researchDecider?.isConfigured()) return reject("AI_NOT_CONFIGURED");
     try {
-      account = await this.deps.execution.getAccountSummary(true);
-      context.account = { snapshot: account, receivedAt: new Date().toISOString() };
-      if (account.accountId !== claim.identity.accountId || !Array.isArray(account.positions) || !account.totals ||
-          !Number.isFinite(Date.parse(account.retrievedAt))) return reject("ACCOUNT_CONTEXT_INVALID");
-    } catch { return reject("ACCOUNT_UNAVAILABLE"); }
-    await this.deps.assertEntryAllowed?.();
-    let news: MarketNewsItem[];
-    try {
-      news = await this.deps.news.getNewsForSymbol(claim.order.instrument, this.deps.newsWindowHours, this.deps.maxNewsItems);
-      // Symbol-only search cannot establish that a PKO entity is the WSE listing.
-      const unverifiedItemsCount = isPko ? news.length : 0;
-      if (isPko) news = [];
-      coverage.instrumentMatchedNews = unverifiedItemsCount ? "UNVERIFIED_IDENTITY" : news.length ? "SYMBOL_MATCH_ONLY" : "EMPTY";
-      context.news = { items: news, unverifiedItemsCount, receivedAt: new Date().toISOString(), availability: coverage.instrumentMatchedNews };
-    } catch { return reject("NEWS_UNAVAILABLE"); }
-    const current = account.positions.find((position) => position.conid === claim.identity.conid);
-    await this.deps.assertEntryAllowed?.();
-    let decision: LlmDecision;
-    try {
-      decision = await this.deps.decider.decide({ order: claim.order,
-        indicatorSummary: claim.order.indicators ?? null,
-        accountSummary: { accountId: account.accountId, metrics: account.metrics,
-          totals: account.totals, openPositions: account.positions.filter((p) => p.position !== 0) },
-        currentPosition: current ? { symbol: current.symbol, qty: current.position, averageCost: current.averageCost,
-          unrealizedPnL: current.unrealizedPnL, marketValue: current.marketValue } : null,
-        news, nowIso: new Date().toISOString(), evidence: context,
-      });
-      if (!['EXECUTE', 'REJECT'].includes(decision.decision) || !Number.isFinite(decision.confidence) ||
-          decision.confidence < 0 || decision.confidence > 1 || typeof decision.reason !== 'string' || !decision.reason.trim()) {
-        return reject("AI_OUTPUT_INVALID");
+      await this.deps.assertEntryAllowed?.();
+      const research = await repository.prepareResearch(claim);
+      const raw = await bounded(this.deps.execution.getAiContext(claim.order.id), 8000, "AI_CONTEXT_TIMEOUT");
+      const identity = { proposedOrderId: claim.order.id, clientOrderHash: claim.identity.clientOrderHash,
+        effectiveConfigHash: research.binding.configHash, accountId: claim.identity.accountId, sessionId: claim.identity.sessionId,
+        instrumentId: claim.identity.instrumentId, conid: claim.identity.conid };
+      const context: ResearchOrderContextV1 = validateResearchOrderContext(raw, identity, Date.now());
+      if (Date.now() - started >= 8000) return reject("AI_CONTEXT_TIMEOUT");
+      request = buildResearchModelRequest(claim, research, context);
+      await this.deps.assertEntryAllowed?.();
+      reservation = await repository.reserveModel(claim, request);
+      await this.deps.assertEntryAllowed?.();
+      const remaining = Date.parse(reservation.deadlineAt) - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) {
+        await repository.recordModelOutcome(claim, reservation, { kind: "DEADLINE_BEFORE_SEND", completedAt: new Date().toISOString() });
+        return reject("AI_DEADLINE_EXHAUSTED");
       }
-    } catch { return reject("AI_UNAVAILABLE_OR_INVALID"); }
-    context.completedAt = new Date().toISOString();
-    return { decision: decision.decision, reason: decision.reason.slice(0, 1400), confidence: decision.confidence,
-      model: this.deps.model, promptVersion: this.deps.promptVersion, context };
+      const controller = new AbortController();
+      let timedOut = false;
+      const pending = this.deps.researchDecider.decide(request, controller.signal);
+      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, remaining);
+      let result: ResearchModelResult;
+      try {
+        result = await bounded(pending, remaining, "AI_MODEL_TIMEOUT");
+        result.decision = validateResearchModelDecision(result.decision, research);
+      } catch {
+        controller.abort();
+        await repository.recordModelOutcome(claim, reservation, { kind: "UNKNOWN_OR_INVALID", completedAt: new Date().toISOString() });
+        const savedReservation = reservation;
+        void pending.then(late => {
+          if (timedOut) return repository.recordModelOutcome!(claim, savedReservation, { kind: "LATE_RESPONSE", completedAt: new Date().toISOString(), result: late });
+        }).catch(() => undefined);
+        return reject("AI_UNAVAILABLE_OR_INVALID");
+      } finally { clearTimeout(timeout); }
+      const completedAt = new Date().toISOString();
+      const withinDeadline = Date.parse(completedAt) < Date.parse(reservation.deadlineAt);
+      await repository.recordModelOutcome(claim, reservation, { kind: withinDeadline ? "COMPLETED" : "LATE_RESPONSE", completedAt, result });
+      if (!withinDeadline) return reject("AI_MODEL_TIMEOUT");
+      return { ...result.decision, model: request.model, actualModel: result.actualModel,
+        promptVersion: request.promptVersion, outputSchemaVersion: request.outputSchemaVersion,
+        context: request.context, contextHash: reservation.requestHash, research: research.binding,
+        timings: { startedAt: reservation.startedAt, completedAt, latencyMs: Date.parse(completedAt) - Date.parse(reservation.startedAt), outcome: "COMPLETED" } };
+    } catch (error) {
+      const code = error instanceof Error && /^[A-Z][A-Z0-9_]{2,100}$/.test(error.message) ? error.message : "RESEARCH_CONTEXT_UNAVAILABLE";
+      if (reservation) await repository.recordModelOutcome(claim, reservation, { kind: code, completedAt: new Date().toISOString() });
+      return reject(code);
+    }
   }
+}
+async function bounded<T>(work: Promise<T>, timeoutMs: number, code: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try { return await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(code)), timeoutMs); })]); }
+  finally { if (timer) clearTimeout(timer); }
 }

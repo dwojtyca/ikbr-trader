@@ -58,8 +58,8 @@ const POST_ROUTES: Record<Service, readonly string[]> = {
   backtest: ['/backtest/history', '/backtest/history/resume', '/backtest/run'],
 };
 
-function allowed(method: string, service: Service, path: string): boolean {
-  if (method === 'GET') return GET_ROUTES[service].includes(path);
+export function allowed(method: string, service: Service, path: string): boolean {
+  if (method === 'GET') return GET_ROUTES[service].includes(path) || service === 'execution' && /^\/execution\/orders\/[1-9][0-9]*\/research$/.test(path);
   if (method !== 'POST') return false;
   if (POST_ROUTES[service].includes(path)) return true;
   if (service === 'signal') return /^\/signals\/strategies\/[A-Za-z0-9_-]+$/.test(path);

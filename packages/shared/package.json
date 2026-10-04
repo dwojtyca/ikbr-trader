@@ -17,6 +17,14 @@
       "types": "./dist/http-auth.d.ts",
       "default": "./dist/http-auth.js"
     },
+    "./instrument-research": {
+      "types": "./dist/instrument-research.d.ts",
+      "default": "./dist/instrument-research.js"
+    },
+    "./instrument-research-testfixture": {
+      "types": "./dist/instrument-research/research.fixture.d.ts",
+      "default": "./dist/instrument-research/research.fixture.js"
+    },
     "./trading-config": {
       "types": "./dist/trading-config.d.ts",
       "default": "./dist/trading-config.js"

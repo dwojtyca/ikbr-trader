@@ -1,3 +1,4 @@
+import type { ResearchEntryValidator, ResearchEntryPermit } from "./research-entry-guard.js";
 import { isProvenUnfilledPaperEntry } from "./paper-terminal-entry.js";
 import { checkPaperEntryBudget, bindPaperProposal, reservePaperEntryAttempt, readPaperRoundTripWindow } from "./paper-entry-budget.js";
 import type { PaperRunPolicy } from "./paper-run-policy.js";
@@ -446,7 +447,13 @@ export interface Trade {
 export class ExecutionRepository {
   constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined,
     private readonly paper?: { policy?: PaperRunPolicy; context: () => PaperDailyLossContext | null;
-      resolveManagement: (order: ProposedOrder, db: PoolClient) => Promise<BoundInstrument | undefined> }) {}
+      resolveManagement: (order: ProposedOrder, db: PoolClient) => Promise<BoundInstrument | undefined> },
+    private readonly researchEntryValidator?: ResearchEntryValidator) {}
+
+  private async validateEntryResearch(db: PoolClient, order: ProposedOrder, clientOrderHash: string, accountId: string, sessionId: string): Promise<ResearchEntryPermit> {
+    if (!this.researchEntryValidator) throw new Error("RESEARCH_ENTRY_VALIDATOR_UNAVAILABLE");
+    return this.researchEntryValidator({ db, order, clientOrderHash, accountId, sessionId });
+  }
 
   assertCurrentStrategyConfiguration(order: SignalTicket): void {
     if (getClientOrderHashVersion(order) === 2 && (!this.strategyConfigurationHash ||
@@ -543,6 +550,13 @@ export class ExecutionRepository {
         deadline = Math.min(deadline, permit.endsAtMs);
       }
       if (beforeSend) await beforeSend();
+      const researchRow = await client.query("SELECT * FROM proposed_orders WHERE id=$1 FOR UPDATE", [order.id]);
+      const researchOrder = researchRow.rows[0] ? this.mapRow(researchRow.rows[0]) : undefined;
+      if (!researchOrder || !validatePersistedOrderIdentity(researchOrder, researchRow.rows[0].client_order_hash).ok ||
+          computeClientOrderHash(researchOrder) !== computeClientOrderHash(order)) throw new Error("RESEARCH_DISPATCH_IDENTITY_CHANGED");
+      const researchReview = await readAiProposalReview(client, order.id!, true);
+      const researchPermit = await this.validateEntryResearch(client, researchOrder, researchRow.rows[0].client_order_hash,
+        accountId, researchReview?.session_id ?? "");
       if (order.strategyAttribution) {
         this.assertCurrentStrategyConfiguration(order);
         const stored = await client.query("SELECT * FROM proposed_orders WHERE id=$1 FOR UPDATE", [order.id]);
@@ -571,6 +585,8 @@ export class ExecutionRepository {
             context.connectionGeneration !== daily.connectionGeneration || context.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough) ||
             context.nowMs >= finalPaperRisk.validUntilMs) throw new Error("paper_daily_loss_changed");
       }
+      researchPermit.assertCurrent();
+      if (Date.now() >= researchPermit.validUntilMs) throw new Error("RESEARCH_DISPATCH_EXPIRED");
       send();
       await client.query("COMMIT");
     } catch (error) {
@@ -2730,6 +2746,14 @@ export class ExecutionRepository {
         await client.query("ROLLBACK");
         return { kind: "submission_identity_mismatch", reason: "risk_check_not_pass" };
       }
+      let researchPermit: ResearchEntryPermit;
+      try {
+        researchPermit = await this.validateEntryResearch(client, this.mapRow(row), row.client_order_hash ?? "", input.accountId,
+          input.positionGuard.kind === "available" ? input.positionGuard.sessionId : "");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        return { kind: "submission_identity_mismatch", reason: error instanceof Error ? error.message : "RESEARCH_ENTRY_UNAVAILABLE" };
+      }
       if (row.instrument_id !== null) {
         const order = this.mapRow(row);
         const verified = validatePersistedOrderIdentity(order, row.client_order_hash);
@@ -2796,6 +2820,14 @@ export class ExecutionRepository {
 
       const calendar = await this.sessionEntryGuard(client, this.mapRow(row));
       if (!calendar.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: calendar.reason }; }
+
+      try {
+        researchPermit.assertCurrent();
+        if (Date.now() >= researchPermit.validUntilMs) throw new Error("RESEARCH_ENTRY_EXPIRED");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        return { kind: "submission_identity_mismatch", reason: error instanceof Error ? error.message : "RESEARCH_ENTRY_UNAVAILABLE" };
+      }
 
       // Atomic claim + metadata + account write. Same fencing as
       // `tryStartSubmission`; also stamps `execution_account_id`

@@ -1,13 +1,15 @@
 # Instrument research and AI decision context
 
-Status: **proposed PP4 contract**, 2026-09-26. Company-report/ETF research is not
-implemented. Current AI coverage is documented in [CURRENT_STATE](../implementation/CURRENT_STATE.md).
+Status: **PP4 contract implemented and independently reviewed**, 2026-10-04.
+Full real-source acceptance remains blocked; see the
+[PP4 implementation and coverage report](../implementation/phase3/PP4_IMPLEMENTATION_REPORT.md).
+ETF data has a descriptor contract only; ETF research providers and execution remain unsupported.
 This extends existing llm-agent/shared modules; it does not move AI into execution.
 
 ## Two timelines
 
 Slow instrument research is fetched/cache-refreshed before signals and stored as
-an immutable `InstrumentResearchSnapshot` (proposed type). A time-sensitive entry
+an immutable `InstrumentResearchSnapshotV1`. A time-sensitive entry
 review joins the latest eligible snapshot with the exact proposed order, technical
 observations, fresh account/quote evidence and deterministic risk results. It pins
 the snapshot ID/version to both proposal and decision. The dispatcher repeats

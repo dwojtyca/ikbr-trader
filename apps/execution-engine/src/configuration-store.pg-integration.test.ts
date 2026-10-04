@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "./research-entry-guard.fixture.js";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -8,7 +9,6 @@ import { InstrumentBindingAuthority, InstrumentRegistry, type SignalTicket } fro
 import { TradingConfigurationStore, createTradingConfigurationRuntime, createLegacyManagementSnapshot, computeTradingConfigurationHash, loadTradingConfiguration, parseTradingConfiguration,
   buildTradingConfigurationProjection, buildStrategyAttribution, TRADING_CONFIGURATION_SERVICES, type LoadedTradingConfiguration } from "@ikbr/shared/trading-config";
 import { runMigrations } from "./migrations.js";
-import { ExecutionRepository } from "./repository.js";
 import { focusedSubmissionTestSessionGuard } from "./session-entry-guard.fixture.js";
 import { fixture } from "./lifecycle/close-test-fixture.js";
 
@@ -40,14 +40,14 @@ async function prepare(pool: Pool) {
   return { store, authority, sourceHash: createLegacyManagementSnapshot(authority).sourceHash, runtimes };
 }
 suite("PP1 durable configuration authority on isolated PostgreSQL", () => {
-  test("fresh bundle persists snapshots/revisions and sticky drift across restart without permitting entries", async () => isolated(async pool => {
+  test("fresh bundle persists snapshots/revisions and admits configuration only while peers agree", async () => isolated(async pool => {
     const store = new TradingConfigurationStore(pool), loaded = bundle();
     const enabled = createTradingConfigurationRuntime({ service: "execution-engine", store, loaded, tradingEnabled: true });
     await assert.rejects(() => enabled.initialize(), /DISABLED_WRITES/);
     assert.equal(Number((await pool.query("SELECT COUNT(*) n FROM trading_configuration_snapshots")).rows[0].n), 0);
     const runtimes = TRADING_CONFIGURATION_SERVICES.map(service => createTradingConfigurationRuntime({ service, store, loaded, tradingEnabled: false }));
     for (const runtime of runtimes) await runtime.initialize();
-    const matched = await runtimes[0].admission(); assert.equal(matched.allowed, false); assert.ok(!matched.reasons.includes("CONFIG_DRIFT"));
+    const matched = await runtimes[0].admission(); assert.equal(matched.allowed, true); assert.ok(!matched.reasons.includes("CONFIG_DRIFT"));
     const changed = raw(); changed.instruments[0].entryEnabled = false;
     const concurrent = createTradingConfigurationRuntime({ service: "ingestion", store, loaded: bundle(changed), tradingEnabled: false });
     await concurrent.initialize(); assert.ok((await runtimes[0].admission()).reasons.includes("CONFIG_DRIFT"));
@@ -95,7 +95,9 @@ suite("PP1 durable configuration authority on isolated PostgreSQL", () => {
     await assert.rejects(() => createTradingConfigurationRuntime({ service: "execution-engine", store, loaded: foreign, tradingEnabled: false }).initialize(), /SOURCE_CHANGED/);
   }));
   test("repository holds dispatch permit through an awaited final configuration check", async () => isolated(async pool => {
-    const repo = new ExecutionRepository(pool, undefined, undefined, focusedSubmissionTestSessionGuard);
+    await pool.query(`INSERT INTO proposed_orders(id,instrument,instrument_id,conid,side,order_type,quantity,entry,stop,take_profit,reason,confidence,risk_check_status,status,strategy,client_order_hash)
+      VALUES(42,'TEST','test','123','BUY','LMT',1,100,99,102,'test',.8,'PASS','SUBMITTED','test_strategy',$1)`, [computeClientOrderHash(fixture().order)]);
+    const repo = new LegacyResearchCompatibilityRepository(pool, undefined, undefined, focusedSubmissionTestSessionGuard);
     let writes = 0, checked = false;
     await assert.rejects(() => repo.withEntryDispatchPermit(fixture().order, "DU_TEST", () => { writes++; }, async () => {
       await Promise.resolve(); checked = true; throw Error("CONFIG_DRIFT");
@@ -104,7 +106,7 @@ suite("PP1 durable configuration authority on isolated PostgreSQL", () => {
     await repo.withEntryDispatchPermit(fixture().order, "DU_TEST", () => { writes++; }, async () => { await Promise.resolve(); });
     assert.equal(writes, 1);
     const latestDeadline = Date.now() + 60_000;
-    const deadlineRepo = new ExecutionRepository(pool, undefined, undefined, async () => ({ ok: true, generation: 1, endsAtMs: latestDeadline }));
+    const deadlineRepo = new LegacyResearchCompatibilityRepository(pool, undefined, undefined, async () => ({ ok: true, generation: 1, endsAtMs: latestDeadline }));
     const originalNow = Date.now;
     try {
       await assert.rejects(() => deadlineRepo.withEntryDispatchPermit(fixture().order, "DU_TEST", () => { writes++; }, async () => {

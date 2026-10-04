@@ -64,7 +64,7 @@ test("all fixture instruments project monitoring with independent identities and
   for (const row of projection.readiness) {
     assert.equal(row.entryReady, false);
     assert.ok(!row.reasons.includes("PP2_STRATEGY_RUNTIME_UNAVAILABLE"));
-    assert.ok(row.reasons.includes("PP4_RESEARCH_UNAVAILABLE"));
+    assert.ok(row.reasons.includes("RESEARCH_PER_PROPOSAL_REQUIRED"));
     assert.equal(row.priceGrid.status, "unknown");
   }
   assert.ok(projection.readiness.find(row => row.instrumentId === "disabled_assignment")!.reasons.includes("STRATEGY_INSTANCE_DISABLED"));

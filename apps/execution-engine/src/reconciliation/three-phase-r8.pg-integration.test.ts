@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "../research-entry-guard.fixture.js";
 import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15 r8 — order-critical fields round-trip + persisted hash
@@ -101,7 +102,7 @@ function buildTestService(
     onDispatch?: (p: BrokerDispatchPayload) => Promise<void>;
   } = {},
 ): { service: SubmissionApplicationService; dispatchCount: () => number; captured: { legs: PreparedBrokerOrder["legs"] | null } } {
-  const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
+  const repo = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
   const captured: { legs: PreparedBrokerOrder["legs"] | null } = { legs: null };
   let count = 0;
   const dispatcher: BrokerOrderDispatcher = overrides.dispatcher ?? {
@@ -186,7 +187,7 @@ suite("PR15 r8 §1 — order-critical fields round-trip through DB (PG)", () => 
       assert.equal(Number(persisted.trailing_stop_pct), 1.5);
       assert.equal(Number(persisted.trailing_stop_activation_r), 2);
       // Recomputed persisted hash equals wire hash.
-      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
+      const repo = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const rec = await repo.getExecutableProposedById(
         (await pool.query<{ id: number }>(`SELECT id FROM proposed_orders WHERE client_order_id='r8-rt'`)).rows[0].id,
       );
@@ -377,7 +378,7 @@ suite("PR15 r8 §6 — executeProposed happy path with rich fields (PG)", () => 
       const preparedFor: { order?: unknown } = {};
       let dispatchCount = 0;
       const capturedLegs: { legs?: PreparedBrokerOrder["legs"] } = {};
-      const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
+      const repo = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
       const service = buildSubmissionApplicationService({
     assertEntryAllowed: async () => {},
         repo,

@@ -18,13 +18,13 @@ export function buildTradingConfigurationProjection(configuration: TradingConfig
   const unknown = Object.freeze({ status: "unknown" as const, reason: "BROKER_EVIDENCE_UNKNOWN" });
   const readiness = Object.freeze(configuration.instruments.map(row => {
     const observed = evidence.get(row.id), assigned = Object.freeze(instances.filter(instance => row.strategySelection.instanceIds.includes(instance.id)));
-    const reasons = ["PP4_RESEARCH_UNAVAILABLE"];
+    const reasons = ["RESEARCH_PER_PROPOSAL_REQUIRED"];
     if (!row.entryEnabled) reasons.unshift("ENTRY_DISABLED");
     if (assigned.some(instance => !instance.enabled)) reasons.push("STRATEGY_INSTANCE_DISABLED");
     return Object.freeze({ instrumentId: row.id, monitoringEnabled: row.monitoringEnabled, entryRequested: row.entryEnabled, entryReady: false as const,
       instances: assigned, reasons: Object.freeze(reasons), brokerIdentity: observed?.identity ?? unknown, session: observed?.session ?? unknown,
       priceGrid: observed?.priceGrid ?? unknown, quote: observed?.quote ?? unknown, sessionOpen: observed?.sessionOpen ?? null,
-      research: Object.freeze({ status: "unavailable" as const, reason: "PP4_RESEARCH_UNAVAILABLE" }) });
+      research: Object.freeze({ status: "unknown" as const, reason: "RESEARCH_PER_PROPOSAL_REQUIRED" }) });
   }));
   return Object.freeze({ registry, bindings, authority, instances, readiness });
 }

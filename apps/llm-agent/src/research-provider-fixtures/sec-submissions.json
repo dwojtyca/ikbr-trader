@@ -1,0 +1,12 @@
+{
+  "cik": "0000000001",
+  "name": "Example Industries",
+  "tickers": ["EXM"],
+  "exchanges": ["Nasdaq"],
+  "filings": { "recent": {
+    "accessionNumber": ["0000000001-25-000001", "0000000001-25-000002"],
+    "form": ["10-K", "10-K/A"],
+    "reportDate": ["2024-12-31", "2024-12-31"],
+    "acceptanceDateTime": ["2025-02-10T16:12:00.000Z", "2025-03-01T10:00:00.000Z"]
+  }}
+}

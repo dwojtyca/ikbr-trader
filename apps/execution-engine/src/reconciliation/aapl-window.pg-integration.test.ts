@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "../research-entry-guard.fixture.js";
 import { checkGpwWindow, parseGpwWindow } from "../gpw-window.js";
 import { createSessionEntryGuard } from "../session-entry-guard.js";
 import { executeTicketBodySchema } from "../execute-ticket-schema.js";
@@ -10,7 +11,6 @@ import { Pool } from "pg";
 import { newYorkMidnight, buildInstrumentSessionIdentity, type SessionSchedule, InstrumentBindingAuthority, InstrumentRegistry, type Instrument, type SignalTicket } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { runMigrations } from "../migrations.js";
-import { ExecutionRepository } from "../repository.js";
 import { assessAiEntryRisk } from "../ai-entry-risk.js";
 import { buildSubmissionApplicationService } from "./submission-service.js";
 import { deriveChildOrderRef, deriveParentOrderRef } from "./order-ref.js";
@@ -60,7 +60,7 @@ async function fixture(currency: "USD" | "PLN" = "USD", pko = true) {
   const before = new Date(day); before.setUTCDate(before.getUTCDate()-20);
   // Synthetic broker calendar spans the current local day so PG tests remain
   // independent of wall-clock market hours, while all production checks run.
-  const repo = new ExecutionRepository(pool, undefined, window, createSessionEntryGuard(id => authority.getBoundInstrument(id)));
+  const repo = new LegacyResearchCompatibilityRepository(pool, undefined, window, createSessionEntryGuard(id => authority.getBoundInstrument(id)));
   await pool.query(`INSERT INTO broker_snapshot_syncs (account_id,session_id,generation,observed_at,complete)
     VALUES ($1,$2,1,clock_timestamp(),true)`, [accountId, sessionId]);
   const selectedInstrument: Instrument = { ...instrument(pko ? "aapl_nasdaq" : "test", pko ? "AAPL" : "TEST"), currency, exchange,
@@ -168,7 +168,7 @@ describe("AAPL durable single-entry window through production service", {skip: !
         const result = await f.repo.insertProposedFromTicket(f.makeTicket(patch), "test_strategy", undefined, guard);
         assert.deepEqual(result, {kind:"invalid_ticket_shape", reason:"aapl_window_identity_mismatch"});
       }
-      const unconfigured = new ExecutionRepository(f.pool);
+      const unconfigured = new LegacyResearchCompatibilityRepository(f.pool);
       assert.deepEqual(await unconfigured.insertProposedFromTicket(f.makeTicket(), "test_strategy", undefined, guard),
         {kind:"invalid_ticket_shape", reason:"aapl_window_unconfigured"});
       assert.equal((await f.pool.query("SELECT count(*) FROM proposed_orders")).rows[0].count, "0");
@@ -201,7 +201,7 @@ describe("AAPL durable single-entry window through production service", {skip: !
       assert.equal(f.state.dispatches,1);
       const spent=(await f.pool.query("SELECT * FROM aapl_windows")).rows[0];
       assert.equal(Number(spent.consumed_proposal_id),id);
-      const restarted=new ExecutionRepository(f.pool,undefined,f.window,createSessionEntryGuard(id => f.authority.getBoundInstrument(id)));
+      const restarted=new LegacyResearchCompatibilityRepository(f.pool,undefined,f.window,createSessionEntryGuard(id => f.authority.getBoundInstrument(id)));
       assert.equal((await restarted.getAaplWindowStatus(accountId)).ok,false);
       await f.pool.query("UPDATE proposed_orders SET status='CANCELLED' WHERE id=$1",[id]);
       const retry=await f.submit(f.makeTicket(),"second-entry");
@@ -370,7 +370,7 @@ describe('generic production calendar guard for arbitrary bound entries', {skip:
       const id=await f.create();await f.approve(id);await f.pool.query('UPDATE proposed_orders SET instrument_id=NULL WHERE id=$1',[id]);
       const resumed=await f.execute(id);assert.deepEqual(resumed,{kind:'risk_rejected',reason:'session_entry_binding_required'});
       assert.equal(f.state.prepares+f.state.dispatches,0);
-      assert.deepEqual(await new ExecutionRepository(f.pool).checkSessionEntry(f.makeTicket()),{ok:false,reason:'session_entry_guard_unavailable'});
+      assert.deepEqual(await new LegacyResearchCompatibilityRepository(f.pool).checkSessionEntry(f.makeTicket()),{ok:false,reason:'session_entry_guard_unavailable'});
       assert.deepEqual(await createSessionEntryGuard(id=>f.authority.getBoundInstrument(id))(f.pool,{...f.makeTicket(),positionEffect:'CLOSE_OR_REDUCE'}),{ok:false,reason:'session_close_requires_lifecycle'});
       for(const instrumentId of ['test',undefined]) { const forged=await f.submit(f.makeTicket({instrumentId,positionEffect:'CLOSE_OR_REDUCE'}),'forged-close-'+String(instrumentId)); assert.notEqual(forged.kind,'awaiting_ai');assert.notEqual(forged.kind,'resumed'); }
       assert.equal(f.state.dispatches,0);

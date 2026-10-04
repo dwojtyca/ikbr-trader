@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "../research-entry-guard.fixture.js";
 import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 /**
  * PR15.2 — instrument_id persistence, resume-identity mismatch,
@@ -29,7 +30,6 @@ import {
 import { InstrumentRegistry } from "@ikbr/shared";
 
 import { runMigrations } from "../migrations.js";
-import { ExecutionRepository } from "../repository.js";
 import {
   buildSubmissionApplicationService,
   type BrokerDispatchPayload,
@@ -165,7 +165,7 @@ function buildService(
   dispatchCount: () => number;
 } {
   let count = 0;
-  const repo = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
+  const repo = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
   const buildPrepared = (cid: string): PreparedBrokerOrder =>
     ({
       contract: {} as PreparedBrokerOrder["contract"],

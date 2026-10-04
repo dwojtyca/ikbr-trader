@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createServer, preview } from 'vite';
-import { createOperatorMiddleware, operatorProxyPlugin, validateOperatorConfig, type OperatorConfig } from './operator-proxy.js';
+import { allowed, createOperatorMiddleware, operatorProxyPlugin, validateOperatorConfig, type OperatorConfig } from './operator-proxy.js';
 import { createMutationAuth } from '@ikbr/shared/http-auth';
 
 const password = 'operator-fixture-'.repeat(3);
@@ -33,6 +33,14 @@ function call(port: number, path: string, options: { method?: string; headers?: 
   });
 }
 const headers = { authorization: auth, origin, 'x-operator-request': '1', 'sec-fetch-site': 'same-origin' };
+
+test('research audit proxy permits only the exact numeric GET route', () => {
+  assert.equal(allowed('GET', 'execution', '/execution/orders/12/research'), true);
+  for (const path of ['/execution/orders/0/research', '/execution/orders/-1/research', '/execution/orders/12/research/', '/execution/orders/12/other', '/execution/orders/12%2fresearch', '/execution/orders/12%252fresearch', '/execution/orders/12/../research', '/execution/orders/12/research/other']) {
+    assert.equal(allowed('GET', 'execution', path), false, path);
+  }
+  for (const method of ['POST', 'PUT', 'DELETE', 'HEAD']) assert.equal(allowed(method, 'execution', '/execution/orders/12/research'), false, method);
+});
 
 test('configuration rejects missing/shared secrets, plaintext remote origin and credential targets', () => {
   const base = config('http://127.0.0.1:3101');

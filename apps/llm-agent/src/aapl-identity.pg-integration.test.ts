@@ -30,27 +30,12 @@ describe('AAPL identity through production PostgreSQL repository and bound worke
   const id=Number(row.rows[0].id);
   await pool.query(`INSERT INTO proposal_ai_reviews(proposed_order_id,client_order_hash,instrument_id,conid,account_id,session_id,expires_at) VALUES($1,'hash','aapl_nasdaq','265598','DU1','session',clock_timestamp()+interval '120 seconds')`,[id]);return id;
  }
- for(const scenario of ['EXECUTE','REJECT','UNKNOWN','STALE'] as const)it(`verified metadata and complete proposal propagate with ${scenario} semantics`,async()=>{
-  const id=await seed();let calls=0,deliveries=0;let modelEvidence:unknown;
-  const worker=new BoundReviewWorker({repository:repo,resolveAaplIdentity:createAaplIdentityResolver({pool,env}),
-   execution:{getAccountSummary:async()=>({accountId:'DU1',source:'live',retrievedAt:new Date().toISOString(),positions:[],metrics:{},totals:{positionsCount:0,grossExposure:0,netExposure:0,unrealizedPnL:0,realizedPnL:0}}),executeBoundProposed:async()=>{deliveries++;if(scenario==='UNKNOWN')throw new Error('uncertain');return'SUBMITTED';}},
-   news:{isConfigured:()=>true,getNewsForSymbol:async()=>[]},decider:{isConfigured:()=>true,decide:async context=>{
-    modelEvidence=structuredClone(context.evidence);calls++;assert.deepEqual(context.indicatorSummary,indicators);assert.deepEqual(context.order.indicators,indicators);
-    assert.equal(context.order.instrumentId,'aapl_nasdaq');assert.equal(context.order.positionEffect,'OPEN_OR_ADD');
-    assert.deepEqual(context.order.partialTakeProfits,[{rMultiple:2,fraction:.5}]);assert.equal(context.order.trailingStopPct,.5);assert.equal(context.order.trailingStopActivationR,1);
-    assert.deepEqual([context.order.entry,context.order.stop,context.order.takeProfit,context.order.quantity],[100,99,102,1]);
-    const evidence=context.evidence as Record<string,unknown>;assert.equal((evidence.instrument as Record<string,unknown>).currency,'USD');assert.equal(evidence.accountValuationCurrency,'UNVERIFIED');
-    if(scenario==='STALE')await pool.query("UPDATE proposal_ai_reviews SET claim_until=clock_timestamp()-interval '1 second' WHERE proposed_order_id=$1",[id]);
-    return{decision:scenario==='REJECT'?'REJECT':'EXECUTE',reason:'test',confidence:.8,riskFlags:[]};}},model:'fake',promptVersion:'test',newsWindowHours:24,maxNewsItems:3});
-  await worker.pollOnce();assert.equal(calls,1);
+ it('legacy AAPL metadata cannot bypass missing PP4 research',async()=>{
+  const id=await seed();let deliveries=0;
+  const worker=new BoundReviewWorker({repository:repo,execution:{executeBoundProposed:async()=>{deliveries++;return'SUBMITTED';}},model:'fixture',promptVersion:'pp4-research-v1'});
+  await worker.pollOnce();assert.equal(await worker.pollOnce(),false);
   const stored=(await pool.query('SELECT * FROM proposal_ai_reviews WHERE proposed_order_id=$1',[id])).rows[0];
-  if(scenario==='STALE'){assert.equal(stored.decision_json,null);assert.equal(deliveries,0);return;}
-  assert.equal(await worker.pollOnce(),false);assert.equal(deliveries,scenario==='REJECT'?0:1);
-  assert.deepEqual(stored.decision_json.context.instrument,(modelEvidence as Record<string,unknown>).instrument);
-  const instrument=stored.decision_json.context.instrument;
-  assert.deepEqual(instrument,{clientOrderHash:'hash',instrumentId:'aapl_nasdaq',conid:'265598',accountId:'DU1',sessionId:'session',symbol:'AAPL',secType:'STK',exchange:'SMART',primaryExchange:'NASDAQ',currency:'USD',localSymbol:'AAPL',tradingClass:'NMS',source:'ibkr',resolvedAt:'2026-09-01T12:00:00.000Z',bindingVerified:true});
-  assert.deepEqual(stored.decision_json.context.proposal.indicator_snapshot,indicators);
-  assert.equal(stored.delivery_outcome,scenario==='REJECT'?null:scenario==='UNKNOWN'?'UNKNOWN':'SUBMITTED');
+  assert.equal(stored.status,'REJECTED');assert.equal(stored.decision_json.reason,'RESEARCH_UNAVAILABLE');assert.equal(deliveries,0);
  });
  for(const source of ['override_fallback','unknown'])it(`raw ${source} provenance cannot become ibkr evidence`,async()=>{
   await seed();await pool.query('UPDATE instrument_contracts SET source=$1',[source]);const claim=(await repo.claim())!;

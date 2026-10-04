@@ -73,6 +73,10 @@ export class ExecutionApiClient {
     private readonly bearerToken: string
   ) {}
 
+  async getAiContext(id: number): Promise<unknown> {
+    return this.requestJson(`/execution/proposals/${id}/ai-context`);
+  }
+
   async getAccountSummary(force = false): Promise<AccountSummary> {
     const suffix = force ? '?force=true' : '';
     return this.requestJson<AccountSummary>(`/execution/account/summary${suffix}`);

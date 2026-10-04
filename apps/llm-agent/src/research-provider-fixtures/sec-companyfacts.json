@@ -1,0 +1,13 @@
+{
+  "cik": "0000000001",
+  "entityName": "Example Industries",
+  "facts": { "us-gaap": {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": { "units": { "USD": [
+      { "accn": "0000000001-25-000001", "end": "2024-12-31", "start": "2024-01-01", "val": 1200 },
+      { "accn": "0000000001-25-000002", "end": "2024-12-31", "start": "2024-01-01", "val": 1250 }
+    ]}},
+    "LongTermDebtCurrent": { "units": { "USD": [{ "accn": "0000000001-25-000002", "end": "2024-12-31", "val": 100 }] }},
+    "LongTermDebtNoncurrent": { "units": { "USD": [{ "accn": "0000000001-25-000002", "end": "2024-12-31", "val": 300 }] }},
+    "CommercialPaper": { "units": { "USD": [{ "accn": "0000000001-25-000002", "end": "2024-12-31", "val": 50 }] }}
+  }}
+}

@@ -1,3 +1,4 @@
+import { LegacyResearchCompatibilityRepository } from "../research-entry-guard.fixture.js";
 import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 import { stockMetadataFixture } from "../stock-market-test-fixture.js";
 import { describe, it } from "node:test";
@@ -12,7 +13,6 @@ import {
 } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { findAccountReservation } from "../ai-proposal-review.js";
-import { ExecutionRepository } from "../repository.js";
 import { runMigrations } from "../migrations.js";
 import { ReconciliationRunner } from "../reconciliation/runner.js";
 import { ReconciliationRepository } from "../reconciliation/repository.js";
@@ -85,7 +85,7 @@ async function createFixture(currency: "USD" | "PLN") {
   url.pathname = `/${database}`;
   const pool = new Pool({ connectionString: url.toString() });
   await runMigrations(pool);
-  const execution = new ExecutionRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard),
+  const execution = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard),
     repo = new CloseRepository(pool, execution),
     reconciliation = new ReconciliationRepository(pool);
   const authority = new InstrumentBindingAuthority(

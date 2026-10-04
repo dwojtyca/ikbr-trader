@@ -1,14 +1,13 @@
-import { createAaplIdentityResolver } from "./aapl-identity.js";
-import { BoundReviewRepository } from "./bound-review-repository.js";
+import { ResearchBoundReviewRepository } from "./research-review-repository.js";
+import { ResearchOpenAiDecider } from "./research-decision.js";
+import { ResearchStore, loadResearchManifest } from "@ikbr/shared/instrument-research";
 import { BoundReviewWorker } from "./bound-review-worker.js";
-import { createLegacyReviewWorker } from "./legacy-review-worker.js";
 import { Pool } from "pg";
 import { config, tradingConfiguration } from "./config.js";
 import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@ikbr/shared/trading-config";
-import { MarketAuxClient } from "./marketaux-client.js";
 import { ExecutionApiClient } from "./execution-api-client.js";
-import { OpenAiDecider } from "./openai-decider.js";
 import { LlmAgentRepository } from "./repository.js";
+import { ResearchRefreshScheduler, researchBudgetAccountId } from "./research-refresh.js";
 
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const configurationStore = new TradingConfigurationStore(pool);
@@ -22,29 +21,20 @@ const executionApi = new ExecutionApiClient(
   config.LLM_AGENT_HTTP_TIMEOUT_MS,
   config.EXECUTION_API_TOKEN ?? "",
 );
-const marketaux = new MarketAuxClient({
-  apiKey: config.LLM_AGENT_MARKETAUX_API_KEY,
-  baseUrl: config.LLM_AGENT_MARKETAUX_BASE_URL,
-  timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS,
-});
-const decider = new OpenAiDecider({
-  apiKey: config.LLM_AGENT_OPENAI_API_KEY,
-  baseUrl: config.LLM_AGENT_OPENAI_BASE_URL,
-  model: config.LLM_AGENT_MODEL,
-  timeoutMs: config.LLM_AGENT_HTTP_TIMEOUT_MS,
-  promptVersion: config.LLM_AGENT_PROMPT_VERSION,
-  maxOpenNotionalPct: config.MAX_NOTIONAL_PER_TRADE_PCT,
-});
-
+const research = loadResearchManifest(process.env, tradingConfiguration.loaded);
+const researchStore = new ResearchStore(pool);
+const researchDecider = new ResearchOpenAiDecider({ apiKey: config.LLM_AGENT_OPENAI_API_KEY, baseUrl: config.LLM_AGENT_OPENAI_BASE_URL });
 const boundWorker = new BoundReviewWorker({
   assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
-  repository: new BoundReviewRepository(pool, { effectiveConfigHash: tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined }), execution: executionApi,
-  resolveAaplIdentity: createAaplIdentityResolver({ pool, env: process.env }),
-  news: marketaux, decider, model: config.LLM_AGENT_MODEL,
-  promptVersion: config.LLM_AGENT_PROMPT_VERSION,
-  newsWindowHours: config.LLM_AGENT_NEWS_WINDOW_HOURS,
-  maxNewsItems: config.LLM_AGENT_MAX_NEWS_ITEMS,
+  repository: new ResearchBoundReviewRepository(pool, research), execution: executionApi,
+  researchDecider, model: research?.manifest.model.model ?? config.LLM_AGENT_MODEL,
+  promptVersion: research?.manifest.model.promptVersion ?? config.LLM_AGENT_PROMPT_VERSION,
 });
+let researchHeartbeat: NodeJS.Timeout | undefined;
+let refreshTimer: NodeJS.Timeout | undefined;
+const refreshAccountId = researchBudgetAccountId(process.env, research?.manifest.refreshEnabled ?? false);
+const refreshScheduler = research && refreshAccountId ? new ResearchRefreshScheduler({ manifest: research.manifest,
+  manifestHash: research.hash, accountId: refreshAccountId, store: researchStore }) : null;
 
 const workerId = `llm-agent-${process.pid}`;
 let inFlight = false;
@@ -72,14 +62,8 @@ function log(
   }
 }
 
-const legacyWorker = createLegacyReviewWorker({
-  repo, executionApi, marketaux, decider, config, workerId, log,
-  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
-});
-
 async function pollOnce(): Promise<void> {
-  if (await boundWorker.pollOnce()) return;
-  await legacyWorker.pollOnce();
+  await boundWorker.pollOnce();
 }
 
 async function tick(): Promise<void> {
@@ -100,6 +84,21 @@ async function main(): Promise<void> {
   await configurationRuntime.initialize();
   configurationRuntime.startHeartbeat();
   await repo.init();
+  if (research && tradingConfiguration.loaded.mode === "bundle") {
+    await researchStore.registerManifest({ manifest: research.manifest, configuration: tradingConfiguration.loaded.configuration,
+      tradingEnabled: process.env.TRADING_ENABLED === "true", adopt: process.env.RESEARCH_ADOPT_MANIFEST === "true" });
+    const observe = () => researchStore.observe({ configHash: research.manifest.configHash, manifestHash: research.hash,
+      service: "llm-agent", processId: configurationRuntime.processId, tradingEnabled: process.env.TRADING_ENABLED === "true" });
+    await observe();
+    researchHeartbeat = setInterval(() => { void observe().catch(() => log("error", "research heartbeat unavailable")); }, 10000);
+    researchHeartbeat.unref();
+  }
+  if (refreshScheduler) {
+    const refresh = () => void refreshScheduler.tick().catch(error => log("error", "research refresh failed", { message: (error as Error).message }));
+    refreshTimer = setInterval(refresh, 60_000);
+    refreshTimer.unref();
+    refresh();
+  }
 
   log("info", "trading configuration loaded", configurationRuntime.diagnostics());
 
@@ -132,6 +131,8 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
     configurationRuntime.stopHeartbeat();
     try {
       if (timer) clearInterval(timer);
+      if (researchHeartbeat) clearInterval(researchHeartbeat);
+      if (refreshTimer) clearInterval(refreshTimer);
       await pool.end();
     } finally {
       process.exit(0);

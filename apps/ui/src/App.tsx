@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { deriveOrderDiagnostics, type StrategyInstanceAttributionV1 } from "@ikbr/shared";
 import { formatStrategyAttribution } from "./strategy-attribution";
 import { TradingLoopResultView } from "./TradingLoopResult";
+import { ResearchAudit } from "./ResearchAudit";
 import {
   fetchOperatorApi,
   requestTradingLoopRunOnce,
@@ -2665,6 +2666,7 @@ export function App() {
                                     <span>Cancel Detail</span>
                                     <p>{order.cancelReasonDetail ?? "-"}</p>
                                   </div>
+                                  {order.id !== undefined ? <ResearchAudit orderId={order.id} /> : null}
                                 </div>
                               </td>
                             </tr>

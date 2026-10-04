@@ -12,7 +12,6 @@ export function assessTradingConfigurationAdmission(local: { mode: "legacy" | "b
   const reasons: string[] = [];
   if (!state || !Number.isFinite(state.nowMs)) reasons.push("CONFIG_STORE_UNAVAILABLE");
   if (local.migrationPrepare) reasons.push("CONFIG_MIGRATION_PREPARATION");
-  if (local.mode === "bundle") reasons.push("PP4_RESEARCH_UNAVAILABLE");
   if (state) {
     const active = state.observations.filter(row => {
       const observed = Date.parse(row.observedAt), expires = Date.parse(row.expiresAt);

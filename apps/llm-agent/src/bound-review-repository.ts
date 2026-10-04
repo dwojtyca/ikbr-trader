@@ -11,6 +11,8 @@ export interface BoundClaim {
   identity: { clientOrderHash: string; instrumentId: string; conid: string; accountId: string; sessionId: string;
     clientOrderHashVersion?: 1 | 2; strategyAttribution?: StrategyInstanceAttributionV1; strategyTrigger?: StrategyTriggerV1 };
   token: string;
+  claimUntil?: string;
+  expiresAt?: string;
 }
 
 export interface BoundDecision {
@@ -20,6 +22,13 @@ export interface BoundDecision {
   model: string;
   promptVersion: string;
   context: unknown;
+  riskFlags?: string[];
+  evidenceRefs?: string[];
+  contextHash?: string;
+  research?: import("@ikbr/shared/instrument-research").ResearchBinding;
+  outputSchemaVersion?: string;
+  actualModel?: string;
+  timings?: { startedAt: string; completedAt: string; latencyMs: number; outcome: string };
 }
 
 export type DeliveryOutcome = "SUBMITTED" | "UNKNOWN" | "REFUSED";
@@ -31,9 +40,9 @@ export interface BoundReviewStore {
 
 // Every transaction locks the proposal before its review, matching submission.
 export class BoundReviewRepository implements BoundReviewStore {
-  constructor(private readonly pool: Pool, private readonly options: { effectiveConfigHash?: string } = {}) {}
+  constructor(protected readonly pool: Pool, protected readonly options: { effectiveConfigHash?: string } = {}) {}
 
-  private async validateStrategyIdentity(client: PoolClient, row: ClaimedOrderRow & { client_order_hash?: string }): Promise<ClaimedOrder> {
+  protected async validateStrategyIdentity(client: PoolClient, row: ClaimedOrderRow & { client_order_hash?: string }): Promise<ClaimedOrder> {
     const order = new LlmAgentRepository(this.pool).mapClaimedOrder(row);
     if (getClientOrderHashVersion(order) === 2) {
       if (!this.options.effectiveConfigHash || order.strategyAttribution!.effectiveConfigHash !== this.options.effectiveConfigHash ||
@@ -81,6 +90,7 @@ export class BoundReviewRepository implements BoundReviewStore {
         identity: { clientOrderHash: r.client_order_hash, instrumentId: r.instrument_id,
           conid: r.conid, accountId: r.account_id, sessionId: r.session_id,
           ...(order.strategyAttribution ? { clientOrderHashVersion: 2 as const, strategyAttribution: order.strategyAttribution, strategyTrigger: order.strategyTrigger } : {}) }, token,
+        claimUntil: r.claim_until.toISOString(), expiresAt: r.expires_at.toISOString(),
       };
     });
   }
@@ -98,6 +108,7 @@ export class BoundReviewRepository implements BoundReviewStore {
             canonicalJson(validated.strategyAttribution ?? null) !== canonicalJson(claim.identity.strategyAttribution ?? null) ||
             canonicalJson(validated.strategyTrigger ?? null) !== canonicalJson(claim.identity.strategyTrigger ?? null)) return false;
       } catch { return false; }
+      if (!(await this.validateDecision(client, claim, decision))) return false;
       const result = await client.query(`
         UPDATE proposal_ai_reviews
         SET status = $3, decision_json = $4::jsonb, decided_at = clock_timestamp(),
@@ -120,6 +131,8 @@ export class BoundReviewRepository implements BoundReviewStore {
     });
   }
 
+  protected async validateDecision(_client: PoolClient, _claim: BoundClaim, _decision: BoundDecision): Promise<boolean> { return true; }
+
   async recordDelivery(claim: BoundClaim, outcome: DeliveryOutcome): Promise<void> {
     await this.pool.query(`UPDATE proposal_ai_reviews SET delivery_outcome = $3
       WHERE proposed_order_id = $1 AND claim_token = $2::uuid
@@ -127,7 +140,7 @@ export class BoundReviewRepository implements BoundReviewStore {
         AND delivery_outcome IS NULL`, [claim.order.id, claim.token, outcome]);
   }
 
-  private async expire(client: PoolClient): Promise<void> {
+  protected async expire(client: PoolClient): Promise<void> {
     const expired = await client.query(`SELECT po.id FROM proposed_orders po
       JOIN proposal_ai_reviews r ON r.proposed_order_id = po.id
       WHERE po.status = 'PROPOSED' AND po.execution_attempted_at IS NULL
@@ -144,7 +157,7 @@ export class BoundReviewRepository implements BoundReviewStore {
     }
   }
 
-  private async transaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+  protected async transaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");

@@ -1,0 +1,390 @@
+{
+  "schemaVersion": 1,
+  "configHash": "60cd6b0368d6d176a3d85f750b11bace5b2f7880576e85441099ba80fd229f10",
+  "refreshEnabled": false,
+  "model": {
+    "provider": "openai",
+    "model": "UNVERIFIED_MODEL",
+    "promptVersion": "pp4-research-v1",
+    "outputSchemaVersion": "pp4-decision-v1",
+    "maxInputChars": 100000,
+    "maxOutputTokens": 1000,
+    "maxCostMicrosPerCall": 0,
+    "maxRequestsPerDay": 0,
+    "maxCostMicrosPerDay": 0
+  },
+  "instruments": [
+    {
+      "instrumentId": "pko_wse",
+      "assetClass": "stock",
+      "listing": {
+        "broker": "ibkr",
+        "symbol": "PKO",
+        "conId": 35146360,
+        "exchange": "WSE",
+        "primaryExchange": "WSE",
+        "currency": "PLN",
+        "localSymbol": "PKO",
+        "tradingClass": "PKO",
+        "expectedMinTick": 0.01
+      },
+      "issuerId": "pko",
+      "legalName": "Powszechna Kasa Oszczędności Bank Polski Spółka Akcyjna",
+      "country": "PL",
+      "sector": "Banking",
+      "business": "Banking group; consolidated banking reporting",
+      "identifiers": [
+        {
+          "scheme": "LEI",
+          "value": "P4GTT6GF1W40CVIMFR43"
+        },
+        {
+          "scheme": "ISIN",
+          "value": "PLPKO0000016"
+        }
+      ],
+      "verification": {
+        "url": "https://www.pkobp.pl/en/investor-relations",
+        "verifiedAt": "2026-10-04T09:30:28Z",
+        "outcome": "VERIFIED"
+      },
+      "profile": "bank",
+      "reportingCurrency": "PLN",
+      "bankCapitalMetric": "tier1_ratio",
+      "annual": {
+        "periodStart": "2025-01-01",
+        "periodEnd": "2025-12-31",
+        "nextPublicationDeadline": "2026-10-04T00:00:00Z",
+        "scope": "consolidated"
+      },
+      "periodic": {
+        "periodStart": "2026-01-01",
+        "periodEnd": "2026-06-30",
+        "nextPublicationDeadline": "2026-10-04T00:00:00Z",
+        "scope": "consolidated"
+      },
+      "sources": [
+        {
+          "id": "annual_report",
+          "provider": "https://www.pkobp.pl",
+          "adapter": "issuer-document",
+          "parserConfig": {
+            "kind": "issuer-xhtml",
+            "issuerMarkers": [
+              "PKO Bank Polski"
+            ],
+            "documentPeriodMarkers": [
+              "2025"
+            ],
+            "sourceUnitMarkers": [
+              "in PLN million"
+            ],
+            "reportPublicationAt": "2026-03-12T00:02:00+01:00",
+            "facts": [
+              {
+                "metric": "net_interest_income",
+                "rowLabel": "Net interest income",
+                "tableHeaders": [
+                  "INCOME STATEMENT",
+                  "Note",
+                  "2025",
+                  "2024"
+                ],
+                "columnHeader": "2025",
+                "kind": "annual",
+                "unit": "currency",
+                "currency": "PLN",
+                "scale": 1000000,
+                "decimalSeparator": ".",
+                "periodStart": "2025-01-01",
+                "periodEnd": "2025-12-31",
+                "periodType": "duration",
+                "scope": "consolidated",
+                "publicationAt": "2026-03-12T00:02:00+01:00"
+              },
+              {
+                "metric": "net_profit",
+                "rowLabel": "Net profit attributable to equity holders of the parent company",
+                "tableHeaders": [
+                  "INCOME STATEMENT",
+                  "Note",
+                  "2025",
+                  "2024"
+                ],
+                "columnHeader": "2025",
+                "kind": "annual",
+                "unit": "currency",
+                "currency": "PLN",
+                "scale": 1000000,
+                "decimalSeparator": ".",
+                "periodStart": "2025-01-01",
+                "periodEnd": "2025-12-31",
+                "periodType": "duration",
+                "scope": "consolidated",
+                "publicationAt": "2026-03-12T00:02:00+01:00"
+              },
+              {
+                "metric": "loans",
+                "rowLabel": "Loans and advances to customers",
+                "tableHeaders": [
+                  "",
+                  "Note",
+                  "31.12.2025",
+                  "31.12.2024"
+                ],
+                "columnHeader": "31.12.2025",
+                "kind": "annual",
+                "unit": "currency",
+                "currency": "PLN",
+                "scale": 1000000,
+                "decimalSeparator": ".",
+                "periodStart": null,
+                "periodEnd": "2025-12-31",
+                "periodType": "instant",
+                "scope": "consolidated",
+                "publicationAt": "2026-03-12T00:02:00+01:00"
+              },
+              {
+                "metric": "deposits",
+                "rowLabel": "Amounts due to customers",
+                "tableHeaders": [
+                  "",
+                  "Note",
+                  "31.12.2025",
+                  "31.12.2024"
+                ],
+                "columnHeader": "31.12.2025",
+                "kind": "annual",
+                "unit": "currency",
+                "currency": "PLN",
+                "scale": 1000000,
+                "decimalSeparator": ".",
+                "periodStart": null,
+                "periodEnd": "2025-12-31",
+                "periodType": "instant",
+                "scope": "consolidated",
+                "publicationAt": "2026-03-12T00:02:00+01:00"
+              },
+              {
+                "metric": "tier1_ratio",
+                "rowLabel": "Tier 1 capital ratio",
+                "tableHeaders": [
+                  "Capital adequacy",
+                  "31.12.2025",
+                  "31.12.2024 (restated)",
+                  "31.12.2024 (published)"
+                ],
+                "columnHeader": "31.12.2025",
+                "kind": "annual",
+                "unit": "percent",
+                "scale": 1,
+                "decimalSeparator": ".",
+                "periodStart": null,
+                "periodEnd": "2025-12-31",
+                "periodType": "instant",
+                "scope": "consolidated",
+                "publicationAt": "2026-03-12T00:02:00+01:00"
+              }
+            ]
+          },
+          "roles": [
+            "reports"
+          ],
+          "urls": [
+            "https://www.pkobp.pl/api/public/7ac80885-6c08-42c2-8c15-42540e4e3987.xhtml"
+          ],
+          "issuerIdentifier": {
+            "scheme": "LEI",
+            "value": "P4GTT6GF1W40CVIMFR43"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.pkobp.pl/regulacje-prawne/regulamin-strony-internetowej",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        },
+        {
+          "id": "latest_periodic",
+          "provider": "https://www.pkobp.pl",
+          "adapter": "issuer-document",
+          "parserConfig": {
+            "kind": "UNSUPPORTED_PDF_MAPPING"
+          },
+          "roles": [
+            "reports"
+          ],
+          "urls": [
+            "https://www.pkobp.pl/en/investor-relations/financial-reports/periodic-report-for-the-first-half-of-2026"
+          ],
+          "issuerIdentifier": {
+            "scheme": "LEI",
+            "value": "P4GTT6GF1W40CVIMFR43"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.pkobp.pl/regulacje-prawne/regulamin-strony-internetowej",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        },
+        {
+          "id": "issuer_news_calendar",
+          "provider": "https://www.pkobp.pl",
+          "adapter": "issuer-document",
+          "parserConfig": {
+            "kind": "UNVERIFIED_FEED_COVERAGE"
+          },
+          "roles": [
+            "news",
+            "calendar"
+          ],
+          "urls": [
+            "https://www.pkobp.pl/en/investor-relations"
+          ],
+          "issuerIdentifier": {
+            "scheme": "LEI",
+            "value": "P4GTT6GF1W40CVIMFR43"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.pkobp.pl/regulacje-prawne/regulamin-strony-internetowej",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        }
+      ]
+    },
+    {
+      "instrumentId": "aapl_nasdaq",
+      "assetClass": "stock",
+      "listing": {
+        "broker": "ibkr",
+        "symbol": "AAPL",
+        "conId": 265598,
+        "exchange": "SMART",
+        "primaryExchange": "NASDAQ",
+        "currency": "USD",
+        "localSymbol": "AAPL",
+        "tradingClass": "NMS",
+        "expectedMinTick": 0.01
+      },
+      "issuerId": "apple",
+      "legalName": "Apple Inc.",
+      "country": "US",
+      "sector": "Electronic Computers (SEC SIC 3571)",
+      "business": "Consumer electronics, software and services",
+      "identifiers": [
+        {
+          "scheme": "CIK",
+          "value": "0000320193"
+        }
+      ],
+      "verification": {
+        "url": "https://data.sec.gov/submissions/CIK0000320193.json",
+        "verifiedAt": "2026-10-04T09:30:28Z",
+        "outcome": "VERIFIED"
+      },
+      "profile": "industrial",
+      "reportingCurrency": "USD",
+      "bankCapitalMetric": null,
+      "annual": {
+        "periodStart": "2024-09-29",
+        "periodEnd": "2025-09-27",
+        "nextPublicationDeadline": "2026-10-04T00:00:00Z",
+        "scope": "consolidated"
+      },
+      "periodic": {
+        "periodStart": "2025-09-28",
+        "periodEnd": "2026-06-27",
+        "nextPublicationDeadline": "2026-10-04T00:00:00Z",
+        "scope": "consolidated"
+      },
+      "sources": [
+        {
+          "id": "sec_reports",
+          "provider": "https://data.sec.gov",
+          "adapter": "sec-json",
+          "parserConfig": {
+            "kind": "sec-json",
+            "listingSymbol": "AAPL",
+            "exchange": "Nasdaq",
+            "concepts": [
+              {
+                "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "metric": "revenue",
+                "unit": "currency",
+                "currency": "USD",
+                "scale": 1,
+                "periodType": "duration"
+              },
+              {
+                "concept": "NetIncomeLoss",
+                "metric": "net_income",
+                "unit": "currency",
+                "currency": "USD",
+                "scale": 1,
+                "periodType": "duration"
+              },
+              {
+                "concept": "NetCashProvidedByUsedInOperatingActivities",
+                "metric": "operating_cash_flow",
+                "unit": "currency",
+                "currency": "USD",
+                "scale": 1,
+                "periodType": "duration"
+              }
+            ],
+            "debtComponents": [
+              "LongTermDebtCurrent",
+              "LongTermDebtNoncurrent",
+              "CommercialPaper"
+            ]
+          },
+          "roles": [
+            "reports"
+          ],
+          "urls": [
+            "https://data.sec.gov/submissions/CIK0000320193.json",
+            "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"
+          ],
+          "issuerIdentifier": {
+            "scheme": "CIK",
+            "value": "0000320193"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.sec.gov/search-filings/edgar-application-programming-interfaces",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        },
+        {
+          "id": "issuer_news_calendar",
+          "provider": "https://investor.apple.com",
+          "adapter": "issuer-document",
+          "parserConfig": {
+            "kind": "UNVERIFIED_FEED_COVERAGE"
+          },
+          "roles": [
+            "news",
+            "calendar"
+          ],
+          "urls": [
+            "https://investor.apple.com/investor-relations/default.aspx"
+          ],
+          "issuerIdentifier": {
+            "scheme": "CIK",
+            "value": "0000320193"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://investor.apple.com/investor-relations/default.aspx",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        }
+      ]
+    }
+  ]
+}

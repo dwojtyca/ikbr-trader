@@ -1,96 +1,74 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { BoundReviewWorker } from "./bound-review-worker.js";
-import type { BoundClaim, BoundDecision, BoundReviewStore, DeliveryOutcome } from "./bound-review-repository.js";
+import type { BoundClaim, BoundDecision, DeliveryOutcome } from "./bound-review-repository.js";
 import { ExecutionApiClient } from "./execution-api-client.js";
-import { MarketAuxClient } from "./marketaux-client.js";
-import { OpenAiDecider } from "./openai-decider.js";
+import { ResearchOpenAiDecider, researchRequestHash, type ResearchModelRequest } from "./research-decision.js";
+import { reviewFixture } from "./research-review.testfixture.js";
+import type { ResearchReviewStore } from "./research-review-repository.js";
 
-const claim: BoundClaim = {
-  order: { id: 1, instrument: "MSFT", conid: "42", side: "BUY", orderType: "LMT", quantity: 1,
-    entry: 100, stop: 99, takeProfit: 102, confidence: 0.7, reason: "strategy breakout", strategy: "test",
-    riskCheckStatus: "PASS", status: "PROPOSED", timestamp: new Date().toISOString(), createdAt: new Date() },
-  identity: { clientOrderHash: "hash", instrumentId: "msft", conid: "42", accountId: "DU1", sessionId: "session" },
-  token: "00000000-0000-4000-8000-000000000001",
-};
-
-class MemoryStore implements BoundReviewStore {
-  decision?: BoundDecision;
-  outcome?: DeliveryOutcome;
-  available = true;
-  stale = false;
-  async claim() { if (!this.available) return null; this.available = false; return claim; }
-  async finalize(_claim: BoundClaim, decision: BoundDecision) {
-    if (this.stale) return false;
-    this.decision = decision;
-    return decision.decision === "EXECUTE";
-  }
-  async recordDelivery(_claim: BoundClaim, outcome: DeliveryOutcome) { this.outcome = outcome; }
-}
-
-for (const scenario of ["approve", "reject", "news-error", "news-malformed", "ai-error", "ai-malformed", "stale", "timeout", "5xx", "malformed2xx", "refused"] as const) {
-  test(`bound worker uses real clients and preserves one-shot semantics: ${scenario}`, async (t) => {
-    const store = new MemoryStore();
-    store.stale = scenario === "stale";
-    let deliveries = 0;
-    let modelCalls = 0;
+for (const scenario of ["approve", "reject", "missing", "stale-context", "budget", "ai-error", "ai-malformed", "unknown-ref", "missing-ref", "stale", "timeout", "5xx", "malformed2xx", "refused"] as const) {
+  test(`cached bound worker one-shot semantics: ${scenario}`, async t => {
+    const f = reviewFixture(); let available = true, saved: BoundDecision | undefined, outcome: DeliveryOutcome | undefined;
+    let deliveries = 0, modelCalls = 0, reserved = 0, modelOutcome: unknown;
+    const store: ResearchReviewStore = {
+      claim: async () => { if (!available) return null; available = false; return f.claim; },
+      prepareResearch: async () => { if (scenario === "missing") throw new Error("RESEARCH_SNAPSHOT_MISSING"); return f.research; },
+      reserveModel: async (_claim, request) => {
+        if (scenario === "budget") throw new Error("RESEARCH_BUDGET_EXHAUSTED");
+        reserved++; return { startedAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 1000).toISOString(), requestHash: researchRequestHash(request), callKey: "model:proposal:1" };
+      },
+      recordModelOutcome: async (_claim, _reservation, value) => { modelOutcome = value; },
+      finalize: async (_claim, decision) => { if (scenario === "stale") return false; saved = decision; return decision.decision === "EXECUTE"; },
+      recordDelivery: async (_claim, value) => { outcome = value; },
+    };
     t.mock.method(globalThis, "fetch", async (url: string | URL, init?: RequestInit) => {
       const path = String(url);
-      if (path.includes("/account/summary")) return Response.json({
-        accountId: "DU1", source: "live", retrievedAt: new Date().toISOString(), positions: [],
-        metrics: { netLiquidation: 10000 }, totals: { positionsCount: 0, grossExposure: 0, netExposure: 0, unrealizedPnL: 0, realizedPnL: 0 },
-      });
-      if (path.includes("news.test")) {
-        if (scenario === "news-error") return new Response("unavailable", { status: 503 });
-        if (scenario === "news-malformed") return Response.json({ error: "bad" });
-        return Response.json({ data: [] });
-      }
+      if (path.includes("/ai-context")) return Response.json(scenario === "stale-context" ? { ...f.context, requestedAt: new Date(Date.now() - 20000).toISOString() } : f.context);
       if (path.includes("ai.test")) {
-        modelCalls++;
+        modelCalls++; assert.equal(reserved, 1);
         const body = JSON.parse(String(init?.body));
-        assert.match(body.messages[0].content, /untrusted data/);
-        assert.match(body.messages[1].content, /UNAVAILABLE/);
-        if (scenario === "ai-error") return new Response("unavailable", { status: 503 });
-        return Response.json({ choices: [{ message: { content: scenario === "ai-malformed" ? '{"decision":"EXECUTE"}' :
-          JSON.stringify({ decision: scenario === "reject" ? "REJECT" : "EXECUTE", confidence: 0.8, reason: "context supports trade" }) } }] });
+        assert.match(body.messages[0].content, /untrusted data/); assert.equal(body.max_completion_tokens, 1000);
+        assert.equal(body.response_format.json_schema.strict, true); assert.equal(body.tools, undefined);
+        if (scenario === "ai-error") return new Response("secret should not be logged", { status: 503 });
+        const decision = { decision: scenario === "reject" ? "REJECT" : "EXECUTE", confidence: .8, reason: "supported fixture", riskFlags: ["fixture-risk"],
+          evidenceRefs: scenario === "unknown-ref" ? ["invented"] : scenario === "missing-ref" ? [] : ["reports"] };
+        return Response.json({ model: "fixture-model-version", choices: [{ finish_reason: "stop", message: { content: scenario === "ai-malformed" ? '{"decision":"EXECUTE"}' : JSON.stringify(decision) } }] });
       }
-      assert.ok(path.includes("/execute-proposed/1"));
-      deliveries++;
-      assert.equal(store.decision?.decision, "EXECUTE");
+      assert.ok(path.includes("/execute-proposed/1")); deliveries++; assert.equal(saved?.decision, "EXECUTE");
       if (scenario === "timeout") throw new DOMException("timeout", "AbortError");
       if (scenario === "5xx") return new Response("uncertain", { status: 500 });
-      if (scenario === "refused") return new Response("blocked", { status: 409 });
-      if (scenario === "malformed2xx") return Response.json({ ok: true });
-      return Response.json({ outcome: "SUBMITTED", order: { id: 1, status: "SUBMITTED" } });
+      if (scenario === "refused") return new Response("denied", { status: 409 });
+      return Response.json(scenario === "malformed2xx" ? { ok: true } : { outcome: "SUBMITTED", order: { id: 1, status: "SUBMITTED" } });
     });
-    const worker = new BoundReviewWorker({ repository: store,
-      execution: new ExecutionApiClient("https://execution.test", 100, "test-only"),
-      news: new MarketAuxClient({ apiKey: "fake", baseUrl: "https://news.test", timeoutMs: 100 }),
-      decider: new OpenAiDecider({ apiKey: "fake", baseUrl: "https://ai.test", timeoutMs: 100,
-        model: "fake-model", promptVersion: "bound-v1", maxOpenNotionalPct: 10 }),
-      model: "fake-model", promptVersion: "bound-v1", newsWindowHours: 24, maxNewsItems: 3 });
-    assert.equal(await worker.pollOnce(), true);
-    assert.equal(await worker.pollOnce(), false);
-    if (["reject", "news-error", "news-malformed", "ai-error", "ai-malformed", "stale"].includes(scenario)) {
-      assert.equal(deliveries, 0);
-      assert.equal(store.decision?.decision, scenario === "stale" ? undefined : "REJECT");
-    } else {
-      assert.equal(deliveries, 1);
-      assert.equal(store.decision?.decision, "EXECUTE");
-      assert.equal(store.outcome, scenario === "approve" ? "SUBMITTED" : scenario === "refused" ? "REFUSED" : "UNKNOWN");
-      assert.ok(JSON.stringify(store.decision?.context).includes('"availability":"EMPTY"'));
-    }
-    if (scenario.startsWith("news-")) assert.equal(modelCalls, 0);
+    const worker = new BoundReviewWorker({ repository: store, execution: new ExecutionApiClient("https://execution.test", 1000, "fixture"),
+      researchDecider: new ResearchOpenAiDecider({ apiKey: "fake", baseUrl: "https://ai.test" }), model: "fixture", promptVersion: "pp4-research-v1" });
+    assert.equal(await worker.pollOnce(), true); assert.equal(await worker.pollOnce(), false);
+    const approved = ["approve", "timeout", "5xx", "malformed2xx", "refused"].includes(scenario);
+    assert.equal(deliveries, approved ? 1 : 0); assert.equal(saved?.decision, scenario === "stale" ? undefined : approved ? "EXECUTE" : "REJECT");
+    assert.equal(modelCalls, ["missing", "stale-context", "budget"].includes(scenario) ? 0 : 1);
+    if (approved) { assert.deepEqual(saved?.riskFlags, ["fixture-risk"]); assert.deepEqual(saved?.evidenceRefs, ["reports"]);
+      assert.ok(saved?.contextHash); assert.ok(modelOutcome); assert.equal(outcome, scenario === "approve" ? "SUBMITTED" : scenario === "refused" ? "REFUSED" : "UNKNOWN"); }
   });
 }
 
-test("bound path always rejects missing providers without attempting sources", async () => {
-  const repository = new MemoryStore();
-  const worker = new BoundReviewWorker({ repository,
-    execution: { getAccountSummary: async () => { throw new Error("must not fetch"); }, executeBoundProposed: async () => { throw new Error("must not execute"); } },
-    news: { isConfigured: () => false, getNewsForSymbol: async () => { throw new Error("must not fetch"); } },
-    decider: { isConfigured: () => false, decide: async () => { throw new Error("must not fetch"); } },
-    model: "fake", promptVersion: "v1", newsWindowHours: 24, maxNewsItems: 3 });
-  await worker.pollOnce();
-  assert.equal(repository.decision?.reason, "NEWS_NOT_CONFIGURED");
+test("no research configuration refuses before account, news or model calls", async () => {
+  const f = reviewFixture(); let saved: BoundDecision | undefined;
+  const worker = new BoundReviewWorker({ repository: { claim: async () => f.claim, finalize: async (_c, d) => { saved = d; return false; }, recordDelivery: async () => {} },
+    execution: { executeBoundProposed: async () => { throw new Error("must not execute"); } },
+    model: "fixture", promptVersion: "v1" });
+  await worker.pollOnce(); assert.equal(saved?.reason, "RESEARCH_UNAVAILABLE");
+});
+
+test("model timeout is bounded even for an uncooperative transport and late response is audit only", async () => {
+  const f=reviewFixture(); let resolve: ((r: {decision:{decision:"EXECUTE";confidence:number;reason:string;riskFlags:string[];evidenceRefs:string[]};actualModel:string;usage:null})=>void)|undefined;
+  const records:string[]=[]; let deliveries=0; let saved:BoundDecision|undefined;
+  const worker=new BoundReviewWorker({repository:{claim:async()=>f.claim,prepareResearch:async()=>f.research,
+    reserveModel:async(_c:BoundClaim,r:ResearchModelRequest)=>({startedAt:new Date().toISOString(),deadlineAt:new Date(Date.now()+20).toISOString(),requestHash:researchRequestHash(r),callKey:"fixture"}),
+    recordModelOutcome:async(_c,_r,outcome)=>{records.push(outcome.kind);},finalize:async(_c,d)=>{saved=d;return false;},recordDelivery:async()=>{}},
+    execution:{getAiContext:async()=>f.context,executeBoundProposed:async()=>{deliveries++;return"UNKNOWN";}},
+    researchDecider:{isConfigured:()=>true,decide:()=>new Promise(r=>{resolve=r;})},model:"fixture",promptVersion:"pp4-research-v1"});
+  await worker.pollOnce(); assert.equal(saved?.decision,"REJECT"); assert.equal(deliveries,0);
+  resolve!({decision:{decision:"EXECUTE",confidence:.8,reason:"late approval",riskFlags:[],evidenceRefs:["reports"]},actualModel:"fixture",usage:null});
+  await new Promise(r=>setImmediate(r));assert.deepEqual(records,["UNKNOWN_OR_INVALID","LATE_RESPONSE"]);assert.equal(deliveries,0);
 });

@@ -8,7 +8,8 @@ PP2 source implements the [bounded runtime contract](PP2_RUNTIME_CONTRACT.md);
 its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required local
 checks, publication and successful exact-source-commit CI.
 PP3 is delivered with accepted review, required checks and successful exact-source
-CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is independently reviewed, with real-source acceptance blocked;
+see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -281,6 +282,13 @@ image/config only after compatibility and original ownership are verified. Never
 delete local orders or budget rows to mimic a flat account or regain permission.
 
 ## 8. PP4 — Instrument research and complete AI audit
+
+Implementation: [bounded plan](PP4_IMPLEMENTATION_PLAN.md),
+[source mapping contract](PP4_PROVIDER_CONTRACT.md),
+[implementation and actual coverage report](PP4_IMPLEMENTATION_REPORT.md).
+Code review is accepted; latest PKO periodic extraction, complete news/calendar
+coverage and operational permissions remain explicit blockers. This is not full
+real-source acceptance or trading authorization.
 
 **Contract:** [research context](../../architecture/INSTRUMENT_RESEARCH_CONTEXT.md).
 **Touchpoints:** llm-agent providers/repository/worker/decider, shared evidence types,
