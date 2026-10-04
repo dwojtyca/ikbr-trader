@@ -5,7 +5,7 @@ import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js
 import { Pool } from "pg";
 import { Redis } from "ioredis";
 import { z } from "zod";
-import { assertConfiguredEvaluationReady } from "./trading-configuration-bootstrap.js";
+import { assertConfiguredEvaluationReady, parseConfiguredAccountScope } from "./trading-configuration-bootstrap.js";
 import { config, tradingConfiguration } from "./config.js";
 import { createTradingConfigurationRuntime, TradingConfigurationStore, preparePP2Conversion } from "@ikbr/shared/trading-config";
 import { SignalRepository } from "./repository.js";
@@ -38,6 +38,8 @@ import { configuredStrategyRoutes } from "./runtime/strategy/configured-strategy
 import { ConfiguredStrategyStateRepository, HttpConfiguredOutcomeReader } from "./runtime/strategy/configured-strategy-state.js";
 import { StrategyContextLoader } from "./runtime/strategy/strategy-context-loader.js";
 import { TradingLoopService } from "./runtime/trading-loop/trading-loop-service.js";
+import { DiagnosticLoopRecorder } from './runtime/trading-loop/diagnostics.js';
+import { DiagnosticStore } from '@ikbr/shared/diagnostics';
 
 const defaultInstrumentRegistry = tradingConfiguration.registry;
 const instrumentBindingAuthority = tradingConfiguration.authority;
@@ -45,6 +47,8 @@ const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(co
 app.addHook("onResponse", logSafeResponse);
 app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? "", SIGNAL_MUTATING_READS));
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const diagnosticPool = new Pool({ connectionString: config.POSTGRES_URL, max: 2,
+  connectionTimeoutMillis: 2000, query_timeout: 3000, statement_timeout: 2000 });
 const configurationStore = new TradingConfigurationStore(pool);
 const configurationRuntime = createTradingConfigurationRuntime({
   service: "signal-engine", loaded: tradingConfiguration.loaded, store: configurationStore,
@@ -65,6 +69,7 @@ const repo = new SignalRepository(pool, redis);
  * DI everywhere.
  */
 let tradingLoopService: TradingLoopService | null = null;
+let diagnosticRecorder: DiagnosticLoopRecorder | null = null;
 const strategyToggleSchema = z.object({ enabled: z.boolean() });
 const strategies = createStrategies();
 app.get("/health", async () => ({ ok: true, signalEventDriven: false, producer: "bound_runtime" }));
@@ -306,6 +311,33 @@ if (config.runtimeEnabled) {
         );
       },
     });
+    const diagnosticStore = new DiagnosticStore(diagnosticPool);
+    diagnosticRecorder = new DiagnosticLoopRecorder({
+      sink: diagnosticStore,
+      accountId: () => {
+        if(tradingConfiguration.configuredAccount?.ok) return tradingConfiguration.configuredAccount.accountId;
+        const declared=parseConfiguredAccountScope(process.env);
+        return declared.ok?declared.accountId:null;
+      },
+      identity: (instrumentId) => {
+        if (tradingConfiguration.loaded.mode !== 'bundle') return {configHash:null,conId:null,symbol:null,listing:null,
+          implementationId:null,instanceId:null,revision:null};
+        const row=tradingConfiguration.loaded.configuration.instruments.find(i=>i.id===instrumentId);
+        const selections=row?.strategySelection.instanceIds.map(id=>tradingConfiguration.loaded.mode==='bundle'
+          ? tradingConfiguration.loaded.configuration.strategyInstances.find(instance=>instance.id===id) : undefined).filter(x=>x!==undefined)??[];
+        const only=selections.length===1?selections[0]:null;
+        return {configHash:tradingConfiguration.loaded.effectiveHash,conId:row?String(row.contract.conId):null,
+          symbol:row?.contract.symbol??null,listing:row?.contract.primaryExchange??null,
+          implementationId:only?.implementationId??null,instanceId:only?.id??null,revision:only?.revision??null,
+          assignedInstances:selections.map(instance=>({implementationId:instance.implementationId,instanceId:instance.id,revision:instance.revision}))};
+      },
+      intervalMs:config.tradingLoop.intervalMs,
+      enabled:config.tradingLoop.enabled,
+      secrets:Object.entries(process.env).filter(([key,value])=>
+        /TOKEN|SECRET|PASSWORD|API_KEY|CHAT_ID/i.test(key) && typeof value==='string' && value.length>0)
+        .map(([,value])=>value!),
+      logger:app.log,
+    });
     tradingLoopService = new TradingLoopService({
       configuredStrategyRuntime,
       assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
@@ -322,6 +354,7 @@ if (config.runtimeEnabled) {
       strategyCooldownMs: config.SIGNAL_STRATEGY_COOLDOWN_MS,
       maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS,
       logger: app.log,
+      diagnostics: diagnosticRecorder,
     });
     await app.register(tradingLoopRoutesPlugin, {
       service: tradingLoopService,
@@ -393,6 +426,7 @@ async function main(): Promise<void> {
   // probes during the startup-delay window. `start()` is a no-op
   // when TRADING_LOOP_ENABLED=false.
   if (tradingLoopService !== null) {
+    await diagnosticRecorder?.announceStart();
     tradingLoopService.start();
   }
 
@@ -417,6 +451,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
       await app.close();
       await redis.quit();
       await pool.end();
+      await diagnosticPool.end();
     } finally {
       process.exit(0);
     }

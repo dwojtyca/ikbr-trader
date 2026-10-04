@@ -255,6 +255,9 @@ importers:
 
   tools/paper-verify-stack:
     dependencies:
+      '@ikbr/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       zod:
         specifier: ^3.23
         version: 3.25.76

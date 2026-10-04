@@ -1,3 +1,7 @@
+import { buildInstrumentSessionIdentity } from "@ikbr/shared";
+import { evaluateRoundTrip } from "./lifecycle/round-trip-evidence.js";
+import { registerDiagnosticRoutes } from "./diagnostics/routes.js";
+import { createDiagnosticReadModel } from "./diagnostics/read-model.js";
 import { registerResearchAuditRoute } from "./research-audit-routes.js";
 import { createResearchEntryValidator } from "./research-entry-guard.js";
 import { loadResearchManifest, ResearchStore, evaluateResearchEligibility } from "@ikbr/shared/instrument-research";
@@ -1898,6 +1902,45 @@ app.get("/execution/lifecycle/supervision", async () => {
   return { observer: lifecycleObserver.status(), automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true",
     tradingEnabled: config.tradingEnabled, positions: rows.rows, alerts: await lifecycleAlerts.readStatus(lastActiveAccountId!, EXECUTION_PROCESS_OWNER_ID) };
 });
+const diagnosticPool = new Pool({ connectionString: config.POSTGRES_URL, max: 2, connectionTimeoutMillis: 2000, query_timeout: 3000, statement_timeout: 2500 });
+const diagnosticRepository = new ExecutionRepository(diagnosticPool);
+const diagnosticReadModel = createDiagnosticReadModel({
+  pool: diagnosticPool, currentAccountId: () => lastActiveAccountId, currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
+  runtimeControls: () => ({ tradingEnabled: config.tradingEnabled, entriesPaused: config.EXECUTION_ENTRIES_PAUSED === "true", automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true" }),
+  configuration: () => {
+    const loaded = tradingConfiguration.loaded;
+    return { configHash: loaded.mode === "bundle" ? loaded.effectiveHash : null,
+      instruments: instrumentBindingAuthority.listBoundInstruments().map(bound => {
+        const configured = loaded.mode === "bundle" ? loaded.configuration.instruments.find(i => i.id === bound.instrumentId) : null;
+        const instances = loaded.mode === "bundle" ? loaded.configuration.strategyInstances.filter(i => configured?.strategySelection.instanceIds.includes(i.id)) : [];
+        return { id: bound.instrumentId, symbol: bound.brokerSymbol, listing: bound.exchange, conId: String(bound.conId),
+          sessionIdentity: buildInstrumentSessionIdentity(bound.instrument, bound),
+          entryEnabled: configured?.entryEnabled, monitoringEnabled: configured?.monitoringEnabled,
+          implementationId: instances.length === 1 ? instances[0].implementationId : null,
+          instanceId: instances.length === 1 ? instances[0].id : null, revision: instances.length === 1 ? instances[0].revision : null,
+          instances: instances.map(i => ({ implementationId: i.implementationId, instanceId: i.id, revision: i.revision, enabled: i.enabled })) };
+      }) };
+  },
+  readWatchlist: async () => {
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(3000), redirect: "error" });
+    if (!response.ok) throw Error("DIAGNOSTIC_QUOTES_UNAVAILABLE");
+    return response.json();
+  },
+  roundTrip: async proposalId => {
+    const accountId = lastActiveAccountId, sessionId = EXECUTION_PROCESS_OWNER_ID;
+    if (!accountId) return null;
+    const evidence = await diagnosticRepository.getRoundTripEvidence(proposalId, accountId);
+    if (!evidence || evidence.lifecycle.order.executionAccountId !== accountId) return null;
+    const order = evidence.lifecycle.order;
+    const bound = order.strategyAttribution
+      ? await readOriginalStockManagementInstrument(diagnosticPool, order.strategyAttribution)
+      : order.instrumentId ? await configurationRuntime.resolveManagementInstrument(order.instrumentId) : null;
+    return evaluateRoundTrip(evidence, { accountId: lastActiveAccountId === accountId ? accountId : null, sessionId, nowMs: Date.now(), bound: bound ?? null });
+  },
+});
+registerDiagnosticRoutes(app, { token: config.EXECUTION_API_TOKEN ?? "", read: query => diagnosticReadModel.read(query),
+  privacy: () => ({ accountIds: [...config.allowedPaperAccounts, ...config.allowedLiveAccounts],
+    secrets: Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|CHAT_ID/.test(key)).map(([, value]) => value ?? "") }) });
 registerFullCloseRoutes(app, fullCloseService);
 
 registerLifecycleRoutes(app, {
@@ -2146,6 +2189,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
       await reconScheduler.stop();
       tws.disconnect();
       await app.close();
+      await diagnosticPool.end();
       await pool.end();
     } finally {
       process.exit(0);

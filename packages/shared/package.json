@@ -28,6 +28,10 @@
     "./trading-config": {
       "types": "./dist/trading-config.d.ts",
       "default": "./dist/trading-config.js"
+    },
+    "./diagnostics": {
+      "types": "./dist/diagnostics.d.ts",
+      "default": "./dist/diagnostics.js"
     }
   },
   "scripts": {

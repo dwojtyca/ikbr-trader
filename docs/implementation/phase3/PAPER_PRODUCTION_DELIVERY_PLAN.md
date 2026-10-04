@@ -9,7 +9,7 @@ its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required loc
 checks, publication and successful exact-source-commit CI.
 PP3 is delivered with accepted review, required checks and successful exact-source
 CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is independently reviewed, with real-source acceptance blocked;
-see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with independent review, required checks and exact-source CI passed; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with independent review, required checks and exact-source CI passed; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6 source/document review accepted; final checks and publication are recorded in the [PP6 report](PP6_IMPLEMENTATION_REPORT.md). PP7 remains planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -373,7 +373,10 @@ is unavailable, entries stay paused and operator escalation is required.
 
 ## 10. PP6 — Headless diagnostics, deployment and recovery
 
-**Status:** revised by owner on 2026-10-04; implementation remains planned. Custom
+**Status:** implemented against the [accepted contract](PP6_IMPLEMENTATION_PLAN.md);
+independent source/document review accepted. Final validation and publication are
+recorded in the [PP6 report](PP6_IMPLEMENTATION_REPORT.md); operator commands are in the
+[headless runbook](../../runbooks/PAPER_HEADLESS_OPERATIONS.md). Custom
 web UI development is deferred. Retain existing UI source and PP0 security fixes.
 IBKR desktop is the owner's broker interface; bot-specific evidence and decisions
 must be understandable without running our UI.
@@ -382,8 +385,8 @@ must be understandable without running our UI.
 pure formatters where useful, small terminal/report tooling, readiness verifier,
 PP5 controls/alerts, Compose/deployment and backup/restore docs. No new service,
 web dashboard or required ELK/Grafana/cloud logging. Actual command names and storage
-choices belong in the bounded PP6 implementation plan; the capabilities below are
-requirements, not shipped commands.
+choices are recorded in the bounded PP6 implementation plan; the capabilities below
+remain the acceptance requirements.
 
 **Order:** PP6-C establishes event/completeness/privacy and operational contracts;
 PP6-A implements pure presentation and PP6-B instrumentation/read integration.

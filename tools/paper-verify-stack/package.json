@@ -13,10 +13,12 @@
     "verify:fixture": "node --import tsx src/fixture/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "ops": "node --import tsx src/operator-cli.ts"
   },
   "dependencies": {
-    "zod": "^3.23"
+    "zod": "^3.23",
+    "@ikbr/shared": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

@@ -3,10 +3,16 @@ x-app-image: &app-image
     context: .
     dockerfile: Dockerfile
   image: ikbr-trader-app:local
+  logging: &bounded-logging
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   postgres:
     image: postgres:16
+    logging: *bounded-logging
     environment:
       POSTGRES_DB: ikbr_trader
       POSTGRES_USER: postgres
@@ -24,6 +30,7 @@ services:
 
   redis:
     image: redis:7
+    logging: *bounded-logging
     ports:
       - "${HOST_BIND_ADDRESS:-127.0.0.1}:6379:6379"
     healthcheck:

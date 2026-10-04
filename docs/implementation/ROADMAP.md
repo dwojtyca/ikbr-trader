@@ -49,7 +49,8 @@ PP3 implements generic stock execution, immutable attempts and lifecycle evidenc
 independent review, required checks, publication and exact-source-commit CI passed.
 See the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is reviewed; real-source acceptance remains **blocked**. See the
 [PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered; independent review, required local checks and exact-source CI passed; see the
-[PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain **planned**.
+[PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6 implementation is independently reviewed; final verification/publication is recorded in the
+[PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 remains **planned**.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
@@ -62,7 +63,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP3 | Delivered: generic stock capability/windows/budgets/audit for PKO, AAPL and configured fixtures | PP1, PP2 |
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
-| PP6 | Headless readable logs, filtered decision/lifecycle reports, existing alerts/controls, deployment and recovery | PP0–PP5 |
+| PP6 | Implemented headless Polish logs/JSON, terminal reports and existing controls; reviewed; final verification/publication in the PP6 report | PP0–PP5 |
 | PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
 
 PP4 research implementation may proceed independently after the identity contract
@@ -147,4 +148,4 @@ support is a separately bounded extension using the same contracts.
 historical evidence. The current owner direction supersedes their next-step order.
 [Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
 records the original delivery-direction reconciliation. PP0/PP1 implementation
-evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6–PP7 remain planned.
+evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6 source is implemented and reviewed; see its report for final checks/publication. PP7 remains planned.

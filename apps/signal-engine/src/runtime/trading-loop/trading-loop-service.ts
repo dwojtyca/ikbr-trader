@@ -76,6 +76,7 @@ import type {
   TriggerIdentity,
 } from "./types.js";
 import type { ReconciliationReader } from "./reconciliation-reader.js";
+import type { DiagnosticLoopRecorder } from './diagnostics.js';
 
 /**
  * PR15.4 — sync+read repository interface used by the trading
@@ -150,6 +151,7 @@ export interface TradingLoopServiceOptions {
   readonly clearTimeoutFn?: typeof clearTimeout;
   readonly setIntervalFn?: typeof setInterval;
   readonly clearIntervalFn?: typeof clearInterval;
+  readonly diagnostics?: Pick<DiagnosticLoopRecorder, 'capture' | 'failed'> & Partial<Pick<DiagnosticLoopRecorder, 'flush'>>;
 }
 
 const HISTORY_LIMIT = 100;
@@ -212,6 +214,7 @@ export class TradingLoopService {
   readonly #setIntervalFn: typeof setInterval;
   readonly #clearIntervalFn: typeof clearInterval;
   readonly #keyBuilder: TradingLoopIdempotencyKeyBuilder;
+  readonly #diagnostics?: TradingLoopServiceOptions['diagnostics'];
 
   #startupTimer: ReturnType<typeof setTimeout> | null = null;
   #tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -265,6 +268,7 @@ export class TradingLoopService {
     this.#setIntervalFn = options.setIntervalFn ?? setInterval;
     this.#clearIntervalFn = options.clearIntervalFn ?? clearInterval;
     this.#keyBuilder = new TradingLoopIdempotencyKeyBuilder();
+    this.#diagnostics = options.diagnostics;
     this.#contextLoader = new StrategyContextLoader({
       repo: options.repo,
       clock: this.#clock,
@@ -327,6 +331,7 @@ export class TradingLoopService {
     const timeoutMs = this.#config.shutdownTimeoutMs;
     const runs = Array.from(this.#inFlight.values());
     if (runs.length === 0) {
+      this.#diagnostics?.flush?.();
       this.#logger.info(
         { component: "trading-loop" },
         "trading-loop: stopped (no in-flight runs)",
@@ -345,6 +350,7 @@ export class TradingLoopService {
       }
     });
     const result = await Promise.race([drain, timeout]);
+    this.#diagnostics?.flush?.();
     if (result === "timeout") {
       this.#logger.warn(
         { component: "trading-loop", inFlight: this.#inFlight.size },
@@ -369,7 +375,9 @@ export class TradingLoopService {
         reports: [],
       };
     }
-    return this.#runCycle();
+    const cycle=await this.#runCycle();
+    await this.#diagnostics?.capture(cycle);
+    return cycle;
   }
 
   status(): TradingLoopStatus {
@@ -396,7 +404,8 @@ export class TradingLoopService {
 
   async #safeTick(): Promise<void> {
     try {
-      await this.#runCycle();
+      const cycle=await this.#runCycle();
+      await this.#diagnostics?.capture(cycle);
     } catch (error) {
       this.#logger.error(
         {
@@ -526,12 +535,20 @@ export class TradingLoopService {
     this.#nextCycleAt = this.#config.enabled ? new Date(startedAt.getTime() + this.#config.intervalMs) : null;
     const reports: TradingLoopInstrumentReport[] = [];
     for (const instrumentId of this.#configuredStrategyRuntime!.listInstrumentIds()) {
-      if (this.#stopping || this.#inFlight.has(instrumentId)) continue;
+      if (this.#stopping) { this.#recordSkip(cycleId,instrumentId,'LOOP_DISABLED',reports); continue; }
+      if (this.#inFlight.has(instrumentId)) { this.#recordSkip(cycleId,instrumentId,'RUN_IN_PROGRESS',reports); continue; }
       const start = this.#clock();
       const task = (async () => {
-        const evaluation = await this.#configuredStrategyRuntime!.evaluate(instrumentId);
-        const report = this.#finalize(cycleId, instrumentId, start, { kind:"CONFIGURED_EVALUATION", instrumentId, evaluation });
-        reports.push(report); this.#lastOutcomes.set(instrumentId, report);
+        try {
+          const evaluation = await this.#configuredStrategyRuntime!.evaluate(instrumentId);
+          const report = this.#finalize(cycleId, instrumentId, start, { kind:"CONFIGURED_EVALUATION", instrumentId, evaluation });
+          reports.push(report); this.#lastOutcomes.set(instrumentId, report);
+        } catch (error) {
+          const report=this.#finalize(cycleId,instrumentId,start,{kind:'ERROR',instrumentId,message:'configured evaluation failed'});
+          reports.push(report);this.#lastOutcomes.set(instrumentId,report);
+          await this.#diagnostics?.capture({cycleId,startedAt,finishedAt:this.#clock(),durationMs:this.#clock().getTime()-startedAt.getTime(),reports});
+          throw error;
+        }
       })();
       this.#inFlight.set(instrumentId, task);
       try { await task; } finally { this.#inFlight.delete(instrumentId); }
@@ -1093,7 +1110,7 @@ export class TradingLoopService {
       durationMs: finishedAt.getTime() - startedAt.getTime(),
       outcome,
     };
-    this.#logInstrumentReport(report);
+    if (!this.#diagnostics) this.#logInstrumentReport(report);
     return report;
   }
 
@@ -1120,7 +1137,7 @@ export class TradingLoopService {
     };
     reports.push(report);
     this.#lastOutcomes.set(instrumentId, report);
-    this.#logInstrumentReport(report);
+    if (!this.#diagnostics) this.#logInstrumentReport(report);
   }
 
   #selectInstruments(): readonly Instrument[] {
