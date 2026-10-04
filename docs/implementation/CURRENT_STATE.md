@@ -24,6 +24,12 @@ durable entry pause and alert delivery. Its [report](phase3/PP5_IMPLEMENTATION_R
 records final validation. This work performs no deployment or broker actions.
 PP4 source coverage and unavailable certified Warsaw-day accounting still prevent entry.
 
+Owner scope update 2026-10-04: custom UI development is deferred. PP6 will deliver
+readable Polish logs and simple filtered terminal reports, reuse PP5 alerts/controls
+and finish deployment/recovery procedures. This is a planned presentation/operations
+change, not evidence that a unified headless diagnostic interface already exists.
+Existing UI source is retained; no service was stopped or deployed by this update.
+
 ## Delivery objective
 
 The owner wants a production-style bot operating on **IBKR Paper**, initially with
@@ -59,7 +65,7 @@ None of these labels implies profitability or permission to activate Live.
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
 | Exit/ownership | PP5 background observer restores durable ownership/close state, verifies exact protection and broker flat evidence, and can invoke the audited deadline close | One share only; disabled by default; unknown/rejected/unfilled close retains HOLD; no automatic replace/reprotection |
 | AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report |
-| Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | Operator lifecycle/research visibility and deployment/recovery work in PP6 remain planned; see PP0 report for security checks and residual dependencies |
+| Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | PP6 readable log/report and terminal diagnostics, UI-off deployment and recovery remain planned; custom dashboard deferred; manual IBKR changes require supported reconciliation |
 | Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |

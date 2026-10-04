@@ -13,6 +13,8 @@ see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with in
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
+Owner scope revision 2026-10-04: PP6 delivers readable headless diagnostics and
+operations; custom web UI is deferred. PP0–PP5 implementation evidence is retained.
 
 ## 1. Product outcome and boundaries
 
@@ -28,6 +30,12 @@ automated exit observation, bounded recovery and operational alerts. It survives
 restart/reconnect without duplicating entry or losing ownership. Production-style
 means these lifecycle properties, not a claim of strategy profitability, unrestricted
 instruments or Live approval. Paper remains the only authorized deployment target.
+
+The owner uses IBKR desktop for account inspection and discretionary manual trades.
+The bot must explain its decisions and health through readable logs, reports and
+alerts. A custom web UI is outside this delivery track; existing UI source/security
+fixes remain intact. PP6 and PP7 must work with the UI service stopped. This changes
+the presentation channel, not the required risk, audit, visibility or recovery.
 
 Keep current service boundaries and schema compatibility. Initial supported scope
 remains whole-share long stocks, LMT entry, bracket protection, USD and WSE/PLN,
@@ -107,9 +115,9 @@ RS is allowed for a separately bounded noncritical delivery with accepted contra
 | PP4-C: fetch/cache scheduler, storage/audit wiring, prompt assembly and source display (steps 3–5 integration) | S | RA | A defines immutable hashes, schema migration, coverage/claim rules and untrusted-text boundary; changes to them return to A |
 | PP5-A: durable lifecycle observer, pause/close permissions, session exit deadline, protective cancellation/reprotection, unknown holds and recovery (steps 1–5) | A | RA | PP3; includes lifecycle race/crash tests, state migration, shutdown and critical-alert trigger semantics |
 | PP5-B: alert transport/delivery ledger/dedup wiring and observability (step 5 integration) | S | RA | PP5-A defines fault IDs, persistence/ack contract and unattended gate; stubs only; critical suppression or retry semantics remain A |
-| PP6-A: operator read-only panels, filters, source links and state rendering tests | L | RS | Accepted PP0–PP5 read contracts; display unavailable/unknown faithfully; no calculation of safety state or authorization |
-| PP6-B: read API aggregation, authenticated control UI wiring, metrics and reporting | S | RA | Existing A-reviewed controls and contracts; no new write route, P&L/currency rule or resume/close authorization semantics |
-| PP6-C: control permissions, deployment/retention/backup/restore contract, recovery drill and operational fallback | A | RA | PP0–PP5; owns restored-state/broker mismatch gates, secrets/account privacy and rollback compatibility |
+| PP6-A: Polish log/report rendering, read-only filters, timelines, source references and formatter tests | L | RS | PP6-C event/privacy contracts first; presentation only, with no derived safety state, P&L calculation or authorization |
+| PP6-B: structured event instrumentation, read aggregation, terminal report integration and existing authenticated control access | S | RA | PP6-C contracts and PP0–PP5 interfaces fixed; no new broker route, retry, risk, ownership or admission semantics |
+| PP6-C: event/coverage/privacy and control contracts, UI-off deployment, retention/restore, manual-intervention evidence and integrated recovery acceptance | A | RA | Design before PP6-A/B; integrate after them; owns missing-data semantics, broker mismatch holds, secrets and rollback compatibility |
 | PP7-A: prepare manifest; judge Gates A–D; authorized supervised entry/exit, soak and restart coordination; incident decisions | A | RA | PP0–PP6 complete plus explicit Paper/provider authorization; model routing is not operational permission |
 | PP7-B: execute specified read-only evidence queries, collect/format session observations and CI/check results | M | A judges evidence | PP7-A supplies exact commands and scope; no broker writes, paid calls, repairs, activation or automatic go/no-go |
 | PP7-C: isolated failure/restart harness integration and evidence summaries (Gate D) | S | RA | A specifies failures and invariant assertions; new broker/race/recovery semantics stay A; disposable state/stub adapters |
@@ -363,31 +371,134 @@ notification delivery/acknowledgement status observable within60s where transpor
 is available. No guarantee of exchange fill latency. If independent broker evidence
 is unavailable, entries stay paused and operator escalation is required.
 
-## 10. PP6 — Operator experience, deployment and recovery
+## 10. PP6 — Headless diagnostics, deployment and recovery
 
-**Touchpoints:** UI/API read models, readiness verifier, Compose/deployment docs,
-alerts and backup/restore procedures. No new broker execution path in UI.
+**Status:** revised by owner on 2026-10-04; implementation remains planned. Custom
+web UI development is deferred. Retain existing UI source and PP0 security fixes.
+IBKR desktop is the owner's broker interface; bot-specific evidence and decisions
+must be understandable without running our UI.
 
-The operator view must show each configured instrument and assigned strategy
-instance/hash, quote entitlement/type/age, session/history readiness, research
-coverage/age, no-signal/rejection reason, proposal/AI/risk state, broker legs,
-protection, close state, P&L with currency/fees completeness and active holds.
-Separate healthy process, disabled entries, market closed, not ready and unknown
-broker state. Provide authenticated entry pause/resume and supported audited close;
-never a bypass button. Resume requires current operational gates and authorization.
+**Touchpoints:** existing service loggers, audit/read models, shared event types and
+pure formatters where useful, small terminal/report tooling, readiness verifier,
+PP5 controls/alerts, Compose/deployment and backup/restore docs. No new service,
+web dashboard or required ELK/Grafana/cloud logging. Actual command names and storage
+choices belong in the bounded PP6 implementation plan; the capabilities below are
+requirements, not shipped commands.
 
-Deployment records exact image digest, code/config hashes and migrations. Run a
-clean Docker build for changes to deployed configuration. Rehearse backup/restore
-using a disposable database copy: restore ownership/attempts/config snapshots,
-then broker reconciliation before any writes. A restored stale DB cannot infer
-that orders since backup do not exist. Store secrets outside version control and
-restrict account data in operator logs. Define retention of audit/research records.
+**Order:** PP6-C establishes event/completeness/privacy and operational contracts;
+PP6-A implements pure presentation and PP6-B instrumentation/read integration.
+PP6-C then integrates and validates recovery. Reuse PP0–PP5 lifecycle/risk/audit and
+notification mechanisms rather than implementing parallel ones.
 
-**Acceptance:** an operator can identify why either instrument is blocked, inspect
-exact AI sources and reconstruct an entry-to-exit audit. UI tests cover all lifecycle
-states and old route removal. A recovery drill demonstrates no writes until broker
-state and restored ownership reconcile. Document responsibility and manual fallback
-for unresolved broker uncertainty; no IBKR UI automation.
+### Readable events and diagnostic coverage
+
+1. Versioned structured JSON events and a Polish human-readable view derive from
+   the same fields. Include stable event ID/code, severity, service, UTC timestamp,
+   plain message/reason, impact and safe next action where applicable. Human time
+   includes an explicit timezone/offset; sorting and export retain UTC.
+2. Include applicable instrument ID/conId/listing, algorithm/instance/revision,
+   config hash, evaluation/trace, proposal, broker-order and lifecycle/close IDs.
+   Correlation survives services/restarts; symbol alone is insufficient. Unavailable
+   or inapplicable IDs are explicit, never fabricated. Mask account identifiers and
+   retain a restricted authorized path to exact audit records.
+3. Cover readiness, scheduled evaluation/no-signal, proposal/research, AI verdict/
+   timeout, fresh risk, dispatch/unknown outcome, broker acknowledgement/fills,
+   protection, close/reconciliation and fault/delivery status. Preserve broker codes
+   with plain explanations. Submitted is not filled; an error is not no-signal.
+4. Per-instrument status retains assigned strategy/config identity, quote entitlement/
+   type/age, session/history readiness, research coverage/age, decision/risk reasons,
+   broker legs/protection/close/holds and P&L currency/fee completeness. Distinguish
+   process health, paused entries, closed market, missing/stale data, unknown state
+   and faults. Unavailable accounting values are not zero.
+5. Decision details reference stored research snapshots, source/document/publication
+   identities and recorded AI verdict/rationale/riskFlags plus deterministic risk.
+   Do not dump provider payloads, prompts or secrets into routine logs. Evidence
+   lookup uses authenticated stored records, not new provider calls. Rendering must
+   not invent missing facts or change decision/admission semantics.
+
+Illustrative Polish presentation (synthetic IDs/reason names, not broker evidence):
+
+```text
+10:05:00 +02:00 | PKO/WSE | OCZEKIWANIE | Brak sygnału strategii. Kolejna ocena za 60 s.
+10:06:00 +02:00 | PKO/WSE | WEJŚCIE ZABLOKOWANE | Wymagane dane badawcze są nieaktualne.
+Powód: RESEARCH_REQUIRED_STALE | ocena: demo-42 | Działanie: sprawdź status źródła danych.
+16:01:12 +02:00 | AAPL/NASDAQ | DECYZJA AI: ODRZUĆ | Uzasadnienie: zapisane przy propozycji demo-43.
+```
+
+### Easy analysis without a browser
+
+Provide simple documented terminal entry points for these operations. Normal use
+must not require custom SQL, jq scripts or bearer tokens in shell history. Default
+operations are read-only; mutating controls are explicit and separately authenticated.
+Reuse read endpoints/audit storage; add only missing query/projection capabilities.
+
+| Operator need | Required result |
+| --- | --- |
+| Follow the bot | Readable live events with instrument, severity, reason and time filters; bounded output and explicit reconnect/gap status |
+| Why is it not trading? | Current per-instrument reasons, source ages, coverage and permitted next steps; partial/unavailable evidence visibly limits the answer |
+| Explain one evaluation/trade | Correlated signal/research/AI/risk/broker/close timeline and exact stored evidence references |
+| Summarize a session | Evaluations/no-signals/blocks by reason, attempts, fills/exits, holds/alerts and currency-aware P&L completeness; timezone and interval coverage |
+| Share diagnostics | Time-bounded, size-limited redacted text/JSON export with schema/config metadata and explicit omitted/truncated intervals |
+
+Default INFO explains transitions/outcomes without tick spam. Aggregate repeated
+noncritical states with count and first/last times while retaining underlying audit/
+counters for interval accounting. Never sample away the first critical fault or its
+resolution. Reuse PP5 episode dedup and delivery health; logging is not proof of
+notification receipt, fault resolution or broker-flat state. Broker/audit evidence
+remains authoritative; reports cannot grant permission to trade.
+
+Define duplicate/out-of-order handling and completeness after restart, rotation,
+reader disconnect and clock skew. Session totals come from persisted evidence and
+coverage, not sampled console counts. Distinguish zero, not observed and unavailable
+intervals. Specify bounded disk/age retention and rotation in the implementation
+plan; diagnostic-copy expiry cannot erase required audit/research records. Escape
+control characters/untrusted source/model text. Redact credentials, account IDs and
+sensitive balances by default, including exports. A failed log sink stays visible;
+never claim durable recording during storage outage or mark partial coverage healthy.
+
+### Controls, manual IBKR intervention and recovery
+
+Document terminal access to existing authenticated PP5 pause/resume, supervision
+and supported audited close/reconciliation using the
+[implemented permission contract](../../runbooks/PAPER_LIFECYCLE_SUPERVISION.md).
+Entry pause leaves exit automation active. Master=false blocks full close but does
+not cancel broker orders or undo a dispatched action. Resume retains all current
+broker/research/risk/observer/alert gates; no report clears holds or resets budgets.
+
+Manual purchases/sales are external broker events, not strategy entries. Do not
+adopt arbitrary manual holdings or guess who submitted an order; unknown attribution
+stays explicit. Before intervention in bot-owned exposure, the runbook must identify
+active automatic close work and protective legs and specify a supported coordinated
+takeover. Pausing entries alone is not such a protocol. If PP5 cannot prove quiescent
+management for the intended intervention, document the limitation and require a
+separately reviewed capability before claiming seamless manual takeover.
+
+After intervention, verify fresh broker quantity, outstanding protective/close
+orders, executions and ownership through supported reconciliation. No second sale,
+blind cancel, hold deletion, budget reset or new request ID to escape uncertainty.
+Unsupported quantity/ownership or unknown outcomes remain HOLD and visible; a missing
+capability requires a bounded reviewed fix. Unrelated manual exposure participates
+in account-wide risk without silent bot management. No automated IBKR UI or real
+broker actions in tests. Manual incident recovery is not normal-flow PP7 proof.
+
+Deployment starts required bot services with `apps/ui` stopped and records exact
+image/code/config/migration identity. Document service selection or an optional UI
+profile while retaining shared trading logic and secret/auth guards. Deployment
+config changes require a clean Docker build. Rehearse backup/restore on disposable
+state: ownership, attempts, config/research/AI evidence, close markers, entry-control
+and fault/delivery records stay interpretable. Reconcile before writes; stale backup
+cannot prove absence of orders since backup. Keep rollback compatible with ownership.
+
+**Acceptance:** with UI stopped, a non-developer following the runbook can answer
+"why no trade?", "what happened to this trade?" and "is action needed?" using the
+operations above for PKO, AAPL and a configured fixture stock. Tests cover all lifecycle
+states, source outage/expiry, mixed currencies/missing fees, duplicate/reordered/gapped
+events, rotation/restart, redaction/hostile control characters, read-only behavior and
+authenticated mutation boundaries. Isolated fixtures cover manual sale racing close,
+changed quantity, unrelated exposure and orphan protection; unsupported cases show
+HOLD rather than false success. Preserve PP5 timing/alert gates. A restore drill
+proves no writes before ownership and broker state reconcile. Headless diagnostics
+do not resolve PP4 coverage or certified broker-accounting blockers or prove PP7.
 
 ## 11. PP7 — Broker acceptance and automated Paper soak
 
@@ -403,6 +514,8 @@ coverage/holds, subscriptions, real-time BBO, six required native closed histori
 where required by the resolved strategy/regime, research coverage and provider/model
 availability. Readiness must distinguish off-session from source failure. No paid
 call is implicit in infrastructure preflight. Stale/incomplete evidence is a stop.
+Require PP6 readable logs/reports, current status/coverage and authenticated terminal
+controls with `apps/ui` stopped; no web dashboard is a launch prerequisite.
 
 ### Gate B: supervised mechanics
 
@@ -482,5 +595,6 @@ commit CI passes; configuration-only additional-instrument tests and independent
 strategy-instance tests pass; research coverage for both issuers is real and
 versioned; normal entry/exit is automated; five-session operational criteria and
 failure drills pass. The owner can configure instances, assign them to instruments,
-start a bounded Paper deployment and understand/recover its state without manual
-run-once or close-reconcile requests for normal operation. Live stays off.
+start a bounded Paper deployment with UI stopped and understand/recover its state
+through readable logs/reports without manual run-once or close-reconcile requests
+for normal operation. Live stays off.

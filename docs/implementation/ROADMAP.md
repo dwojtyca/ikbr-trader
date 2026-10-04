@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-04 (PP5 review, required checks and exact-source CI passed; PP4 real-source acceptance blocked).
+Updated: 2026-10-04 (PP6 changed to headless operations; PP5 delivered; PP4 real-source acceptance blocked).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -17,6 +17,12 @@ entry adjudication, enforce deterministic risk, submit and protect orders, manag
 exits, recover safely after failures and explain its state to the operator.
 One supervised round trip is a prerequisite, not the finish line. Live activation,
 new strategy development and ES research are outside this delivery track.
+
+The owner has deferred the custom web UI. PP6 must provide understandable Polish
+logs, easy read-only terminal reports and alerts instead. IBKR desktop is the
+owner's account/manual-trading interface; bot decisions, data gaps and holds remain
+visible through our diagnostics. Existing UI code/security fixes are retained;
+running that service is not a PP6/PP7 requirement.
 
 ## Reuse the delivered work
 
@@ -56,7 +62,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP3 | Delivered: generic stock capability/windows/budgets/audit for PKO, AAPL and configured fixtures | PP1, PP2 |
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
-| PP6 | Operator readiness/decision/lifecycle view, alerts, deployment and recovery runbooks | PP0–PP5 |
+| PP6 | Headless readable logs, filtered decision/lifecycle reports, existing alerts/controls, deployment and recovery | PP0–PP5 |
 | PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
 
 PP4 research implementation may proceed independently after the identity contract
@@ -78,6 +84,11 @@ review independence and usage reporting. The first Luna implementation pilot is
 PP1-B after the PP1-A contract is accepted, with no trading activation. This does
 not reorder delivery dependencies or change the bot's trading-decision model.
 
+For revised PP6, Astra establishes event/privacy/control/recovery contracts first
+(PP6-C), Luna implements pure human-readable formatting/filtering (PP6-A), and Sol
+integrates events/reports and existing APIs (PP6-B). Astra then owns integrated
+safety acceptance; a different Astra performs the final independent review.
+
 ## Completion criteria
 
 - PKO and AAPL coexist in one validated configuration; only assigned enabled
@@ -91,6 +102,10 @@ not reorder delivery dependencies or change the bot's trading-decision model.
   escalation and no duplicate submissions or accidental reversal.
 - The operator can pause new entries without losing supported protective/exit
   supervision. Current master-switch behavior is not reinterpreted retroactively.
+- With the UI service stopped, the operator can follow readable events, explain
+  non-trading, inspect one decision and reconstruct its full lifecycle using simple
+  terminal reports. Missing/stale evidence and manual broker changes stay explicit;
+  only supported reconciliation can establish safe resumption.
 - PP7 documents real entry/exit evidence for both initial instruments and the
   specified automated soak/restart/failure criteria. No-signal periods do not prove
   trading mechanics; signals or approvals are never fabricated to obtain a pass.
@@ -111,11 +126,16 @@ finish every earlier research task before this track.
 | 4 | Instrument registry | Foundation implemented; PP1/PP2 deliver operator configuration |
 | 5 | Decision layer | Shared deterministic rules and separate AI gate implemented; PP4 enriches evidence |
 | 6 | Market context | Price/technical evidence exists; PP4 adds issuer research; broad macro/flows later |
-| 7 | Operator dashboard | Existing dashboard; PP0/PP6 repair and extend |
+| 7 | Operator diagnostics / future dashboard | PP6 delivers logs/reports/terminal operation; custom web UI deferred by owner |
 | 8 | Autonomous Paper | Target of PP7 after lifecycle/recovery gates |
 | 9 | Live readiness | Deferred; this track never authorizes Live |
 
 ## Deferred work and historical records
+
+Custom UI development is outside the current Paper delivery track. Reconsider it
+only if the owner later needs it; do not replace it with another web dashboard or
+require a hosted logging stack. [PP6 scope change](phase3/PP6_HEADLESS_REPLAN_PLAN.md)
+records the decision; runtime log/report implementation is still pending.
 
 ES PR15.5D.3 remains REJECTED_FOR_ES. PR15.5F local diagnostics are unfinished and
 off the critical path; preserve source, frozen data and verdicts. Futures roll,

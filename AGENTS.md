@@ -51,6 +51,22 @@ Apps (all run via Docker Compose, also runnable individually via
 - `packages/shared` — shared domain types and `strategy-profiles.ts`.
 - `tools/paper-verify-stack` — read-only infrastructure/preflight verifier.
 
+## Operator interface scope
+
+Owner decision 2026-10-04: defer custom web UI development. PP6 is planned to deliver
+human-readable Polish logs/reports, structured diagnostic events and simple terminal
+access, with existing alerts and authenticated controls. See the
+[PP6 specification](docs/implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#10-pp6--headless-diagnostics-deployment-and-recovery).
+The existing `apps/ui` is retained; its security fixes must not be undone. PP6/PP7
+must work with that service stopped, without requiring a browser or new dashboard.
+
+The owner uses the IBKR desktop application for account inspection and manual
+trades. This is not permission for agents to automate that UI or submit broker
+orders. Entry pause does not stop exit automation or cancel protective orders;
+manual changes to bot-owned exposure require coordination and supported broker
+reconciliation. Unknown outcomes remain holds. Headless operation does not remove
+audit, alert, protection, risk or deployment/recovery requirements.
+
 ## Current delivery priority
 
 Prove a supervised Paper entry and exit on **one PKO share** before tuning
@@ -314,7 +330,7 @@ delivery phase. These are coding-agent settings, not the trading bot's AI settin
 | Work | Default model | Reasoning |
 | --- | --- | --- |
 | Specified checks, reviewed commit/push, exact-commit CI monitoring | `gpt-5.6-luna` | `low` |
-| Bounded code, pure data mapping/validation, read-only UI, associated tests under an accepted contract | `gpt-6-luna` | `medium` |
+| Bounded code, pure data mapping/validation, read-only log/report presentation, associated tests under an accepted contract | `gpt-6-luna` | `medium` |
 | Coordinated noncritical integration, known-contract service wiring and ordinary debugging | `gpt-6-sol` | `medium` |
 | Architecture, safety/security semantics, critical integration/debugging | `gpt-6-astra` | `high` |
 | Independent noncritical plan or implementation review | `gpt-6-sol` | `high` |

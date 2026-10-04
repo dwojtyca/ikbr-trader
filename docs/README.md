@@ -8,6 +8,8 @@ successful exact-commit CI; see the
 PP4 real-source acceptance remains blocked. PP5 is delivered with review/checks/CI
 passed; see its [report](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md).
 PP6–PP7 remain planned.
+Owner decision 2026-10-04: PP6 will provide readable logs, terminal reports and recovery
+without the custom web UI. UI development is deferred; existing source is retained.
 These changes do not activate or deploy trading.
 
 ## Start here
@@ -31,6 +33,9 @@ These changes do not activate or deploy trading.
    pause, session deadlines, automatic close observation and fault delivery.
 7. [Current runtime flow](implementation/phase2/RUNTIME_FLOW.md) and
    [planned production-Paper acceptance](runbooks/PRODUCTION_PAPER_ACCEPTANCE.md).
+8. [Revised PP6 headless specification](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#10-pp6--headless-diagnostics-deployment-and-recovery):
+   readable Polish logs, simple filtering/timelines/session summaries, existing
+   authenticated controls and UI-off deployment/recovery. This remains future work.
 
 ## Authority and reading rules
 
@@ -166,7 +171,9 @@ and are intentionally unpublished/preserved.
 | [implementation/phase3/MODEL_ROUTING_GUIDE.md](implementation/phase3/MODEL_ROUTING_GUIDE.md) | Current coding-agent routing, review and escalation policy |
 | [implementation/phase3/MODEL_ROUTING_PLAN.md](implementation/phase3/MODEL_ROUTING_PLAN.md) | Bounded documentation/instruction change plan |
 | [implementation/phase3/MODEL_ROUTING_REPORT.md](implementation/phase3/MODEL_ROUTING_REPORT.md) | Model-routing change review and validation evidence |
-| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0 evidence linked; PP1 delivered with review, local checks and CI evidence; PP2–PP7 planned |
+| [implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md](implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md) | PP0–PP5 evidence; PP4 real-source acceptance blocked; headless PP6 and PP7 planned |
+| [implementation/phase3/PP6_HEADLESS_REPLAN_PLAN.md](implementation/phase3/PP6_HEADLESS_REPLAN_PLAN.md) | Accepted docs-only scope change deferring UI and specifying readable headless operations |
+| [implementation/phase3/PP6_HEADLESS_REPLAN_REPORT.md](implementation/phase3/PP6_HEADLESS_REPLAN_REPORT.md) | Scope-change reviews, preservation and validation evidence |
 | [implementation/phase3/PP0_IMPLEMENTATION_PLAN.md](implementation/phase3/PP0_IMPLEMENTATION_PLAN.md) | Accepted operator-security implementation contract |
 | [implementation/phase3/PP0_IMPLEMENTATION_REPORT.md](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md) | PP0 implementation, review and validation evidence |
 | [implementation/phase3/PP1_CONFIGURATION_CONTRACT.md](implementation/phase3/PP1_CONFIGURATION_CONTRACT.md) | Normative implemented PP1 field, identity, admission and migration contract |
