@@ -5,8 +5,8 @@ Other runtime/broker observations retain the September26 audit of `6cbd2c7`.
 PP1 configuration is implemented, independently reviewed and published with
 successful exact-commit CI; see the
 [PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP3 are delivered;
-PP4 real-source acceptance remains blocked. PP5 implementation/final validation is
-recorded in its [report](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md).
+PP4 real-source acceptance remains blocked. PP5 is delivered with review/checks/CI
+passed; see its [report](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md).
 PP6–PP7 remain planned.
 These changes do not activate or deploy trading.
 

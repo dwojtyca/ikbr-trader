@@ -9,7 +9,7 @@ its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required loc
 checks, publication and successful exact-source-commit CI.
 PP3 is delivered with accepted review, required checks and successful exact-source
 CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is independently reviewed, with real-source acceptance blocked;
-see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B source passed independent review and required local checks; publication/CI pending; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with independent review, required checks and exact-source CI passed; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.

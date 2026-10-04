@@ -1,7 +1,7 @@
 # PP5 — Automatic lifecycle supervision and durable alerts
 
-Date: 2026-10-04. Status: source implemented; independent review and all required local checks
-passed. Publication and exact-commit CI are pending. This status must not be read as broker acceptance.
+Date: 2026-10-04. Status: PP5-A/B implemented, independently reviewed and published; all required
+local checks and exact-source-commit CI passed. This status must not be read as broker acceptance.
 Baseline: `4c94f737ecc041a9bb7f5929cbca707ac35f3393`, main.
 
 Contract: [accepted plan](PP5_IMPLEMENTATION_PLAN.md),
@@ -133,7 +133,7 @@ and existing broker stacks are not touched.
 | Clean Docker `--no-cache` build | PASS, exit0; final image `sha256:9fbf3eee5b4f281b1c7b1228f75880eb203494d9271ba70ff957437169ae2b5a` |
 | Independent final source/document review | Accepted; no unresolved findings |
 | Local links, scoped diff, original dirty hashes | PASS; all25 original paths preserved |
-| Scoped main publication and exact-SHA GitHub CI | Pending |
+| Scoped main publication and exact-SHA GitHub CI | PASS; source `6986ae23eac798bd9ed18773f47ffecbc78027f5`, run 37205293268 |
 
 No strategy/simulator behavior changed, so additional strategy backtests are not
 applicable; existing repository backtest tests still run in the required suites.
@@ -154,6 +154,15 @@ was that migration-list test, rechecked with scoped lint, targeted PostgreSQL, t
 clean rebuilt image and full integration. Unit rerun took50.6s, build5.5s, final
 Docker build17.6s and integration88.8s. Documentation receipt updates do not change
 that verified runtime.
+
+Source commit: [`6986ae23eac798bd9ed18773f47ffecbc78027f5`](https://github.com/dwojtyca/ikbr-trader/commit/6986ae23eac798bd9ed18773f47ffecbc78027f5), pushed to `main`.
+Exact-source-commit [GitHub CI run 37205293268](https://github.com/dwojtyca/ikbr-trader/actions/runs/37205293268)
+completed **success** at 2026-10-04T13:27:22Z. The observed `head_sha` matches the
+source commit exactly. This documentation-only receipt records that result; its
+own commit is also verified in CI before final delivery. The 25 unrelated dirty
+paths remained byte-for-byte unchanged after publication. The dedicated PP5
+PostgreSQL container was stopped, with other stacks untouched. No operational
+service was started and no broker/provider message was sent.
 
 ## Model routing and remaining operational limits
 
