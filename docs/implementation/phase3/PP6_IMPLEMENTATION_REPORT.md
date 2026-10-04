@@ -1,8 +1,9 @@
 # PP6 — diagnostyka i obsługa bez własnego UI
 
 Data: 2026-10-04. Baza: `85ed46aeeba660bd967a0818f696eede3624619e`, gałąź `main`.
-Status: implementacja, niezależne przeglądy i końcowe kontrole lokalne zakończone;
-publikacja poprawki i CI dokładnego końcowego commitu oczekują.
+Status: **PP6 dostarczono** — implementacja, niezależne przeglądy, końcowe kontrole,
+publikacja kodu i CI dokładnego commitu zakończone sukcesem. Nie jest to aktywacja
+ani odbiór rzeczywistego handlu Paper.
 Kontrakt: [przyjęty plan](PP6_IMPLEMENTATION_PLAN.md),
 [specyfikacja PP6](PAPER_PRODUCTION_DELIVERY_PLAN.md#10-pp6--headless-diagnostics-deployment-and-recovery),
 [procedury operatora](../../runbooks/PAPER_HEADLESS_OPERATIONS.md).
@@ -132,7 +133,7 @@ i publikacji poniżej.
 | Końcowy dump/restore i CLI bez UI | PASS: nowy dump/restore 22 tabel i produkcyjny replay UNKNOWN; root `pnpm paper:ops`, 3 instrumenty, 5 operacji, 7 GET na czystym końcowym obrazie |
 | Niezależny końcowy przegląd źródeł/dokumentacji | PASS; Astra/high, bez uwag blokujących |
 | Linki, diff i zachowanie zastanych plików | PASS: 25 hashów bez zmian, 48 jawnych plików PP6, linki 6 dokumentów i `git diff --check` |
-| Commit/push `main` i CI dokładnego SHA | Oczekuje |
+| Commit/push `main` i CI dokładnego SHA | PASS: `fb03c146bdef8915eaec7bf85f54a67209d6298f`, [CI 37231952462](https://github.com/dwojtyca/ikbr-trader/actions/runs/37231952462) SUCCESS |
 
 Końcowy obraz `ikbr-pp6-verification:final` ma digest
 `sha256:8f49b00441f98e985813bf28f4a5dd8d9b7bdf6f45e8d1b895fbd959334b5d2b`.
@@ -206,7 +207,8 @@ z `--cpuset-cpus 0`, ograniczając równoległość między plikami; jawne wspó
 rezerwacje w testach pozostały aktywne. To ograniczenie lokalnego środowiska
 weryfikacji jest zachowane w raporcie. Pierwszy opublikowany commit przeszedł też
 standardowe [GitHub CI 37226720055](https://github.com/dwojtyca/ikbr-trader/actions/runs/37226720055);
-nie zastępuje to CI poprawionego końcowego commitu.
+nie zastępuje to CI poprawionego końcowego commitu, które również przeszło
+z domyślną współbieżnością workflow (szczegóły poniżej).
 
 ## Modele i eskalacje
 
@@ -229,5 +231,27 @@ naprawy izolacji kont; dokładna liczba wcześniejszych edycji wewnątrz tych ru
 niedostępna. Po korektach CLI dochodzą dwa odrębne przeglądy źródeł i przegląd raportu
 (11 żądań przed publikacją poprawionego kodu), dwie naprawy wywołania i jedna poprawka
 błędnego trybu testowego, bez obniżenia poziomu modelu. Według znaczników czasu plików od zapisu inwentarza o 17:15 CEST do końcowej próby
-odtworzenia o 22:21 CEST upłynęło około 306 minut; publikacja/CI są kolejnym etapem. Nie deklarujemy procentu
+odtworzenia o 22:21 CEST upłynęło około 306 minut. CI poprawionego kodu trwało około 6 minut 40 sekund;
+czas przygotowania potwierdzenia dokumentacyjnego nie jest wliczony. Nie deklarujemy procentu
 oszczędności ani gwarancji jakości modelu.
+
+
+## Publikacja i potwierdzenie CI
+
+Kod opublikowano na `main` w dwóch commitach: pakiet
+`a4c150021c46002a8e8fa67fae810201987d9dab` oraz korekta rzeczywistego wywołania CLI
+`fb03c146bdef8915eaec7bf85f54a67209d6298f`. Drugi commit jest końcowym SHA źródeł PP6.
+Dla tego dokładnego SHA [workflow 37231952462](https://github.com/dwojtyca/ikbr-trader/actions/runs/37231952462)
+i job `build-test` zakończyły się `success` 2026-10-04 o 20:30:51 UTC.
+Instalacja, lint, typy, testy jednostkowe, standardowa integracja PostgreSQL i build
+przeszły; workflow nie otrzymał lokalnej flagi ograniczenia CPU. Nie rozstrzyga to
+przyczyny dwóch opisanych wyżej lokalnych rozbieżności świeżości.
+
+Zachowano wszystkie 25 zastanych plików i ich hashe; po publikacji kodu tylko one
+pozostały zmienione. Zatrzymano własny izolowany `pp6-postgres`; nie zmieniano
+operacyjnego stosu, brokera ani odbiorców alertów. PP7 pozostaje zaplanowane,
+a PP4 i brakujące dane brokerskie zachowują swoje blokady.
+
+Niniejsze potwierdzenie oraz statusy roadmap/current-state/delivery są oddzielną
+zmianą dokumentacyjną po udanym CI źródeł. Otrzymuje niezależny przegląd dokumentów,
+sprawdzenie linków/diff i osobny commit z weryfikacją jego CI; nie zmienia kodu.

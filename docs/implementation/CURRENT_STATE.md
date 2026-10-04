@@ -27,9 +27,9 @@ PP4 source coverage and unavailable certified Warsaw-day accounting still preven
 Owner scope update 2026-10-04: custom UI development is deferred. PP6 implements
 readable Polish logs/JSON and filtered terminal reports through `pnpm paper:ops`,
 reuses authenticated PP5 controls, and supplies UI-off deployment/recovery procedures.
-Independent source/document review accepted; final check/publication evidence is in the
+Independent reviews, required checks, isolated restore/root-CLI drills and exact-source CI passed; evidence is in the
 [PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md).
-Existing UI source is retained; no service was stopped or deployed by this update.
+Existing UI source is retained; no operational service was stopped or deployed by this update.
 
 ## Delivery objective
 
@@ -66,7 +66,7 @@ None of these labels implies profitability or permission to activate Live.
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
 | Exit/ownership | PP5 background observer restores durable ownership/close state, verifies exact protection and broker flat evidence, and can invoke the audited deadline close | One share only; disabled by default; unknown/rejected/unfilled close retains HOLD; no automatic replace/reprotection |
 | AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report |
-| Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | PP6 implements readable logs/JSON, terminal reports and recovery procedures; see its report for final validation; custom dashboard deferred; manual IBKR changes require supported reconciliation |
+| Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | PP6 delivered readable logs/JSON, terminal reports and recovery procedures with review/checks/exact-source CI passed; custom dashboard deferred; manual IBKR changes require supported reconciliation |
 | Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |

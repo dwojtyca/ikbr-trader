@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-04 (PP6 changed to headless operations; PP5 delivered; PP4 real-source acceptance blocked).
+Updated: 2026-10-04 (PP6 headless operations delivered; PP4 real-source acceptance blocked; PP7 planned).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -18,8 +18,8 @@ exits, recover safely after failures and explain its state to the operator.
 One supervised round trip is a prerequisite, not the finish line. Live activation,
 new strategy development and ES research are outside this delivery track.
 
-The owner has deferred the custom web UI. PP6 must provide understandable Polish
-logs, easy read-only terminal reports and alerts instead. IBKR desktop is the
+The owner has deferred the custom web UI. PP6 provides understandable Polish
+logs, easy read-only terminal reports and existing alerts. IBKR desktop is the
 owner's account/manual-trading interface; bot decisions, data gaps and holds remain
 visible through our diagnostics. Existing UI code/security fixes are retained;
 running that service is not a PP6/PP7 requirement.
@@ -29,8 +29,8 @@ running that service is not a PP6/PP7 requirement.
 Bound contracts, strategy attribution, durable proposal identity, mandatory AI
 reviews, submission/reconciliation, ownership, one-share full-close and generic
 session/native-candle readiness are implemented. Do not restart those subsystems.
-Configuration and research source contracts are delivered; real research coverage,
-operator visibility and broker-backed automated operation remain gated. PP0 supplies the reviewed operator security baseline;
+Configuration, research source contracts and headless operator diagnostics are delivered;
+real research coverage and broker-backed automated operation remain gated. PP0 supplies the reviewed operator security baseline;
 see the evidence matrix in CURRENT_STATE.
 
 ## Current sequence
@@ -49,7 +49,7 @@ PP3 implements generic stock execution, immutable attempts and lifecycle evidenc
 independent review, required checks, publication and exact-source-commit CI passed.
 See the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is reviewed; real-source acceptance remains **blocked**. See the
 [PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered; independent review, required local checks and exact-source CI passed; see the
-[PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6 implementation is independently reviewed; final verification/publication is recorded in the
+[PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6 is delivered with independent review, required local checks, isolated recovery and successful exact-source CI; evidence is in the
 [PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 remains **planned**.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
@@ -63,7 +63,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP3 | Delivered: generic stock capability/windows/budgets/audit for PKO, AAPL and configured fixtures | PP1, PP2 |
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
-| PP6 | Implemented headless Polish logs/JSON, terminal reports and existing controls; reviewed; final verification/publication in the PP6 report | PP0–PP5 |
+| PP6 | Delivered headless Polish logs/JSON, terminal reports, existing controls and recovery; review/checks/exact-source CI passed | PP0–PP5 |
 | PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
 
 PP4 research implementation may proceed independently after the identity contract
@@ -148,4 +148,4 @@ support is a separately bounded extension using the same contracts.
 historical evidence. The current owner direction supersedes their next-step order.
 [Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
 records the original delivery-direction reconciliation. PP0/PP1 implementation
-evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6 source is implemented and reviewed; see its report for final checks/publication. PP7 remains planned.
+evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6 is delivered with accepted review, required checks, recovery drills and exact-source CI; see its report. PP7 remains planned.
