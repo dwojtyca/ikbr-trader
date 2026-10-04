@@ -35,6 +35,9 @@ odnalezione dowody. Nadal obowiązuje limit 1000 zdarzeń/2 MiB i jawne pominię
 nie odtwarza to usuniętych ocen ani niezapisanych przejść stanu. Limit 31 dni
 obowiązuje wyszukiwanie czasowe logs/session/export.
 
+Względne ścieżki `--env-file` i `--output` odnoszą się do katalogu wywołania
+`pnpm paper:ops`, a ścieżki bezwzględne pozostają bez zmian.
+
 Token pochodzi z `EXECUTION_API_TOKEN` w środowisku albo wskazanego `--env-file`.
 Nie wpisuj go do argumentów, historii powłoki ani plików raportu. Odczyt wymaga
 uwierzytelnienia także przy wyłączonych zapisach. Domyślny adres to loopback na porcie 3103;

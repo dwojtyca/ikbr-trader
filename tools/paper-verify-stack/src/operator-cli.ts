@@ -1,6 +1,7 @@
 import { readFile, open } from 'node:fs/promises';
 import { parseArgs, parseEnv } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { boundDiagnosticReport, redactDiagnosticExport, parseDiagnosticQuery, safeDiagnosticText,
   formatDiagnosticReport, formatDiagnosticEvent, sanitizeDiagnosticReport, DIAGNOSTIC_LIMITS, type DiagnosticReport } from '@ikbr/shared/diagnostics';
@@ -72,7 +73,8 @@ export async function runOperatorCli(args:string[],env:NodeJS.ProcessEnv=process
   if(values.follow&&command!=='logs'||values.output&&command!=='export') throw Error('OPERATOR_ARGUMENTS_INVALID');
   if(command==='export'&&(!values.from||!values.to||!values.output)) throw Error('EXPORT_INTERVAL_OUTPUT_REQUIRED');
   const timeZone=values.timezone??'Europe/Warsaw'; new Intl.DateTimeFormat('pl-PL',{timeZone});
-  const fileEnv=values['env-file']?parseEnv(await readFile(values['env-file'],'utf8')):{};
+  const callerDirectory=env.INIT_CWD??process.cwd();
+  const fileEnv=values['env-file']?parseEnv(await readFile(resolve(callerDirectory,values['env-file']),'utf8')):{};
   const token=env.EXECUTION_API_TOKEN??fileEnv.EXECUTION_API_TOKEN??'';
   const client=new OperatorClient({token,origin:values['base-url']??env.PAPER_OPS_BASE_URL??fileEnv.PAPER_OPS_BASE_URL});
   if(command==='control') {
@@ -95,7 +97,7 @@ export async function runOperatorCli(args:string[],env:NodeJS.ProcessEnv=process
   if(command==='export') {
     const redacted=redactDiagnosticExport(report,{secrets:[token]});
     const content=renderBoundedExport(redacted,Boolean(values.json),timeZone);
-    await writeDiagnosticExport(values.output!,content);
+    await writeDiagnosticExport(resolve(callerDirectory,values.output!),content);
     process.stdout.write('Zapisano ograniczoną, zanonimizowaną diagnostykę (uprawnienia 0600). Pominięcia są opisane w pliku.\n');return;
   }
   process.stdout.write(values.json?JSON.stringify(report)+'\n':formatDiagnosticReport(report,{timeZone})+'\n');

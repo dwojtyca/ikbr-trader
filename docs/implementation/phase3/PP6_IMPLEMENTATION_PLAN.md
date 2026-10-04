@@ -183,3 +183,25 @@ fixtures. Report limits plainly.
 review results, commands, source SHA/CI URL, requested/dispatched models, repair/
 escalation counts, elapsed time and unavailable token telemetry. Final completion
 requires accepted review, all checks, scoped push and exact SHA CI success.
+
+### Root terminal entry point — verification clarification
+
+The documented `pnpm paper:ops` changes the child process working directory to
+its workspace package. Relative `--env-file` and `--output` paths must resolve
+against the caller's `INIT_CWD` when provided by pnpm, otherwise `process.cwd()`;
+absolute paths remain unchanged. This affects file location only, not credentials,
+authentication, host allowlists or trade controls. The isolated operator drill must
+invoke the actual root `pnpm paper:ops` command with a relative private synthetic
+environment file and relative export path, without inherited API credentials.
+Keep the same seven read-only requests and three-instrument/five-view acceptance.
+The original independent plan reviewer accepted this clarification before
+implementation on 2026-10-04. Final source review and all required checks apply
+to the corrected candidate.
+
+The package Node invocation must terminate runtime option parsing with `--` before
+the CLI script, so the operator's `--env-file` belongs exclusively to the CLI parser
+and does not trigger Node environment preloading. The root-command drill covers
+this boundary together with relative paths and original token precedence.
+Accepted independently by the original plan reviewer on 2026-10-04 before the
+package-script change. A subprocess test also exercises this root command with an
+empty synthetic token, expecting the CLI's own token rejection before any HTTP.
