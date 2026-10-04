@@ -15,7 +15,8 @@ CI are recorded in the
 [PP2 report](phase3/PP2_IMPLEMENTATION_REPORT.md). These source updates establish
 no operational deployment or broker readiness. PP3 adds common stock capability,
 immutable Paper budgets and generic lifecycle evidence; the
-[PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md) records current final delivery gates.
+[PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md) records accepted review, required
+local checks, publication and successful exact-source-commit CI.
 PP4 denial and unavailable certified Warsaw-day accounting still prevent entry.
 
 ## Delivery objective

@@ -7,8 +7,8 @@ with independent review, local checks and exact-commit CI passed; evidence is in
 PP2 source implements the [bounded runtime contract](PP2_RUNTIME_CONTRACT.md);
 its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required local
 checks, publication and successful exact-source-commit CI.
-PP3 source is implemented; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md) for
-final review/check/publication status. PP4–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+PP3 is delivered with accepted review, required checks and successful exact-source
+CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.

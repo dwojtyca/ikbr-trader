@@ -1,7 +1,7 @@
 # PP3 implementation report
 
-Date: 2026-09-28. Status: source and documentation accepted by independent review; all required local
-checks passed. Main publication and exact-commit CI pending. This source package is not an operational deployment
+Date: 2026-09-28. Status: **PP3 delivered**. Independent source/document review, all required local
+checks, scoped main publication and exact-source-commit CI passed. This source package is not an operational deployment
 or broker-readiness claim. No trading, real broker/provider calls or PP4 work was performed.
 
 ## Baseline and contract
@@ -166,32 +166,36 @@ replay regression tests remain part of the full suite.
 | Clean `docker build --no-cache` | PASS; complete image build on isolated Colima profile |
 | Independent final hostile/document review | PASS; two repair rounds, final source/document verification clean |
 | Scoped diff / unrelated hash preservation | PASS; 78 reviewed paths, 25 unrelated file hashes unchanged; explicit staging only |
-| Main commit/push and exact-commit CI | Pending |
+| Main commit/push and exact-source-commit CI | PASS; `1bd67e44aa66d8de3b172863f4c1675ee8cd30fa`; [CI run](https://github.com/dwojtyca/ikbr-trader/actions/runs/36466264494) |
 
 Validation used Node 24.4.1 / pnpm 9.5.0 on the host and Node 24.20.0 in the
 clean Docker image. Integration used only isolated PostgreSQL16 on
 `colima-pp1-verification`, with the runner and DB sharing the VM clock.
 Final image: `sha256:3a2a1a9106a313e42f0eba3c9717f436122cbcb65c42b42fdc7f32863e41e2c0`.
-The final command logs are local `/private/tmp/pp3-delivery/final-*.log`; status
-files preserve each actual exit code. Full integration includes 1,566 execution,
+The original command logs were at `/private/tmp/pp3-delivery/final-*.log`; status
+files recorded each actual exit code. Those temporary files expired before the
+October 4 resumption. The September 28 independent verification and successful
+source CI remain the recorded evidence; local runtime suites were not rerun solely
+for this prose update. Full integration included 1,566 execution,
 18 backtest, 13 LLM, 111 ingestion and 524 signal checks. All passed.
 
 ## Routing and cost evidence
 
 | Task | Requested / dispatched model and effort | Repairs/escalations | Evidence / elapsed / tokens |
 | --- | --- | --- | --- |
-| Lead critical contract/integration | Capable lead; exact runtime telemetry unavailable | Plan clarification + review repairs; no semantic downgrade | Final integrated checks below; elapsed/tokens unavailable per role |
+| Lead critical contract/integration | Capable lead; exact runtime telemetry unavailable | 1 plan clarification, 2 hostile-review repair rounds, fixture integration repairs; 0 model escalations | Final integrated checks above; elapsed/tokens unavailable per role |
 | Independent plan review | `gpt-6-astra` / `high` | One P1 clarification, then accepted; no implementation | Separate plan reviewer; elapsed/tokens unavailable |
-| PP3-A capability/close/identity | `gpt-6-astra` / `high` | One integrated review repair pass; no model escalation | Focused/PG evidence above; elapsed/tokens unavailable |
-| PP3-A policy/budget/migration | `gpt-6-astra` / `high` | Targeted SQL/date fixture repairs; one review restart repair; no model escalation | 22 focused checks; elapsed/tokens unavailable |
+| PP3-A capability/close/identity | `gpt-6-astra` / `high` | 1 hostile-review repair round + 2 fixture repair passes; 0 model escalations | Focused/PG evidence above; elapsed/tokens unavailable |
+| PP3-A policy/budget/migration | `gpt-6-astra` / `high` | Targeted SQL/date repairs + 1 hostile-review restart repair; 0 model escalations | 22 focused checks; elapsed/tokens unavailable |
 | PP3-B pure formatter | `gpt-6-luna` / `medium` | No worker repair/escalation; A integrated later audit fields | 4 focused checks; elapsed/tokens unavailable |
 | Mechanical preparation/checks | `gpt-5.6-luna` / `low` requested; fallback execution reported capable lead environment, exact runtime telemetry unavailable | No source editing | Dedicated PG and final logs; elapsed/tokens unavailable per role |
 | Independent hostile/document review | `gpt-6-astra` / `high` | First pass 5 P1 + 3 P2; second pass 1 P1 repaired; final verification accepted | Different from plan reviewer/implementers; elapsed/tokens unavailable |
 
 Dispatch settings are recorded, not independently measured runtime model claims.
 No token totals or percentage savings can be established from available telemetry.
-Wall-clock package time begins 2026-09-28 17:42:50 UTC; final completion time is
-recorded with publication evidence. Startup, review and rework are included.
+Work began 2026-09-28 17:42:50 UTC. Source publication/CI was verified at
+2026-09-28 19:01:25 UTC, 78.6 minutes after that checkpoint, including
+startup, review, rework and source CI. Per-agent/token attribution remains unavailable.
 
 ## Remaining operational gates
 
@@ -203,3 +207,15 @@ as broker capability. Actual quote entitlement, calendars, account/identity,
 completed-order/economic coverage and supervised acceptance still require current
 broker evidence. Repeated scheduling/automatic lifecycle require PP5; final broker
 acceptance remains PP7. Source checks do not authorize deployment or trading.
+
+## Publication evidence
+
+Source commit: [`1bd67e44aa66d8de3b172863f4c1675ee8cd30fa`](https://github.com/dwojtyca/ikbr-trader/commit/1bd67e44aa66d8de3b172863f4c1675ee8cd30fa).
+It was pushed to `main`; the remote head matched. Exact-source-commit
+[CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/36466264494) completed successfully. This documentation follow-up
+records the observed result without changing runtime source or configuration. Its
+own commit receives the normal CI check before final delivery is reported.
+
+The final documentation-only review/publication was resumed on 2026-10-04 after
+the September 28 agent usage limit interrupted that step. Source acceptance and
+successful CI above predate the interruption; no runtime changes were needed.
