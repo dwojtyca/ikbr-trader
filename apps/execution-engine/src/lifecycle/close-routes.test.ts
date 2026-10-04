@@ -4,7 +4,7 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import { registerFullCloseRoutes } from "./close-routes.js";
 import { registerExecutionAuth, AuthFailureBurstTracker } from "../auth.js";
-import { assertEnvironmentAllowsWrite, EnvironmentGuardError } from "../env-guard.js";
+import { assertEnvironmentAllowsWrite, assertActiveAccountAllowed, EnvironmentGuardError } from "../env-guard.js";
 import { isWriteGuardExempt } from "../write-guard-exemptions.js";
 import type { CloseOperation } from "./close-types.js";
 
@@ -16,9 +16,12 @@ test("full close routes use bearer, normal write/account guard and strict reques
     writeAudit: () => {}, logger: { warn: () => {} } });
   app.addHook("preHandler", async (request, reply) => {
     if (request.method === "GET") return;
-    assert.equal(isWriteGuardExempt(request.method, request.routeOptions.url), false);
-    try { assertEnvironmentAllowsWrite({ environment: "paper", tradingEnabled: state.enabled,
-      allowedPaperAccounts: ["DU_TEST"], allowedLiveAccounts: [] }, state.account); }
+    const cfg = { environment: "paper" as const, tradingEnabled: state.enabled,
+      allowedPaperAccounts: ["DU_TEST"], allowedLiveAccounts: [] };
+    try {
+      if (isWriteGuardExempt(request.method, request.routeOptions.url)) assertActiveAccountAllowed(cfg, state.account, { requireKnownAccount: true });
+      else assertEnvironmentAllowsWrite(cfg, state.account);
+    }
     catch (error) { if (error instanceof EnvironmentGuardError) return reply.code(423).send({ error: error.reason }); throw error; }
   });
   registerFullCloseRoutes(app, { get: async () => { reads++; return null; }, request: async () => {
@@ -37,6 +40,10 @@ test("full close routes use bearer, normal write/account guard and strict reques
       assert.equal((await app.inject({ method: "POST", url: "/execution/lifecycle/1/close", headers, payload })).statusCode, 400);
     assert.equal(writes, 0);
     assert.equal((await app.inject({ method: "POST", url: "/execution/lifecycle/1/close", headers, payload: body })).statusCode, 202);
+    state.enabled = false;
+    state.account = "OTHER";
+    assert.equal((await app.inject({ method: "POST", url: "/execution/lifecycle/1/close/reconcile", headers })).statusCode, 423);
+    state.account = "DU_TEST";
     assert.equal((await app.inject({ method: "POST", url: "/execution/lifecycle/1/close/reconcile", headers })).statusCode, 200);
     assert.equal((await app.inject({ method: "GET", url: "/execution/lifecycle/1/close", headers })).statusCode, 404);
     assert.equal(writes, 2);

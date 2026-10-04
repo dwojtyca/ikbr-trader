@@ -114,3 +114,11 @@ test('close risk deadline is rechecked at synchronous send after dispatch setup'
   finally { Date.now = originalNow; }
   assert.deepEqual(ib.orders, []);
 });
+
+test('management guard fences cancel and final synchronous close send', async () => {
+ const f=await fixture();f.client.setCloseWriteGuard(()=>{throw new Error('MASTER_DISABLED');});
+ await assert.rejects(f.client.cancelOwnedOrder(f.input),/MASTER_DISABLED/);assert.deepEqual(f.ib.cancels,[]);
+ assert.throws(()=>f.client.dispatchPreparedClose(prepared(),f.input.expectedGeneration,Date.now()+10000),/MASTER_DISABLED/);assert.deepEqual(f.ib.orders,[]);
+ let count=0;f.client.setCloseWriteGuard(()=>{if(++count>1)throw new Error('MASTER_CHANGED');});
+ await assert.rejects(f.client.dispatchPreparedClose(prepared(),f.input.expectedGeneration,Date.now()+10000),/MASTER_CHANGED/);assert.deepEqual(f.ib.orders,[]);
+});

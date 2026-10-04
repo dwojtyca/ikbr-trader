@@ -1,10 +1,13 @@
 # Project documentation
 
-Documentation updated 2026-09-28 with [PP0 implementation evidence](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md).
+Documentation updated 2026-10-04 with [PP0 implementation evidence](implementation/phase3/PP0_IMPLEMENTATION_REPORT.md).
 Other runtime/broker observations retain the September26 audit of `6cbd2c7`.
 PP1 configuration is implemented, independently reviewed and published with
 successful exact-commit CI; see the
-[PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP7 remain planned.
+[PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP3 are delivered;
+PP4 real-source acceptance remains blocked. PP5 implementation/final validation is
+recorded in its [report](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md).
+PP6–PP7 remain planned.
 These changes do not activate or deploy trading.
 
 ## Start here
@@ -24,7 +27,9 @@ These changes do not activate or deploy trading.
    also describes future PP2 runtime behavior.
 5. [Instrument research contract](architecture/INSTRUMENT_RESEARCH_CONTEXT.md):
    company reports/news/earnings, asset-specific evidence and immutable AI context.
-6. [Current runtime flow](implementation/phase2/RUNTIME_FLOW.md) and
+6. [PP5 lifecycle supervision](runbooks/PAPER_LIFECYCLE_SUPERVISION.md): durable entry
+   pause, session deadlines, automatic close observation and fault delivery.
+7. [Current runtime flow](implementation/phase2/RUNTIME_FLOW.md) and
    [planned production-Paper acceptance](runbooks/PRODUCTION_PAPER_ACCEPTANCE.md).
 
 ## Authority and reading rules
@@ -52,6 +57,9 @@ and are intentionally unpublished/preserved.
 | Document | Status / use |
 | --- | --- |
 | [README.md](README.md) | Current navigation and complete inventory |
+| [implementation/phase3/PP5_IMPLEMENTATION_PLAN.md](implementation/phase3/PP5_IMPLEMENTATION_PLAN.md) | Accepted PP5-A/B scope and safety contract |
+| [implementation/phase3/PP5_IMPLEMENTATION_REPORT.md](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md) | PP5 changes, review, checks and publication evidence |
+| [runbooks/PAPER_LIFECYCLE_SUPERVISION.md](runbooks/PAPER_LIFECYCLE_SUPERVISION.md) | Permission migration, observation and bounded recovery |
 | [adr/ADR-001-execution-security.md](adr/ADR-001-execution-security.md) | Historical decision with current security qualification |
 | [architecture/DATABASE_MIGRATIONS.md](architecture/DATABASE_MIGRATIONS.md) | Current wiring plus retained module specification |
 | [architecture/DECISION_ENGINE.md](architecture/DECISION_ENGINE.md) | Current wiring plus retained module specification |

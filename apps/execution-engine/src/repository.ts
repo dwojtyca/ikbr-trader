@@ -1,4 +1,5 @@
 import type { ResearchEntryValidator, ResearchEntryPermit } from "./research-entry-guard.js";
+import type { EntryControlPermit } from "./entry-control.js";
 import { isProvenUnfilledPaperEntry } from "./paper-terminal-entry.js";
 import { checkPaperEntryBudget, bindPaperProposal, reservePaperEntryAttempt, readPaperRoundTripWindow } from "./paper-entry-budget.js";
 import type { PaperRunPolicy } from "./paper-run-policy.js";
@@ -448,7 +449,12 @@ export class ExecutionRepository {
   constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined,
     private readonly paper?: { policy?: PaperRunPolicy; context: () => PaperDailyLossContext | null;
       resolveManagement: (order: ProposedOrder, db: PoolClient) => Promise<BoundInstrument | undefined> },
-    private readonly researchEntryValidator?: ResearchEntryValidator) {}
+    private readonly researchEntryValidator?: ResearchEntryValidator,
+    private readonly lifecycleEntry?: {
+      permit(db: PoolClient, accountId: string): Promise<EntryControlPermit>;
+      pin(db: PoolClient, order: ProposedOrder, accountId: string): Promise<void>;
+      deadline(db: PoolClient, proposalId: number, accountId: string): Promise<number>;
+    }) {}
 
   private async validateEntryResearch(db: PoolClient, order: ProposedOrder, clientOrderHash: string, accountId: string, sessionId: string): Promise<ResearchEntryPermit> {
     if (!this.researchEntryValidator) throw new Error("RESEARCH_ENTRY_VALIDATOR_UNAVAILABLE");
@@ -525,7 +531,7 @@ export class ExecutionRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      if (order.strategyAttribution || this.paper?.policy) {
+      if (order.strategyAttribution || this.paper?.policy || this.lifecycleEntry) {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('cash:unattributed-fill'))");
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`snap:${accountId}`]);
       }
@@ -576,6 +582,10 @@ export class ExecutionRepository {
         await validateStrategyInstanceEntry(client, persisted, persisted.strategy!, stored.rows[0].client_order_id,
           { effectiveConfigHash: risk.strategyEffectiveConfigHash, observedAt: risk.strategyObservedAt });
       }
+      const lifecyclePermit = this.lifecycleEntry ? await this.lifecycleEntry.permit(client, accountId) : undefined;
+      if (this.lifecycleEntry) deadline = Math.min(deadline, await this.lifecycleEntry.deadline(client, order.id!, accountId));
+      lifecyclePermit?.assertCurrent();
+      if (lifecyclePermit && Date.now() >= lifecyclePermit.validUntilMs) throw new Error("LIFECYCLE_ENTRY_EVIDENCE_EXPIRED");
       if (order.strategyAttribution) this.assertCurrentStrategyConfiguration(order);
       if (Date.now() >= strategyRiskDeadline) throw new Error("STRATEGY_DISPATCH_RISK_EXPIRED");
       if (Date.now() >= deadline) throw new Error("session_dispatch_expired");
@@ -1482,6 +1492,7 @@ export class ExecutionRepository {
           "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
           [`snap:${positionGuard.accountId}`],
         );
+        if (this.lifecycleEntry) await this.lifecycleEntry.permit(client, positionGuard.accountId);
         const close = await findCloseReservation(client, positionGuard.accountId);
         if (close) {
           await client.query("ROLLBACK");
@@ -1645,6 +1656,10 @@ export class ExecutionRepository {
       const calendar = await this.sessionEntryGuard(client, ticket);
       if (!calendar.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: calendar.reason }; }
 
+      if (this.lifecycleEntry) {
+        if (positionGuard.kind !== "available") throw new Error("ENTRY_CONTROL_ACCOUNT_UNAVAILABLE");
+        await this.lifecycleEntry.permit(client, positionGuard.accountId);
+      }
       const result = await client.query(
         `
         INSERT INTO proposed_orders (
@@ -1836,7 +1851,10 @@ export class ExecutionRepository {
         startsAt: window.starts_at, endsAt: window.ends_at, consumedAt: window.consumed_at,
         consumedProposalId: window.consumed_proposal_id == null ? null : Number(window.consumed_proposal_id) } : null),
         close: row ? { state: row.state, accountId: row.account_id, conid: row.conid,
-        originalHash: row.original_hash, closeProposalId: closeId, links: closeLinks } : null,
+        originalHash: row.original_hash, closeProposalId: closeId, links: closeLinks,
+        submissionAttemptedAt: row.submission_attempted_at, terminals: row.terminals,
+        generation: Number(row.socket_generation), sessionId: row.session_id, clientId: row.client_id,
+        barrierAt: row.barrier_at } : null,
         fills: fills.rows.map(fill => ({ ...fill, proposed_order_id: fill.proposed_order_id === null ? null : Number(fill.proposed_order_id) })) };
     } catch (error) { if (!transaction) await client.query("ROLLBACK"); throw error; }
     finally { if (!transaction) client.release(); }
@@ -2820,6 +2838,12 @@ export class ExecutionRepository {
 
       const calendar = await this.sessionEntryGuard(client, this.mapRow(row));
       if (!calendar.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: calendar.reason }; }
+
+      if (this.lifecycleEntry) {
+        await this.lifecycleEntry.permit(client, input.accountId);
+        await this.lifecycleEntry.pin(client, this.mapRow(row), input.accountId);
+        await this.lifecycleEntry.deadline(client, input.id, input.accountId);
+      }
 
       try {
         researchPermit.assertCurrent();

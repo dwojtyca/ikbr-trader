@@ -69,6 +69,16 @@ export const WRITE_GUARD_EXEMPT_ROUTES: readonly WriteGuardExemption[] = [
   },
   {
     method: "POST",
+    routePath: "/execution/entry-control/pause",
+    rationale: "PP5 durable entry pause; retains authentication, audit and known allowed account.",
+  },
+  {
+    method: "POST",
+    routePath: "/execution/lifecycle/:id/close/reconcile",
+    rationale: "PP5 observation-only close reconciliation; cannot submit or repeat broker writes.",
+  },
+  {
+    method: "POST",
     routePath: "/execution/reconciliation/holds/:id/acknowledge",
     rationale:
       "PR15 §8 — acknowledge a reconciliation hold. Does not touch " +

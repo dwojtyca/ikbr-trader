@@ -1,3 +1,5 @@
+import { LifecycleObserverRepository, pinLifecycleEntryPolicy, assertLifecycleEntryDeadline } from './observer-repository.js';
+import { LifecycleObserver } from './observer.js';
 import { LegacyResearchCompatibilityRepository } from "../research-entry-guard.fixture.js";
 import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixture.js";
 import { stockMetadataFixture } from "../stock-market-test-fixture.js";
@@ -241,6 +243,8 @@ async function createFixture(currency: "USD" | "PLN") {
         action: role === "PARENT" ? "BUY" : "SELL",
         observedAt: capture,
       }));
+      for (const row of orders) Object.assign(row, { orderType: row.action === 'BUY' || row.orderRef.endsWith('TP') ? 'LMT' : 'STP',
+        limitPrice: row.action === 'BUY' ? 100 : 102, stopPrice: 99, totalQuantity: 1, parentId: '101', ocaGroup: 'fixture-owned', ocaType: 2, tif: 'DAY' });
       if (state.closeWorking)
         orders.push({
           accountId,
@@ -1024,3 +1028,81 @@ for (const currency of ["USD", "PLN"] as const) describe(
     });
   },
 );
+
+
+describe('PP5 durable observer with real FullCloseService and PostgreSQL', {skip:!connection},()=>{
+  async function supervised(pending=false) {
+    const f=await createFixture('PLN'); const store=new LifecycleObserverRepository(f.pool,f.execution);
+    const now=Date.now();const metadata=stockMetadataFixture(f.context().bound!,accountId,now);
+    metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+15*60000-100).toISOString();
+    await f.pool.query(`INSERT INTO instrument_session_schedules(instrument_id,conid,use_rth,generation,status,evidence,updated_at) VALUES('test','123',true,1,'READY',$1,$2)`,[metadata.sessionEvidence.schedule,new Date(now)]);
+    const order=(await f.execution.getProposedOrderById(f.id))!;
+    await store.adopt(order,f.context().bound!,accountId,15);
+    await f.pool.query(`INSERT INTO gpw_windows(run_id,account_id,trade_date,starts_at,ends_at,consumed_proposal_id,consumed_at) VALUES('pp5',$1,CURRENT_DATE,$2,$3,$4,$5)`,[accountId,new Date(now-60000),new Date(now+60000),f.id,order.executionAttemptedAt]);
+    await f.pool.query(`INSERT INTO gpw_proposals(proposed_order_id,run_id) VALUES($1,'pp5')`,[f.id]);
+    await f.pool.query(`UPDATE proposal_ai_reviews SET risk_evidence=$2 WHERE proposed_order_id=$1`,[f.id,{accountId,instrumentId:'test',conid:'123',sessionId,quoteCurrency:'PLN',assessedAtMs:new Date(order.executionAttemptedAt!).getTime()-100,validUntilMs:now+10000}]);
+    if(pending){f.state.originalFilled=false;f.state.position=0;f.state.working=['PARENT','TP','SL'];}
+    const times=new Map<string,string>();
+    const refresh=async()=>{await f.refresh();const latest=(await f.pool.query('SELECT id,broker_snapshot FROM reconciliation_runs WHERE account_id=$1 ORDER BY id DESC LIMIT 1',[accountId])).rows[0];
+      for(const row of latest.broker_snapshot.openOrders){row.secType='STK';row.currency='PLN';}
+      for(const fill of latest.broker_snapshot.executions){fill.secType='STK';fill.currency='PLN';if(!times.has(fill.execId))times.set(fill.execId,fill.executedAt);fill.executedAt=times.get(fill.execId);
+        await f.execution.upsertBrokerExecutionFill({execId:fill.execId,secType:'STK',orderId:Number(fill.brokerOrderId),accountId,conid:'123',symbol:'TEST',currency:'PLN',side:fill.side==='BOT'?'BUY':'SELL',shares:fill.shares,price:fill.price,executedAt:fill.executedAt});
+        await f.pool.query('UPDATE broker_execution_fills SET commission=.5,commission_currency=$2 WHERE exec_id=$1',[fill.execId,'PLN']);}
+      await f.pool.query('UPDATE reconciliation_runs SET broker_snapshot=$2 WHERE id=$1',[latest.id,latest.broker_snapshot]);};
+    f.service.deps.refresh=refresh;
+    const faults=new Set<string>();
+    const observer=new LifecycleObserver(store,{currentContext:()=>({accountId,sessionId}),context:async()=>f.context(),refresh,close:f.service,
+      faults:{recordFault:async x=>{faults.add(x.code);},resolveScope:async()=>{}},closePrice:async()=>100,assertManagementAllowed:()=>{},automationEnabled:true,adoptExisting:false,exitBeforeCloseMinutes:15,onHealth:()=>{},logCritical:()=>{}});
+    return {...f,store,observer,faults};
+  }
+  it('deadline pending-entry cancellation completes all3 terminals with no SELL and restart reconstructs terminal proof',async()=>{
+    const f=await supervised(true);try{
+      await f.observer.triggerNow();assert.equal((await f.repo.get(f.id))?.state,'COMPLETED');assert.deepEqual(f.state.cancels,['PARENT','TP','SL']);assert.equal(f.state.dispatches,0);
+      await f.observer.triggerNow();assert.equal((await f.store.get(f.id))?.status,'TERMINAL_UNFILLED',JSON.stringify([...f.faults]));assert.ok((await f.store.get(f.id))?.terminalProof);
+      await f.observer.triggerNow();assert.equal(f.state.cancels.length,3);assert.equal(f.state.dispatches,0);
+    }finally{await f.observer.stop();await f.close();}
+  });
+  it('owned share follows deadline close then independently verified flat and accounting without HTTP polling',async()=>{
+    const f=await supervised();try{await f.observer.triggerNow();assert.equal(f.state.dispatches,1);assert.equal((await f.repo.get(f.id))?.state,'SUBMITTED');
+      f.state.closeWorking=false;f.state.closeFilled=true;f.state.position=0;await f.observer.triggerNow();assert.equal((await f.repo.get(f.id))?.state,'COMPLETED');
+      assert.equal((await f.store.get(f.id))?.status,'FLAT',JSON.stringify([...f.faults]));await f.observer.triggerNow();assert.equal(f.state.dispatches,1);assert.ok((await f.store.get(f.id))?.terminalProof);
+    }finally{await f.observer.stop();await f.close();}
+  });
+  it('lost cancel acknowledgement remains reserved across observer cycles, no duplicate broker writes',async()=>{
+    const f=await supervised();try{f.state.failCancel=true;await f.observer.triggerNow();assert.equal((await f.repo.get(f.id))?.state,'CANCEL_UNKNOWN');const before=f.state.cancels.length;
+      await f.observer.triggerNow();assert.equal(f.state.cancels.length,before);assert.equal(f.state.dispatches,0);assert.ok(f.faults.has('PROTECTION_GAP'));
+      assert.ok(await f.pool.query("SELECT id FROM lifecycle_close_operations WHERE account_id=$1 AND state<>'COMPLETED'",[accountId]).then(r=>r.rowCount===1));
+    }finally{await f.observer.stop();await f.close();}
+  });
+  it('crash after durable auto intent cannot recreate close or resend, lease excludes second worker',async()=>{
+    const f=await supervised();try{
+      const policy=(await f.store.get(f.id))!;assert.ok(await f.store.claimAutomatic(policy,100));await f.observer.triggerNow();assert.equal(await f.repo.get(f.id),null);assert.equal(f.state.dispatches,0);assert.ok(f.faults.has('CLOSE_BLOCKED'));
+      let release!:()=>void;let entered!:()=>void;const ready=new Promise<void>(r=>{entered=r;});const first=f.store.withAccountLease(accountId,async()=>{entered();await new Promise<void>(r=>{release=r;});});await ready;
+      assert.equal(await f.store.withAccountLease(accountId,async()=>true),null);release();await first;
+      await assert.rejects(f.pool.query('DELETE FROM lifecycle_supervision WHERE original_proposal_id=$1',[f.id]),/durable/);
+      await assert.rejects(f.pool.query("UPDATE lifecycle_supervision SET exit_deadline=exit_deadline+interval '1 minute' WHERE original_proposal_id=$1",[f.id]),/immutable/);
+    }finally{await f.observer.stop();await f.close();}
+  });
+  it('final dispatch calendar check tightens original60minute policy before observer polling and never extends it',async()=>{
+    const f=await createFixture('PLN');const db=await f.pool.connect();try{
+      const now=Date.now(),metadata=stockMetadataFixture(f.context().bound!,accountId,now);metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+120*60000).toISOString();
+      await f.pool.query(`INSERT INTO instrument_session_schedules(instrument_id,conid,use_rth,generation,status,evidence,updated_at) VALUES('test','123',true,1,'READY',$1,$2)`,[metadata.sessionEvidence.schedule,new Date(now)]);
+      const order=(await f.execution.getProposedOrderById(f.id))!;
+      await db.query('BEGIN');await pinLifecycleEntryPolicy(db,order,f.context().bound!,accountId,new Date(order.executionAttemptedAt!),60);await db.query('COMMIT');
+      const original=await assertLifecycleEntryDeadline(db,f.id,accountId);assert.equal(original,now+60*60000);
+      metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+90*60000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET evidence=$1,generation=2',[metadata.sessionEvidence.schedule]);
+      const earlier=await assertLifecycleEntryDeadline(db,f.id,accountId);assert.equal(earlier,now+30*60000);
+      metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+150*60000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET evidence=$1,generation=3',[metadata.sessionEvidence.schedule]);
+      assert.equal(await assertLifecycleEntryDeadline(db,f.id,accountId),earlier);
+      metadata.sessionEvidence.schedule!.identity.currency='USD';await f.pool.query('UPDATE instrument_session_schedules SET evidence=$1',[metadata.sessionEvidence.schedule]);await assert.rejects(assertLifecycleEntryDeadline(db,f.id,accountId),/identity/);
+      metadata.sessionEvidence.schedule!.identity.currency='PLN';metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+30*60000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET evidence=$1',[metadata.sessionEvidence.schedule]);await assert.rejects(assertLifecycleEntryDeadline(db,f.id,accountId),/deadline/);
+      await f.pool.query("UPDATE instrument_session_schedules SET status='FAILED'");await assert.rejects(assertLifecycleEntryDeadline(db,f.id,accountId),/unavailable/);
+    }finally{db.release();await f.close();}
+  });
+  it('reservation deadline admission rejects elapsed pinned policy while preserving attempted ownership',async()=>{
+    const f=await supervised();const db=await f.pool.connect();try{await assert.rejects(assertLifecycleEntryDeadline(db,f.id,accountId),/deadline/);
+      const order=(await f.execution.getProposedOrderById(f.id))!;await assert.rejects(pinLifecycleEntryPolicy(db,order,f.context().bound!,accountId,new Date(order.executionAttemptedAt!),15),/deadline/);
+      assert.ok((await f.execution.getProposedOrderById(f.id))?.executionAttemptedAt);
+    }finally{db.release();await f.observer.stop();await f.close();}
+  });
+});

@@ -70,7 +70,7 @@ export const evaluateCloseEvidence: CloseEvaluator = (evidence, context, options
   const closeTerminal = !options.closeLink || close?.filledQuantity === 1;
   const noWorking = facts.legs.every(leg => !leg.observed);
   result.canComplete = facts.ownedFillNet === 0 && noWorking && !parent.working &&
-    (parent.fullyFilled || seenTerminals.has("PARENT")) && closeTerminal;
+    (parent.fullyFilled || (parent.fullyFilled === false && result.allTerminal && facts.legs.every(leg => leg.filledQuantity === 0))) && closeTerminal;
   if (options.barrierAt !== null) {
     const barrier = time(options.barrierAt);
     if (!Number.isFinite(barrier) || barrier > context.nowMs || time(evidence.run?.started_at) <= barrier ||

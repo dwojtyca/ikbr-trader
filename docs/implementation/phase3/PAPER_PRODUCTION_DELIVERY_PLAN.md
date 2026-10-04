@@ -1,6 +1,6 @@
 # Production-style Paper bot delivery plan
 
-Date: 2026-09-26; PP2 source status updated 2026-09-28. Status: **delivery specification**;
+Date: 2026-09-26; PP5 source status updated 2026-10-04. Status: **delivery specification**;
 PP0 is implemented and published with successful CI, recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 PP1 source implements the bounded [configuration contract](PP1_CONFIGURATION_CONTRACT.md),
 with independent review, local checks and exact-commit CI passed; evidence is in the [PP1 report](PP1_IMPLEMENTATION_REPORT.md).
@@ -9,7 +9,7 @@ its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required loc
 checks, publication and successful exact-source-commit CI.
 PP3 is delivered with accepted review, required checks and successful exact-source
 CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is independently reviewed, with real-source acceptance blocked;
-see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
+see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B source passed independent review and required local checks; publication/CI pending; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain planned. [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -322,6 +322,12 @@ request/cost caps. No claim of provider readiness from an API key alone. Rollbac
 halts new reviews/entries while retaining snapshots and existing exit supervision.
 
 ## 9. PP5 — Automated protection, exits and recovery
+
+Implementation: [accepted bounded plan](PP5_IMPLEMENTATION_PLAN.md),
+[implementation report](PP5_IMPLEMENTATION_REPORT.md) and
+[permission/recovery runbook](../../runbooks/PAPER_LIFECYCLE_SUPERVISION.md).
+The supported failure fallback is durable HOLD and critical escalation; automatic
+replacement/reprotection is not implemented. Master-switch meaning is unchanged.
 
 **Touchpoints:** execution lifecycle service/repository/routes, reconciliation
 scheduler, broker adapter, account reservations, entry guards and alerts. Keep close

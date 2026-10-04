@@ -98,3 +98,11 @@ test("a partially filled close stays observable and reserved without new sell au
   const result = f.evaluate(); assert.equal(result.ok, true, JSON.stringify(result)); assert.equal(result.closeWorking, true);
   assert.equal(result.quantity, null); assert.equal(result.residualQuantity, .5); assert.equal(result.canComplete, false);
 });
+
+test('zero-fill cancellation requires positive terminal proof for every original child', () => {
+  for (const omitted of ['TP','SL'] as const) {
+    const f=setup(); f.snapshot.positions=[];f.snapshot.executions=[];f.snapshot.openOrders=[];f.count();
+    f.cancel('PARENT');f.cancel(omitted==='TP'?'SL':'TP');f.options.mode='reconcile';
+    assert.equal(f.evaluate().canComplete,false);
+  }
+});

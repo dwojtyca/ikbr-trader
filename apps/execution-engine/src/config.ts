@@ -95,6 +95,10 @@ const rawSchema = z.object({
   // Runtime enforcement in PR3.
   // Strict binary: must be the literal string 'true' or 'false'.
   TRADING_ENABLED: z.enum(["true", "false"]).default("false"),
+  EXECUTION_ENTRIES_PAUSED: z.enum(["true", "false"]).default("true"),
+  EXECUTION_LIFECYCLE_AUTOMATION_ENABLED: z.enum(["true", "false"]).default("false"),
+  EXECUTION_LIFECYCLE_ADOPT_EXISTING: z.enum(["true", "false"]).default("false"),
+  EXECUTION_EXIT_BEFORE_CLOSE_MINUTES: z.coerce.number().int().min(15).max(60).default(15),
   // Whitelists of IBKR account IDs per environment (CSV).
   // Fail-closed at bootstrap when active account is not in the whitelist
   // corresponding to IBKR_ENVIRONMENT (enforced in PR3).
@@ -366,6 +370,11 @@ export function buildExecutionConfig(
   rawEnv: NodeJS.ProcessEnv | Record<string, unknown>,
 ) {
   const env = schema.parse(rawEnv);
+  if (env.EXECUTION_LIFECYCLE_ADOPT_EXISTING === "true" &&
+    (env.TRADING_ENABLED !== "false" || env.EXECUTION_ENTRIES_PAUSED !== "true"))
+    throw new Error("LIFECYCLE_ADOPTION_REQUIRES_DISABLED_WRITES_AND_PAUSED_ENTRIES");
+  if (env.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true" && env.IBKR_ENVIRONMENT !== "paper")
+    throw new Error("LIFECYCLE_AUTOMATION_REQUIRES_PAPER");
   const paperRunPolicy = rawEnv.PAPER_RUN_POLICY_JSON === undefined || rawEnv.PAPER_RUN_POLICY_JSON === ""
     ? undefined : parsePaperRunPolicy(rawEnv, loadServiceTradingConfiguration(rawEnv).loaded);
   const gpwWindow = parseGpwWindow(rawEnv);

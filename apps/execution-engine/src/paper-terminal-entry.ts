@@ -1,3 +1,4 @@
+import { evaluateCloseEvidence } from './lifecycle/close-evidence.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { LifecycleContext } from './lifecycle/ownership.js';
 import { evaluateRoundTrip, type RoundTripEvidence } from './lifecycle/round-trip-evidence.js';
@@ -6,7 +7,14 @@ const object = (v: unknown): Record<string, unknown> | null => v !== null && typ
 export function isProvenUnfilledPaperEntry(evidence: RoundTripEvidence, context: LifecycleContext): boolean {
   const report = evaluateRoundTrip(evidence, context);
   if (report.status !== 'NOT_PROVEN' || report.reasons.length !== 1 || report.reasons[0] !== 'one_share_round_trip_not_proven' ||
-      evidence.fills.length !== 0 || report.fills.length !== 0 || evidence.close !== null || !context.bound) return false;
+      evidence.fills.length !== 0 || report.fills.length !== 0 || (evidence.close !== null && (evidence.close.state !== 'COMPLETED' || evidence.close.closeProposalId !== null || evidence.close.submissionAttemptedAt !== null || evidence.close.links.length !== 0 || evidence.close.accountId !== context.accountId || evidence.close.conid !== evidence.lifecycle.order.conid || evidence.close.originalHash !== evidence.lifecycle.clientOrderHash)) || !context.bound) return false;
+  if (evidence.close) {
+    const close = evidence.close;
+    if (!close.terminals || close.terminals.length !== 3 || !close.barrierAt || !close.generation || close.clientId === undefined || !close.sessionId) return false;
+    const proof = evaluateCloseEvidence(evidence.lifecycle, { ...context, accountId: context.accountId!, clientId: close.clientId, generation: close.generation },
+      { mode: 'reconcile', terminals: close.terminals, closeLink: null, barrierAt: new Date(close.barrierAt).toISOString(), originalGeneration: close.generation, originalSessionId: close.sessionId });
+    return proof.ok && proof.canComplete && proof.allTerminal && proof.legs.every(leg => !leg.fullyFilled && !leg.working);
+  }
   const snapshot = object(evidence.lifecycle.run?.broker_snapshot), coverage = object(snapshot?.sourceCoverage);
   const completed = object(coverage?.completedOrders), rows = snapshot?.completedOrders;
   if (!snapshot || !coverage || !isDeepStrictEqual(coverage, evidence.lifecycle.run?.source_coverage) ||

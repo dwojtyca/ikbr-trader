@@ -14,6 +14,8 @@ import type {
   CloseTerminalEvidence,
 } from "./close-types.js";
 export interface FullCloseDependencies {
+  assertManagementAllowed?(context: CloseContext): void;
+  durableFaults?: boolean;
   context(instrumentId: string, originalProposalId?: number): CloseContext | null | Promise<CloseContext | null>;
   refresh(): Promise<void>;
   evaluate: CloseEvaluator;
@@ -74,7 +76,7 @@ export class FullCloseService {
     return c;
   }
   private async alertUnresolved(op: CloseOperation) {
-    if (op.failureReason && (await this.repo.claimAlert(op, op.failureReason)))
+    if (op.failureReason && (this.deps.durableFaults || await this.repo.claimAlert(op, op.failureReason)))
       await this.deps.alert(op, op.failureReason);
   }
   private async observeAndAlert(op: CloseOperation) {
@@ -87,6 +89,8 @@ export class FullCloseService {
     return observed;
   }
   async reconcile(id: number) {
+    const active = this.inFlightRequests.get(id);
+    if (active) return active.result;
     const op = await this.repo.get(id);
     if (!op) throw new CloseConflict("close_operation_missing");
     if (op.state === "COMPLETED") return op;
@@ -138,6 +142,7 @@ export class FullCloseService {
       initial.clientId !== fresh.clientId
     )
       throw new CloseConflict("close_connection_changed");
+    this.deps.assertManagementAllowed?.(fresh);
     const reserved = await this.repo.reserve(
       id,
       requestId,
@@ -183,6 +188,7 @@ export class FullCloseService {
         const leg = report.legs.find((v) => v.role === role);
         if (!leg) throw new CloseConflict("original_leg_missing");
         if (!leg.working) continue;
+        this.deps.assertManagementAllowed?.(await this.unchanged(op));
         await this.repo.markCancel(
           op,
           leg,
@@ -190,7 +196,9 @@ export class FullCloseService {
           this.deps.evaluate,
         );
         cancellationInFlight = true;
-        const terminal = await this.deps.cancel(leg, await this.unchanged(op));
+        const cancelContext = await this.unchanged(op);
+        this.deps.assertManagementAllowed?.(cancelContext);
+        const terminal = await this.deps.cancel(leg, cancelContext);
         await this.unchanged(op);
         await this.repo.recordTerminal(op, terminal);
         cancellationInFlight = false;
@@ -216,6 +224,7 @@ export class FullCloseService {
         );
       const firstRisk = await this.deps.assessRisk(ticket, c.bound!, c);
       if (!firstRisk.ok) throw new CloseConflict(firstRisk.reasons.join(","));
+      this.deps.assertManagementAllowed?.(await this.unchanged(op));
       const prepared = await this.deps.prepare(
         ticket,
         `close-${op.requestId}`,
@@ -241,6 +250,7 @@ export class FullCloseService {
       const dispatchContext = await this.unchanged(op);
       if (!op.riskExpiresAt || !Number.isFinite(Date.parse(op.riskExpiresAt)) || Date.parse(op.riskExpiresAt) <= Date.now())
         throw new CloseConflict("close_dispatch_risk_expired");
+      this.deps.assertManagementAllowed?.(dispatchContext);
       await this.deps.dispatch(prepared, op, dispatchContext);
       op = await this.repo.submitted(op);
       await this.deps.refresh();

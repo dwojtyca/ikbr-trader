@@ -17,7 +17,7 @@ export interface RoundTripEvidence {
     runId: string; accountId: string; startsAt: Date | string; endsAt: Date | string;
     consumedProposalId: number | null; consumedAt: Date | string | null };
   close: null | { state: string; accountId: string; conid: string; originalHash: string;
-    closeProposalId: number | null; links: LifecycleLegLink[] };
+    closeProposalId: number | null; links: LifecycleLegLink[]; submissionAttemptedAt?: Date | string | null; terminals?: import("./close-types.js").CloseTerminalEvidence[]; generation?: number; sessionId?: string; clientId?: number; barrierAt?: Date | string | null };
   fills: RoundTripFill[];
 }
 const record = (v: unknown): Record<string, unknown> | null =>

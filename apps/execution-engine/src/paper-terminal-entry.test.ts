@@ -21,3 +21,12 @@ test('missing/ambiguous terminal leg, residual fill and wrong typed cancellation
   }
   const missing = fixture(); missing.completedOrders.pop(); assert.equal(isProvenUnfilledPaperEntry(missing.evidence, missing.context), false);
 });
+
+test('completed cancel-only operation accepts exact durable terminals, never close marker or missing child',()=>{
+ const f=fixture();
+ f.evidence.close={state:'COMPLETED',accountId:'DU_TEST',conid:'123',originalHash:f.evidence.lifecycle.clientOrderHash!,closeProposalId:null,links:[],submissionAttemptedAt:null,generation:1,sessionId:'current',clientId:7,barrierAt:new Date(f.context.nowMs-2000).toISOString(),terminals:f.evidence.lifecycle.links.map(link=>({role:link.role as 'PARENT'|'TP'|'SL',brokerOrderId:link.broker_order_id!,orderRef:link.order_ref,permId:link.perm_id,accountId:'DU_TEST',conid:'123',clientId:7,status:'CANCELLED',generation:1,sessionId:'current',confirmedAt:new Date(f.context.nowMs-2000).toISOString()}))};
+ assert.equal(isProvenUnfilledPaperEntry(f.evidence,f.context),true);
+ f.evidence.close.terminals!.pop();assert.equal(isProvenUnfilledPaperEntry(f.evidence,f.context),false);
+ f.evidence.close.terminals!.push({ ...f.evidence.close.terminals![0] });assert.equal(isProvenUnfilledPaperEntry(f.evidence,f.context),false);
+ f.evidence.close.submissionAttemptedAt=new Date();assert.equal(isProvenUnfilledPaperEntry(f.evidence,f.context),false);
+});

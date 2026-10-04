@@ -49,6 +49,8 @@ export interface BrokerPositionRow {
 }
 
 export interface BrokerOrderRow {
+  readonly orderType?: string | null; readonly limitPrice?: number | null; readonly stopPrice?: number | null;
+  readonly totalQuantity?: number | null; readonly parentId?: string | null; readonly ocaGroup?: string | null; readonly ocaType?: number | null; readonly tif?: string | null;
   readonly accountId?: string | null;
   readonly brokerOrderId: string | null;
   readonly permId?: string | null;

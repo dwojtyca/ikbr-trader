@@ -177,3 +177,10 @@ test("Warsaw Gateway bare execution timestamp is converted before snapshot evide
   assert.equal(result.ok, true);
   assert.equal(result.rows[0].executedAt.toISOString(), "2026-09-24T13:30:21.000Z");
 });
+
+test('actual broker protective order shape survives production capture without inferred values',async()=>{
+ const ib=new FakeIb();ib.reqAllOpenOrders=()=>{ib.emit('openOrder',2,{symbol:'TEST',conId:123},{account:'PAPER',orderRef:'tp',action:'SELL',orderType:'LMT',lmtPrice:102,auxPrice:0,totalQuantity:1,parentId:1,ocaGroup:'pair',ocaType:2,tif:'DAY'},{status:'Submitted'});ib.emit('openOrderEnd');};
+ const client=makeClient(ib);await client.connect();
+ const snapshot=await new IbBrokerReconciliationAdapter(client,{load:async()=>({ok:false,rows:[],error:'unavailable'})}).capture({accountId:'PAPER',sessionId:'session',sessionStartedAt:new Date(),safetyMarginMs:0,sourceTimeoutMs:100,abortSignal:new AbortController().signal});
+ const row=snapshot.openOrders[0]!;assert.deepEqual({type:row.orderType,price:row.limitPrice,quantity:row.totalQuantity,parent:row.parentId,group:row.ocaGroup,oca:row.ocaType,tif:row.tif},{type:'LMT',price:102,quantity:1,parent:'1',group:'pair',oca:2,tif:'DAY'});
+});

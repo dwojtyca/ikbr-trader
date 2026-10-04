@@ -1,6 +1,11 @@
 import { registerResearchAuditRoute } from "./research-audit-routes.js";
 import { createResearchEntryValidator } from "./research-entry-guard.js";
-import { loadResearchManifest, ResearchStore } from "@ikbr/shared/instrument-research";
+import { loadResearchManifest, ResearchStore, evaluateResearchEligibility } from "@ikbr/shared/instrument-research";
+import { EntryControlStore, EntryControlError, registerEntryControlRoutes } from "./entry-control.js";
+import { LifecycleObserverRepository, pinLifecycleEntryPolicy, assertLifecycleEntryDeadline } from "./lifecycle/observer-repository.js";
+import { LifecycleObserver } from "./lifecycle/observer.js";
+import { LifecycleAlertStore, LifecycleAlertWorker, createTelegramLifecycleTransport } from "./lifecycle/lifecycle-alerts.js";
+import type { CloseContext } from "./lifecycle/close-types.js";
 import { registerResearchOrderContextRoute, readContextReconciliation, type FreshAiRiskReader } from "./research-order-context.js";
 import { adoptPaperEntryBudget } from "./paper-entry-budget.js";
 import { readPaperDailyLoss, assessPaperDailyLoss } from "./paper-daily-loss.js";
@@ -24,7 +29,7 @@ import { registerCancelProposedRoute } from "./lifecycle/cancel-route.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { hostname } from "node:os";
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { z } from "zod";
 import { ProposedOrder, ProposedOrderStatus, SignalTicket, getSupportedStockCapability, type BoundInstrument } from "@ikbr/shared";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
@@ -70,6 +75,9 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const entryControls = new EntryControlStore(pool);
+const lifecycleAlerts = new LifecycleAlertStore(pool);
+let lifecycleLocallyHealthy = false;
 const configurationStore = new TradingConfigurationStore(pool);
 const loadedResearch = loadResearchManifest(process.env, tradingConfiguration.loaded);
 const researchStore = new ResearchStore(pool);
@@ -82,7 +90,17 @@ const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, 
   () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
   { policy: config.paperRunPolicy, context: paperDailyContext, resolveManagement: async (order, db) => order.strategyAttribution
     ? readOriginalStockManagementInstrument(db, order.strategyAttribution) : configurationRuntime.resolveManagementInstrument(order.instrumentId!) },
-  createResearchEntryValidator({ store: researchStore, loadedIdentity: researchIdentity }));
+  createResearchEntryValidator({ store: researchStore, loadedIdentity: researchIdentity }), {
+    permit: lifecycleEntryPermit,
+    pin: async (db, order, accountId) => {
+      const bound = order.strategyAttribution ? await readOriginalStockManagementInstrument(db, order.strategyAttribution)
+        : await configurationRuntime.resolveManagementInstrument(order.instrumentId!);
+      if (!bound) throw new Error("LIFECYCLE_ENTRY_BINDING_UNAVAILABLE");
+      const time = await db.query(`SELECT COALESCE((SELECT attempted_at FROM paper_entry_attempts WHERE proposed_order_id=$1),clock_timestamp()) AS attempted_at`, [order.id]);
+      await pinLifecycleEntryPolicy(db, order, bound, accountId, new Date(time.rows[0].attempted_at), config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES);
+    },
+    deadline: assertLifecycleEntryDeadline,
+  });
 const alerts = new AlertService(repo, app.log);
 const reconRepo = new ReconciliationRepository(pool);
 // Per-process identity for the PR13 submission claim. Combines
@@ -303,7 +321,7 @@ const tws = new TwsExecutionClient(
   { resolveBoundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
     resolveManagementInstrument: resolveOriginalManagementInstrument,
     loadStockMetadata,
-    assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
+    assertEntryAllowed: assertNewEntryAllowed,
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
 
@@ -518,6 +536,42 @@ function envGuardConfig(): EnvironmentGuardConfig {
     allowedPaperAccounts: config.allowedPaperAccounts,
     allowedLiveAccounts: config.allowedLiveAccounts,
   };
+}
+
+function entryControlContext() {
+  if (!lastActiveAccountId) throw new EntryControlError("ENTRY_CONTROL_ACCOUNT_UNAVAILABLE");
+  return { accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
+    entriesPaused: config.EXECUTION_ENTRIES_PAUSED === "true",
+    automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true" };
+}
+function assertLifecycleManagement(context?: CloseContext) {
+  assertEnvironmentAllowsWrite(envGuardConfig(), lastActiveAccountId);
+  assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
+  if (config.IBKR_ENVIRONMENT !== "paper" || !tws.isConnected() ||
+    (context && (context.accountId !== lastActiveAccountId || context.sessionId !== EXECUTION_PROCESS_OWNER_ID ||
+      context.generation !== tws.getConnectionGeneration() || context.clientId !== tws.getClientId())))
+    throw new CloseConflict("close_management_context_unavailable");
+}
+function entryPermitDependencies(accountId: string) {
+  const generation = tws.getConnectionGeneration();
+  return {
+    assertCurrent: () => {
+      assertLifecycleManagement();
+      if (!lifecycleLocallyHealthy || accountId !== lastActiveAccountId || generation !== tws.getConnectionGeneration())
+        throw new EntryControlError("LIFECYCLE_LOCAL_STATE_UNAVAILABLE");
+    },
+    alertFailure: (db: PoolClient, account: string, processId: string) => lifecycleAlerts.entryFailure(db, account, processId),
+  };
+}
+async function lifecycleEntryPermit(db: PoolClient, accountId: string) {
+  const context = entryControlContext();
+  if (context.accountId !== accountId) throw new EntryControlError("ENTRY_CONTROL_ACCOUNT_CHANGED");
+  return entryControls.permit(db, context, entryPermitDependencies(accountId));
+}
+async function assertNewEntryAllowed() {
+  await configurationRuntime.assertEntryAllowed();
+  const context = entryControlContext();
+  await entryControls.check(context, entryPermitDependencies(context.accountId));
 }
 
 const READY_AUDIT_CACHE_TTL_MS = 7_000;
@@ -1044,7 +1098,7 @@ registerResearchOrderContextRoute(app, { repo, prepare: async order => {
 } });
 
 const submissionService = buildSubmissionApplicationService({
-  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
+  assertEntryAllowed: assertNewEntryAllowed,
   strategyPreflight: async ticket => {
     if (tradingConfiguration.loaded.mode !== "bundle") throw new Error("STRATEGY_CONFIGURATION_UNAVAILABLE");
     const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
@@ -1729,6 +1783,8 @@ async function loadStockMetadata(bound: BoundInstrument, accountId: string) {
 }
 
 const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
+  durableFaults: true,
+  assertManagementAllowed: assertLifecycleManagement,
   context: async (instrumentId, originalProposalId) => {
     const accountId = lastActiveAccountId, generation = tws.getConnectionGeneration();
     if (!accountId || !tws.isConnected()) return null;
@@ -1772,11 +1828,75 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
     await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation, Date.parse(operation.riskExpiresAt ?? ""));
   },
   alert: async (operation, reason) => {
-    await alerts.record({ severity: "CRITICAL", kind: "system",
-      message: `Close operation ${operation.id} requires attention: ${reason}`,
-      payload: { operationId: operation.id, originalProposalId: operation.originalProposalId, state: operation.state,
-        accountId: operation.accountId, conid: operation.conid } });
+    await lifecycleAlerts.recordFault({ accountId: operation.accountId, proposalId: operation.originalProposalId,
+      code: operation.state === "CANCEL_UNKNOWN" ? "CANCEL_UNKNOWN" : operation.state === "SUBMISSION_UNKNOWN" ? "SUBMISSION_UNKNOWN" : "CLOSE_BLOCKED",
+      evidence: { operationId: operation.id, state: operation.state, reason } });
   },
+});
+tws.setCloseWriteGuard(() => assertLifecycleManagement());
+const lifecycleStore = new LifecycleObserverRepository(pool, repo);
+const lifecycleObserver = new LifecycleObserver(lifecycleStore, {
+  currentContext: () => lastActiveAccountId ? { accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID } : null,
+  context: async proposalId => {
+    const order = await repo.getProposedOrderById(proposalId);
+    return order?.instrumentId ? fullCloseService.deps.context(order.instrumentId, proposalId) : null;
+  },
+  refresh: () => fullCloseService.deps.refresh(),
+  close: fullCloseService,
+  faults: lifecycleAlerts,
+  closePrice: async (bound, context) => {
+    const response = await fetch(`${config.EXECUTION_INGESTION_BASE_URL.replace(/\/$/, "")}/watchlist`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new CloseConflict("close_quote_unavailable");
+    const body = await response.json() as { connected?: boolean; watchlist?: Array<{ instrumentId?: string; marketState?: { bid?: number } }> };
+    const matches = body.watchlist?.filter(row => row.instrumentId === bound.instrumentId);
+    const bid = matches?.length === 1 ? matches[0].marketState?.bid : undefined;
+    if (body.connected !== true || typeof bid !== "number" || !Number.isFinite(bid) || bid <= 0)
+      throw new CloseConflict("close_quote_unavailable");
+    const ticket: SignalTicket = { instrument: bound.brokerSymbol, instrumentId: bound.instrumentId, conid: String(bound.conId),
+      side: "SELL", positionEffect: "CLOSE_OR_REDUCE", orderType: "LMT", quantity: 1, entry: bid,
+      reason: "Session deadline close", confidence: 1, riskCheckStatus: "PASS", timestamp: new Date().toISOString() };
+    const metadata = await loadStockMetadata(bound, context.accountId);
+    const risk = assessCloseRisk(ticket, bound, { ...context, nowMs: Date.now() }, body, metadata);
+    if (!risk.ok) throw new CloseConflict(risk.reasons.join(","));
+    return bid;
+  },
+  assertManagementAllowed: assertLifecycleManagement,
+  automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true",
+  adoptExisting: config.EXECUTION_LIFECYCLE_ADOPT_EXISTING === "true",
+  exitBeforeCloseMinutes: config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES,
+  onHealth: healthy => { lifecycleLocallyHealthy = healthy; },
+  logCritical: reason => app.log.error({ reason }, "Lifecycle supervision requires attention"),
+});
+const lifecycleAlertWorker = new LifecycleAlertWorker(lifecycleAlerts, createTelegramLifecycleTransport({
+  botToken: config.ALERT_TELEGRAM_BOT_TOKEN, chatId: config.ALERT_TELEGRAM_CHAT_ID,
+}), { accountIds: config.allowedPaperAccounts, processId: EXECUTION_PROCESS_OWNER_ID });
+registerEntryControlRoutes(app, {
+  store: entryControls,
+  context: entryControlContext,
+  assertAccount: () => assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true }),
+  resumeGate: async db => {
+    await configurationRuntime.assertEntryAllowed();
+    const identity = researchIdentity();
+    if (!identity || !loadedResearch || tradingConfiguration.loaded.mode !== "bundle") throw new EntryControlError("RESEARCH_UNAVAILABLE");
+    const authority = await researchStore.assertAuthority(identity, db);
+    let deadline = authority.validUntilMs;
+    for (const instrument of tradingConfiguration.loaded.configuration.instruments.filter(item => item.entryEnabled)) {
+      const stored = await researchStore.latestSnapshot({ ...identity, instrumentId: instrument.id }, db, true);
+      const now = new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime();
+      const eligible = stored ? evaluateResearchEligibility(stored.snapshot, loadedResearch.manifest, now) : null;
+      if (!eligible?.eligible || !eligible.expiresAt) throw new EntryControlError("RESEARCH_REQUIRED_COVERAGE_UNAVAILABLE");
+      deadline = Math.min(deadline, Date.parse(eligible.expiresAt));
+    }
+    const context = entryControlContext();
+    const permit = await entryControls.permit(db, context, entryPermitDependencies(context.accountId), { resuming: true });
+    return { ...permit, validUntilMs: Math.min(deadline, permit.validUntilMs) };
+  },
+});
+app.get("/execution/lifecycle/supervision", async () => {
+  assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
+  const rows = await pool.query("SELECT * FROM lifecycle_supervision WHERE account_id=$1 ORDER BY original_proposal_id DESC LIMIT 100", [lastActiveAccountId]);
+  return { observer: lifecycleObserver.status(), automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true",
+    tradingEnabled: config.tradingEnabled, positions: rows.rows, alerts: await lifecycleAlerts.readStatus(lastActiveAccountId!, EXECUTION_PROCESS_OWNER_ID) };
 });
 registerFullCloseRoutes(app, fullCloseService);
 
@@ -1854,6 +1974,7 @@ async function main(): Promise<void> {
   // the scheduler / broker never come online against a partial schema.
   try {
     await repo.init();
+    for (const accountId of config.allowedPaperAccounts) await entryControls.adopt(accountId, config.tradingEnabled);
     await configurationRuntime.initialize();
     if (loadedResearch && tradingConfiguration.loaded.mode === "bundle") {
       await researchStore.registerManifest({ manifest: loadedResearch.manifest, configuration: tradingConfiguration.loaded.configuration,
@@ -1979,6 +2100,11 @@ async function main(): Promise<void> {
   // RUNNING → final status via two short `snap:<account>` xact
   // locks around Phase B broker reads.
   reconScheduler.start();
+  lifecycleObserver.start();
+  void lifecycleAlertWorker.start().catch(() => {
+    lifecycleLocallyHealthy = false;
+    app.log.error("Lifecycle alert worker failed to start; entries remain blocked");
+  });
 
   // Fire-and-forget: try to reconcile positions with the broker on
   // startup. If TWS is not yet reachable we just emit a startup alert
@@ -2015,6 +2141,8 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     configurationRuntime.stopHeartbeat();
     try {
+      await lifecycleObserver.stop();
+      await lifecycleAlertWorker.stop();
       await reconScheduler.stop();
       tws.disconnect();
       await app.close();

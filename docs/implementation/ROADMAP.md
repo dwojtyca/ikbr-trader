@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-04 (PP4 implementation and exact-source CI verified; real-source acceptance blocked).
+Updated: 2026-10-04 (PP5 review and local checks passed; publication pending; PP4 real-source acceptance blocked).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -23,8 +23,8 @@ new strategy development and ES research are outside this delivery track.
 Bound contracts, strategy attribution, durable proposal identity, mandatory AI
 reviews, submission/reconciliation, ownership, one-share full-close and generic
 session/native-candle readiness are implemented. Do not restart those subsystems.
-Configuration generality, company research, richer operator visibility and automated
-lifecycle remain incomplete. PP0 supplies the reviewed operator security baseline;
+Configuration and research source contracts are delivered; real research coverage,
+operator visibility and broker-backed automated operation remain gated. PP0 supplies the reviewed operator security baseline;
 see the evidence matrix in CURRENT_STATE.
 
 ## Current sequence
@@ -42,7 +42,8 @@ checks, publication and successful exact-source-commit CI.
 PP3 implements generic stock execution, immutable attempts and lifecycle evidence;
 independent review, required checks, publication and exact-source-commit CI passed.
 See the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is reviewed; real-source acceptance remains **blocked**. See the
-[PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5–PP7 remain **planned**.
+[PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5-A/B source is implemented; independent review and required local checks passed; see the
+[PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6–PP7 remain **planned**.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
@@ -54,7 +55,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP2 | Delivered: parameterized factories, assignment-only runtime and durable instance attribution; checks/review/CI passed | PP1 |
 | PP3 | Delivered: generic stock capability/windows/budgets/audit for PKO, AAPL and configured fixtures | PP1, PP2 |
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
-| PP5 | Automated protection/exit observation, recovery and entry-pause semantics | PP3 |
+| PP5 | Implemented automatic lifecycle, durable pause and alert delivery; review/local checks passed, CI pending | PP3 |
 | PP6 | Operator readiness/decision/lifecycle view, alerts, deployment and recovery runbooks | PP0–PP5 |
 | PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
 
@@ -126,4 +127,4 @@ support is a separately bounded extension using the same contracts.
 historical evidence. The current owner direction supersedes their next-step order.
 [Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
 records the original delivery-direction reconciliation. PP0/PP1 implementation
-evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5–PP7 remain planned.
+evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6–PP7 remain planned.

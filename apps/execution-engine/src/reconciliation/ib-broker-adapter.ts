@@ -157,6 +157,8 @@ export class IbBrokerReconciliationAdapter
       brokerOrderId: r.brokerOrderId,
       permId: r.permId ?? null,
       parentPermId: null,
+      orderType: r.orderType ?? null, limitPrice: r.limitPrice ?? null, stopPrice: r.stopPrice ?? null,
+      totalQuantity: r.totalQuantity ?? null, parentId: r.parentId ?? null, ocaGroup: r.ocaGroup ?? null, ocaType: r.ocaType ?? null, tif: r.tif ?? null,
       clientId: r.clientId ?? null,
       orderRef: r.orderRef ?? null,
       status: r.status,

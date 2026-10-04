@@ -148,13 +148,15 @@ describe("isWriteGuardExempt — closed exemption list", () => {
     );
   });
 
-  it("closed list has exactly the four documented entries", () => {
+  it("closed list has exactly the documented entries including PP5 pause and observation", () => {
     // Any addition here is a policy change; this test forces the
     // reviewer to update it together with the exemption list.
     assert.deepEqual(
       WRITE_GUARD_EXEMPT_ROUTES.map((e) => `${e.method} ${e.routePath}`).sort(),
       [
         "POST /execution/cancel-proposed/:id",
+        "POST /execution/entry-control/pause",
+        "POST /execution/lifecycle/:id/close/reconcile",
         "POST /execution/reconciliation/holds/:id/acknowledge",
         "POST /execution/reconciliation/holds/:id/resolve",
         "POST /execution/reconciliation/run",

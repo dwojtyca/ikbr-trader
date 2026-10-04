@@ -51,7 +51,7 @@ suite("PP2 conversion barrier on full migrated PostgreSQL", () => {
         VALUES('used','DU_PP2','2026-09-28',clock_timestamp(),clock_timestamp()+interval '10 minutes',$1,clock_timestamp())`, [id]);
       const tables = ["proposed_orders", "proposal_ai_reviews", "broker_order_links", "lifecycle_close_operations", "gpw_windows"];
       const before = await Promise.all(tables.map(async table => (await pool.query(`SELECT to_jsonb(t) row FROM ${table} t`)).rows[0].row));
-      const result = await runMigrations(pool); assert.deepEqual(result.applied.map(name => Number(name.split("_")[0])), [17,18,19,20,21]);
+      const result = await runMigrations(pool); assert.deepEqual(result.applied.map(name => Number(name.split("_")[0])), [17,18,19,20,21,22,23,24]);
       for (let i=0;i<tables.length;i++) {
         const row = (await pool.query(`SELECT to_jsonb(t) row FROM ${tables[i]} t`)).rows[0].row;
         for (const [key,value] of Object.entries(before[i])) assert.deepEqual(row[key],value,`${tables[i]}.${key}`);

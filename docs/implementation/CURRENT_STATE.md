@@ -1,6 +1,6 @@
 # Current project state
 
-Source update: 2026-09-28. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+Source update: 2026-10-04. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
@@ -17,7 +17,12 @@ no operational deployment or broker readiness. PP3 adds common stock capability,
 immutable Paper budgets and generic lifecycle evidence; the
 [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md) records accepted review, required
 local checks, publication and successful exact-source-commit CI.
-PP4 denial and unavailable certified Warsaw-day accounting still prevent entry.
+PP4 implements cached research and immutable AI evidence, but real-source acceptance
+remains blocked; see the [PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md).
+PP5 adds automatic ownership/protection/close observation, pinned session deadlines,
+durable entry pause and alert delivery. Its [report](phase3/PP5_IMPLEMENTATION_REPORT.md)
+records final validation. This work performs no deployment or broker actions.
+PP4 source coverage and unavailable certified Warsaw-day accounting still prevent entry.
 
 ## Delivery objective
 
@@ -52,9 +57,9 @@ None of these labels implies profitability or permission to activate Live.
 | Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | PP3 validates WSE/WSE/PLN or SMART/NASDAQ|NYSE|AMEX/USD; one whole long stock share and LMT bracket; bundle entries denied |
 | Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | USD base account evidence remains required; generic daily loss additionally requires full Warsaw-day broker/fee coverage, unavailable in the current production adapter |
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
-| Exit/ownership | Durable ownership, bracket protection and supported audited full close | No automatic full-close observation worker; no general quantity/partial/replace lifecycle |
-| AI evidence | Persisted technical/order/account context, Marketaux news, AAPL-specific verified identity | Financial statements/earnings/macro are unavailable; PKO symbol-only news excluded; no ETF research pipeline |
-| Operator control | PP0 adds authenticated UI delegation, direct mutation gates, loopback defaults and the supported bound runtime UI action; existing lifecycle/round-trip endpoints remain | Operator lifecycle/research visibility and deployment/recovery work in PP6 remain planned; see PP0 report for security checks and residual dependencies |
+| Exit/ownership | PP5 background observer restores durable ownership/close state, verifies exact protection and broker flat evidence, and can invoke the audited deadline close | One share only; disabled by default; unknown/rejected/unfilled close retains HOLD; no automatic replace/reprotection |
+| AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report |
+| Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | Operator lifecycle/research visibility and deployment/recovery work in PP6 remain planned; see PP0 report for security checks and residual dependencies |
 | Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |
@@ -68,7 +73,7 @@ None of these labels implies profitability or permission to activate Live.
   [admission](../../packages/shared/src/trading-configuration/admission.ts),
   [monitoring projection](../../packages/shared/src/trading-configuration/projection.ts)
   and [configuration runbook](../runbooks/TRADING_CONFIGURATION.md).
-  Bundle entry readiness keeps PP4 research unavailable; PP3 generic policy does not grant activation.
+  Entry readiness requires current PP4 research evidence and PP5 supervision; PP3 generic policy does not grant activation.
   PP2 applies parameters through fresh configured factories and exposes guarded
   diagnostic evaluation; see the [runtime contract](phase3/PP2_RUNTIME_CONTRACT.md).
 - Registry: [definitions](../../packages/shared/src/instruments/definitions.ts),
@@ -86,8 +91,8 @@ None of these labels implies profitability or permission to activate Live.
 - AI: [bound worker](../../apps/llm-agent/src/bound-review-worker.ts),
   [review store](../../apps/llm-agent/src/bound-review-repository.ts),
   [AI integration report](phase2/PR15_6_AI_PROPOSAL_GATE_REPORT.md).
-  `coverage.financialStatements/earnings/macro/broaderMarketTrends` are unavailable.
-  Generic market-context runtime currently registers only the price provider.
+  PP4 adds the research snapshot/coverage contract; unavailable real-source coverage
+  remains an admission failure as detailed in its report.
 - Execution: [entry risk](../../apps/execution-engine/src/ai-entry-risk.ts),
   [submission service](../../apps/execution-engine/src/reconciliation/submission-service.ts),
   [close risk](../../apps/execution-engine/src/lifecycle/close-risk.ts),
@@ -97,6 +102,11 @@ None of these labels implies profitability or permission to activate Live.
   [budget](../../apps/execution-engine/src/paper-entry-budget.ts) and
   [daily-loss evidence](../../apps/execution-engine/src/paper-daily-loss.ts) preserve
   immutable attempts and fail closed on uncertified account-day coverage.
+- PP5: [observer](../../apps/execution-engine/src/lifecycle/observer.ts),
+  [durable observer store](../../apps/execution-engine/src/lifecycle/observer-repository.ts),
+  [entry pause](../../apps/execution-engine/src/entry-control.ts),
+  [fault/delivery ledger](../../apps/execution-engine/src/lifecycle/lifecycle-alerts.ts)
+  and [permission/recovery runbook](../runbooks/PAPER_LIFECYCLE_SUPERVISION.md).
 - Security: [UI proxy](../../apps/ui/vite.config.ts), [Compose](../../docker-compose.yml),
   [signal controls](../../apps/signal-engine/src/index.ts),
   [ingestion controls](../../apps/ingestion/src/index.ts).
@@ -104,7 +114,7 @@ None of these labels implies profitability or permission to activate Live.
 ## Important current limits
 
 1. PP1 can load PKO and AAPL together for configuration and monitoring. Every bundle
-   entry remains denied until later delivery stages; the legacy registry still
+   entry requires PP4 evidence and PP5 supervision, with operational acceptance still pending; the legacy registry still
    rejects simultaneous execution opt-ins. Seed entries remain disabled without opt-in.
 2. ETFs map to IBKR STK at the binding layer but `assetClass=etf` is rejected by
    production entry/close risk. Futures/index types likewise do not prove tradability.
@@ -115,11 +125,12 @@ None of these labels implies profitability or permission to activate Live.
    are forbidden. See the [policy runbook](../runbooks/PAPER_EXECUTION_POLICY.md).
 4. Full close cancels protection before submitting its bounded SELL limit. An
    unfilled/failed close may leave an unprotected position. No blind replacement;
-   operator observation is currently necessary. `TRADING_ENABLED=false` neither
+   PP5 automatically observes and escalates, while unsupported recovery still needs
+   owner intervention. `TRADING_ENABLED=false` neither
    closes positions nor cancels existing broker protection and blocks full close.
-5. The bound AI worker has a 30-second claim with sequential account/news/model
-   requests and no renewal. It does not persist returned `riskFlags`. News response
-   mapping does not enforce matched entity or publication-time validity.
+5. PP4 adds lease/deadline and immutable source/decision checks. Real-source coverage,
+   provider permissions and model availability remain blocked as recorded in its
+   report; PP5 does not override those admission failures.
 6. The September 26 operator-security gap is fixed in the reviewed PP0 source:
    authenticated UI delegation, direct mutation gates, loopback defaults and the
    supported bound runtime action are implemented and CI-verified. Retired direct

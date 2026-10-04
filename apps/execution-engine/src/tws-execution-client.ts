@@ -779,6 +779,9 @@ export class TwsExecutionClient {
     );
   }
 
+  private closeWriteGuard: (() => void) | undefined;
+  setCloseWriteGuard(guard: () => void): void { this.closeWriteGuard = guard; }
+
   dispatchPreparedClose(
     prepared: PreparedBrokerOrder,
     expectedGeneration: number,
@@ -786,12 +789,13 @@ export class TwsExecutionClient {
   ): Promise<PlaceOrderResult> {
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") throw new Error("CLOSE_POSITION_EFFECT_REQUIRED");
     this.assertConnectionGeneration(expectedGeneration);
+    this.closeWriteGuard?.();
     const assertRiskDeadline = () => { if (!Number.isFinite(riskDeadlineMs) || Date.now() >= riskDeadlineMs!) throw new Error("CLOSE_RISK_EXPIRED"); };
     assertRiskDeadline();
     this.assertWseDispatch(prepared);
     this.assertStockDispatch(prepared);
     return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration, undefined, undefined,
-      () => { assertRiskDeadline(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); });
+      () => { this.closeWriteGuard?.(); assertRiskDeadline(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); });
   }
 
   private dispatchPlan(
@@ -976,6 +980,7 @@ export class TwsExecutionClient {
 
   async cancelOwnedOrder(input: OwnedOrderCancellation): Promise<OwnedOrderCancellationResult> {
     this.assertConnectionGeneration(input.expectedGeneration);
+    this.closeWriteGuard?.();
     const orderId = Number(input.brokerOrderId);
     const permId = Number(input.permId);
     const observedAt = Date.parse(input.observedAt);
@@ -1026,6 +1031,7 @@ export class TwsExecutionClient {
       this.ib.on("connected", onDisconnect);
       try {
         this.assertConnectionGeneration(input.expectedGeneration);
+        this.closeWriteGuard?.();
         this.ib.cancelOrder(orderId);
       } catch (error) {
         cleanup();
@@ -2986,6 +2992,7 @@ export class TwsExecutionClient {
       filled?: number;
       remaining?: number;
       action?: string;
+      orderType?: string; limitPrice?: number; stopPrice?: number; totalQuantity?: number; parentId?: string; ocaGroup?: string; ocaType?: number; tif?: string;
     }>;
     error?: string;
   }> {
@@ -3008,6 +3015,7 @@ export class TwsExecutionClient {
           filled?: number;
           remaining?: number;
           action?: string;
+      orderType?: string; limitPrice?: number; stopPrice?: number; totalQuantity?: number; parentId?: string; ocaGroup?: string; ocaType?: number; tif?: string;
         }
       >();
       let endObserved = false;
@@ -3051,6 +3059,14 @@ export class TwsExecutionClient {
               : existing.currency,
           action:
             typeof order?.action === "string" ? order.action : existing.action,
+          orderType: typeof order.orderType === 'string' ? order.orderType : undefined,
+          limitPrice: typeof order.lmtPrice === 'number' ? order.lmtPrice : undefined,
+          stopPrice: typeof order.auxPrice === 'number' ? order.auxPrice : undefined,
+          totalQuantity: typeof order.totalQuantity === 'number' ? order.totalQuantity : undefined,
+          parentId: typeof order.parentId === 'number' ? String(order.parentId) : undefined,
+          ocaGroup: typeof order.ocaGroup === 'string' ? order.ocaGroup : undefined,
+          ocaType: typeof order.ocaType === 'number' ? order.ocaType : undefined,
+          tif: typeof order.tif === 'string' ? order.tif : undefined,
           status: String(orderState?.status ?? existing.status),
         });
       };

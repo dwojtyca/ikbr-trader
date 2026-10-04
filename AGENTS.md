@@ -36,7 +36,9 @@ Apps (all run via Docker Compose, also runnable individually via
   (parent + TP + SL), `/execution/orders`, `/execution/trades` (FIFO-matched
   entries+exits with realized P&L), `/execution/account/summary`,
   kill-switches, durable proposal/AI/risk checks, reconciliation and an audited
-  full-close lifecycle for the supported one-share stock scope.
+  full-close lifecycle for the supported one-share stock scope. PP5 adds durable
+  lifecycle supervision, session exit deadlines, entry pause and alert delivery;
+  see [the supervision runbook](docs/runbooks/PAPER_LIFECYCLE_SUPERVISION.md).
 - `apps/backtest-engine` (port `3104`) — separate Postgres DB
   `ikbr_trader_backtest`, historical fetch with token-bucket pacing +
   concurrency cap, strategy-lab worker, simulator.
@@ -224,6 +226,12 @@ Required configuration:
   The explicit cancel/reconciliation exemptions retain auth/account guards;
   full-close currently requires writes enabled. Switching it off does not close
   positions or cancel broker-side protective orders.
+- `EXECUTION_ENTRIES_PAUSED` — startup entry ceiling, default true, plus a durable
+  account pause that survives restart. Pause leaves supported close/reconciliation
+  available when the existing master/account/risk guards allow them.
+- `EXECUTION_LIFECYCLE_AUTOMATION_ENABLED` — default false; explicit Paper deadline
+  management opt-in. Observation remains active. First PP5 account adoption requires
+  master writes disabled; see the supervision runbook for migration and recovery.
 - `EXECUTION_API_TOKEN` — Bearer for all mutating execution-engine endpoints.
   Required (≥32 chars) when `IBKR_ENVIRONMENT=live` or `TRADING_ENABLED=true`.
   In Phase 1 the same token is used by every internal client
