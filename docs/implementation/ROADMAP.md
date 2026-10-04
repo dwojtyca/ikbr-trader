@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-04 (PP4 implementation reviewed; real-source coverage acceptance blocked).
+Updated: 2026-10-04 (PP4 implementation and exact-source CI verified; real-source acceptance blocked).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 

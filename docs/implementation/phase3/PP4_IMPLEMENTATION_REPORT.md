@@ -157,7 +157,8 @@ calendar occurrence, lock-wait freshness, listing pairing, exact wire audit,
 transport deadlines, audit TRUNCATE, report-period and amendment-chain issues,
 refresh restart/concurrency and UI units. Repairs and regression tests were re-reviewed and accepted. The independent reviewer
 ran 33 targeted tests successfully and rechecked the final seven provider tests.
-Final acceptance remains conditional on required full checks and exact-commit CI.
+All required local checks and exact-source-commit CI subsequently passed. Full real-source
+acceptance remains blocked as described above.
 
 Focused evidence already passed: shared 7 unit tests; store 6 isolated PostgreSQL
 tests; execution 31 unit, 3 new PostgreSQL and 86 historical compatibility tests;
@@ -185,8 +186,14 @@ guards; targeted 15 tests and the subsequent full suite passed. Provider offset
 normalization was rechecked against both real payloads and the shared snapshot
 schema; invalid calendar dates and 24:00 remain rejected.
 
-Source publication and exact-commit CI: **pending**; this is filled from GitHub
-observations after the authorized push, never inferred from local checks.
+Source commit: [`dc419ff394714c09265f0d75c7a6f2f3fe1540c2`](https://github.com/dwojtyca/ikbr-trader/commit/dc419ff394714c09265f0d75c7a6f2f3fe1540c2), pushed to `main`.
+Exact-source-commit [GitHub CI run 37199720392](https://github.com/dwojtyca/ikbr-trader/actions/runs/37199720392)
+completed **success** at 2026-10-04T11:48:46Z. The observed `head_sha` exactly
+matches that source commit. This documentation-only receipt records the result;
+its own commit is also checked in CI before final delivery. The 25 unrelated dirty
+paths remained byte-for-byte unchanged after publication. The disposable PP4
+PostgreSQL container was stopped after successful local checks; existing stacks
+were not changed.
 The candidate excludes all 25 pre-existing dirty paths. Integration uses disposable
 PostgreSQL databases on the separate `colima-pp1-verification` Docker daemon,
 container `pp4-postgres`, host port 55444. No operational database fixtures are used.
