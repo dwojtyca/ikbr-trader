@@ -15,6 +15,10 @@ bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
 Owner scope revision 2026-10-04: PP6 delivers readable headless diagnostics and
 operations; custom web UI is deferred. PP0–PP5 implementation evidence is retained.
+Owner scope revision 2026-10-05: PP7 includes the missing configured scheduler-to-
+proposal integration, outstanding research/accounting implementation and bounded
+scheduled policy before broker acceptance. See the [PP7 implementation plan](PP7_IMPLEMENTATION_PLAN.md).
+This is planned work, not a claim that bundle trading is already connected or ready.
 
 ## 1. Product outcome and boundaries
 
@@ -70,6 +74,11 @@ extensions. Do not unblock them by bypassing a guard or marking them as stocks.
 `PP1 -> PP4`, with PP4 integrated before broker entries.
 `PP0 + PP2 + PP3 + PP4 + PP5 -> PP6 -> PP7`.
 
+Inside PP7, D/E/F complete the configured entry path and its evidence prerequisites
+before Gate A/B. G implements the scheduled policy before Gate C; operational
+activation still follows Gate B. A owns integrated acceptance, B collects specified
+evidence and C implements the isolated failure harness. Existing package IDs stay.
+
 PP numbers identify new delivery packages, not historical PR numbers or GitHub PRs.
 Work directly on main under the existing repository workflow. ES diagnostics are
 not prerequisites and must remain preserved outside these commits.
@@ -118,9 +127,13 @@ RS is allowed for a separately bounded noncritical delivery with accepted contra
 | PP6-A: Polish log/report rendering, read-only filters, timelines, source references and formatter tests | L | RS | PP6-C event/privacy contracts first; presentation only, with no derived safety state, P&L calculation or authorization |
 | PP6-B: structured event instrumentation, read aggregation, terminal report integration and existing authenticated control access | S | RA | PP6-C contracts and PP0–PP5 interfaces fixed; no new broker route, retry, risk, ownership or admission semantics |
 | PP6-C: event/coverage/privacy and control contracts, UI-off deployment, retention/restore, manual-intervention evidence and integrated recovery acceptance | A | RA | Design before PP6-A/B; integrate after them; owns missing-data semantics, broker mismatch holds, secrets and rollback compatibility |
-| PP7-A: prepare manifest; judge Gates A–D; authorized supervised entry/exit, soak and restart coordination; incident decisions | A | RA | PP0–PP6 complete plus explicit Paper/provider authorization; model routing is not operational permission |
+| PP7-A: integrate D/E/F/G; prepare manifest; judge Gates A–D; authorized supervised entry/exit, soak and restart coordination; incident decisions | A | RA | Reuse PP0–PP6; D/E/F evidence before Gate A/B, G plus Gate B before Gate C activation; explicit Paper/provider scope remains required |
 | PP7-B: execute specified read-only evidence queries, collect/format session observations and CI/check results | M | A judges evidence | PP7-A supplies exact commands and scope; no broker writes, paid calls, repairs, activation or automatic go/no-go |
 | PP7-C: isolated failure/restart harness integration and evidence summaries (Gate D) | S | RA | A specifies failures and invariant assertions; new broker/race/recovery semantics stay A; disposable state/stub adapters |
+| PP7-D: configured scheduler-to-ticket/proposal/AI handoff, truthful admission, durable trigger identity and integrated diagnostics | A | RA | Preserve assigned strategy prices/attribution, server-side risk and all pause/hold/budget guards; never replace a fixed blocker with unconditional permission |
+| PP7-E: complete real mandatory research/model coverage and feed integration | A (L pure mappings; S known-contract wiring) | RA | A verifies source/issuer/period/coverage/permissions and AI-binding semantics first; real paid probes only within explicit scope |
+| PP7-F: certified account-day execution/fee coverage and daily-loss evidence integration | A | RA | Verify actual installed broker capabilities; requested history start/end callbacks do not certify completeness; missing evidence remains denied |
+| PP7-G: versioned bounded scheduled policy, finite session windows, durable transition/reservations and migration | A | RA | Retain Gate B one-attempt policy; Gate C activation only after Gate B, reviewed policy and applicable authorization; no counter resets |
 
 Every row includes implementation of its relevant positive/negative tests and
 documentation; critical acceptance tests are designed and reviewed by A/RA, not
@@ -503,11 +516,46 @@ HOLD rather than false success. Preserve PP5 timing/alert gates. A restore drill
 proves no writes before ownership and broker state reconcile. Headless diagnostics
 do not resolve PP4 coverage or certified broker-accounting blockers or prove PP7.
 
-## 11. PP7 — Broker acceptance and automated Paper soak
+## 11. PP7 — Configured flow completion, broker acceptance and automated Paper soak
 
-The [acceptance runbook specification](../../runbooks/PRODUCTION_PAPER_ACCEPTANCE.md)
-becomes executable only after PP0–PP6 are shipped and reviewed. Record explicit owner
-Paper/provider scope; the documentation request itself does not activate trading.
+**Bounded plan:** [PP7_IMPLEMENTATION_PLAN.md](PP7_IMPLEMENTATION_PLAN.md).
+PP7 now includes implementation needed to finish the configured flow, followed by
+the [acceptance runbook](../../runbooks/PRODUCTION_PAPER_ACCEPTANCE.md). Reuse shipped
+PP0–PP6 mechanisms; do not treat their tests/CI as evidence of end-to-end operation.
+Record explicit owner Paper/provider scope; this documentation update does not
+authorize deployment, activation, broker actions or paid calls.
+
+### Implementation prerequisites before broker acceptance
+
+1. **PP7-D:** connect the configured scheduled evaluation to the existing validated
+   ticket, persisted proposal, mandatory AI and execution-risk path. Currently
+   `#runConfiguredCycle` only records evaluation and `ConfiguredStrategyRuntime`
+   always reports `entryAllowed: false` / `PP4_RESEARCH_UNAVAILABLE`. Preserve the
+   selected instance/trigger/contract and strategy prices, all runtime admission
+   checks, durable deduplication and unknown-action holds. Diagnostics stay read-only;
+   a configuration status flag is never a broker permit.
+2. **PP7-E:** close PP4 real-source gaps for both issuers: latest required PKO
+   periodic extraction, news/calendar coverage, reporting deadlines, operational
+   source permissions and a verified model. Reuse immutable research/AI contracts;
+   source failure is never converted to empty coverage or a waived requirement.
+3. **PP7-F:** implement and verify broker-derived full Warsaw-account-day execution/
+   fee coverage required by daily-loss risk. The production adapter currently lacks
+   the `certifiedFrom` evidence the guard requires. Use verified source capability;
+   never fabricate certification or loosen risk because history is unavailable.
+4. **PP7-G:** implement the currently rejected `bounded_scheduled` policy, finite
+   multi-session windows and durable transition/reservation/migration. Keep the
+   supervised limits for Gate B; scheduled activation requires Gate B and explicit
+   bounded authorization. Retain consumed/unknown attempts across config/run changes.
+5. **PP7-A/C:** prove the integrated scheduled flow in isolated production-wired
+   tests for both initial stocks and a configuration-only third stock. Start with
+   the actual scheduler/assigned strategy, not a manually seeded approved proposal.
+   Cover repeated ticks, concurrent processes, restart, rejected/late AI, stale data,
+   risk/account drift, unknown submissions and close/protection races; keep UI off.
+
+Follow section12 validation and independent hostile review before publication.
+Keep source delivery, Gate A readiness, per-instrument Gate B proof, Gate C session
+counts and Gate D results separate. External evidence gaps may block acceptance;
+complete independent implementation without claiming the bot is trade-ready.
 
 ### Gate A: disabled preflight
 
@@ -522,6 +570,10 @@ controls with `apps/ui` stopped; no web dashboard is a launch prerequisite.
 
 ### Gate B: supervised mechanics
 
+Enable this bounded scope only after Gate A passes and applicable explicit owner
+authorization is recorded. Gate B/C broker evidence cannot be required before the
+first supervised activation; they are collected during the authorized run.
+
 At most one entry attempt/account/day initially, quantity1, long/LMT/bracket, one
 active account-wide bot intent. Within separately authorized actual sessions, obtain
 at least one real strategy-generated, AI-approved entry and completed exit for each
@@ -532,7 +584,7 @@ reuse another instrument's result. No-signal/REJECT records a valid pending gate
 
 ### Gate C: bounded automated operation
 
-After PP5 and explicit activation of the PP3 repeated-entry policy, complete at
+After Gate B, PP7-G delivery and explicit activation of the bounded scheduled policy, complete at
 least **five consecutive scheduled trading sessions per initial instrument** with
 both configured, quote/research monitoring and scheduler active during authorized
 windows. Multi-market sessions are counted separately by the instrument calendar.
@@ -586,8 +638,9 @@ source dataset/target and are not enabled by pointing TEST_RESEARCH_POSTGRES_URL
 an empty fixture. Preserve frozen data and unrelated local work.
 
 Deploy with entries disabled, record private backup/migration evidence, compare
-service versions and inspect current broker state. Enable only the authorized
-bounded scope after gates. Any rollback must keep existing ownership interpretable;
+service versions and inspect current broker state. Enable supervised Gate B only
+after Gate A and owner authorization; enable scheduled Gate C only after Gate B,
+PP7-G and its applicable authorization. Any rollback must keep existing ownership interpretable;
 where old code cannot manage new state, leave entries paused and use the supported
 recovery version. No blanket deletion, hash rewriting or budget resets.
 

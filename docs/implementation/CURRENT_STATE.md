@@ -1,6 +1,6 @@
 # Current project state
 
-Source update: 2026-10-04. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+Source update: 2026-10-04; read-only PP7 gap review: 2026-10-05. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
@@ -30,6 +30,18 @@ reuses authenticated PP5 controls, and supplies UI-off deployment/recovery proce
 Independent reviews, required checks, isolated restore/root-CLI drills and exact-source CI passed; evidence is in the
 [PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md).
 Existing UI source is retained; no operational service was stopped or deployed by this update.
+
+The 2026-10-05 source inspection confirms that bundle-mode scheduled evaluation
+does not yet submit proposals: `TradingLoopService.#runConfiguredCycle` records
+`CONFIGURED_EVALUATION` only, and `ConfiguredStrategyRuntime` returns fixed
+`entryAllowed: false` / `PP4_RESEARCH_UNAVAILABLE`. The generic proposal/AI/execution
+components exist but are not an integrated configured scheduler-to-broker flow.
+The supervised Paper policy also still rejects `bounded_scheduled` and its transition
+with `PP5_LIFECYCLE_REQUIRED`. These are implementation gaps, separate from current
+broker/feed readiness. The [PP7 plan](phase3/PP7_IMPLEMENTATION_PLAN.md) assigns D to
+the missing handoff, E to real research, F to account-day coverage and G to scheduled
+policy, before operational Gates A–D. No gate was removed and no code was changed
+by this planning update. No current broker preflight was performed.
 
 ## Delivery objective
 
@@ -67,7 +79,7 @@ None of these labels implies profitability or permission to activate Live.
 | Exit/ownership | PP5 background observer restores durable ownership/close state, verifies exact protection and broker flat evidence, and can invoke the audited deadline close | One share only; disabled by default; unknown/rejected/unfilled close retains HOLD; no automatic replace/reprotection |
 | AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report |
 | Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | PP6 delivered readable logs/JSON, terminal reports and recovery procedures with review/checks/exact-source CI passed; custom dashboard deferred; manual IBKR changes require supported reconciliation |
-| Scheduler | Paper entry scheduler exists, disabled by default | No evidence of accepted unattended lifecycle or multi-session production-style Paper operation |
+| Scheduler | Legacy Paper orchestration exists; bundle scheduler evaluates assigned instances and records diagnostics | Bundle handoff is missing and fixed denial remains; PP7-D implements it. `bounded_scheduled` is rejected pending PP7-G; broker/soak acceptance remains unproven |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |
 

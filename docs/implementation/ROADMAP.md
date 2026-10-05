@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-04 (PP6 headless operations delivered; PP4 real-source acceptance blocked; PP7 planned).
+Updated: 2026-10-05 (PP6 delivered; PP7 includes configured-flow completion and remaining evidence blockers before broker acceptance).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -50,7 +50,13 @@ independent review, required checks, publication and exact-source-commit CI pass
 See the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is reviewed; real-source acceptance remains **blocked**. See the
 [PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered; independent review, required local checks and exact-source CI passed; see the
 [PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6 is delivered with independent review, required local checks, isolated recovery and successful exact-source CI; evidence is in the
-[PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 remains **planned**.
+[PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 remains **planned** under the
+[bounded implementation plan](phase3/PP7_IMPLEMENTATION_PLAN.md). The current bundle
+scheduler records evaluation without proposal handoff. PP7-D connects that path;
+PP7-E/F close mandatory research and certified account-day accounting gaps. PP7-G
+implements the currently rejected scheduled policy; it is activated only after the
+supervised Gate B and explicit bounded authorization. Passing PP6 does not remove
+these prerequisites or establish a ready-to-trade bot.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
@@ -64,7 +70,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
 | PP6 | Delivered headless Polish logs/JSON, terminal reports, existing controls and recovery; review/checks/exact-source CI passed | PP0–PP5 |
-| PP7 | Broker-backed supervised acceptance, then bounded multi-session automated Paper soak | PP0–PP6 |
+| PP7 | Planned: D bundle handoff, E real research, F broker/accounting coverage, G bounded scheduled policy; then Gates A–D broker acceptance/soak | Reuse PP0–PP6; D/E/F before Gate A/B; G plus Gate B before Gate C activation |
 
 PP4 research implementation may proceed independently after the identity contract
 is fixed. Final integration and broker activation remain sequential and gated.
@@ -89,6 +95,12 @@ For revised PP6, Astra establishes event/privacy/control/recovery contracts firs
 (PP6-C), Luna implements pure human-readable formatting/filtering (PP6-A), and Sol
 integrates events/reports and existing APIs (PP6-B). Astra then owns integrated
 safety acceptance; a different Astra performs the final independent review.
+
+PP7-D/F/G and critical PP7-E research semantics use Astra high; E may delegate pure
+accepted mappings to Luna medium and known-contract wiring to Sol medium. PP7-A
+owns integration and operational gate decisions, B specified mechanical evidence,
+and C the isolated failure harness. Independent Astra plan/final reviewers remain
+different agents. See the PP7 plan for exact scope and invariants.
 
 ## Completion criteria
 
@@ -136,7 +148,7 @@ finish every earlier research task before this track.
 Custom UI development is outside the current Paper delivery track. Reconsider it
 only if the owner later needs it; do not replace it with another web dashboard or
 require a hosted logging stack. [PP6 scope change](phase3/PP6_HEADLESS_REPLAN_PLAN.md)
-records the decision; runtime log/report implementation is still pending.
+records the decision; runtime logs/reports are now delivered in PP6.
 
 ES PR15.5D.3 remains REJECTED_FOR_ES. PR15.5F local diagnostics are unfinished and
 off the critical path; preserve source, frozen data and verdicts. Futures roll,

@@ -1,14 +1,37 @@
 # Production-style Paper acceptance and operations
 
 Status: **planned runbook specification, not executable on the current baseline**.
-Updated 2026-10-04 for headless PP6. Requires [PP0–PP6](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
-implementation and review. Current usable narrow procedures remain
+Updated 2026-10-05 for [PP7 implementation prerequisites](../implementation/phase3/PP7_IMPLEMENTATION_PLAN.md).
+Reuses [PP0–PP6](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
+and additionally requires PP7-D/E/F before Gate A/B and PP7-G before scheduled
+Gate C activation. Current usable narrow procedures remain
 [PKO](GPW_PAPER_ROUND_TRIP.md) and [AAPL](AAPL_PAPER_ROUND_TRIP.md); neither proves
 unattended production-style readiness. No invented API routes/env commands appear here.
 Custom UI is deferred: launch and acceptance must work with `apps/ui` stopped.
 The owner uses IBKR desktop for broker inspection/manual operations; bot diagnostics
-come from readable logs/reports and existing alerts. The requirements below remain
-planned until PP6 is implemented; PP4 source and broker-accounting blockers remain.
+come from the delivered [PP6 terminal operations](PAPER_HEADLESS_OPERATIONS.md)
+and existing alerts. Full operational acceptance remains planned: the configured
+scheduler-to-proposal handoff, required real research/account-day evidence and
+bounded scheduled policy are not completed by PP6.
+
+## Implementation prerequisites
+
+- PP7-D connects the production bundle scheduler and selected strategy to persisted
+  proposal/AI/risk/dispatch, retaining identity, price evidence, admission and durable
+  deduplication. Current configured evaluation alone cannot produce a broker entry.
+- PP7-E completes real mandatory research for PKO and AAPL plus model readiness;
+  PP7-F establishes verified full account-day execution/fee coverage. Missing feeds,
+  permissions, credentials or broker capability remain explicit entry blockers.
+- PP7-G implements versioned bounded scheduling and durable budget transition for
+  Gate C. Gate B retains one attempt/account/day and existing supervised windows.
+- Require isolated integrated success/failure tests, independent hostile review,
+  required repository checks and exact-commit CI. No seeded approved proposal or
+  fabricated coverage is evidence of the normal automated entry path.
+
+Record code delivery separately from actual gate status. The implementation prompt
+does not authorize broker trades, paid calls, operational deployment or real alerts.
+Reuse applicable recorded owner permission; otherwise obtain the concrete bounded
+launch/provider authorization after preparing the tested release and manifest.
 
 ## Launch manifest
 
@@ -48,9 +71,9 @@ reset by changing run ID, config revision or process restart.
 ## Headless operator evidence
 
 Follow the [PP6 diagnostic contract](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#10-pp6--headless-diagnostics-deployment-and-recovery).
-The runbook delivered by PP6 must give short executable steps for live readable
-logs, instrument/reason/time filters, one-decision source/lifecycle lookup and a
-session summary without bespoke SQL or mandatory jq. Machine JSON and readable
+The [runbook delivered by PP6](PAPER_HEADLESS_OPERATIONS.md) gives short executable
+steps for readable log follow, instrument/reason/time filters, one-decision source/
+lifecycle lookup and session summaries without bespoke SQL or mandatory jq. Machine JSON and readable
 Polish output must agree, including stable IDs/codes, explicit timezone and safe
 next actions. Source lookup reads stored evidence; it must not trigger provider calls.
 
@@ -64,6 +87,10 @@ that a broker position is flat. Use persisted audit plus fresh broker evidence.
 
 ## Supervised acceptance
 
+After disabled Gate A passes and explicit bounded owner authorization is recorded,
+enable only the supervised Gate B scope. Later Gate B/C broker results are not
+preconditions for this first supervised run; collect them within that authorization.
+
 Use the shipped authenticated bound runtime, never retired legacy signal routes.
 A valid no-signal or AI REJECT remains pending acceptance. For each initial
 instrument collect one real entry, broker protection, real exit and fresh final
@@ -73,8 +100,9 @@ signals or alter thresholds during the window. Preserve unknown attempts and bud
 
 ## Automated observation
 
-After GateB, run five consecutive scheduled sessions per instrument under the
-unchanged launch manifest and PP7 policy. The bot performs normal evaluation,
+After GateB, PP7-G delivery and applicable explicit bounded authorization, run five
+consecutive scheduled sessions per instrument under the unchanged launch manifest
+and scheduled policy. The bot performs normal evaluation,
 protection and exit observation; an operator monitors alerts rather than manually
 polling close completion. Track every evaluation interval, reason for non-trading,
 provider latency/cost, quote/history/research freshness, reconciliation lag,
