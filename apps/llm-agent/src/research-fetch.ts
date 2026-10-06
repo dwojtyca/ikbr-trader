@@ -41,6 +41,11 @@ export async function resolvePublicResearchAddress(hostname: string): Promise<{ 
 }
 
 export type ResearchFetchResult = { payload: Buffer; contentHash: string; contentType: string };
+export function assertResearchPdfResponse(payload: Uint8Array, contentType: string): void {
+  if (contentType.split(";")[0].trim().toLowerCase() !== "application/pdf") throw new Error("RESEARCH_PDF_CONTENT_TYPE_INVALID");
+  if (!Buffer.from(payload.subarray(0, 5)).equals(Buffer.from("%PDF-"))) throw new Error("RESEARCH_PDF_MAGIC_INVALID");
+}
+
 export async function fetchResearchSource(source: ResearchSource, sourceUrl: string, deadlineAt: string,
   deps: { resolveAddress?: typeof resolvePublicResearchAddress; httpsRequest?: typeof request } = {}): Promise<ResearchFetchResult> {
   const url = assertResearchSourceUrl(source, sourceUrl);
@@ -59,7 +64,7 @@ export async function fetchResearchSource(source: ResearchSource, sourceUrl: str
   return new Promise<ResearchFetchResult>((resolve, reject) => {
     const options = {
       method: "GET", signal: controller.signal, agent: false, autoSelectFamily: false, maxHeaderSize: 16 * 1024,
-      headers: { "Accept": "application/json, application/xhtml+xml, text/html;q=0.8", "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
+      headers: { "Accept": source.parserConfig.kind === "issuer-pdf-table" ? "application/pdf" : "application/json, application/xhtml+xml, text/html;q=0.8", "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
       lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
     } satisfies RequestOptions & { autoSelectFamily: boolean };
     const req = (deps.httpsRequest ?? request)(url, options, response => {
@@ -76,7 +81,11 @@ export async function fetchResearchSource(source: ResearchSource, sourceUrl: str
       response.on("error", reject);
       response.on("end", () => {
         const payload = Buffer.concat(chunks);
-        resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType: String(response.headers["content-type"] ?? "") });
+        const contentType = String(response.headers["content-type"] ?? "");
+        try {
+          if (source.parserConfig.kind === "issuer-pdf-table") assertResearchPdfResponse(payload, contentType);
+          resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType });
+        } catch (error) { reject(error); }
       });
     });
     req.on("error", reject);

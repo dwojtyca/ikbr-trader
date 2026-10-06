@@ -209,13 +209,455 @@
           "provider": "https://www.pkobp.pl",
           "adapter": "issuer-document",
           "parserConfig": {
-            "kind": "UNSUPPORTED_PDF_MAPPING"
+            "kind": "issuer-pdf-table",
+            "documentSha256": "814f2e8d1c5b2239db62b08a3636a7add61e09b511981f2fae797d4544b82908",
+            "pageCount": 36,
+            "issuerId": "pko",
+            "legalName": "Powszechna Kasa Oszczędności Bank Polski Spółka Akcyjna",
+            "issuerIdentifier": {
+              "scheme": "LEI",
+              "value": "P4GTT6GF1W40CVIMFR43"
+            },
+            "report": {
+              "kind": "periodic",
+              "periodStart": "2026-01-01",
+              "periodEnd": "2026-06-30",
+              "scope": "consolidated",
+              "publishedAt": "2026-08-13T00:03:00+02:00",
+              "publicationEvidenceUrl": "https://www.pkobp.pl/en/investor-relations/financial-reports/periodic-report-for-the-first-half-of-2026"
+            },
+            "pages": [
+              {
+                "pageNumber": 5,
+                "width": 595.32,
+                "height": 842.04,
+                "markers": {
+                  "issuer": {
+                    "text": "CONDENSED INTERIM CONSOLIDATED FINANCIAL STATEMENTS OF THE PKO BANK POLSKI S.A. GROUP",
+                    "rect": {
+                      "left": 55,
+                      "top": 15,
+                      "right": 394,
+                      "bottom": 25
+                    }
+                  },
+                  "period": {
+                    "text": "FOR THE SIX-MONTH PERIOD ENDED 30 JUNE 2026",
+                    "rect": {
+                      "left": 55,
+                      "top": 26,
+                      "right": 224,
+                      "bottom": 36
+                    }
+                  },
+                  "unit": {
+                    "text": "(IN PLN MILLION)",
+                    "rect": {
+                      "left": 55,
+                      "top": 37,
+                      "right": 113,
+                      "bottom": 47
+                    },
+                    "currency": "PLN",
+                    "scale": 1000000
+                  }
+                },
+                "tables": [
+                  {
+                    "id": "income",
+                    "title": {
+                      "text": "Consolidated income statement",
+                      "rect": {
+                        "left": 50,
+                        "top": 68,
+                        "right": 275,
+                        "bottom": 86
+                      }
+                    },
+                    "columns": [
+                      {
+                        "id": "q2_2026",
+                        "header": {
+                          "text": "Q2 2026",
+                          "rect": {
+                            "left": 277,
+                            "top": 90,
+                            "right": 345,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 277,
+                        "right": 345,
+                        "periodStart": "2026-04-01",
+                        "periodEnd": "2026-06-30"
+                      },
+                      {
+                        "id": "h1_2026",
+                        "header": {
+                          "text": "H1 2026",
+                          "rect": {
+                            "left": 346,
+                            "top": 90,
+                            "right": 417,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 346,
+                        "right": 417,
+                        "periodStart": "2026-01-01",
+                        "periodEnd": "2026-06-30"
+                      },
+                      {
+                        "id": "q2_2025",
+                        "header": {
+                          "text": "Q2 2025",
+                          "rect": {
+                            "left": 418,
+                            "top": 90,
+                            "right": 488,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 418,
+                        "right": 488,
+                        "periodStart": "2025-04-01",
+                        "periodEnd": "2025-06-30"
+                      },
+                      {
+                        "id": "h1_2025",
+                        "header": {
+                          "text": "H1 2025",
+                          "rect": {
+                            "left": 489,
+                            "top": 90,
+                            "right": 559,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 489,
+                        "right": 559,
+                        "periodStart": "2025-01-01",
+                        "periodEnd": "2025-06-30"
+                      }
+                    ],
+                    "facts": [
+                      {
+                        "metric": "net_interest_income",
+                        "row": {
+                          "text": "Net interest income",
+                          "rect": {
+                            "left": 80,
+                            "top": 105,
+                            "right": 274,
+                            "bottom": 116
+                          }
+                        },
+                        "columnId": "h1_2026",
+                        "unit": "currency",
+                        "currency": "PLN",
+                        "scale": 1000000,
+                        "periodType": "duration"
+                      },
+                      {
+                        "metric": "net_profit",
+                        "row": {
+                          "text": "Net profit attributable to equity holders of the parent company",
+                          "rect": {
+                            "left": 80,
+                            "top": 583,
+                            "right": 274,
+                            "bottom": 606
+                          }
+                        },
+                        "columnId": "h1_2026",
+                        "unit": "currency",
+                        "currency": "PLN",
+                        "scale": 1000000,
+                        "periodType": "duration"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "pageNumber": 7,
+                "width": 595.32,
+                "height": 842.04,
+                "markers": {
+                  "issuer": {
+                    "text": "CONDENSED INTERIM CONSOLIDATED FINANCIAL STATEMENTS OF THE PKO BANK POLSKI S.A. GROUP",
+                    "rect": {
+                      "left": 55,
+                      "top": 15,
+                      "right": 394,
+                      "bottom": 25
+                    }
+                  },
+                  "period": {
+                    "text": "FOR THE SIX-MONTH PERIOD ENDED 30 JUNE 2026",
+                    "rect": {
+                      "left": 55,
+                      "top": 26,
+                      "right": 224,
+                      "bottom": 36
+                    }
+                  },
+                  "unit": {
+                    "text": "(IN PLN MILLION)",
+                    "rect": {
+                      "left": 55,
+                      "top": 37,
+                      "right": 113,
+                      "bottom": 47
+                    },
+                    "currency": "PLN",
+                    "scale": 1000000
+                  }
+                },
+                "tables": [
+                  {
+                    "id": "financial_position",
+                    "title": {
+                      "text": "Consolidated statement of financial position",
+                      "rect": {
+                        "left": 50,
+                        "top": 68,
+                        "right": 362,
+                        "bottom": 86
+                      }
+                    },
+                    "columns": [
+                      {
+                        "id": "june_2026",
+                        "header": {
+                          "text": "30.06.2026",
+                          "rect": {
+                            "left": 400,
+                            "top": 90,
+                            "right": 486,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 400,
+                        "right": 486,
+                        "periodStart": null,
+                        "periodEnd": "2026-06-30"
+                      },
+                      {
+                        "id": "december_2025",
+                        "header": {
+                          "text": "31.12.2025",
+                          "rect": {
+                            "left": 487,
+                            "top": 90,
+                            "right": 559,
+                            "bottom": 102
+                          }
+                        },
+                        "left": 487,
+                        "right": 559,
+                        "periodStart": null,
+                        "periodEnd": "2025-12-31"
+                      }
+                    ],
+                    "facts": [
+                      {
+                        "metric": "loans",
+                        "row": {
+                          "text": "Loans and advances",
+                          "rect": {
+                            "left": 80,
+                            "top": 191,
+                            "right": 396,
+                            "bottom": 203
+                          }
+                        },
+                        "columnId": "june_2026",
+                        "unit": "currency",
+                        "currency": "PLN",
+                        "scale": 1000000,
+                        "periodType": "instant"
+                      },
+                      {
+                        "metric": "deposits",
+                        "row": {
+                          "text": "Amounts due to customers",
+                          "rect": {
+                            "left": 80,
+                            "top": 436,
+                            "right": 396,
+                            "bottom": 448
+                          }
+                        },
+                        "columnId": "june_2026",
+                        "unit": "currency",
+                        "currency": "PLN",
+                        "scale": 1000000,
+                        "periodType": "instant"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "pageNumber": 33,
+                "width": 595.32,
+                "height": 842.04,
+                "markers": {
+                  "issuer": {
+                    "text": "CONDENSED INTERIM CONSOLIDATED FINANCIAL STATEMENTS OF THE PKO BANK POLSKI S.A. GROUP",
+                    "rect": {
+                      "left": 55,
+                      "top": 15,
+                      "right": 394,
+                      "bottom": 25
+                    }
+                  },
+                  "period": {
+                    "text": "FOR THE SIX-MONTH PERIOD ENDED 30 JUNE 2026",
+                    "rect": {
+                      "left": 55,
+                      "top": 26,
+                      "right": 224,
+                      "bottom": 36
+                    }
+                  },
+                  "unit": {
+                    "text": "(IN PLN MILLION)",
+                    "rect": {
+                      "left": 55,
+                      "top": 37,
+                      "right": 113,
+                      "bottom": 47
+                    },
+                    "currency": "PLN",
+                    "scale": 1000000
+                  }
+                },
+                "tables": [
+                  {
+                    "id": "capital",
+                    "title": {
+                      "text": "Own funds and capital ratios",
+                      "rect": {
+                        "left": 50,
+                        "top": 419,
+                        "right": 181,
+                        "bottom": 431
+                      }
+                    },
+                    "columns": [
+                      {
+                        "id": "june_2026",
+                        "header": {
+                          "text": "30.06.2026",
+                          "rect": {
+                            "left": 345,
+                            "top": 434,
+                            "right": 417,
+                            "bottom": 458
+                          }
+                        },
+                        "left": 345,
+                        "right": 417,
+                        "periodStart": null,
+                        "periodEnd": "2026-06-30"
+                      },
+                      {
+                        "id": "december_2025_restated",
+                        "header": {
+                          "text": "31.12.2025 restated",
+                          "rect": {
+                            "left": 418,
+                            "top": 434,
+                            "right": 488,
+                            "bottom": 458
+                          }
+                        },
+                        "left": 418,
+                        "right": 488,
+                        "periodStart": null,
+                        "periodEnd": "2025-12-31"
+                      },
+                      {
+                        "id": "december_2025_published",
+                        "header": {
+                          "text": "31.12.2025 published",
+                          "rect": {
+                            "left": 489,
+                            "top": 434,
+                            "right": 559,
+                            "bottom": 458
+                          }
+                        },
+                        "left": 489,
+                        "right": 559,
+                        "periodStart": null,
+                        "periodEnd": "2025-12-31"
+                      }
+                    ],
+                    "facts": [
+                      {
+                        "metric": "tier1_ratio",
+                        "row": {
+                          "text": "Tier 1 capital ratio",
+                          "rect": {
+                            "left": 53,
+                            "top": 691,
+                            "right": 340,
+                            "bottom": 703
+                          }
+                        },
+                        "columnId": "june_2026",
+                        "unit": "percent",
+                        "currency": null,
+                        "scale": 1,
+                        "periodType": "instant"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ],
+            "authorityDecisions": [
+              {
+                "id": "pko_h1_2026_tier1_primary_precedence",
+                "version": 1,
+                "metric": "tier1_ratio",
+                "periodEnd": "2026-06-30",
+                "scope": "consolidated",
+                "selected": {
+                  "url": "https://www.pkobp.pl/api/public/57cf6f76-c47b-4c5c-a17d-ed72de0980bd.pdf",
+                  "documentSha256": "814f2e8d1c5b2239db62b08a3636a7add61e09b511981f2fae797d4544b82908",
+                  "pointer": "pdf:page=33;table=capital;row=Tier 1 capital ratio;column=30.06.2026;cell=[345,691,417,703]",
+                  "sourceClass": "consolidated-financial-report"
+                },
+                "conflicting": {
+                  "url": "https://www.pkobp.pl/api/public/a73faa8f-2958-457a-b149-80bc8b3d5c3e.xlsx",
+                  "documentSha256": "511e0666eefbd7351fcc0552447b010bea7189519bf9d8400456e908514dd403",
+                  "pointer": "xlsx:sheet=12_Adekwatność_Capital adeq_new;cell=T34;column=30.06.2026",
+                  "sourceClass": "derivative-workbook",
+                  "value": 0.1553,
+                  "unit": "decimal"
+                },
+                "corroborating": {
+                  "url": "https://www.pkobp.pl/api/public/49e6cca8-99c2-4b00-a8c7-23d0634cb512.pdf",
+                  "documentSha256": "c5d306da909f82b21e8ab3ea6bee80a26031133cf89487a01b4b61d0bad2bb00",
+                  "pointer": "pdf:page=26;table=EU KM1;row=6 Tier 1 ratio;column=30.06.2026",
+                  "sourceClass": "prudential-disclosure",
+                  "value": 15.55,
+                  "unit": "percent"
+                },
+                "observedAt": "2026-10-06T20:33:33Z",
+                "rationale": "Historical review provenance, not a current fetch: canonical consolidated financial report, corroborated by prudential disclosure, takes precedence over the inconsistent derivative workbook and English summary; ratio is reported, not recomputed."
+              }
+            ]
           },
           "roles": [
             "reports"
           ],
           "urls": [
-            "https://www.pkobp.pl/en/investor-relations/financial-reports/periodic-report-for-the-first-half-of-2026"
+            "https://www.pkobp.pl/api/public/57cf6f76-c47b-4c5c-a17d-ed72de0980bd.pdf"
           ],
           "issuerIdentifier": {
             "scheme": "LEI",

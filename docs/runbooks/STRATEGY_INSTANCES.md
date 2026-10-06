@@ -1,10 +1,11 @@
-# Configured strategy instances (PP2)
+# Configured strategy instances (PP2, updated for PP7)
 
-PP2 applies validated momentum parameters to diagnostic evaluation and independent
-binding replay. Every bundle entry remains blocked by
-`PP3_EXECUTION_POLICY_UNAVAILABLE`; PP4 research is also unavailable. A signal is
-not an admitted proposal or permission to trade. No operational conversion,
-deployment, broker submission or paid provider call is part of this delivery.
+PP2 introduced validated momentum parameters, diagnostic evaluation and independent
+binding replay. PP7 connects configured scheduling to the guarded proposal, AI and
+execution flow. A signal alone is not an admitted proposal or permission to trade.
+Current real-source and operational acceptance remain separate from implemented
+capability; see the [PP7 report](../implementation/phase3/PP7_IMPLEMENTATION_REPORT.md)
+and [closure plan](../implementation/phase3/PP7_CLOSURE_PLAN.md).
 
 ## Configuration
 
@@ -57,16 +58,19 @@ The production evaluator checks current peer configuration observations, account
 scope, conversion readiness and persisted binding safety state before loading the
 existing verified session-native strategy context. Configuration drift,
 preparation, store failure, unavailable/ambiguous outcomes, missing/stale candles
-or quote evidence deny evaluation. The fixed PP3 entry blocker alone does not
-prevent computing a diagnostic signal. Trigger evidence comes from trusted market
+or quote evidence deny evaluation. Entry admission remains separate from computing
+a diagnostic signal. Trigger evidence comes from trusted market
 state, with one minute buckets; caller timestamps cannot select it.
 
-`TRADING_LOOP_ENABLED=true` schedules the same configured evaluator when the runtime
-is enabled, including with `EXECUTION_RUNTIME_ENABLED=false`. Its configured branch
-never enters execution submission or legacy strategy-state synchronization. With
-`TRADING_LOOP_ENABLED=false`, no scheduler starts. The write route
-`/runtime/execute` still requires its existing explicit execution-runtime flag and
-entry guards.
+`TRADING_LOOP_ENABLED=true` schedules the configured evaluator when the runtime is
+enabled. With `EXECUTION_RUNTIME_ENABLED=false`, it remains evaluation-only.
+With execution runtime enabled, the PP7 scheduler can submit through the existing
+prepared-ticket/proposal flow after admission, reconciliation, exposure and policy
+checks. Mandatory AI, deterministic risk, master writes, durable pause, finite entry
+windows and attempt budgets still apply. The configured branch does not synchronize
+legacy strategy state. With `TRADING_LOOP_ENABLED=false`, no scheduler starts.
+The write route `/runtime/execute` retains its explicit execution-runtime flag
+and entry guards. These capabilities do not establish real Paper Gate A/B evidence.
 
 `GET /configuration` exposes whether the configured runtime is installed and a
 safe account readiness flag/reason, without returning the account ID. Matching

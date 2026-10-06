@@ -1,6 +1,8 @@
 import { SaxesParser } from "saxes";
 import type { ResearchEvidence, ResearchFact, ResearchInstrumentPolicy, ResearchMetric, ResearchReport, ResearchSource, ResearchSourceResult } from "@ikbr/shared/instrument-research";
 import { researchHash, publicationRange } from "@ikbr/shared/instrument-research";
+import { normalizeIssuerPdf, parseIssuerPdfMapping } from "./research-pdf-mapping.js";
+import type { PdfTextDocument } from "./research-pdf-types.js";
 
 type SecConcept = { concept: string; metric: ResearchMetric; unit: "currency" | "percent" | "decimal"; currency?: string; scale: number; periodType: "instant" | "duration" };
 export interface SecMapping {
@@ -263,6 +265,10 @@ export function normalizeResearchSource(policy: ResearchInstrumentPolicy, source
       ...(config as unknown as Omit<XhtmlMapping, "sourceId" | "sourceUrl" | "contentHash" | "issuerIdentifier">),
       sourceId: source.id, sourceUrl, contentHash, issuerIdentifier: source.issuerIdentifier
     }, policy, fetchedAt);
+  }
+  if (config.kind === "issuer-pdf-table") {
+    if (source.adapter !== "issuer-document") throw new Error("issuer document parser configuration mismatch");
+    return normalizeIssuerPdf(payload as PdfTextDocument, parseIssuerPdfMapping(config), policy, source, fetchedAt, sourceUrl, contentHash);
   }
   if (config.kind === "declared-evidence") {
     if (source.adapter !== "issuer-document") throw new Error("declared evidence parser configuration mismatch");

@@ -1,4 +1,4 @@
-# Versioned trading configuration (PP1 + PP2)
+# Versioned trading configuration (PP1–PP7)
 
 PP1 adds a startup configuration bundle shared by ingestion, signal-engine,
 execution-engine and llm-agent. The [field contract](../implementation/phase3/PP1_CONFIGURATION_CONTRACT.md)
@@ -46,9 +46,14 @@ binding JSON, enabled PKO/AAPL profile flags and legacy strategy overrides; clea
 those authority settings during conversion. Credentials, account allowlists and
 activation controls stay outside the bundle.
 
-Even a valid entry-enabled declaration cannot trade through bundle mode.
-Diagnostics retain `PP3_EXECUTION_POLICY_UNAVAILABLE`; PP2 permits guarded
-diagnostic evaluation only. Issuer mapping is not verified PP4 research.
+PP7 connects configured scheduling to the guarded proposal, AI and execution flow.
+An entry-enabled declaration alone does not authorize an order: runtime/master
+switches, durable pause, peer identity, entry windows, budgets, broker coverage,
+research and risk checks must all pass. Diagnostic evaluation remains read-only.
+Issuer mapping is not verified research. Real-source and operational acceptance
+are tracked in the [PP7 report](../implementation/phase3/PP7_IMPLEMENTATION_REPORT.md)
+and [closure plan](../implementation/phase3/PP7_CLOSURE_PLAN.md); source implementation
+does not prove Gate A/B readiness.
 `TRADING_ENABLED` keeps its existing meaning, including the requirement for an
 authorized full close. Configuration admission never exempts close from its
 existing account, authentication, ownership, quote, risk or quantity checks.

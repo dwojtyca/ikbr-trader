@@ -1,6 +1,8 @@
 import { parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchInstrumentPolicy, type ResearchManifestV1, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
 import { normalizeResearchSource } from "./research-providers.js";
-import { fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
+import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
+import { extractResearchPdf } from "./research-pdf-extractor.js";
+import { parseIssuerPdfMapping } from "./research-pdf-mapping.js";
 
 type Role = "reports" | "news" | "calendar";
 type SourceStore = Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot">;
@@ -27,11 +29,17 @@ export function researchCallKey(manifestHash: string, policy: ResearchInstrument
 
 function compatible(source: ResearchSource, role: Role): boolean {
   const kind = source.parserConfig.kind;
-  return role === "reports" ? kind === "sec-json" || kind === "issuer-xhtml" : kind === "declared-evidence";
+  return role === "reports" ? kind === "sec-json" || kind === "issuer-xhtml" || kind === "issuer-pdf-table" : kind === "declared-evidence";
 }
 
 function parsePayload(result: ResearchFetchResult): unknown {
   return JSON.parse(result.payload.toString("utf8")) as unknown;
+}
+
+async function parsePdfPayload(source: ResearchSource, result: ResearchFetchResult): Promise<unknown> {
+  assertResearchPdfResponse(result.payload, result.contentType);
+  const mapping = parseIssuerPdfMapping(source.parserConfig);
+  return extractResearchPdf(result.payload, mapping.documentSha256, mapping.pages.map(page => page.pageNumber));
 }
 
 function removePriorSourceRole(snapshot: InstrumentResearchSnapshotV1, sourceId: string, role: Role): void {
@@ -100,7 +108,8 @@ export class ResearchRefreshScheduler {
         const payload = source.adapter === "sec-json" ? {
           submissions: parsePayload(fetched.find(row => row.url.includes("/submissions/"))?.result ?? (() => { throw new Error("RESEARCH_SOURCE_MAPPING_INCOMPLETE"); })()),
           companyfacts: parsePayload(chosen.result),
-        } : source.parserConfig.kind === "issuer-xhtml" ? chosen.result.payload.toString("utf8") : parsePayload(chosen.result);
+        } : source.parserConfig.kind === "issuer-xhtml" ? chosen.result.payload.toString("utf8")
+          : source.parserConfig.kind === "issuer-pdf-table" ? await parsePdfPayload(source, chosen.result) : parsePayload(chosen.result);
         const result = normalizeResearchSource(policy, source, payload, fetchedAt, chosen.url, chosen.result.contentHash);
         const namespace = { sourceId: source.id, role };
         const evidenceIds = new Map(result.evidence.map(row => [row.ref, "ev_" + researchHash({ ...namespace, ref: row.ref })]));
