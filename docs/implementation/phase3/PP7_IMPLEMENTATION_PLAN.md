@@ -1,14 +1,16 @@
 # PP7 — complete the configured Paper flow and prove broker acceptance
 
-Date: 2026-10-05. Status: **planned; no implementation or trading activation**.
+Date: 2026-10-05; implementation update 2026-10-06. Status: **source locally verified; operational acceptance blocked**.
+The accepted [delivery contract](PP7_DELIVERY_CONTRACT.md) fixes the implementation
+semantics; the [report](PP7_IMPLEMENTATION_REPORT.md) tracks actual evidence.
 Owner request: include the missing bundle scheduler-to-proposal connection in PP7
 and provide an implementation prompt. [Delivery plan](PAPER_PRODUCTION_DELIVERY_PLAN.md)
 owns Gates A–D; [ROADMAP](../ROADMAP.md) owns sequence. Existing PP0–PP6 mechanisms
 must be reused. Their delivery does not prove an end-to-end configured Paper bot.
 
-## 1. Planning delivery and review boundary
+## 1. Historical planning delivery and review boundary
 
-This revision changes documentation only: this plan, the delivery plan, ROADMAP,
+The original October 5 planning revision changed documentation only: this plan, the delivery plan, ROADMAP,
 CURRENT_STATE, the production Paper acceptance runbook and a PP7 planning report.
 It does not change application code, configuration, `.env`, deployment or broker
 state. Preserve unrelated ES work. Obtain independent Astra high plan review before

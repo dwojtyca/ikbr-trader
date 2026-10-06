@@ -1,3 +1,4 @@
+import { normalizeStrategyPriceBands } from "./wse-market-rules.js";
 import type { BoundInstrument } from './instruments/bindings.js';
 import type { SignalTicket } from './index.js';
 import { tickSizesEqual } from './instruments/bindings.js';
@@ -83,4 +84,22 @@ export function validateStockOrder(metadata: unknown, bound: BoundInstrument, ac
     const saved = JSON.parse(JSON.stringify(metadata)) as StockMarketMetadata;
     return { ok: true, expiresAtMs, metadata: saved };
   } catch (error) { return { ok: false, reason: error instanceof Error ? error.message : 'stock_metadata_invalid' }; }
+}
+
+export interface StockStrategyPriceEvidence {
+  raw: { entry: number; stopLoss: number; takeProfit: number };
+  final: { entry: number; stopLoss: number; takeProfit: number };
+  metadata: StockMarketMetadata;
+  normalizedAtMs: number;
+}
+export function normalizeStockStrategyLevels(metadata: unknown, bound: BoundInstrument, accountId: string,
+  raw: StockStrategyPriceEvidence['raw'], nowMs: number): StockStrategyPriceEvidence {
+  const final = normalizeStrategyPriceBands(metadata, raw);
+  const validated = validateStockOrder(metadata, bound, accountId, {
+    instrument: bound.brokerSymbol, instrumentId: bound.instrumentId, conid: String(bound.conId),
+    side: 'BUY', quantity: 1, orderType: 'LMT', entry: final.entry, stop: final.stopLoss, takeProfit: final.takeProfit,
+    reason: 'strategy price validation', confidence: 1, timestamp: new Date(nowMs).toISOString(), riskCheckStatus: 'PASS',
+  }, nowMs);
+  if (!validated.ok) throw new Error(validated.reason);
+  return Object.freeze({ raw: Object.freeze({...raw}), final: Object.freeze(final), metadata: validated.metadata, normalizedAtMs: nowMs });
 }

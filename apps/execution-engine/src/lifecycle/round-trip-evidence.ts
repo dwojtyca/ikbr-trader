@@ -13,7 +13,7 @@ export interface RoundTripFill {
 export interface RoundTripEvidence {
   lifecycle: LifecycleEvidence;
   window: null | { source?: "paper" | "gpw" | "aapl"; instrumentId?: string; conid?: string; effectiveConfigHash?: string;
-    runPolicyHash?: string; policyKind?: "supervised_one_attempt"; attemptId?: string; accountDate?: string; instrumentSessionDate?: string;
+    runPolicyHash?: string; policyKind?: "supervised_one_attempt" | "bounded_scheduled"; policyVersion?: 1 | 2; policyAdopted?: boolean; attemptId?: string; accountDate?: string; instrumentSessionDate?: string;
     runId: string; accountId: string; startsAt: Date | string; endsAt: Date | string;
     consumedProposalId: number | null; consumedAt: Date | string | null };
   close: null | { state: string; accountId: string; conid: string; originalHash: string;
@@ -122,7 +122,7 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     return refuse("consumed_window_not_proven");
   if (lifecycle.order.strategyAttribution && (window.source !== "paper" || window.instrumentId !== lifecycle.order.instrumentId ||
     window.conid !== lifecycle.order.conid || window.effectiveConfigHash !== lifecycle.order.strategyAttribution.effectiveConfigHash ||
-    window.policyKind !== "supervised_one_attempt" || !window.runPolicyHash || !/^[a-f0-9]{64}$/.test(window.runPolicyHash) ||
+    (window.policyKind !== "supervised_one_attempt" && !(window.policyKind === "bounded_scheduled" && window.policyVersion === 2 && window.policyAdopted === true)) || !window.runPolicyHash || !/^[a-f0-9]{64}$/.test(window.runPolicyHash) ||
     window.attemptId !== String(lifecycle.order.id) || !/^[1-9]\d*$/.test(window.attemptId) ||
     window.accountDate !== sessionDateAt(attempted, "Europe/Warsaw") ||
     window.instrumentSessionDate !== sessionDateAt(attempted, capability!.timeZone))) return refuse("generic_attempt_identity_not_proven");

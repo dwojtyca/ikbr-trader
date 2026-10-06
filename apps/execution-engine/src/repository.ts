@@ -447,7 +447,7 @@ export interface Trade {
 
 export class ExecutionRepository {
   constructor(private readonly pool: Pool, private readonly gpwWindow?: GpwWindow, private readonly aaplWindow?: AaplWindow, private readonly sessionEntryGuard: SessionEntryGuard = unavailableSessionEntryGuard, private readonly strategyConfigurationHash?: () => string | undefined,
-    private readonly paper?: { policy?: PaperRunPolicy; context: () => PaperDailyLossContext | null;
+    private readonly paper?: { policy?: PaperRunPolicy; exitMarginMinutes?: number; context: () => PaperDailyLossContext | null;
       resolveManagement: (order: ProposedOrder, db: PoolClient) => Promise<BoundInstrument | undefined> },
     private readonly researchEntryValidator?: ResearchEntryValidator,
     private readonly lifecycleEntry?: {
@@ -470,7 +470,7 @@ export class ExecutionRepository {
   async checkPaperEntry(order: ProposedOrder, accountId: string, dispatch = false) {
     if (this.paper?.policy && !order.strategyAttribution) return { ok: false as const, reason: "paper_attribution_required" };
     if (order.strategyAttribution || this.paper?.policy)
-      return checkPaperEntryBudget(this.pool, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch }, this.sessionEntryGuard);
+      return checkPaperEntryBudget(this.pool, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch, exitMarginMinutes: this.paper?.exitMarginMinutes }, this.sessionEntryGuard);
     if (isPkoIdentity(order)) return this.checkGpwEntry(order, accountId, dispatch);
     if (isAaplIdentity(order)) return this.checkAaplEntry(order, accountId, dispatch);
     return this.checkSessionEntry(order);
@@ -481,7 +481,7 @@ export class ExecutionRepository {
     if (!policy || accountId !== policy.accountId) return { configured: Boolean(policy), status: "BLOCKED", reason: "paper_budget_unconfigured_or_account_mismatch" };
     const windows = await Promise.all(policy.windows.map(async window => ({ instrumentId: window.instrumentId, conId: window.conId,
       startsAt: window.startsAt, endsAt: window.endsAt,
-      ...(await checkPaperEntryBudget(this.pool, policy, accountId, { instrumentId: window.instrumentId, conid: String(window.conId), instrument: window.instrument }, {}, this.sessionEntryGuard)) })));
+      ...(await checkPaperEntryBudget(this.pool, policy, accountId, { instrumentId: window.instrumentId, conid: String(window.conId), instrument: window.instrument }, { exitMarginMinutes: this.paper?.exitMarginMinutes, windowStartsAt: window.startsAt }, this.sessionEntryGuard)) })));
     return { configured: true, readOnly: true, runId: policy.runId, policyKind: policy.kind, manifestHash: policy.manifestHash, effectiveConfigHash: policy.effectiveConfigHash, windows };
   }
 
@@ -518,6 +518,30 @@ export class ExecutionRepository {
     return undefined;
   }
 
+  async assertPaperPolicyFlat(client: PoolClient, accountId: string, sessionId: string, connectionGeneration: number): Promise<Record<string, unknown>> {
+    if (await findAccountReservation(client, accountId) || await this.unresolvedPaperOwnership(client, accountId)) throw new Error("PAPER_POLICY_UNRESOLVED_OWNERSHIP");
+    const pending = await client.query(`SELECT 1 FROM paper_entry_attempts a LEFT JOIN lifecycle_supervision s ON s.original_proposal_id=a.proposed_order_id
+      WHERE a.account_id=$1 AND (s.original_proposal_id IS NULL OR s.status NOT IN ('FLAT','TERMINAL_UNFILLED') OR s.terminal_proof IS NULL) LIMIT 1`, [accountId]);
+    if (pending.rowCount) throw new Error("PAPER_POLICY_UNRESOLVED_ATTEMPT");
+    const sync = (await client.query(`SELECT *,clock_timestamp() AS database_now FROM broker_snapshot_syncs WHERE account_id=$1`, [accountId])).rows[0];
+    const now = sync ? new Date(sync.database_now).getTime() : NaN, observed = sync ? new Date(sync.observed_at).getTime() : NaN;
+    if (!sync || sync.session_id !== sessionId || sync.complete !== true || !Number.isFinite(observed) || observed > now || now-observed >= 10000) throw new Error("PAPER_POLICY_POSITION_UNAVAILABLE");
+    const run = (await client.query('SELECT * FROM reconciliation_runs WHERE account_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1', [accountId])).rows[0];
+    const snapshot = run?.broker_snapshot, captured = snapshot ? Date.parse(snapshot.capturedAt) : NaN;
+    if (!run || run.status !== "CLEAN" || run.session_id !== sessionId || run.snapshot_complete !== true ||
+      !Number.isSafeInteger(Number(sync.generation)) || Number(sync.generation) <= 0 || Number(run.position_generation) !== Number(sync.generation) ||
+      !snapshot || snapshot.accountId !== accountId || snapshot.sessionId !== sessionId || snapshot.connectionGeneration !== connectionGeneration ||
+      snapshot.exposureComplete !== true || snapshot.recoveryComplete !== true || !Number.isFinite(captured) || captured > now || now-captured >= 10000 ||
+      canonicalJson(snapshot.sourceCoverage ?? null) !== canonicalJson(run.source_coverage)) throw new Error("PAPER_POLICY_RECONCILIATION_CHANGED");
+    const positions = await client.query(`SELECT 1 FROM broker_position_snapshots WHERE account_id=$1 AND quantity<>0 AND
+      (conid IS NULL OR conid=ANY($2::text[]) OR conid IN (SELECT conid FROM paper_entry_attempts WHERE account_id=$1)) LIMIT 1`, [accountId, this.paper?.policy?.windows.map(w => String(w.conId)) ?? []]);
+    if (positions.rowCount) throw new Error("PAPER_POLICY_NOT_FLAT");
+    const held = await client.query('SELECT 1 FROM paper_entry_migration_holds WHERE account_id IS NULL OR account_id=$1 LIMIT 1', [accountId]);
+    if (held.rowCount) throw new Error("PAPER_POLICY_MIGRATION_HOLD");
+    return { positionGeneration: Number(sync.generation), positionObservedAt: new Date(observed).toISOString(),
+      reconciliationRunId: Number(run.id), reconciliationCompletedAt: new Date(run.completed_at).toISOString(), snapshotCapturedAt: new Date(captured).toISOString() };
+  }
+
   async checkAaplEntry(order: ProposedOrder, accountId: string, dispatch = false) {
     if (!isExactAaplIdentity(order)) return { ok: false as const, reason: "aapl_window_identity_mismatch" };
     return checkAaplWindow(this.pool, this.aaplWindow, accountId, order.id, dispatch, this.sessionEntryGuard);
@@ -541,7 +565,7 @@ export class ExecutionRepository {
       let strategyRiskDeadline = Infinity;
       let finalPaperRisk: AiEntryRiskEvidence | undefined;
       if (order.strategyAttribution || this.paper?.policy) {
-        const permit = await checkPaperEntryBudget(client, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch: true }, this.sessionEntryGuard);
+        const permit = await checkPaperEntryBudget(client, this.paper?.policy, accountId, order, { proposalId: order.id, dispatch: true, exitMarginMinutes: this.paper?.exitMarginMinutes }, this.sessionEntryGuard);
         if (!permit.ok) throw new Error(permit.reason);
         deadline = Math.min(deadline, permit.endsAtMs);
       } else if (isAaplIdentity(order)) {
@@ -1633,7 +1657,7 @@ export class ExecutionRepository {
       }
 
       if (ticket.strategyAttribution || this.paper?.policy) {
-        const window = positionGuard.kind === "available" ? await checkPaperEntryBudget(client, this.paper?.policy, positionGuard.accountId, ticket, {}, this.sessionEntryGuard)
+        const window = positionGuard.kind === "available" ? await checkPaperEntryBudget(client, this.paper?.policy, positionGuard.accountId, ticket, { exitMarginMinutes: this.paper?.exitMarginMinutes }, this.sessionEntryGuard)
           : { ok: false as const, reason: "paper_budget_account_unavailable" };
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "invalid_ticket_shape", reason: window.reason }; }
       } else if (isPkoIdentity(ticket)) {
@@ -2818,7 +2842,7 @@ export class ExecutionRepository {
 
       if (row.strategy_attribution || this.paper?.policy) {
         if (!this.paper?.policy) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: "paper_budget_unconfigured" }; }
-        const window = await reservePaperEntryAttempt(client, this.paper.policy, input.accountId, this.mapRow(row), this.sessionEntryGuard);
+        const window = await reservePaperEntryAttempt(client, this.paper.policy, input.accountId, this.mapRow(row), this.sessionEntryGuard, this.paper.exitMarginMinutes);
         if (!window.ok) { await client.query("ROLLBACK"); return { kind: "submission_identity_mismatch", reason: window.reason }; }
       } else if (isPkoIdentity({instrumentId: row.instrument_id, instrument: row.instrument, conid: row.conid})) {
         const window = await checkGpwWindow(client, this.gpwWindow, input.accountId, input.id, false, this.sessionEntryGuard);

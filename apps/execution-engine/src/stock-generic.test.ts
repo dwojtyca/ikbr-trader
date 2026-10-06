@@ -148,6 +148,10 @@ for (const index of [0, 1, 2]) test(`generic stock ${index} completion binds ori
   assert.equal(report.status, 'COMPLETED', report.reasons.join(','));
   assert.deepEqual(report.netPnl, { currency: generic.bound.currency, amount: 1 });
   assert.equal(report.paperRunId, 'fixture-run'); assert.equal(report.gpwWindowRunId, null); assert.equal(report.aaplWindowRunId, null);
+  Object.assign(f.evidence.window!, { policyKind: 'bounded_scheduled', policyVersion: 2 });
+  assert.equal(evaluateRoundTrip(f.evidence, f.context).status, 'NOT_PROVEN');
+  f.evidence.window!.policyAdopted = true;
+  assert.equal(evaluateRoundTrip(f.evidence, f.context).status, 'COMPLETED');
   f.evidence.window!.attemptId = '43'; assert.equal(evaluateRoundTrip(f.evidence, f.context).status, 'NOT_PROVEN');
   f.evidence.window!.attemptId = '42'; f.evidence.window!.effectiveConfigHash = 'd'.repeat(64);
   assert.equal(evaluateRoundTrip(f.evidence, f.context).status, 'NOT_PROVEN');

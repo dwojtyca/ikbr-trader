@@ -1,5 +1,6 @@
 import type { CompletedOrdersClient } from "./completed-orders-client.js";
 import type { TwsExecutionClient } from "../tws-execution-client.js";
+import { paperAccountDayStart } from "../paper-daily-loss.js";
 import type {
   BrokerReconciliationAdapter,
   BrokerReconciliationCaptureRequest,
@@ -33,20 +34,20 @@ export class IbBrokerReconciliationAdapter
     });
 
     // Executions window: exposureStart = sessionStart - safetyMargin;
-    // recoveryStart = min(exposureStart, oldest ambiguous - safetyMargin).
+    // recoveryStart also includes Warsaw midnight and any older ambiguous attempt.
     const exposureStart = new Date(
       req.sessionStartedAt.getTime() - req.safetyMarginMs,
     );
-    const utcDayStart = new Date(capturedAtStart); utcDayStart.setUTCHours(0, 0, 0, 0);
+    const accountDayStart = paperAccountDayStart(capturedAtStart.getTime());
     const recoveryStart = req.oldestAmbiguousAttemptedAt
       ? new Date(
           Math.min(
-            utcDayStart.getTime(),
+            accountDayStart,
             exposureStart.getTime(),
             req.oldestAmbiguousAttemptedAt.getTime() - req.safetyMarginMs,
           ),
         )
-      : new Date(Math.min(exposureStart.getTime(), utcDayStart.getTime()));
+      : new Date(Math.min(exposureStart.getTime(), accountDayStart));
 
     // Fire all four snapshot reads in parallel — each carries its
     // own timeout + abort handling so a single slow source cannot

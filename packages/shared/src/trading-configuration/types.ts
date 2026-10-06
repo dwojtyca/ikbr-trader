@@ -36,8 +36,8 @@ export interface TradingAccountPolicyV1 {
 
 export interface TradingEntryPolicyV1 {
   readonly id: string;
-  readonly kind: "supervised_one_attempt";
-  readonly maxAttemptsPerAccountDay: 1;
+  readonly kind: "supervised_one_attempt" | "bounded_scheduled";
+  readonly maxAttemptsPerAccountDay: 1 | 2;
 }
 
 export interface TradingExecutionPolicyV1 {

@@ -1,3 +1,5 @@
+import type { StrategySignal } from "../strategies/strategy.types.js";
+import { prepareConfiguredPipeline } from "./strategy/configured-signal-pipeline.js";
 /**
  * Market Data Runtime — orchestration entry point.
  *
@@ -47,6 +49,7 @@ export interface DryRunResult {
 }
 
 export class MarketDataRuntime {
+  readonly #now: () => Date;
   readonly #registry: InstrumentRegistry;
   readonly #builder: MarketContextBuilder;
   readonly #pipeline: TradingPipeline;
@@ -63,6 +66,7 @@ export class MarketDataRuntime {
     if (!Array.isArray(options.providers)) {
       throw new Error("MarketDataRuntime: providers array is required");
     }
+    this.#now = options.now ?? (() => new Date());
     this.#registry = options.registry;
     this.#pipeline = options.pipeline;
     this.#builder = new MarketContextBuilder({
@@ -88,6 +92,13 @@ export class MarketDataRuntime {
    *   - `TradingPipeline.run` never throws (its own isolation
    *     contract).
    */
+  async prepareConfiguredSignal(input: { instrumentId: string; policy: ExecutionTicketPolicy; signal: StrategySignal }): Promise<DryRunResult> {
+    const instrument = this.#registry.getInstrumentOrThrow(input.instrumentId);
+    const snapshot = await this.#builder.build({ instrumentId: input.instrumentId });
+    const pipeline = prepareConfiguredPipeline({ ...input, instrument, snapshot, now: this.#now() });
+    return { instrumentId: input.instrumentId, snapshot, pipeline };
+  }
+
   async dryRun(
     instrumentId: string,
     policy: ExecutionTicketPolicy,

@@ -28,7 +28,9 @@ export function researchFixture(now = Date.now(), instrumentId = "aapl_smart") {
   const snapshot: InstrumentResearchSnapshotV1 = {
     schemaVersion: 1, configHash, manifestHash: researchHash(manifest), instrumentId, mappingHash: researchHash(policy), createdAt: stamp,
     evidence: [{ ref: "reports", sourceId: "official", documentId: "fixture-reports", url: "https://www.sec.gov/fixture", contentHash: "a".repeat(64), issuerId: policy.issuerId, issuerIdentifier: policy.identifiers[0], published: { precision: "instant", at: published }, fetchedAt: stamp, observedAt: stamp, automation: "PERMITTED", retention: "FACTS_AND_REFERENCES" }],
-    coverage: ["reports", "news", "calendar"].map(role => ({ sourceId: "official", role: role as "reports" | "news" | "calendar", status: role === "reports" ? "AVAILABLE" : "EMPTY", checkedAt: stamp, windowStart: new Date(now - 1000 - 86400000).toISOString(), windowEnd: stamp, complete: true, evidenceRefs: role === "reports" ? ["reports"] : [], reason: "fixture-only" })),
+    coverage: ["reports", "news", "calendar"].map(role => ({ sourceId: "official", role: role as "reports" | "news" | "calendar", status: role === "reports" ? "AVAILABLE" : "EMPTY", checkedAt: stamp, windowStart: new Date(now - 1000 - 86400000).toISOString(), windowEnd: stamp,
+      ...(role === "calendar" ? { occurrenceWindowStart: new Date(now - 2 * 86400000).toISOString(), occurrenceWindowEnd: new Date(now + 3 * 86400000).toISOString() } : {}),
+      complete: true, evidenceRefs: role === "reports" ? ["reports"] : [], reason: "fixture-only" })),
     reports: ["annual", "periodic"].map(kind => ({ id: kind, kind: kind as "annual" | "periodic", periodStart: policy[kind as "annual" | "periodic"].periodStart, periodEnd: policy[kind as "annual" | "periodic"].periodEnd, scope: "consolidated", evidenceRef: "reports", supersedes: null })),
     facts: ["annual", "periodic"].flatMap(kind => metrics.map(metric => {
       const instant = ["total_debt", "loans", "deposits", "tier1_ratio"].includes(metric), ratio = metric === "tier1_ratio";

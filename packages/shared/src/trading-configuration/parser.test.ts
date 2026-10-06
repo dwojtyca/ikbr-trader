@@ -199,3 +199,20 @@ test("bounds diagnostics and does not echo rejected values", () => {
   assert.equal(result.ok, false);
   if (!result.ok) assert.ok(result.issues.length <= 100);
 });
+
+test("scheduled entry capability is exact max2 and leaves supervised documents unchanged", () => {
+  const baseline = parseTradingConfiguration(clone());
+  assert.equal(baseline.ok, true);
+  if (baseline.ok) assert.deepEqual(baseline.configuration.entryPolicies[0], { id: "one_attempt", kind: "supervised_one_attempt", maxAttemptsPerAccountDay: 1 });
+  const input = clone();
+  input.entryPolicies[0].kind = "bounded_scheduled";
+  input.entryPolicies[0].maxAttemptsPerAccountDay = 2;
+  assert.equal(parseTradingConfiguration(input).ok, true);
+  for (const value of [1, 3, "2", null]) {
+    input.entryPolicies[0].maxAttemptsPerAccountDay = value;
+    assert.equal(parseTradingConfiguration(input).ok, false);
+  }
+  input.entryPolicies[0].kind = "supervised_one_attempt";
+  input.entryPolicies[0].maxAttemptsPerAccountDay = 2;
+  assert.equal(parseTradingConfiguration(input).ok, false);
+});

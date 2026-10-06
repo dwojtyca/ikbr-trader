@@ -92,12 +92,27 @@ test("declared evidence distinguishes complete EMPTY from incomplete zero result
 });
 
  test("calendar occurrence is independent from publication; absent occurrences cannot become dates", () => {
-  const base = { sourceId: "declared", sourceUrl: "https://example.com/news", fetchedAt, contentHash: "c".repeat(64), role: "calendar" as const, complete: true, windowStart: "2025-03-01T00:00:00Z", windowEnd: fetchedAt };
+  const base = { sourceId: "declared", sourceUrl: "https://example.com/news", fetchedAt, contentHash: "c".repeat(64), role: "calendar" as const, complete: true, windowStart: "2025-03-01T00:00:00Z", windowEnd: fetchedAt,
+    occurrenceWindowStart: "2025-03-01T00:00:00Z", occurrenceWindowEnd: "2025-05-02T00:00:00Z" };
   const item = { id: "e1", documentId: "event-1", issuerId: policy.issuerId, identifier: policy.identifiers[0], url: base.sourceUrl, contentHash: "d".repeat(64), published: { precision: "instant" as const, at: "2025-03-01T12:00:00Z" }, title: "Results", kind: "earnings" as const, occurs: { precision: "date" as const, date: "2025-04-30", timeZone: "America/New_York" } };
   const result = normalizeDeclaredEvidence({ ...base, items: [item] }, policy);
   assert.deepEqual(result.events[0].occurs, item.occurs);
   assert.deepEqual(result.evidence[0].published, { precision: "instant", at: "2025-03-01T12:00:00.000Z" });
+  assert.equal(result.coverage.status, "AVAILABLE");
+  assert.equal(result.coverage.checkedAt, new Date(fetchedAt).toISOString());
+  assert.equal(result.coverage.occurrenceWindowEnd, "2025-05-02T00:00:00.000Z");
+  assert.throws(() => normalizeDeclaredEvidence({ ...base, occurrenceWindowEnd: "2025-04-30T00:00:00Z", items: [item] }, policy), /outside window/);
+  assert.throws(() => normalizeDeclaredEvidence({ ...base, items: [{ ...item, published: { precision: "instant", at: "2025-04-30T00:00:00Z" } }] }, policy), /invalid or foreign/);
   assert.throws(() => normalizeDeclaredEvidence({ ...base, items: [{ ...item, occurs: undefined }] }, policy), /occurrence missing/);
+});
+test("declared calendar EMPTY needs an explicit occurrence range and cannot reuse a news query interval", () => {
+  const base = { sourceId: "declared", sourceUrl: "https://example.com/news", fetchedAt, contentHash: "c".repeat(64), role: "calendar" as const, complete: true, windowStart: "2025-03-01T00:00:00Z", windowEnd: fetchedAt, items: [] };
+  const legacy = normalizeDeclaredEvidence(base, policy);
+  assert.equal(legacy.coverage.status, "UNVERIFIED"); assert.equal(legacy.coverage.complete, false);
+  assert.equal(Object.hasOwn(legacy.coverage, "occurrenceWindowEnd"), false);
+  assert.throws(() => normalizeDeclaredEvidence({ ...base, occurrenceWindowStart: base.windowStart }, policy), /occurrence window/);
+  assert.throws(() => normalizeDeclaredEvidence({ ...base, occurrenceWindowStart: "2025-05-01T00:00:00Z", occurrenceWindowEnd: base.windowStart }, policy), /occurrence window/);
+  assert.throws(() => normalizeDeclaredEvidence({ ...base, role: "news", occurrenceWindowStart: base.windowStart, occurrenceWindowEnd: fetchedAt }, policy), /occurrence window/);
 });
  test("SEC missing numeric values never become zero", async () => {
   const sub = JSON.parse(await fixture("sec-submissions.json")), facts = JSON.parse(await fixture("sec-companyfacts.json"));

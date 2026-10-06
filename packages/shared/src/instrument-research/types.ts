@@ -70,6 +70,8 @@ export interface ResearchSourceResult {
   checkedAt: string;
   windowStart: string;
   windowEnd: string;
+  occurrenceWindowStart?: string;
+  occurrenceWindowEnd?: string;
   complete: boolean;
   evidenceRefs: string[];
   reason: string;

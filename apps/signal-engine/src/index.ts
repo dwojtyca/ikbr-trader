@@ -1,3 +1,4 @@
+import { BrokerStateContextProvider } from "./runtime/broker-state-provider.js";
 import { createMutationAuth, logSafeResponse, operatorSafeLogger, SIGNAL_MUTATING_READS } from "@ikbr/shared/http-auth";
 import { HttpWseStrategyMetadataReader } from "./runtime/trading-loop/wse-metadata-reader.js";
 import Fastify from "fastify";
@@ -198,7 +199,10 @@ if (config.runtimeEnabled) {
   });
   const marketDataRuntime = new MarketDataRuntime({
     registry: defaultInstrumentRegistry,
-    providers: [priceProvider],
+    providers: [priceProvider, ...(tradingConfiguration.loaded.mode === "bundle" ? [new BrokerStateContextProvider({
+      probe: new HttpReadyProbe({ engineUrl: config.executionRuntime.engineUrl, bearerToken: config.EXECUTION_API_TOKEN ?? "", requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
+      exposure: new HttpTradingExposureReader({ engineUrl: config.executionRuntime.engineUrl, bearerToken: config.EXECUTION_API_TOKEN ?? "", requestTimeoutMs: config.tradingLoop.exposureTimeoutMs }),
+    })] : [])],
     pipeline,
     freshnessPolicy: buildRuntimeFreshnessPolicy({
       base: DEFAULT_FRESHNESS_POLICY,
@@ -284,8 +288,7 @@ if (config.runtimeEnabled) {
     }
 
     // -------------------------------------------------------------------
-    // The configured scheduler evaluates assignments without entering
-    // ExecutionRuntime. Legacy scheduling retains its Paper execution path.
+    // Configured scheduling preserves the selected instance through proposal admission.
     // -------------------------------------------------------------------
     const exposureReader = new HttpTradingExposureReader({
       engineUrl,
@@ -340,6 +343,8 @@ if (config.runtimeEnabled) {
     });
     tradingLoopService = new TradingLoopService({
       configuredStrategyRuntime,
+      configuredSubmissionEnabled: config.executionRuntime.enabled,
+      stockMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs, stock: true }),
       assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
       wseMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
       config: config.tradingLoop,

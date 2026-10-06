@@ -120,6 +120,7 @@ export type ExecutionRuntimeOutcome =
       readonly outcome: "NOT_SUBMITTED";
       readonly pipeline: TradingPipelineResult;
       readonly reason: NotSubmittedReason;
+      readonly denialReason?: string;
       readonly message?: string;
     }
   | {
@@ -184,6 +185,7 @@ export interface ExecuteInput {
  */
 export interface ExecutePreparedInput {
   readonly indicators?: IndicatorSnapshot;
+  readonly strategySignal?: { readonly confidenceScore: number; readonly entryReason: string };
   readonly dryRunResult: DryRunResult;
   readonly idempotencyKey: string;
   /**
@@ -361,6 +363,7 @@ export class ExecutionRuntime {
       input.bound,
       input.strategyId,
       input.indicators,
+      input.strategySignal,
     );
   }
 
@@ -375,6 +378,7 @@ export class ExecutionRuntime {
     bound: BoundInstrument | undefined,
     strategyLabel: string,
     indicators?: IndicatorSnapshot,
+    strategySignal?: ExecutePreparedInput["strategySignal"],
   ): Promise<ExecutionRuntimeOutcome> {
     const pipeline = dryRunResult.pipeline;
 
@@ -408,6 +412,12 @@ export class ExecutionRuntime {
     try {
       legacyTicket = toLegacySignalTicket(ticket, { bound });
       if (indicators) legacyTicket.indicators = indicators;
+      if (strategySignal) {
+        if (!Number.isFinite(strategySignal.confidenceScore) || strategySignal.confidenceScore < 0 || strategySignal.confidenceScore > 1 || !strategySignal.entryReason)
+          throw new Error("STRATEGY_SIGNAL_INVALID");
+        legacyTicket.confidence = strategySignal.confidenceScore;
+        legacyTicket.reason = strategySignal.entryReason;
+      }
     } catch (err) {
       // The mapper rejects tickets that cannot be represented on
       // the legacy wire (STP_LMT, STP+bracket). These are deterministic
@@ -517,6 +527,7 @@ export class ExecutionRuntime {
           pipeline,
           reason: "PIPELINE_FAILURE",
           message: `execution-engine rejected the submission (${submission.statusCode}): ${submission.message}`,
+          denialReason: submission.denialReason,
         };
       case "unknown":
         return {

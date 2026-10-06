@@ -372,3 +372,11 @@ describe("HttpExecutionTicketSubmitter — bound AI proposal pending", () => {
     assert.equal(body.clientOrderHash, INPUT.clientOrderHash);
   });
 });
+
+it("structured risk denial preserves the actual reason without being an identity conflict", async () => {
+  const submitter = new HttpExecutionTicketSubmitter({engineUrl:"http://fixture",bearerToken:"fixture",requestTimeoutMs:1000,
+    fetchImpl:async()=>new Response(JSON.stringify({outcome:"RISK_REJECTED",reason:"paper_daily_loss_coverage_unavailable"}),{status:409})});
+  const result = await submitter.submit({ticket:{} as SignalTicket,strategy:"fixture",clientOrderId:"fixture",clientOrderHash:"fixture"});
+  assert.equal(result.kind,"not_submitted");
+  if(result.kind==="not_submitted") assert.equal(result.denialReason,"paper_daily_loss_coverage_unavailable");
+});

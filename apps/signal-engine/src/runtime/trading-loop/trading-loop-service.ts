@@ -1,5 +1,5 @@
 import type { ConfiguredStrategyRuntime } from "../strategy/configured-strategy-runtime.js";
-import type { WseStrategyPriceEvidence } from "@ikbr/shared";
+import type { StockStrategyPriceEvidence, WseStrategyPriceEvidence } from "@ikbr/shared";
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 /**
  * Trading Loop — core service.
@@ -51,7 +51,7 @@ import type {
   InstrumentRegistry,
   SignalAttributionContext,
 } from "@ikbr/shared";
-import { isWseBound, normalizeWseStrategyLevels, findStrategyProfile, mapAssetClassToIbkrSecType } from "@ikbr/shared";
+import { normalizeStockStrategyLevels, strategyTriggerId, isWseBound, normalizeWseStrategyLevels, findStrategyProfile, mapAssetClassToIbkrSecType } from "@ikbr/shared";
 import type { FastifyBaseLogger } from "fastify";
 
 import type { DryRunResult, MarketDataRuntime } from "../runtime.js";
@@ -92,6 +92,8 @@ export interface StrategyRuntimeStateRepository
 }
 
 export interface TradingLoopServiceOptions {
+  readonly configuredSubmissionEnabled?: boolean;
+  readonly stockMetadataReader?: WseStrategyMetadataReader;
   readonly configuredStrategyRuntime?: Pick<ConfiguredStrategyRuntime, "evaluate" | "listInstrumentIds">;
   readonly assertEntryAllowed?: () => Promise<void>;
   readonly config: TradingLoopConfig;
@@ -193,6 +195,8 @@ function mapAssetClassToSecType(
 }
 
 export class TradingLoopService {
+  readonly #configuredSubmissionEnabled: boolean;
+  readonly #stockMetadataReader?: WseStrategyMetadataReader;
   readonly #configuredStrategyRuntime?: TradingLoopServiceOptions["configuredStrategyRuntime"];
   readonly #assertEntryAllowed?: () => Promise<void>;
   readonly #config: TradingLoopConfig;
@@ -223,6 +227,7 @@ export class TradingLoopService {
   #nextCycleAt: Date | null = null;
   #stopping = false;
   #cycleCount = 0;
+  #configuredStartIndex = 0;
   readonly #inFlight = new Map<string, Promise<void>>();
   readonly #lastOutcomes = new Map<string, TradingLoopInstrumentReport>();
 
@@ -248,6 +253,8 @@ export class TradingLoopService {
     }
     if (!options.logger)
       throw new Error("TradingLoopService: logger is required");
+    this.#configuredSubmissionEnabled = options.configuredSubmissionEnabled === true;
+    this.#stockMetadataReader = options.stockMetadataReader;
     this.#configuredStrategyRuntime = options.configuredStrategyRuntime;
     this.#assertEntryAllowed = options.assertEntryAllowed;
     this.#config = options.config;
@@ -533,29 +540,85 @@ export class TradingLoopService {
     const cycleId = randomUUID(), startedAt = this.#clock();
     this.#lastCycleAt = startedAt; this.#cycleCount++;
     this.#nextCycleAt = this.#config.enabled ? new Date(startedAt.getTime() + this.#config.intervalMs) : null;
-    const reports: TradingLoopInstrumentReport[] = [];
-    for (const instrumentId of this.#configuredStrategyRuntime!.listInstrumentIds()) {
+    const reports: TradingLoopInstrumentReport[] = [], tasks: Promise<void>[] = [];
+    const instrumentIds = this.#configuredStrategyRuntime!.listInstrumentIds();
+    const startIndex = this.#configuredStartIndex % Math.max(1, instrumentIds.length);
+    this.#configuredStartIndex = (startIndex + 1) % Math.max(1, instrumentIds.length);
+    for (let offset = 0; offset < instrumentIds.length; offset++) {
+      const instrumentId = instrumentIds[(startIndex + offset) % instrumentIds.length];
       if (this.#stopping) { this.#recordSkip(cycleId,instrumentId,'LOOP_DISABLED',reports); continue; }
+      if (this.#config.instrumentIds.length && !this.#config.instrumentIds.includes(instrumentId)) {
+        this.#recordSkip(cycleId,instrumentId,'NOT_IN_SCOPE',reports); continue;
+      }
       if (this.#inFlight.has(instrumentId)) { this.#recordSkip(cycleId,instrumentId,'RUN_IN_PROGRESS',reports); continue; }
-      const start = this.#clock();
-      const task = (async () => {
-        try {
-          const evaluation = await this.#configuredStrategyRuntime!.evaluate(instrumentId);
-          const report = this.#finalize(cycleId, instrumentId, start, { kind:"CONFIGURED_EVALUATION", instrumentId, evaluation });
-          reports.push(report); this.#lastOutcomes.set(instrumentId, report);
-        } catch (error) {
-          const report=this.#finalize(cycleId,instrumentId,start,{kind:'ERROR',instrumentId,message:'configured evaluation failed'});
-          reports.push(report);this.#lastOutcomes.set(instrumentId,report);
-          await this.#diagnostics?.capture({cycleId,startedAt,finishedAt:this.#clock(),durationMs:this.#clock().getTime()-startedAt.getTime(),reports});
-          throw error;
-        }
-      })();
-      this.#inFlight.set(instrumentId, task);
-      try { await task; } finally { this.#inFlight.delete(instrumentId); }
+      if (this.#inFlight.size >= this.#config.maxConcurrentInstruments) { this.#recordSkip(cycleId,instrumentId,'CONCURRENCY_CAP',reports); continue; }
+      const task = this.#runConfiguredInstrument(cycleId, instrumentId).then(report => {
+        reports.push(report); this.#lastOutcomes.set(instrumentId, report);
+      }).catch(() => {
+        const report = this.#finalize(cycleId,instrumentId,startedAt,{kind:'ERROR',instrumentId,message:'configured evaluation failed'});
+        reports.push(report); this.#lastOutcomes.set(instrumentId,report);
+      }).finally(() => { this.#inFlight.delete(instrumentId); });
+      this.#inFlight.set(instrumentId, task); tasks.push(task);
     }
+    await Promise.all(tasks);
     this.#trimLastOutcomes();
     const finishedAt = this.#clock();
     return { cycleId, startedAt, finishedAt, durationMs:finishedAt.getTime()-startedAt.getTime(), reports };
+  }
+
+  async #runConfiguredInstrument(cycleId: string, instrumentId: string): Promise<TradingLoopInstrumentReport> {
+    const startedAt = this.#clock();
+    const evaluation = await this.#configuredStrategyRuntime!.evaluate(instrumentId);
+    const finish = (outcome: TradingLoopInstrumentOutcome): TradingLoopInstrumentReport =>
+      ({...this.#finalize(cycleId, instrumentId, startedAt, outcome), evaluation});
+    const skip = (reason: TradingLoopSkipReason, message?: string) => finish({kind:'SKIPPED',instrumentId,reason,message});
+    if (!this.#configuredSubmissionEnabled || evaluation.kind !== 'signal')
+      return finish({kind:'CONFIGURED_EVALUATION',instrumentId,evaluation});
+    try { await this.#assertEntryAllowed?.(); }
+    catch { return skip('CONFIGURATION_NOT_READY'); }
+    const instrument = this.#registry.getInstrumentOrThrow(instrumentId);
+    const bound = this.#bindingAuthority?.getBoundInstrument(instrumentId);
+    if (!bound) return skip('INSTRUMENT_BINDING_UNAVAILABLE');
+    if (!this.#reconciliationReader) return skip('RECONCILIATION_UNAVAILABLE');
+    try {
+      const check = await this.#reconciliationReader.checkInstrument({instrument:bound.brokerSymbol,conId:String(bound.conId),
+        secType:mapAssetClassToSecType(instrument.assetClass),exchange:bound.exchange,currency:bound.currency});
+      if (check.kind !== 'pass') return skip(check.kind === 'hold' ? 'RECONCILIATION_HOLD' : check.kind === 'stale' ? 'RECONCILIATION_STALE' : 'RECONCILIATION_UNAVAILABLE');
+    } catch { return skip('RECONCILIATION_UNAVAILABLE'); }
+    try {
+      const exposure = await this.#exposureReader.readExposure({instrumentId,brokerSymbol:bound.brokerSymbol});
+      if (exposure.hasOpenPosition || exposure.hasActiveOrder || exposure.hasPendingProposal || exposure.hasAmbiguousSubmission)
+        return skip('EXPOSURE_BLOCKED');
+      if (exposure.quantity !== undefined && exposure.quantity !== 0) return skip('EXPOSURE_DATA_CONTRADICTION');
+    } catch { return skip('EXPOSURE_READ_FAILED'); }
+    const resolution = resolveInstrumentPolicy(instrument);
+    const signal = evaluation.signal;
+    if (!resolution.ok || !signal || !evaluation.strategyAttribution || !evaluation.strategyTrigger ||
+        signal.strategyId !== evaluation.strategyAttribution.implementationId ||
+        signal.strategyId !== resolution.executionPolicy.strategyId ||
+        signal.strategyAttribution !== evaluation.strategyAttribution || signal.strategyTrigger !== evaluation.strategyTrigger)
+      return skip('STRATEGY_POLICY_MISMATCH');
+    let prices: StockStrategyPriceEvidence;
+    try {
+      if (!this.#stockMetadataReader) throw new Error('stock_metadata_unavailable');
+      const source = await this.#stockMetadataReader.read(bound);
+      prices = normalizeStockStrategyLevels(source.metadata, bound, source.accountId, {
+        entry:signal.suggestedEntry!,stopLoss:signal.stopLoss!,takeProfit:signal.takeProfit!,
+      },this.#clock().getTime());
+    } catch { return skip('STRATEGY_POLICY_MISMATCH','stock_strategy_prices_unavailable'); }
+    let prepared: DryRunResult;
+    try {
+      prepared = await this.#marketDataRuntime.prepareConfiguredSignal({instrumentId,signal,
+        policy:{...resolution.policy,strategyPrices:prices.final}});
+    } catch { return skip('STRATEGY_POLICY_MISMATCH','configured_signal_preparation_failed'); }
+    if (prepared.pipeline.outcome === 'SUCCESS' && (prepared.pipeline.ticket.order.limitPrice !== prices.final.entry ||
+        prepared.pipeline.ticket.protection.stopLoss !== prices.final.stopLoss || prepared.pipeline.ticket.protection.takeProfit !== prices.final.takeProfit))
+      return skip('STRATEGY_POLICY_MISMATCH','configured_strategy_prices_changed');
+    const idempotencyKey = this.#keyBuilder.build({instrumentId,strategyId:signal.strategyId,
+      triggerId:strategyTriggerId(evaluation.strategyTrigger)});
+    const runtime = await this.#executionRuntime.executePrepared({dryRunResult:prepared,idempotencyKey,bound,strategyId:signal.strategyId,
+      strategySignal:signal,indicators:{...evaluation.indicators,stockStrategyPriceEvidence:prices}});
+    return finish(this.#classifyRuntimeOutcome(instrumentId,idempotencyKey,runtime));
   }
 
   #trimLastOutcomes(): void {

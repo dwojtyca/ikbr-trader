@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { TwsExecutionClient, type BrokerOrderStatusUpdate } from "./tws-execution-client.js";
 import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapter.js";
+import { paperAccountDayStart } from "./paper-daily-loss.js";
 
 class FakeIb extends EventEmitter {
   cancelCalls: number[] = [];
@@ -144,17 +145,17 @@ for (const raw of ["20260923 12:00:00", "20260230 12:00:00", "20260923 12:00:00 
   });
 }
 
-test("daily execution coverage sends UTC wire filter, waits matching end and records its actual end time", async () => {
+test("daily execution coverage sends Warsaw midnight in UTC wire filter, waits matching end and records its actual end time", async () => {
   const ib = new FakeIb(), client = makeClient(ib);
   let wire: Record<string, unknown> | undefined, requestId = -1;
   ib.reqExecutions = (id: number, filter?: Record<string, unknown>) => { requestId = id; wire = filter; };
   await client.connect();
   const adapter = new IbBrokerReconciliationAdapter(client, { load: async () => ({ ok: true, rows: [] }) });
-  const started = new Date(); const midnight = new Date(started); midnight.setUTCHours(0,0,0,0);
+  const started = new Date(); const midnight = new Date(paperAccountDayStart(started.getTime()));
   const pending = adapter.capture({ accountId: "PAPER", sessionId: "current", sessionStartedAt: started,
     safetyMarginMs: 0, sourceTimeoutMs: 1000, abortSignal: new AbortController().signal });
   await turn();
-  assert.equal(wire?.time, midnight.toISOString().slice(0,10).replaceAll("-", "") + "-00:00:00");
+  assert.equal(wire?.time, midnight.toISOString().slice(0,10).replaceAll("-", "") + "-" + midnight.toISOString().slice(11,19));
   assert.equal(wire?.acctCode, "PAPER"); assert.equal(wire?.clientId, 0);
   let settled = false; void pending.then(() => { settled = true; });
   ib.emit("execDetailsEnd", requestId + 1); await turn(); assert.equal(settled, false);

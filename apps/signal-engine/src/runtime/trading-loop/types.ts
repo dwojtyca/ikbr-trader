@@ -31,6 +31,7 @@ import type {
  * concurrency cap) or at the runtime layer (paper guard, pipeline).
  */
 export type TradingLoopSkipReason =
+  | "CONFIGURATION_NOT_READY"
   | "LOOP_DISABLED"
   | "NOT_IN_SCOPE"
   | "RUN_IN_PROGRESS"
@@ -131,6 +132,7 @@ export type TradingLoopInstrumentOutcome =
     };
 
 export interface TradingLoopInstrumentReport {
+  readonly evaluation?: ConfiguredStrategyEvaluation;
   readonly cycleId: string;
   readonly instrumentId: string;
   readonly startedAt: Date;

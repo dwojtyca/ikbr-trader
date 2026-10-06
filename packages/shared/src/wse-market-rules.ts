@@ -105,6 +105,18 @@ export function normalizeWseStrategyLevels(metadata: unknown, bound: BoundInstru
   raw: WseStrategyPriceEvidence["raw"], nowMs: number): WseStrategyPriceEvidence {
   if (!raw || ![raw.entry, raw.stopLoss, raw.takeProfit].every(p => Number.isFinite(p) && p > 0)
     || raw.stopLoss >= raw.entry || raw.takeProfit <= raw.entry) throw new Error("wse_strategy_levels_invalid");
+  const final = normalizeStrategyPriceBands(metadata, raw);
+  const validated = validateWseOrder(metadata, bound, accountId, {
+    instrument: bound.brokerSymbol, instrumentId: bound.instrumentId, conid: String(bound.conId),
+    side: "BUY", quantity: 1, orderType: "LMT", entry: final.entry, stop: final.stopLoss, takeProfit: final.takeProfit,
+    reason: "strategy", confidence: 1, timestamp: new Date(nowMs).toISOString(), riskCheckStatus: "PASS",
+  }, nowMs);
+  if (!validated.ok) throw new Error(validated.reason);
+  return Object.freeze({ raw: Object.freeze({ ...raw }), final: Object.freeze(final), metadata: validated.metadata, normalizedAtMs: nowMs });
+}
+
+export function normalizeStrategyPriceBands(metadata: unknown, raw: { entry: number; stopLoss: number; takeProfit: number }): { entry: number; stopLoss: number; takeProfit: number } {
+  if (![raw.entry, raw.stopLoss, raw.takeProfit].every(p => Number.isFinite(p) && p > 0) || raw.stopLoss >= raw.entry || raw.takeProfit <= raw.entry) throw new Error("strategy_levels_invalid");
   if (!record(metadata) || !Array.isArray(metadata.priceIncrements) || metadata.priceIncrements.length < 1
     || metadata.priceIncrements.length > 256) throw new Error("wse_market_rule_invalid");
   const bands = metadata.priceIncrements as WseMarketMetadata["priceIncrements"];
@@ -131,11 +143,5 @@ export function normalizeWseStrategyLevels(metadata: unknown, bound: BoundInstru
     return up ? Math.min(...candidates) : Math.max(...candidates);
   };
   const final = { entry: round(raw.entry, false), stopLoss: round(raw.stopLoss, false), takeProfit: round(raw.takeProfit, true) };
-  const validated = validateWseOrder(metadata, bound, accountId, {
-    instrument: bound.brokerSymbol, instrumentId: bound.instrumentId, conid: String(bound.conId),
-    side: "BUY", quantity: 1, orderType: "LMT", entry: final.entry, stop: final.stopLoss, takeProfit: final.takeProfit,
-    reason: "strategy", confidence: 1, timestamp: new Date(nowMs).toISOString(), riskCheckStatus: "PASS",
-  }, nowMs);
-  if (!validated.ok) throw new Error(validated.reason);
-  return Object.freeze({ raw: Object.freeze({ ...raw }), final: Object.freeze(final), metadata: validated.metadata, normalizedAtMs: nowMs });
+  return final;
 }

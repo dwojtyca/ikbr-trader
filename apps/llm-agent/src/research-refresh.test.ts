@@ -80,12 +80,13 @@ test("HTTP failure destroys an infinite response body before retry can begin", a
   assert.equal(responseDestroyed, true);
 });
 
-function setup(budget: number, successfulNews = false) {
+function setup(budget: number, successfulNews = false, calendar?: { occurrenceWindowStart?: string; occurrenceWindowEnd?: string }) {
   const fixture = researchFixture();
   const manifest = structuredClone(fixture.manifest);
   manifest.refreshEnabled = true; manifest.instruments = [structuredClone(fixture.policy)];
   const source = manifest.instruments[0].sources[0];
-  source.roles = [successfulNews ? "news" : "reports"]; source.adapter = "issuer-document"; source.parserConfig = { kind: successfulNews ? "declared-evidence" : "issuer-xhtml" };
+  const declared = successfulNews || calendar !== undefined;
+  source.roles = [calendar !== undefined ? "calendar" : successfulNews ? "news" : "reports"]; source.adapter = "issuer-document"; source.parserConfig = { kind: declared ? "declared-evidence" : "issuer-xhtml" };
   source.maxRequestsPerDay = budget; source.maxCostMicrosPerDay = budget; source.costMicrosPerCall = 1;
   const manifestHash = researchHash(manifest);
   let fetches = 0; const reserved = new Set<string>(); const slots = new Set<string>(); const snapshots: unknown[] = [];
@@ -100,7 +101,7 @@ function setup(budget: number, successfulNews = false) {
   };
   const make = () => new ResearchRefreshScheduler({ manifest, manifestHash, accountId: "DU1", store: store as any,
     fetch: async () => { fetches++; const end = new Date(Date.now() - 60000).toISOString();
-      return { payload: Buffer.from(successfulNews ? JSON.stringify({ role: "news", complete: true, windowStart: new Date(Date.parse(end) - 86400000).toISOString(), windowEnd: end, items: [] }) : "malformed"), contentHash: "a".repeat(64), contentType: successfulNews ? "application/json" : "application/xhtml+xml" }; } });
+      return { payload: Buffer.from(declared ? JSON.stringify({ role: source.roles[0], complete: true, windowStart: new Date(Date.parse(end) - 86400000).toISOString(), windowEnd: end, ...calendar, items: [] }) : "malformed"), contentHash: "a".repeat(64), contentType: declared ? "application/json" : "application/xhtml+xml" }; } });
   return { make, snapshots, reserved, slots, get fetches() { return fetches; } };
 }
 
@@ -126,6 +127,21 @@ test("a successful empty news slot survives restart without a duplicate call or 
   await state.make().tick();
   assert.equal(state.fetches, 1);
   assert.equal(state.snapshots.length, 1);
+});
+test("refresh persists independent future calendar range, while absent or past-only range stays unverified", async () => {
+  const now = Date.now();
+  for (const calendar of [{}, { occurrenceWindowStart: new Date(now - 2 * 86400000).toISOString(), occurrenceWindowEnd: new Date(now - 86400000).toISOString() }]) {
+    const state = setup(2, false, calendar); await state.make().tick();
+    const coverage = (state.snapshots[0] as any).coverage[0];
+    assert.equal(coverage.status, "UNVERIFIED"); assert.equal(coverage.complete, false);
+    await state.make().tick(); assert.equal(state.fetches, 1);
+  }
+  const range = { occurrenceWindowStart: new Date(now - 2 * 86400000).toISOString(), occurrenceWindowEnd: new Date(now + 3 * 86400000).toISOString() };
+  const state = setup(2, false, range); await state.make().tick();
+  const coverage = (state.snapshots[0] as any).coverage[0];
+  assert.equal(coverage.status, "EMPTY"); assert.equal(coverage.complete, true);
+  assert.equal(coverage.occurrenceWindowStart, range.occurrenceWindowStart); assert.equal(coverage.occurrenceWindowEnd, range.occurrenceWindowEnd);
+  assert.ok(Date.parse(coverage.checkedAt) < now); assert.ok(Date.parse(coverage.occurrenceWindowEnd) > now);
 });
 
 test("concurrent ticks never fetch the same source twice", async () => {

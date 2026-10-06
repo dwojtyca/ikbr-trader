@@ -9,7 +9,7 @@ its [report](PP2_IMPLEMENTATION_REPORT.md) records accepted review, required loc
 checks, publication and successful exact-source-commit CI.
 PP3 is delivered with accepted review, required checks and successful exact-source
 CI; see the [PP3 report](PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is independently reviewed, with real-source acceptance blocked;
-see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with independent review, required checks and exact-source CI passed; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6 is delivered with accepted independent reviews, required checks, isolated recovery/root-CLI drills and exact-source CI passed; evidence is recorded in the [PP6 report](PP6_IMPLEMENTATION_REPORT.md). PP7 remains planned. [Current state](../CURRENT_STATE.md) is the baseline;
+see the [PP4 report](PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered with independent review, required checks and exact-source CI passed; see the [PP5 report](PP5_IMPLEMENTATION_REPORT.md). PP6 is delivered with accepted independent reviews, required checks, isolated recovery/root-CLI drills and exact-source CI passed; evidence is recorded in the [PP6 report](PP6_IMPLEMENTATION_REPORT.md). PP7 implementation and remaining real-source/gate blockers are tracked in the [PP7 report](PP7_IMPLEMENTATION_REPORT.md). [Current state](../CURRENT_STATE.md) is the baseline;
 [ROADMAP](../ROADMAP.md) owns sequencing. Each PP package below requires its own
 bounded implementation plan and independent acceptance before code changes.
 Model assignments added 2026-09-28; they do not change the product acceptance gates.
@@ -519,6 +519,8 @@ do not resolve PP4 coverage or certified broker-accounting blockers or prove PP7
 ## 11. PP7 — Configured flow completion, broker acceptance and automated Paper soak
 
 **Bounded plan:** [PP7_IMPLEMENTATION_PLAN.md](PP7_IMPLEMENTATION_PLAN.md).
+Implementation status and evidence: [PP7 report](PP7_IMPLEMENTATION_REPORT.md).
+The prerequisites below define acceptance, not a claim that real gates have passed.
 PP7 now includes implementation needed to finish the configured flow, followed by
 the [acceptance runbook](../../runbooks/PRODUCTION_PAPER_ACCEPTANCE.md). Reuse shipped
 PP0–PP6 mechanisms; do not treat their tests/CI as evidence of end-to-end operation.
@@ -528,7 +530,7 @@ authorize deployment, activation, broker actions or paid calls.
 ### Implementation prerequisites before broker acceptance
 
 1. **PP7-D:** connect the configured scheduled evaluation to the existing validated
-   ticket, persisted proposal, mandatory AI and execution-risk path. Currently
+   ticket, persisted proposal, mandatory AI and execution-risk path. At the pre-PP7 baseline,
    `#runConfiguredCycle` only records evaluation and `ConfiguredStrategyRuntime`
    always reports `entryAllowed: false` / `PP4_RESEARCH_UNAVAILABLE`. Preserve the
    selected instance/trigger/contract and strategy prices, all runtime admission
@@ -542,7 +544,7 @@ authorize deployment, activation, broker actions or paid calls.
    fee coverage required by daily-loss risk. The production adapter currently lacks
    the `certifiedFrom` evidence the guard requires. Use verified source capability;
    never fabricate certification or loosen risk because history is unavailable.
-4. **PP7-G:** implement the currently rejected `bounded_scheduled` policy, finite
+4. **PP7-G:** implement the formerly rejected `bounded_scheduled` policy, finite
    multi-session windows and durable transition/reservation/migration. Keep the
    supervised limits for Gate B; scheduled activation requires Gate B and explicit
    bounded authorization. Retain consumed/unknown attempts across config/run changes.

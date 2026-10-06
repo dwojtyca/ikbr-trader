@@ -160,6 +160,7 @@ export interface SignalTicket {
 }
 
 export interface IndicatorSnapshot {
+  stockStrategyPriceEvidence?: import("./stock-execution.js").StockStrategyPriceEvidence;
   strategyPriceEvidence?: import("./wse-market-rules.js").WseStrategyPriceEvidence;
   ema20?: number;
   ema50?: number;

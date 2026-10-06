@@ -1,0 +1,112 @@
+{
+  "documentVersion": 1,
+  "purpose": "PP7 disabled release review; not an executable trading policy",
+  "activationAuthorized": false,
+  "release": {
+    "sourceCommit": null,
+    "imageDigest": null,
+    "exactCommitCiUrl": null,
+    "migrationsThrough": 26
+  },
+  "controls": {
+    "IBKR_ENVIRONMENT": "paper",
+    "TRADING_ENABLED": false,
+    "EXECUTION_ENTRIES_PAUSED": true,
+    "TRADING_LOOP_ENABLED": false,
+    "EXECUTION_LIFECYCLE_AUTOMATION_ENABLED": false,
+    "uiRequired": false,
+    "EXECUTION_RUNTIME_ENABLED": false,
+    "TRADING_CONFIG_MODE": "bundle"
+  },
+  "privateAccount": {
+    "verifiedAccountId": null,
+    "allowlistVerified": false
+  },
+  "configuration": {
+    "path": "config/trading/paper.v1.json",
+    "effectiveHash": null,
+    "allServiceHashesMatch": false,
+    "strategyEnabled": false,
+    "instrumentEntriesEnabled": false
+  },
+  "instruments": [
+    {
+      "id": "pko_wse",
+      "symbol": "PKO",
+      "conId": 35146360,
+      "exchange": "WSE",
+      "currency": "PLN",
+      "strategyInstance": "momentum_default",
+      "revision": 1,
+      "brokerIdentityVerified": false
+    },
+    {
+      "id": "aapl_nasdaq",
+      "symbol": "AAPL",
+      "conId": 265598,
+      "exchange": "SMART",
+      "primaryExchange": "NASDAQ",
+      "currency": "USD",
+      "strategyInstance": "momentum_default",
+      "revision": 1,
+      "brokerIdentityVerified": false
+    }
+  ],
+  "authorization": {
+    "ownerDecisionReference": null,
+    "gate": null,
+    "startsAt": null,
+    "endsAt": null,
+    "operator": null
+  },
+  "limits": {
+    "quantity": 1,
+    "gateBMaxAttemptsPerAccountDay": 1,
+    "gateCMaxAttemptsPerAccountDay": 2,
+    "gateCMaxAttemptsPerInstrumentDay": 1,
+    "activeIntentsPerAccount": 1,
+    "allowOvernight": false,
+    "currencyCaps": null,
+    "exitMarginMinutes": null
+  },
+  "providers": {
+    "paidCallsAuthorized": false,
+    "maxRequests": 0,
+    "maxCost": 0,
+    "costCurrency": null,
+    "model": null,
+    "modelProbeEvidence": null,
+    "researchManifestHash": null
+  },
+  "readinessEvidence": {
+    "brokerAccountDayCoverage": null,
+    "researchPko": null,
+    "researchAapl": null,
+    "quoteAndHistory": null,
+    "sessionCalendars": null,
+    "supervisionAndAlerts": null,
+    "backupRestore": null
+  },
+  "gates": {
+    "A": "BLOCKED",
+    "B": {
+      "PKO": 0,
+      "AAPL": 0
+    },
+    "C": {
+      "PKO": 0,
+      "AAPL": 0
+    },
+    "D": {
+      "isolatedEvidence": null,
+      "authorizedPaperRestart": null
+    }
+  },
+  "blockers": [
+    "PKO_CAPITAL_SOURCE_CONFLICT",
+    "REQUIRED_NEWS_AND_CALENDAR_COVERAGE_UNVERIFIED",
+    "MODEL_ACCESS_UNVERIFIED",
+    "BROKER_ACCOUNT_DAY_CERTIFICATION_UNAVAILABLE",
+    "OPERATIONAL_SCOPE_NOT_AUTHORIZED"
+  ]
+}

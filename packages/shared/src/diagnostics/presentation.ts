@@ -33,6 +33,12 @@ const reasons: Record<string, { message: string; impact: string; action: string 
 };
 
 const explanations: Array<[string[], string, string, string]> = [
+  [['RESEARCH_PER_PROPOSAL_REQUIRED'], 'Każda propozycja wymaga osobnej oceny badań i AI.', 'Sam sygnał strategii nie dopuszcza wejścia.', 'Sprawdź powiązany snapshot badań i decyzję propozycji.'],
+  [['CONFIGURATION_NOT_READY'], 'Konfiguracja nie uzyskała gotowości do wejścia.', 'Nowa propozycja nie przechodzi dalej.', 'Sprawdź hash, obserwacje usług i stan migracji konfiguracji.'],
+  [['paper_daily_loss_coverage_unavailable','paper_daily_loss_reconciliation_unavailable','paper_daily_loss_unavailable'], 'Brakuje potwierdzonych danych brokera do kontroli dziennej straty.', 'Nie można potwierdzić przestrzegania limitu; wejście jest blokowane.', 'Sprawdź pokrycie całego dnia konta, świeże uzgodnienie oraz prowizje.'],
+  [['paper_daily_loss_accounting_incomplete','paper_daily_loss_accounting_invalid','paper_daily_loss_execution_invalid','paper_daily_loss_execution_duplicate','paper_daily_loss_context_invalid'], 'Dane rozliczenia dziennej straty są niepełne lub niespójne.', 'Kontrola ryzyka nie dopuszcza wejścia.', 'Sprawdź identyfikatory realizacji, koszty i tożsamość konta; nie usuwaj zapisów.'],
+  [['paper_daily_loss_changed'], 'Dane dziennej straty zmieniły się podczas oceny.', 'Poprzednia ocena ryzyka nie uprawnia do wysłania.', 'Sprawdź świeże uzgodnienie i audyt tej propozycji.'],
+  [['paper_daily_loss_exceeded'], 'Dzienny limit straty został wykorzystany.', 'Nowe wejście jest blokowane.', 'Sprawdź rozliczenie dnia i zachowaj zużyty budżet.'],
   [['NO_STRATEGY_SIGNAL'], 'Strategia nie wygenerowała sygnału.', 'Brak propozycji wejścia.', 'Poczekaj na kolejną ocenę.'],
   [['ENTRY_DISABLED','EXECUTION_ENTRIES_PAUSED','ENTRY_PAUSED','paper_trading_disabled','LOOP_DISABLED'], 'Nowe wejścia są wyłączone lub wstrzymane.', 'Ten stan nie zatrzymuje już wysłanych zleceń ani obsługiwanych automatycznych wyjść.', 'Sprawdź master, pauzę startową i trwałą pauzę.'],
   [['STRATEGY_INSTANCE_DISABLED','STRATEGY_SAFETY_DISABLED'], 'Przypisana strategia jest wyłączona lub w okresie blokady.', 'Nie powstaje nowe wejście tej strategii.', 'Sprawdź przypisanie i zapisaną przyczynę blokady.'],

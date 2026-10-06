@@ -1,4 +1,4 @@
-import type { CandleTimeframe, InstrumentBindingAuthority, InstrumentRegistry, StrategyInstanceAttributionV1, StrategyTriggerV1, TradingConfigurationV1, TradingStrategyInstanceV1 } from "@ikbr/shared";
+import type { IndicatorSnapshot, CandleTimeframe, InstrumentBindingAuthority, InstrumentRegistry, StrategyInstanceAttributionV1, StrategyTriggerV1, TradingConfigurationV1, TradingStrategyInstanceV1 } from "@ikbr/shared";
 import { buildStrategyAttribution } from "@ikbr/shared/trading-config";
 import { createConfiguredStrategy } from "../../strategies/strategy-registry.js";
 import type { Strategy, StrategySignal } from "../../strategies/strategy.types.js";
@@ -16,6 +16,7 @@ export interface ConfiguredStrategyEvaluation {
   readonly strategyAttribution?: StrategyInstanceAttributionV1;
   readonly strategyTrigger?: StrategyTriggerV1;
   readonly signal?: StrategySignal;
+  readonly indicators?: IndicatorSnapshot;
   readonly reasons: readonly string[];
   readonly entryAllowed: false;
   readonly entryBlockers: readonly string[];
@@ -48,7 +49,7 @@ export class ConfiguredStrategyRuntime {
   listInstrumentIds(): readonly string[] { return this.options.configuration.instruments.map(row => row.id); }
   async evaluate(instrumentId: string): Promise<ConfiguredStrategyEvaluation> {
     const result = (kind: ConfiguredStrategyEvaluation["kind"], reasons: string[], rest: Partial<ConfiguredStrategyEvaluation> = {}): ConfiguredStrategyEvaluation =>
-      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(["PP4_RESEARCH_UNAVAILABLE"]) });
+      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(["RESEARCH_PER_PROPOSAL_REQUIRED"]) });
     const row = this.options.configuration.instruments.find(i => i.id === instrumentId);
     if (!row) return result("error", ["INSTRUMENT_NOT_CONFIGURED"]);
     if (!row.entryEnabled || !row.monitoringEnabled) return result("disabled", ["ENTRY_DISABLED"]);
@@ -110,7 +111,7 @@ export class ConfiguredStrategyRuntime {
       const triggerNow = (this.options.clock?.() ?? new Date()).getTime();
       if (!Number.isFinite(observed) || observed > triggerNow || triggerNow-observed >= 90_000) return result("error", ["STRATEGY_TRIGGER_UNAVAILABLE"]);
       const strategyTrigger: StrategyTriggerV1 = Object.freeze({ version:1, source:"evaluation_bucket", timeframe:"1m", observedAt:new Date(observed).toISOString(), bucketStartMs:Math.floor(observed/60_000)*60_000 });
-      return result("signal", [], { strategyAttribution: winner.strategyAttribution, strategyTrigger,
+      return result("signal", [], { indicators: structuredClone(loaded.context.indicators), strategyAttribution: winner.strategyAttribution, strategyTrigger,
         signal: Object.freeze({ ...winner.signal, strategyAttribution: winner.strategyAttribution, strategyTrigger }) });
     } catch(error) { return result("error", [error instanceof Error && domainReasons.has(error.message) ? error.message : "STRATEGY_RUNTIME_UNAVAILABLE"]); }
   }

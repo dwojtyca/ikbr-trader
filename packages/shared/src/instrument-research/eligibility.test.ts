@@ -31,6 +31,50 @@ test("source failures, incomplete news queries, unknown permissions and stale ch
   const unverified = structuredClone(f.snapshot); unverified.evidence[0].retention = "UNVERIFIED";
   assert.equal(evaluateResearchEligibility(unverified, f.manifest, now).eligible, false);
 });
+test("legacy calendar snapshots remain readable and byte-identical but cannot certify upcoming events", () => {
+  const f = researchFixture(now), calendar = f.snapshot.coverage[2];
+  delete calendar.occurrenceWindowStart; delete calendar.occurrenceWindowEnd;
+  calendar.windowStart = "2020-01-01T00:00:00Z"; calendar.windowEnd = "2020-01-02T00:00:00Z";
+  const before = JSON.stringify(f.snapshot), hash = researchHash(f.snapshot);
+  assert.deepEqual(parseResearchSnapshot(f.snapshot, f.manifest), f.snapshot);
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+  assert.equal(JSON.stringify(f.snapshot), before); assert.equal(researchHash(f.snapshot), hash);
+});
+test("calendar coverage spans both blackout boundaries and expires when its forward horizon runs out", () => {
+  const f = researchFixture(now), calendar = f.snapshot.coverage[2];
+  calendar.occurrenceWindowEnd = new Date(now + 86400000 + 5000).toISOString();
+  const eligible = evaluateResearchEligibility(f.snapshot, f.manifest, now);
+  assert.equal(eligible.eligible, true); assert.equal(eligible.expiresAt, new Date(now + 5000).toISOString());
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now + 5000).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+  calendar.occurrenceWindowEnd = new Date(now + 3 * 86400000).toISOString();
+  calendar.occurrenceWindowStart = new Date(now - 86400000 + 1).toISOString();
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+  calendar.occurrenceWindowStart = new Date(now - 2 * 86400000).toISOString();
+  calendar.occurrenceWindowEnd = new Date(now - 1).toISOString();
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+});
+test("calendar range is paired, role-specific, ordered and not a substitute for source as-of time", () => {
+  const f = researchFixture(now);
+  for (const mutate of [
+    (s: typeof f.snapshot) => { delete s.coverage[2].occurrenceWindowEnd; },
+    (s: typeof f.snapshot) => { s.coverage[2].occurrenceWindowStart = "invalid"; },
+    (s: typeof f.snapshot) => { s.coverage[2].occurrenceWindowStart = s.coverage[2].occurrenceWindowEnd; s.coverage[2].occurrenceWindowEnd = new Date(now).toISOString(); },
+    (s: typeof f.snapshot) => { s.coverage[1].occurrenceWindowStart = new Date(now).toISOString(); s.coverage[1].occurrenceWindowEnd = new Date(now + 86400000).toISOString(); },
+  ]) { const snapshot = structuredClone(f.snapshot); mutate(snapshot); assert.throws(() => parseResearchSnapshot(snapshot, f.manifest)); }
+  f.snapshot.coverage[2].checkedAt = new Date(now + 1).toISOString();
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_SOURCE_STALE_OR_FUTURE"));
+});
+test("future occurrence is valid when covered, while future publication and out-of-range occurrence deny", () => {
+  const f = researchFixture(now), calendar = f.snapshot.coverage[2];
+  calendar.status = "AVAILABLE"; calendar.evidenceRefs = ["reports"];
+  f.snapshot.events.push({ id: "event", kind: "earnings", occurs: { precision: "instant", at: new Date(now + 2 * 86400000).toISOString() }, evidenceRef: "reports", title: "Known future earnings" });
+  assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, true);
+  f.snapshot.events[0].occurs = { precision: "instant", at: new Date(now + 4 * 86400000).toISOString() };
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_EVENT_OUTSIDE_WINDOW"));
+  f.snapshot.events[0].occurs = { precision: "instant", at: new Date(now + 2 * 86400000).toISOString() };
+  f.snapshot.evidence[0].published = { precision: "instant", at: new Date(now + 1).toISOString() };
+  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_FUTURE_EVIDENCE"));
+});
 test("units, reporting periods, revisions, identity and future evidence cannot fabricate available facts", () => {
   const f = researchFixture(now);
   const mutations = [

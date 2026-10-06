@@ -78,20 +78,21 @@ export class DiagnosticLoopRecorder {
   private map(report:TradingLoopInstrumentReport,accountId:string):DiagnosticEvaluationInput {
     const identity=this.options.identity(report.instrumentId);
     const outcome=report.outcome;
-    const reason=outcome.kind==='CONFIGURED_EVALUATION'
-      ? outcome.evaluation.kind==='no_signal'?'NO_SIGNAL':outcome.evaluation.reasons[0] ?? outcome.evaluation.kind.toUpperCase()
-      : 'reason' in outcome ? outcome.reason : outcome.kind;
-    const attribution=outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.strategyAttribution:null;
     const runtime='runtime' in outcome?outcome.runtime:null;
+    const reason=(runtime?.outcome==='NOT_SUBMITTED'?runtime.denialReason:undefined) ?? (outcome.kind==='CONFIGURED_EVALUATION'
+      ? outcome.evaluation.kind==='no_signal'?'NO_SIGNAL':outcome.evaluation.reasons[0] ?? outcome.evaluation.kind.toUpperCase()
+      : 'reason' in outcome ? outcome.reason : outcome.kind);
+    const evaluation=report.evaluation ?? (outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation:null);
+    const attribution=evaluation?.strategyAttribution;
     const linked=runtime?.outcome==='SUBMITTED'?runtime.execution.orderId:
       runtime?.outcome==='DUPLICATE'?proposalId(runtime.previousExecution):
       runtime?.outcome==='PENDING'||runtime?.outcome==='AWAITING_AI'?proposalId(runtime.previousOrder):null;
     const privacy={accountIds:[accountId],secrets:this.options.secrets??[]};
     return {accountId,processId:this.processId,cycleId:report.cycleId,instrumentId:report.instrumentId,
       occurredAt:report.finishedAt,outcome:outcome.kind,
-      evaluationKind:outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.kind:null,
+      evaluationKind:evaluation?.kind??null,
       reason:safeDiagnosticText(reason,privacy),
-      reasons:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.reasons:['reason' in outcome?outcome.reason:outcome.kind])
+      reasons:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.reasons:[reason])
         .map(value=>safeDiagnosticText(value,privacy)),
       entryBlockers:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.entryBlockers:[])
         .map(value=>safeDiagnosticText(value,privacy)),

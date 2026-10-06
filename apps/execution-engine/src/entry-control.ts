@@ -84,6 +84,14 @@ export class EntryControlStore {
     const control = await db.query("SELECT paused FROM execution_entry_controls WHERE account_id=$1", [context.accountId]);
     if (!control.rowCount) throw new EntryControlError("ENTRY_CONTROL_UNADOPTED");
     if (!options.resuming && control.rows[0].paused) throw new EntryControlError("EXECUTION_ENTRIES_PAUSED");
+    return this.observationPermit(db, context, deps);
+  }
+
+  async observationPermit(db: PoolClient, context: Pick<EntryControlContext, "accountId" | "sessionId">, deps: {
+    assertCurrent(): void;
+    alertFailure(db: PoolClient, accountId: string, sessionId: string): Promise<string | null>;
+  }): Promise<EntryControlPermit> {
+    deps.assertCurrent();
     const alertFailure = await deps.alertFailure(db, context.accountId, context.sessionId);
     if (alertFailure) throw new EntryControlError(alertFailure);
     const health = await db.query(`SELECT session_id,healthy,observed_at,clock_timestamp() AS database_now

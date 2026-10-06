@@ -32,6 +32,14 @@ export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1,
       if (checked > nowMs || checked > researchTime(s.createdAt) || end > checked || nowMs - checked >= maxAge) deny("RESEARCH_SOURCE_STALE_OR_FUTURE");
       if (!c.complete || !(c.status === "AVAILABLE" || role !== "reports" && c.status === "EMPTY")) deny(`RESEARCH_${role.toUpperCase()}_${c.status}`);
       if (role === "news" && (end < checked || start > checked - DAY)) deny("RESEARCH_NEWS_WINDOW_INCOMPLETE");
+      if (role === "calendar") {
+        if (c.occurrenceWindowStart === undefined || c.occurrenceWindowEnd === undefined) deny("RESEARCH_CALENDAR_WINDOW_INCOMPLETE");
+        else {
+          const occurrenceStart = researchTime(c.occurrenceWindowStart), occurrenceEnd = researchTime(c.occurrenceWindowEnd);
+          deadlines.push(occurrenceEnd - DAY);
+          if (occurrenceStart > nowMs - DAY || occurrenceEnd <= nowMs + DAY) deny("RESEARCH_CALENDAR_WINDOW_INCOMPLETE");
+        }
+      }
       if (c.status === "AVAILABLE" && !c.evidenceRefs.length) deny("RESEARCH_COVERAGE_EVIDENCE_MISSING");
       if (c.status === "EMPTY" && (c.evidenceRefs.length || (role === "news" ? s.news : s.events).some(x => evidence.get(x.evidenceRef)?.sourceId === source.id))) deny("RESEARCH_FALSE_EMPTY");
       for (const ref of c.evidenceRefs) required.add(ref);
@@ -84,9 +92,13 @@ export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1,
   }
   for (const event of s.events) {
     if (!covered(event.evidenceRef, "calendar")) deny("RESEARCH_EVENT_UNCOVERED");
+    const range = publicationRange(event.occurs);
+    const coverage = s.coverage.find(c => c.role === "calendar" && c.evidenceRefs.includes(event.evidenceRef));
+    if (!coverage?.occurrenceWindowStart || !coverage.occurrenceWindowEnd ||
+        range.start < researchTime(coverage.occurrenceWindowStart) || range.end > researchTime(coverage.occurrenceWindowEnd)) deny("RESEARCH_EVENT_OUTSIDE_WINDOW");
     required.add(event.evidenceRef);
     if (event.kind === "earnings" || event.kind === "material") {
-      const range = publicationRange(event.occurs), start = range.start - DAY, end = range.end + DAY;
+      const start = range.start - DAY, end = range.end + DAY;
       if (nowMs >= start && nowMs <= end) deny("RESEARCH_EVENT_BLACKOUT");
       if (start > nowMs) deadlines.push(start);
     }

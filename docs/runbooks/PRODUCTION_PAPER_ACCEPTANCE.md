@@ -1,7 +1,7 @@
 # Production-style Paper acceptance and operations
 
-Status: **planned runbook specification, not executable on the current baseline**.
-Updated 2026-10-05 for [PP7 implementation prerequisites](../implementation/phase3/PP7_IMPLEMENTATION_PLAN.md).
+Status: **operational acceptance remains blocked; PP7 source verification is tracked separately**.
+Updated 2026-10-06 for [PP7 implementation prerequisites](../implementation/phase3/PP7_IMPLEMENTATION_PLAN.md).
 Reuses [PP0–PP6](../implementation/phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md)
 and additionally requires PP7-D/E/F before Gate A/B and PP7-G before scheduled
 Gate C activation. Current usable narrow procedures remain
@@ -12,13 +12,13 @@ The owner uses IBKR desktop for broker inspection/manual operations; bot diagnos
 come from the delivered [PP6 terminal operations](PAPER_HEADLESS_OPERATIONS.md)
 and existing alerts. Full operational acceptance remains planned: the configured
 scheduler-to-proposal handoff, required real research/account-day evidence and
-bounded scheduled policy are not completed by PP6.
+bounded scheduled policy are PP7 responsibilities; source delivery does not pass the operational gates.
 
 ## Implementation prerequisites
 
 - PP7-D connects the production bundle scheduler and selected strategy to persisted
   proposal/AI/risk/dispatch, retaining identity, price evidence, admission and durable
-  deduplication. Current configured evaluation alone cannot produce a broker entry.
+  deduplication. PP7 supplies this handoff; see its implementation report for validation status.
 - PP7-E completes real mandatory research for PKO and AAPL plus model readiness;
   PP7-F establishes verified full account-day execution/fee coverage. Missing feeds,
   permissions, credentials or broker capability remain explicit entry blockers.
@@ -156,3 +156,50 @@ A successful acceptance report includes per-instrument session counts, real roun
 trips, fault-injection evidence labelled separately from broker observations,
 restart results and exact image/config/CI identity. Any material fix/config change
 restarts the soak count. Passing Paper acceptance does not enable Live.
+
+## PP7 release preparation and scheduled policy controls
+
+The [implementation contract](../implementation/phase3/PP7_DELIVERY_CONTRACT.md)
+separates the internal selected-signal handoff from research, fresh risk and broker
+permission. A configured evaluation remains read-only; production scheduler
+submission additionally requires `EXECUTION_RUNTIME_ENABLED=true`, the loop
+allowlist, current peer configuration and all execution guards. These settings
+are not an authorization to operate. The checked-in instrument/strategy and
+research examples remain disabled.
+
+Copy the [disabled launch manifest template](../implementation/phase3/PP7_LAUNCH_MANIFEST.template.json)
+to a private location for an exact release. Fill source SHA, image digest and CI
+link from the reviewed build. Account, dates, amounts, model/cost scope and actual
+evidence require verified operator input; `null` fields mean unresolved. Do not
+pass this document to a run-policy parser or use it to enable trading. A private
+completed manifest still needs the owner's bounded operational authorization.
+
+The execution service exposes authenticated `GET /execution/paper-policy` and
+`POST /execution/paper-policy/schedule`, `/cancel`, `/adopt`. A schedule request
+names the exact registered target `manifestHash`, explicit `priorManifestHash`,
+`expectedRevision`, UUID `requestId` and a reason. Cancel/adopt name the pending
+manifest with a new request ID and current revision. These are policy controls;
+they do not resume entries. Writes must be disabled and both startup and durable
+entry pauses active. Scheduling and adoption require fresh broker/reconciliation,
+flat bot ownership, observer and alert evidence. Missing evidence is a blocker.
+Never retry an ambiguous control response under a new ID: inspect the policy audit
+and use only the original request for an exact replay.
+
+Scheduled policy v2 has finite dated windows (maximum 100, each at most 60 minutes),
+`effectiveAccountDate` and `expiresAfterAccountDate`, account day Europe/Warsaw,
+max2 attempts/account/day and max1/contract/day. Existing per-currency caps and
+one-share bracket/no-overnight guards apply. Scheduling is for a subsequent account
+day. Adoption during that finite date range repeats readiness; expiry never rolls
+forward. A pending transition may be cancelled only before its effective day.
+Active policy, consumed attempts and unknown outcomes survive restart. New run,
+instance revision or configuration cannot replenish them. Actual broker calendars
+and the configured exit margin may make a declared window ineligible on early-close
+days. Existing positions retain their original exit deadlines.
+
+Until the first authority transition, legacy v1 manifests keep their strict
+one-attempt behavior. First scheduling explicitly chooses a registered prior v1
+hash; historical manifest ordering never selects authority. After authority exists,
+old writers cannot regain the compatibility path. Rollback must retain migration26
+and the authority audit; do not restore an older database or delete counters to make
+an older image admit entries. Gate C still requires Gate B evidence and separate
+bounded operational authorization.

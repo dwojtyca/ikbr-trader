@@ -1,6 +1,6 @@
 # Current project state
 
-Source update: 2026-10-04; read-only PP7 gap review: 2026-10-05. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+Source update: 2026-10-06; PP7 source locally verified; publication/CI tracked in its report. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
@@ -31,17 +31,17 @@ Independent reviews, required checks, isolated restore/root-CLI drills and exact
 [PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md).
 Existing UI source is retained; no operational service was stopped or deployed by this update.
 
-The 2026-10-05 source inspection confirms that bundle-mode scheduled evaluation
-does not yet submit proposals: `TradingLoopService.#runConfiguredCycle` records
-`CONFIGURED_EVALUATION` only, and `ConfiguredStrategyRuntime` returns fixed
-`entryAllowed: false` / `PP4_RESEARCH_UNAVAILABLE`. The generic proposal/AI/execution
-components exist but are not an integrated configured scheduler-to-broker flow.
-The supervised Paper policy also still rejects `bounded_scheduled` and its transition
-with `PP5_LIFECYCLE_REQUIRED`. These are implementation gaps, separate from current
-broker/feed readiness. The [PP7 plan](phase3/PP7_IMPLEMENTATION_PLAN.md) assigns D to
-the missing handoff, E to real research, F to account-day coverage and G to scheduled
-policy, before operational Gates A–D. No gate was removed and no code was changed
-by this planning update. No current broker preflight was performed.
+PP7 addresses the October 5 configured-flow inspection. The scheduler now prepares
+and submits the selected configured strategy through the existing persisted
+proposal, research/AI and fresh execution-risk path. Diagnostic evaluations remain
+read-only. Versioned bounded scheduled policy and migration 26 add explicit future-
+day authority, immutable transitions and budgets across run/config changes.
+Research calendars require explicit future occurrence coverage; execution-history
+requests include Warsaw midnight without fabricating a completeness certificate.
+The [PP7 report](phase3/PP7_IMPLEMENTATION_REPORT.md) records review, test, publication
+and gate evidence independently. Required real research/model evidence and broker
+account-day certification remain [blocked](phase3/PP7_EF_EVIDENCE.md). No deployment,
+broker transaction, paid call or operational gate is established by these changes.
 
 ## Delivery objective
 
@@ -70,16 +70,16 @@ None of these labels implies profitability or permission to activate Live.
 | Capability | Implemented state | Remaining gap / evidence |
 | --- | --- | --- |
 | Service boundaries | Ingestion owns data; signal owns strategy evaluation; llm-agent adjudicates entries; execution owns broker writes and reconciliation | Preserve these boundaries; no new orchestrator service is needed |
-| Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entries remain denied; legacy opt-ins remain mutually exclusive |
+| Instrument registry/configuration | PP1 startup JSON projects exact bindings, separate instrument/instance/policy catalogues, hashes, snapshots and monitoring readiness across all four services | PP1 review/checks/CI passed; bundle entry requires per-proposal research, lifecycle and risk evidence; legacy opt-ins remain mutually exclusive |
 | Strategy framework | Seven registered implementations; portfolio selection and regime detection exist; PP1 represents reusable momentum parameter instances and assignments | PP2 applies instance parameters, assignment-only evaluation and isolated state; review/checks/publication/CI passed; see PP2 report |
 | Market data | Bound subscriptions, Redis market state, native closed history, generic session schedules/readiness | Must prove current quote entitlement, calendar coverage and warmup per configured instrument |
-| Entry orchestration | Bound runtime produces attributed tickets; execution persists proposal/AI review; AI approval required | PP3 validates WSE/WSE/PLN or SMART/NASDAQ|NYSE|AMEX/USD; one whole long stock share and LMT bracket; bundle entries denied |
+| Entry orchestration | PP7 configured scheduler prepares selected strategy tickets; execution persists proposal/AI review; AI approval and fresh risk required | PP3 validates WSE/WSE/PLN or SMART/NASDAQ|NYSE|AMEX/USD; one whole long stock share and LMT bracket; real research/account coverage still blocks operational entries |
 | Financial risk | Deterministic entry recheck after AI, quote/account freshness, currency evidence and limits | USD base account evidence remains required; generic daily loss additionally requires full Warsaw-day broker/fee coverage, unavailable in the current production adapter |
 | Reconciliation | Durable snapshots, coverage, holds, unknown-submit handling, dedicated completed-order source | Ambiguous submission/cancellation recovery remains intentionally bounded; completed source does not prove every lost acknowledgement |
 | Exit/ownership | PP5 background observer restores durable ownership/close state, verifies exact protection and broker flat evidence, and can invoke the audited deadline close | One share only; disabled by default; unknown/rejected/unfilled close retains HOLD; no automatic replace/reprotection |
-| AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report |
+| AI evidence | PP4 cached research, strict listing/period/units, immutable snapshot and decision binding | Latest PKO periodic extraction, complete news/events, operational permissions and model acceptance remain blocked; see PP4 report and [PP7 source receipts](phase3/PP7_EF_EVIDENCE.md) |
 | Operator control | PP0 authenticated delegation plus PP5 authenticated durable entry pause/resume and lifecycle/fault/delivery read endpoints; master switch retains its meaning | PP6 delivered readable logs/JSON, terminal reports and recovery procedures with review/checks/exact-source CI passed; custom dashboard deferred; manual IBKR changes require supported reconciliation |
-| Scheduler | Legacy Paper orchestration exists; bundle scheduler evaluates assigned instances and records diagnostics | Bundle handoff is missing and fixed denial remains; PP7-D implements it. `bounded_scheduled` is rejected pending PP7-G; broker/soak acceptance remains unproven |
+| Scheduler | PP7 connects assigned instances to the persisted flow, with fair bounded concurrency and diagnostics; v2 policy has durable future-day authority | Code/evidence status in PP7 report; actual research/broker readiness, round trips and soak remain unaccepted |
 | Research/backtest | Mechanical fixture E2E and frozen ES research exist | ES terminal result stays REJECTED_FOR_ES; local PR15.5F diagnostics remain deferred |
 | Paper/Live | Same repository with explicit environment/account controls | Current runtime deliberately Paper-only; no Live acceptance or activation in this track |
 

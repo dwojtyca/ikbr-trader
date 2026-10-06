@@ -16,7 +16,8 @@
  *
  * 1. Every entry is (a) risk-reducing without creating new
  *    exposure, OR (b) a diagnostic-only operator path already
- *    gated by its own secondary token (reconciliation resolve).
+ *    gated by its own secondary token (reconciliation resolve), or
+ *    (c) policy-authority controls requiring disabled broker writes and paused entries.
  * 2. Match is EXACT — endpoint URL (with :id parametrised) plus
  *    the HTTP method. No open-ended prefix wildcards.
  * 3. Bearer auth and audit run BEFORE this exemption and are
@@ -51,6 +52,10 @@ export interface WriteGuardExemption {
 }
 
 export const WRITE_GUARD_EXEMPT_ROUTES: readonly WriteGuardExemption[] = [
+  ...["schedule", "cancel", "adopt"].map(action => ({
+    method: "POST" as const, routePath: `/execution/paper-policy/${action}`,
+    rationale: "PP7 policy authority only; requires disabled broker writes, durable/startup entry pause, authentication and account guards.",
+  })),
   {
     method: "POST",
     routePath: "/execution/cancel-proposed/:id",

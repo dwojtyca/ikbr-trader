@@ -19,13 +19,15 @@ export interface PaperRunWindow {
   readonly sessionDate: string;
 }
 export interface PaperRunPolicy {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly runId: string;
   readonly accountId: string;
   readonly effectiveConfigHash: string;
   readonly accountDayTimeZone: 'Europe/Warsaw';
-  readonly kind: 'supervised_one_attempt';
-  readonly maxAttemptsPerAccountDay: 1;
+  readonly kind: 'supervised_one_attempt' | 'bounded_scheduled';
+  readonly maxAttemptsPerAccountDay: 1 | 2;
+  readonly effectiveAccountDate?: string;
+  readonly expiresAfterAccountDate?: string;
   readonly maxAttemptsPerInstrumentDay: 1;
   readonly windows: readonly PaperRunWindow[];
   readonly currencyCaps: Readonly<Partial<Record<'PLN' | 'USD', PaperCurrencyCaps>>>;
@@ -61,25 +63,35 @@ export function parsePaperRunPolicy(env: Record<string, unknown>, loaded: Loaded
     if (Buffer.byteLength(raw) > 1024 * 1024) return fail('TOO_LARGE');
     try { decoded = JSON.parse(raw); } catch { return fail('INVALID_JSON'); }
   }
-  const row = object(decoded, ['version', 'runId', 'accountId', 'effectiveConfigHash', 'accountDayTimeZone', 'kind', 'maxAttemptsPerAccountDay', 'maxAttemptsPerInstrumentDay', 'windows', 'currencyCaps']);
-  if (row.kind === 'bounded_scheduled') throw new Error('PP5_LIFECYCLE_REQUIRED');
-  if (row.version !== 1 || row.kind !== 'supervised_one_attempt' || row.accountDayTimeZone !== 'Europe/Warsaw' || row.maxAttemptsPerAccountDay !== 1 || row.maxAttemptsPerInstrumentDay !== 1) return fail('UNSUPPORTED_POLICY');
+  const scheduled = (decoded as Record<string, unknown> | null)?.version === 2;
+  const row = object(decoded, ['version', 'runId', 'accountId', 'effectiveConfigHash', 'accountDayTimeZone', 'kind', 'maxAttemptsPerAccountDay', 'maxAttemptsPerInstrumentDay', 'windows', 'currencyCaps', ...(scheduled ? ['effectiveAccountDate', 'expiresAfterAccountDate'] : [])]);
+  if (row.version !== (scheduled ? 2 : 1) || row.kind !== (scheduled ? 'bounded_scheduled' : 'supervised_one_attempt') || row.accountDayTimeZone !== 'Europe/Warsaw' || row.maxAttemptsPerAccountDay !== (scheduled ? 2 : 1) || row.maxAttemptsPerInstrumentDay !== 1) return fail('UNSUPPORTED_POLICY');
+  const effectiveAccountDate = scheduled ? paperPolicyDate(row.effectiveAccountDate) : undefined;
+  const expiresAfterAccountDate = scheduled ? paperPolicyDate(row.expiresAfterAccountDate) : undefined;
+  if (scheduled && expiresAfterAccountDate! < effectiveAccountDate!) return fail('INVALID_DATE_BOUNDS');
   if (row.effectiveConfigHash !== loaded.effectiveHash) return fail('CONFIG_HASH_MISMATCH');
   const runId = id(row.runId), accountId = id(row.accountId);
   if (!Array.isArray(row.windows) || row.windows.length === 0 || row.windows.length > 100) return fail('INVALID_WINDOWS');
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   const windows = row.windows.map(value => {
     const w = object(value, ['instrumentId', 'conId', 'startsAt', 'endsAt']);
     if (typeof w.instrumentId !== 'string' || !Number.isSafeInteger(w.conId) || Number(w.conId) <= 0) return fail('INVALID_INSTRUMENT');
     const instrument = loaded.configuration.instruments.find(i => i.id === w.instrumentId && i.contract.conId === w.conId);
     if (!instrument) return fail('UNCONFIGURED_INSTRUMENT');
-    if (seen.has(instrument.contract.conId)) return fail('DUPLICATE_INSTRUMENT');
-    seen.add(instrument.contract.conId);
+    if (scheduled) {
+      const entry = loaded.configuration.entryPolicies.find(p => p.id === instrument.entryPolicyId);
+      if (entry?.kind !== 'bounded_scheduled' || entry.maxAttemptsPerAccountDay !== 2) return fail('CONFIGURATION_POLICY_INCOMPATIBLE');
+    }
     const start = timestamp(w.startsAt), end = timestamp(w.endsAt), zone = instrument.session.timeZone;
     if (end <= start || end - start > 3600000) return fail('INVALID_DURATION');
     if (paperLocalDate(start, 'Europe/Warsaw') !== paperLocalDate(end, 'Europe/Warsaw') || paperLocalDate(start, zone) !== paperLocalDate(end, zone)) return fail('CROSS_DAY_WINDOW');
+    const accountDate = paperLocalDate(start, 'Europe/Warsaw'), sessionDate = paperLocalDate(start, zone);
+    const keys = scheduled ? [`${instrument.contract.conId}:account:${accountDate}`, `${instrument.contract.conId}:session:${sessionDate}`] : [String(instrument.contract.conId)];
+    if (keys.some(key => seen.has(key))) return fail('DUPLICATE_INSTRUMENT');
+    keys.forEach(key => seen.add(key));
+    if (scheduled && (accountDate < effectiveAccountDate! || accountDate > expiresAfterAccountDate!)) return fail('WINDOW_OUTSIDE_DATE_BOUNDS');
     return Object.freeze({ instrumentId: instrument.id, conId: instrument.contract.conId, startsAt: new Date(start).toISOString(), endsAt: new Date(end).toISOString(), instrument: instrument.contract.symbol, currency: instrument.contract.currency, sessionTimeZone: zone, accountDate: paperLocalDate(start, 'Europe/Warsaw'), sessionDate: paperLocalDate(start, zone) });
-  }).sort((a, b) => a.instrumentId.localeCompare(b.instrumentId));
+  }).sort((a, b) => scheduled ? a.conId - b.conId || a.startsAt.localeCompare(b.startsAt) || a.endsAt.localeCompare(b.endsAt) : a.instrumentId.localeCompare(b.instrumentId));
   const currencies = [...new Set(windows.map(w => w.currency))].sort();
   const caps = object(row.currencyCaps, currencies);
   const currencyCaps: Partial<Record<'PLN' | 'USD', PaperCurrencyCaps>> = {};
@@ -88,9 +100,16 @@ export function parsePaperRunPolicy(env: Record<string, unknown>, loaded: Loaded
     if (Object.values(cap).some(value => typeof value !== 'number' || !Number.isFinite(value) || value <= 0)) return fail('INVALID_CAP');
     currencyCaps[currency] = Object.freeze(cap as unknown as PaperCurrencyCaps);
   }
-  const manifest = { version: 1 as const, runId, accountId, effectiveConfigHash: loaded.effectiveHash, accountDayTimeZone: 'Europe/Warsaw' as const, kind: 'supervised_one_attempt' as const, maxAttemptsPerAccountDay: 1 as const, maxAttemptsPerInstrumentDay: 1 as const, windows: windows.map(({ instrumentId, conId, startsAt, endsAt }) => ({ instrumentId, conId, startsAt, endsAt })), currencyCaps };
+  const manifest = { version: (scheduled ? 2 : 1) as 1 | 2, runId, accountId, effectiveConfigHash: loaded.effectiveHash, accountDayTimeZone: 'Europe/Warsaw' as const, kind: (scheduled ? 'bounded_scheduled' : 'supervised_one_attempt') as PaperRunPolicy['kind'], maxAttemptsPerAccountDay: (scheduled ? 2 : 1) as 1 | 2, maxAttemptsPerInstrumentDay: 1 as const, windows: windows.map(({ instrumentId, conId, startsAt, endsAt }) => ({ instrumentId, conId, startsAt, endsAt })), currencyCaps, ...(scheduled ? { effectiveAccountDate: effectiveAccountDate!, expiresAfterAccountDate: expiresAfterAccountDate! } : {}) };
   const canonicalManifest = canonicalJson(manifest);
   return Object.freeze({ ...manifest, windows: Object.freeze(windows), currencyCaps: Object.freeze(currencyCaps), canonicalManifest, manifestHash: createHash('sha256').update(canonicalManifest).digest('hex') });
+}
+
+export function paperPolicyDate(value: unknown): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return fail('INVALID_DATE');
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(ms) || new Date(ms).toISOString().slice(0, 10) !== value || value < '2000-01-01' || value > '2100-12-31') return fail('INVALID_DATE');
+  return value;
 }
 
 export interface PaperPolicyTransition {
@@ -108,9 +127,10 @@ export function validatePaperPolicyTransition(input: PaperPolicyTransition): { o
   if (!Number.isSafeInteger(input.consumedAttempts) || input.consumedAttempts < 0) return deny('PAPER_RUN_INVALID_COUNT');
   if (input.accountDayTimeZone !== 'Europe/Warsaw') return deny('PAPER_RUN_TIMEZONE_CHANGED');
   if (input.nextKind === 'bounded_scheduled') {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.effectiveAccountDate) || input.effectiveAccountDate <= input.currentAccountDate) return deny('PAPER_RUN_TRANSITION_REQUIRES_SUBSEQUENT_DAY');
+    try { paperPolicyDate(input.effectiveAccountDate); paperPolicyDate(input.currentAccountDate); } catch { return deny('PAPER_RUN_INVALID_DATE'); }
+    if (input.effectiveAccountDate <= input.currentAccountDate) return deny('PAPER_RUN_TRANSITION_REQUIRES_SUBSEQUENT_DAY');
     if (!input.reconciledFlat || input.unresolvedReservations) return deny('PAPER_RUN_TRANSITION_REQUIRES_FLAT');
-    return deny('PP5_LIFECYCLE_REQUIRED');
+    return { ok: true, retainedAttempts: input.consumedAttempts };
   }
   return { ok: true, retainedAttempts: input.consumedAttempts };
 }

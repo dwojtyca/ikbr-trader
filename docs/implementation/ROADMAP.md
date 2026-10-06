@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-05 (PP6 delivered; PP7 includes configured-flow completion and remaining evidence blockers before broker acceptance).
+Updated: 2026-10-06 (PP7 source locally verified; publication/CI tracked in its report; operational Gates A–D remain unaccepted).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -50,13 +50,15 @@ independent review, required checks, publication and exact-source-commit CI pass
 See the [PP3 report](phase3/PP3_IMPLEMENTATION_REPORT.md). PP4 implementation is reviewed; real-source acceptance remains **blocked**. See the
 [PP4 report](phase3/PP4_IMPLEMENTATION_REPORT.md). PP5-A/B is delivered; independent review, required local checks and exact-source CI passed; see the
 [PP5 report](phase3/PP5_IMPLEMENTATION_REPORT.md). PP6 is delivered with independent review, required local checks, isolated recovery and successful exact-source CI; evidence is in the
-[PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 remains **planned** under the
-[bounded implementation plan](phase3/PP7_IMPLEMENTATION_PLAN.md). The current bundle
-scheduler records evaluation without proposal handoff. PP7-D connects that path;
-PP7-E/F close mandatory research and certified account-day accounting gaps. PP7-G
-implements the currently rejected scheduled policy; it is activated only after the
-supervised Gate B and explicit bounded authorization. Passing PP6 does not remove
-these prerequisites or establish a ready-to-trade bot.
+[PP6 report](phase3/PP6_IMPLEMENTATION_REPORT.md). PP7 source now connects the
+configured scheduler to durable proposals, preserves selected strategy evidence,
+and adds bounded scheduled policy authority and durable budgets. Calendar evidence
+and broker request windows are tightened. Integrated verification and publication
+are recorded separately in the [PP7 report](phase3/PP7_IMPLEMENTATION_REPORT.md).
+Real mandatory research/model coverage and certified Warsaw account-day accounting
+remain blocked by the [documented source/capability gaps](phase3/PP7_EF_EVIDENCE.md).
+Gate B and Gate C have no real broker acceptance evidence. Scheduled activation
+still requires supervised Gate B and explicit bounded authorization.
 No operational deployment or trading activation is included.
 Each package receives its own bounded plan, independent plan review, implementation,
 independent hostile review, checks, report, scoped commit/push and exact CI.
@@ -70,7 +72,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
 | PP6 | Delivered headless Polish logs/JSON, terminal reports, existing controls and recovery; review/checks/exact-source CI passed | PP0–PP5 |
-| PP7 | Planned: D bundle handoff, E real research, F broker/accounting coverage, G bounded scheduled policy; then Gates A–D broker acceptance/soak | Reuse PP0–PP6; D/E/F before Gate A/B; G plus Gate B before Gate C activation |
+| PP7 | Locally verified source: D handoff, E calendar coverage, F request bounds, G scheduled authority; E/F real-source blockers and Gates A–D remain — see report | Reuse PP0–PP6; D/E/F before Gate A/B; G plus Gate B before Gate C activation |
 
 PP4 research implementation may proceed independently after the identity contract
 is fixed. Final integration and broker activation remain sequential and gated.
@@ -160,4 +162,4 @@ support is a separately bounded extension using the same contracts.
 historical evidence. The current owner direction supersedes their next-step order.
 [Documentation reconciliation plan](phase3/PAPER_PRODUCTION_DOCUMENTATION_PLAN.md)
 records the original delivery-direction reconciliation. PP0/PP1 implementation
-evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6 is delivered with accepted review, required checks, recovery drills and exact-source CI; see its report. PP7 remains planned.
+evidence is linked above; PP2 implementation evidence is also linked. PP3 implementation evidence is linked above; PP4 implementation/report is linked above; required real-source acceptance remains blocked. PP5 validation is recorded in its report; PP6 is delivered with accepted review, required checks, recovery drills and exact-source CI; see its report. PP7 implementation/evidence status is tracked in its report; operational acceptance remains blocked.

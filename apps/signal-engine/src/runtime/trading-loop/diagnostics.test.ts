@@ -85,3 +85,22 @@ describe('diagnostic loop recorder',()=>{
     assert.doesNotMatch(JSON.stringify({stored,logs}),/raw-provider-credential/);
   });
 });
+
+it('retains the precise execution denial in stored and terminal reasons', async () => {
+  const stored: {reason:string;reasons?:readonly string[]}[]=[];
+  const logs: DiagnosticEvent[]=[];
+  const recorder=new DiagnosticLoopRecorder({
+    sink:{recordEvaluation:async input=>{stored.push(input);return {id:'7',recordedAt:now};},heartbeat:async()=>{}},
+    accountId:()=> 'paper-fixture',identity,intervalMs:5000,enabled:true,
+    logger:{error:fields=>logs.push((fields as {diagnostic:DiagnosticEvent}).diagnostic),info:fields=>logs.push((fields as {diagnostic:DiagnosticEvent}).diagnostic)},
+  });
+  const source=cycle();
+  await recorder.capture({...source,reports:[{...source.reports[0],outcome:{kind:'NOT_SUBMITTED',instrumentId:'pko_wse',
+    idempotencyKey:'same-trigger',reason:'PIPELINE_FAILURE',runtime:{outcome:'NOT_SUBMITTED',reason:'PIPELINE_FAILURE',
+      denialReason:'paper_daily_loss_coverage_unavailable',pipeline:{outcome:'FAILURE',signal:null,ticket:null,blockers:[],warnings:[],
+        failedStage:'UNKNOWN',durationMs:0,metadata:{engineVersions:{pipeline:'fixture'},ranAt:now}}}}}]});
+  assert.equal(stored[0].reason,'paper_daily_loss_coverage_unavailable');
+  assert.deepEqual(stored[0].reasons,['paper_daily_loss_coverage_unavailable']);
+  assert.match(logs[0].message,/danych brokera/);
+  assert.equal(logs[0].fields.find(field=>field.key==='reasons')?.value,'paper_daily_loss_coverage_unavailable');
+});

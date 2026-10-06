@@ -88,6 +88,7 @@ export class ResearchRefreshScheduler {
     let complete = false;
     let refs: string[] = [];
     let coveredWindow: { start: string; end: string } | null = null;
+    let occurrenceWindow: { occurrenceWindowStart: string; occurrenceWindowEnd: string } | null = null;
     let sourceCheckedAt: string | null = null;
     if (source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && source.maxRequestsPerDay > 0 && source.costMicrosPerCall <= source.maxCostMicrosPerDay && compatible(source, role)) {
       try {
@@ -128,15 +129,21 @@ export class ResearchRefreshScheduler {
           refs = result.evidence.map(row => row.ref);
           coveredWindow = { start: result.coverage.windowStart, end: result.coverage.windowEnd };
           sourceCheckedAt = result.coverage.checkedAt;
-          const windowComplete = role !== "news" || (coveredWindow.end === sourceCheckedAt && Date.parse(coveredWindow.start) <= Date.parse(sourceCheckedAt) - 86400000);
+          if (result.coverage.occurrenceWindowStart !== undefined && result.coverage.occurrenceWindowEnd !== undefined) occurrenceWindow = {
+            occurrenceWindowStart: result.coverage.occurrenceWindowStart, occurrenceWindowEnd: result.coverage.occurrenceWindowEnd,
+          };
+          const windowComplete = role === "news"
+            ? coveredWindow.end === sourceCheckedAt && Date.parse(coveredWindow.start) <= Date.parse(sourceCheckedAt) - 86400000
+            : occurrenceWindow !== null && Date.parse(occurrenceWindow.occurrenceWindowStart) <= Date.parse(fetchedAt) - 86400000 &&
+              Date.parse(occurrenceWindow.occurrenceWindowEnd) > Date.parse(fetchedAt) + 86400000;
           status = windowComplete && (result.coverage.status === "AVAILABLE" || result.coverage.status === "EMPTY") ? result.coverage.status : "UNVERIFIED";
-          reason = windowComplete ? result.coverage.reason : "declared news window does not cover its as-of time";
+          reason = windowComplete ? result.coverage.reason : role === "news" ? "declared news window does not cover its as-of time" : "calendar occurrence window does not cover the entry blackout horizon";
           complete = windowComplete && result.coverage.complete;
         }
         parseResearchSnapshot(snapshot, manifest);
       } catch (error) {
         Object.assign(snapshot, baseline);
-        refs = []; complete = false; coveredWindow = null; sourceCheckedAt = null;
+        refs = []; complete = false; coveredWindow = null; occurrenceWindow = null; sourceCheckedAt = null;
         status = "ERROR"; reason = error instanceof Error ? error.message.slice(0, 1000) : "source refresh failed";
       }
     }
@@ -145,6 +152,7 @@ export class ResearchRefreshScheduler {
     snapshot.createdAt = completedAt;
     snapshot.coverage.push({ sourceId: source.id, role, status, checkedAt,
       windowStart: coveredWindow?.start ?? new Date(Date.parse(checkedAt) - 86400000).toISOString(), windowEnd: coveredWindow?.end ?? checkedAt,
+      ...occurrenceWindow,
       complete, evidenceRefs: refs, reason });
     await store.storeSnapshot(snapshot, slotKey);
   }

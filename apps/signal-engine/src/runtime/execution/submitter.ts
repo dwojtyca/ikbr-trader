@@ -123,6 +123,7 @@ export type SubmitResult =
       readonly kind: "not_submitted";
       readonly message: string;
       readonly statusCode: number;
+      readonly denialReason?: string;
     }
   | { readonly kind: "unknown"; readonly reason: string };
 
@@ -295,6 +296,10 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
               : {}),
           };
         }
+        if (typeof bodyOutcome === "string" && ["RISK_REJECTED", "AI_REVIEW_REQUIRED", "BINDING_IDENTITY_MISMATCH"].includes(bodyOutcome)) {
+          return { kind: "not_submitted", statusCode: 409, denialReason: denialReason(parsed) ?? bodyOutcome,
+            message: extractErrorMessage(parsed) ?? bodyOutcome };
+        }
         return {
           kind: "conflict",
           message: extractErrorMessage(parsed) ?? "conflict",
@@ -345,6 +350,7 @@ export class HttpExecutionTicketSubmitter implements ExecutionTicketSubmitter {
             extractErrorMessage(parsed) ??
             `${response.status} ${response.statusText}`,
           statusCode: response.status,
+          denialReason: denialReason(parsed),
         };
       }
 
@@ -391,7 +397,16 @@ function extractErrorMessage(parsed: unknown): string | undefined {
   if (!parsed || typeof parsed !== "object") return undefined;
   const err = (parsed as Record<string, unknown>).error;
   const message = (parsed as Record<string, unknown>).message;
+  const reason = (parsed as Record<string, unknown>).reason;
+  if (typeof reason === "string" && reason) return reason;
   if (typeof err === "string" && err) return err;
   if (typeof message === "string" && message) return message;
   return undefined;
+}
+
+function denialReason(parsed: unknown): string | undefined {
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const row = parsed as Record<string, unknown>;
+  const value = row.reason ?? row.error;
+  return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,119}$/.test(value) ? value : undefined;
 }

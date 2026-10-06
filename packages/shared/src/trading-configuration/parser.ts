@@ -122,7 +122,11 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
     v.unique(rows.map((x) => x.id), rows.map((_, i) => `${path}[${i}].id`)); return rows;
   };
   const accountPolicies = byId(readPolicies("accountPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), maxOpenPositions:v.literal(v.required(o,"maxOpenPositions",p),`${p}.maxOpenPositions`,[1]) as 1, accountDayTimeZone:v.literal(v.required(o,"accountDayTimeZone",p),`${p}.accountDayTimeZone`,["Europe/Warsaw"]) as "Europe/Warsaw" })), "$.accountPolicies");
-  const entryPolicies = byId(readPolicies("entryPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), kind:v.literal(v.required(o,"kind",p),`${p}.kind`,["supervised_one_attempt"]) as "supervised_one_attempt", maxAttemptsPerAccountDay:v.literal(v.required(o,"maxAttemptsPerAccountDay",p),`${p}.maxAttemptsPerAccountDay`,[1]) as 1 })), "$.entryPolicies");
+  const entryPolicies = byId(readPolicies("entryPolicies", 1, (o,p) => {
+    const kind = v.literal(v.required(o,"kind",p),`${p}.kind`,["supervised_one_attempt", "bounded_scheduled"]) as "supervised_one_attempt" | "bounded_scheduled";
+    return { id:v.id(v.required(o,"id",p),`${p}.id`), kind,
+      maxAttemptsPerAccountDay:v.literal(v.required(o,"maxAttemptsPerAccountDay",p),`${p}.maxAttemptsPerAccountDay`,[kind === "bounded_scheduled" ? 2 : 1]) as 1 | 2 };
+  }), "$.entryPolicies");
   const executionPolicies = byId(readPolicies("executionPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), direction:v.literal(v.required(o,"direction",p),`${p}.direction`,["LONG"]) as "LONG", quantity:v.literal(v.required(o,"quantity",p),`${p}.quantity`,[1]) as 1, quantityUnit:v.literal(v.required(o,"quantityUnit",p),`${p}.quantityUnit`,["shares"]) as "shares", orderType:v.literal(v.required(o,"orderType",p),`${p}.orderType`,["LMT"]) as "LMT", timeInForce:v.literal(v.required(o,"timeInForce",p),`${p}.timeInForce`,["DAY"]) as "DAY", outsideRth:v.literal(v.required(o,"outsideRth",p),`${p}.outsideRth`,[false]) as false, protection:v.literal(v.required(o,"protection",p),`${p}.protection`,["bracket"]) as "bracket" })), "$.executionPolicies");
   const riskPolicies = byId(readPolicies("riskPolicies", 1, (o,p) => {
     const n = v.object(v.required(o,"maxEntryNotional",p),`${p}.maxEntryNotional`,["amount","currency"]);

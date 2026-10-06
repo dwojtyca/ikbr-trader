@@ -131,10 +131,14 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1
   }
   const coverageKeys = new Set<string>();
   for (const value of s.coverage as unknown[]) {
-    const c = obj(value, "sourceId role status checkedAt windowStart windowEnd complete evidenceRefs reason");
+    const hasOccurrenceRange = value !== null && typeof value === "object" &&
+      (Object.hasOwn(value, "occurrenceWindowStart") || Object.hasOwn(value, "occurrenceWindowEnd"));
+    const c = obj(value, "sourceId role status checkedAt windowStart windowEnd complete evidenceRefs reason" +
+      (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : ""));
     const source = policy.sources.find(x => x.id === c.sourceId); researchAssert(source && source.roles.includes(c.role as "reports"), "RESEARCH_COVERAGE_SOURCE_INVALID");
     const key = `${c.sourceId}:${c.role}`; researchAssert(!coverageKeys.has(key), "RESEARCH_DUPLICATE_COVERAGE"); coverageKeys.add(key);
     choice(c.status, "AVAILABLE EMPTY MISSING STALE UNVERIFIED ERROR NOT_APPLICABLE"); researchTime(c.checkedAt); const start = researchTime(c.windowStart), end = researchTime(c.windowEnd); researchAssert(start <= end && typeof c.complete === "boolean");
+    if (hasOccurrenceRange) researchAssert(c.role === "calendar" && researchTime(c.occurrenceWindowStart) <= researchTime(c.occurrenceWindowEnd), "RESEARCH_CALENDAR_RANGE_INVALID");
     researchAssert(typeof c.reason === "string" && c.reason.length <= 1000); arr(c.evidenceRefs); researchAssert(new Set(c.evidenceRefs).size === c.evidenceRefs.length);
     for (const ref of c.evidenceRefs) researchAssert(typeof ref === "string" && refs.has(ref) && evidence.some(e => (e as Record<string, unknown>).ref === ref && (e as Record<string, unknown>).sourceId === c.sourceId));
   }

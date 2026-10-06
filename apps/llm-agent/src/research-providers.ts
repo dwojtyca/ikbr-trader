@@ -209,16 +209,19 @@ export function normalizeIssuerXhtml(xml: string, mapping: XhtmlMapping, policy:
 }
 
 export interface DeclaredItem { id: string; documentId: string; issuerId: string; identifier: { scheme: "CIK" | "LEI" | "ISIN"; value: string }; url: string; contentHash: string; published: ResearchEvidence["published"]; title: string; occurs?: ResearchEvidence["published"]; kind?: "earnings" | "material" | "other" }
-export interface DeclaredEvidenceInput { sourceId: string; sourceUrl: string; fetchedAt: string; contentHash: string; role: "news" | "calendar"; complete: boolean; windowStart: string; windowEnd: string; items: DeclaredItem[] }
+export interface DeclaredEvidenceInput { sourceId: string; sourceUrl: string; fetchedAt: string; contentHash: string; role: "news" | "calendar"; complete: boolean; windowStart: string; windowEnd: string; occurrenceWindowStart?: string; occurrenceWindowEnd?: string; items: DeclaredItem[] }
 export function normalizeDeclaredEvidence(input: DeclaredEvidenceInput, policy: ResearchInstrumentPolicy): { evidence: ResearchEvidence[]; news: { id: string; evidenceRef: string; title: string }[]; events: { id: string; kind: "earnings" | "material" | "other"; occurs: ResearchEvidence["published"]; evidenceRef: string; title: string }[]; coverage: ResearchSourceResult } {
   if (!iso(input.fetchedAt) || !iso(input.windowStart) || !iso(input.windowEnd) || Date.parse(input.windowStart) > Date.parse(input.windowEnd) || Date.parse(input.windowEnd) > Date.parse(input.fetchedAt) || !/^https:\/\//.test(input.sourceUrl) || !/^[a-f0-9]{64}$/i.test(input.contentHash)) throw new Error("invalid declared evidence window");
+  const hasOccurrenceRange = input.occurrenceWindowStart !== undefined || input.occurrenceWindowEnd !== undefined;
+  if (hasOccurrenceRange && (input.role !== "calendar" || !iso(input.occurrenceWindowStart) || !iso(input.occurrenceWindowEnd) || Date.parse(input.occurrenceWindowStart) > Date.parse(input.occurrenceWindowEnd))) throw new Error("invalid calendar occurrence window");
   const source = policy.sources.find(s => s.id === input.sourceId); if (!source || source.parserConfig.kind !== "declared-evidence" || !source.urls.includes(input.sourceUrl) || !source.roles.includes(input.role) || !policy.identifiers.some(i => i.scheme === source.issuerIdentifier.scheme && i.value === source.issuerIdentifier.value)) throw new Error("undeclared evidence source");
   const evidence: ResearchEvidence[] = [], news: { id: string; evidenceRef: string; title: string }[] = [], events: { id: string; kind: "earnings" | "material" | "other"; occurs: ResearchEvidence["published"]; evidenceRef: string; title: string }[] = [];
   const seen = new Map<string, string>();
   for (const item of input.items) {
     if (input.role === "calendar") {
       if (!item.occurs) throw new Error("calendar occurrence missing");
-      publicationRange(canonicalPublication(item.occurs));
+      const range = publicationRange(canonicalPublication(item.occurs));
+      if (hasOccurrenceRange && (range.start < Date.parse(input.occurrenceWindowStart!) || range.end > Date.parse(input.occurrenceWindowEnd!))) throw new Error("calendar occurrence outside window");
       if (!["earnings", "material", "other"].includes(item.kind ?? "")) throw new Error("calendar kind invalid");
     }
     const pub = item.published;
@@ -229,7 +232,10 @@ export function normalizeDeclaredEvidence(input: DeclaredEvidenceInput, policy: 
     evidence.push({ ref, sourceId: input.sourceId, documentId: item.documentId, url: item.url, contentHash: item.contentHash, issuerId: policy.issuerId, issuerIdentifier: item.identifier, published: canonicalPublication(pub), fetchedAt: new Date(input.fetchedAt).toISOString(), observedAt: new Date(input.fetchedAt).toISOString(), automation: source.automation, retention: source.retention });
     if (input.role === "news") news.push({ id: item.id, evidenceRef: ref, title }); else events.push({ id: item.id, kind: item.kind!, occurs: canonicalPublication(item.occurs!), evidenceRef: ref, title });
   }
-  const coverage: ResearchSourceResult = { sourceId: input.sourceId, role: input.role, status: !input.complete ? "UNVERIFIED" : input.items.length === 0 ? "EMPTY" : "AVAILABLE", checkedAt: new Date(input.windowEnd).toISOString(), windowStart: new Date(input.windowStart).toISOString(), windowEnd: new Date(input.windowEnd).toISOString(), complete: input.complete, evidenceRefs: evidence.map(e => e.ref), reason: "declared-evidence fixture; not provider or permission verification" };
+  const complete = input.complete && (input.role !== "calendar" || hasOccurrenceRange);
+  const coverage: ResearchSourceResult = { sourceId: input.sourceId, role: input.role, status: !complete ? "UNVERIFIED" : input.items.length === 0 ? "EMPTY" : "AVAILABLE", checkedAt: new Date(input.windowEnd).toISOString(), windowStart: new Date(input.windowStart).toISOString(), windowEnd: new Date(input.windowEnd).toISOString(),
+    ...(hasOccurrenceRange ? { occurrenceWindowStart: new Date(input.occurrenceWindowStart!).toISOString(), occurrenceWindowEnd: new Date(input.occurrenceWindowEnd!).toISOString() } : {}),
+    complete, evidenceRefs: evidence.map(e => e.ref), reason: "declared-evidence fixture; not provider or permission verification" };
   return { evidence, news, events, coverage };
 }
 

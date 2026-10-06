@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { computeTradingConfigurationHash, loadTradingConfiguration, parseTradingConfiguration } from '@ikbr/shared/trading-config';
 import { parsePaperRunPolicy } from './paper-run-policy.js';
-export function paperPolicyFixture(startsAt='2026-09-28T14:00:00Z', endsAt='2026-09-28T14:30:00Z') {
+export function paperPolicyFixture(startsAt='2026-09-28T14:00:00Z', endsAt='2026-09-28T14:30:00Z', scheduledCapability=false) {
   const raw = JSON.parse(readFileSync(new URL('../../../packages/shared/src/trading-configuration/fixtures/valid-generic.json', import.meta.url), 'utf8'));
+  if (scheduledCapability) raw.entryPolicies = raw.entryPolicies.map((p: Record<string, unknown>) => ({ ...p, kind: 'bounded_scheduled', maxAttemptsPerAccountDay: 2 }));
   const parsed = parseTradingConfiguration(raw);
   if (!parsed.ok) throw new Error('invalid fixture');
   const loaded = loadTradingConfiguration({ TRADING_CONFIG_MODE: 'bundle', TRADING_CONFIG_PATH: '/fixture.json', TRADING_CONFIG_EXPECTED_HASH: computeTradingConfigurationHash(parsed.configuration) }, { readFile: () => JSON.stringify(raw) });
