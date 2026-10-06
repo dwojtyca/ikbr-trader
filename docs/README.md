@@ -7,7 +7,7 @@ successful exact-commit CI; see the
 [PP1 report](implementation/phase3/PP1_IMPLEMENTATION_REPORT.md). PP2–PP3 are delivered;
 PP4 real-source acceptance remains blocked. PP5 is delivered with review/checks/CI
 passed; see its [report](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md).
-PP6 is delivered; PP7 source is locally verified; publication/CI are tracked in its report, with operational acceptance blocked.
+PP6 is delivered; PP7 reviewed source is published with successful CI; operational acceptance remains blocked.
 Owner decision 2026-10-04: PP6 provides readable logs, terminal reports and recovery
 without the custom web UI. UI development is deferred; existing source is retained.
 These changes do not activate or deploy trading.

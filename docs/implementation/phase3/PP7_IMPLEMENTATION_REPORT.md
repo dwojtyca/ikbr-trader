@@ -1,8 +1,8 @@
 # PP7 implementation and acceptance evidence
 
 2026-10-06. Source and documentation accepted by independent hostile review;
-all required local release checks passed. Publication and exact-commit CI remain
-pending until the publication receipt below is filled.
+all required local release checks passed. The reviewed source was published on
+main and its exact-commit GitHub CI passed. Operational PP7 remains blocked.
 This report follows the [implementation plan](PP7_IMPLEMENTATION_PLAN.md) and
 independently accepted [delivery contract](PP7_DELIVERY_CONTRACT.md).
 
@@ -10,7 +10,7 @@ independently accepted [delivery contract](PP7_DELIVERY_CONTRACT.md).
 
 | Outcome | Current evidence |
 | --- | --- |
-| Implementation | D/G flow and policy implemented, E calendar/F request-bound fixes implemented; real E/F capability gaps remain. Source/harness review accepted; all required local checks passed; publication/CI pending |
+| Implementation | D/G flow and policy implemented, E calendar/F request-bound fixes implemented; real E/F capability gaps remain. Source/harness review accepted; all required local checks, publication and exact-source-commit CI passed |
 | Gate A | BLOCKED: PKO capital source conflict; mandatory news/calendar permissions and completeness; exact model access; certified Warsaw account-day executions/costs; no authorized disabled deployment/preflight |
 | Gate B | PKO 0, AAPL 0 real normal-flow round trips |
 | Gate C | PKO 0/5, AAPL 0/5 scheduled sessions; no activation authority |
@@ -135,11 +135,11 @@ All 25 unrelated local file hashes match the original snapshot.
 | Docker `pnpm test:integration`, disposable PostgreSQL16 | PASS, exit 0: 2427/2427, 0 skips/failures |
 | Independent source/document hostile review | ACCEPTED; all reported production and harness findings closed |
 | Local relative links, scoped diff and preservation | PASS; all 25 unrelated files retained |
-| Scoped publication/main and exact-commit CI | Pending publication receipt |
+| Scoped publication/main and exact-commit CI | PASS: `773c7ae5713101852aac54c846fb912564a1aee7`, [CI37466197955](https://github.com/dwojtyca/ikbr-trader/actions/runs/37466197955) SUCCESS |
 
-Unit package passes: shared546, llm-agent91, ingestion107, paper-verify-stack173,
-execution1349, UI14, signal533, backtest109. Integration passes: execution1734,
-backtest18, llm-agent17, ingestion111, signal547. Native-runner integration package
+Unit package passes: shared 546, llm-agent 91, ingestion 107, paper-verify-stack 173,
+execution 1349, UI 14, signal 533, backtest 109. Integration passes: execution 1734,
+backtest 18, llm-agent 17, ingestion 111, signal 547. Native-runner integration package
 durations sum to approximately 208s; total shell wall time was not independently
 captured. Source validation uses local Node24.4.1/pnpm9.15.4. Final Docker uses
 Node24.20.0 and the repository-declared pnpm9.5.0.
@@ -194,7 +194,29 @@ No token-savings percentage or model quality guarantee is claimed.
 The [launch template](PP7_LAUNCH_MANIFEST.template.json) is documentary, disabled and
 not executable as a policy. The private manifest binds the disabled config hash
 `60cd6b0368d6d176a3d85f750b11bace5b2f7880576e85441099ba80fd229f10`
-and inspected image ID; source commit/CI are filled after publication.
+and inspected image ID, source commit and successful exact-source-commit CI.
 Account identity, dates, monetary caps, provider/model limits, source permissions,
 broker coverage evidence and owner authorization must be supplied and verified
 before any operational stage. None is inferred from code approval or green tests.
+
+
+## Publication receipt
+
+The reviewed 69-path source package was committed and pushed to `main` as
+`773c7ae5713101852aac54c846fb912564a1aee7` (no PR). Its exact-SHA
+[GitHub workflow 37466197955](https://github.com/dwojtyca/ikbr-trader/actions/runs/37466197955)
+and `build-test` job completed SUCCESS on 2026-10-06 at 12:55:24 UTC, after starting
+at 12:50:24 UTC. Installation, lint, typecheck, unit tests, standard PostgreSQL
+integration and build all passed. That workflow used no local CPU-limiting flag.
+
+All 25 pre-existing unrelated files remain unstaged/uncommitted with unchanged
+hashes. The local disposable `pp7-postgres` was stopped after verification;
+operational services, broker accounts and real provider/alert channels were not
+started or changed. The private disabled launch manifest and archived receipts
+are under `backups/pp7-release-2026-10-06/`.
+
+This receipt is a separate documentation-only follow-up to successful source CI.
+It receives independent document review, local link/diff checks, scoped publication
+and its own exact-commit CI. No unchanged runtime suite is rerun locally for prose.
+The code-release evidence above remains pinned to 773c7ae. Full PP7 acceptance
+still requires the missing real E/F capabilities and authorized Gates A–D.

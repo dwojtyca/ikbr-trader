@@ -1,6 +1,6 @@
 # AI Trading Platform roadmap
 
-Updated: 2026-10-06 (PP7 source locally verified; publication/CI tracked in its report; operational Gates A–D remain unaccepted).
+Updated: 2026-10-06 (PP7 reviewed source published with successful CI; operational Gates A–D remain unaccepted).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).
 
@@ -72,7 +72,7 @@ independent hostile review, checks, report, scoped commit/push and exact CI.
 | PP4 | Implemented/reviewed cached research and AI audit; full real-source acceptance blocked — see report | PP1; integrate with PP2/PP3 before entries |
 | PP5 | Delivered automatic lifecycle, durable pause and alert delivery; review/checks/CI passed | PP3 |
 | PP6 | Delivered headless Polish logs/JSON, terminal reports, existing controls and recovery; review/checks/exact-source CI passed | PP0–PP5 |
-| PP7 | Locally verified source: D handoff, E calendar coverage, F request bounds, G scheduled authority; E/F real-source blockers and Gates A–D remain — see report | Reuse PP0–PP6; D/E/F before Gate A/B; G plus Gate B before Gate C activation |
+| PP7 | Reviewed/published source: D handoff, E calendar coverage, F request bounds, G scheduled authority; E/F real-source blockers and Gates A–D remain — see report | Reuse PP0–PP6; D/E/F before Gate A/B; G plus Gate B before Gate C activation |
 
 PP4 research implementation may proceed independently after the identity contract
 is fixed. Final integration and broker activation remain sequential and gated.

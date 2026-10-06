@@ -1,6 +1,6 @@
 # Current project state
 
-Source update: 2026-10-06; PP7 source locally verified; publication/CI tracked in its report. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
+Source update: 2026-10-06; PP7 reviewed source published with successful exact-commit CI. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.
 That audit tested a dirty workspace; its uncommitted ES work remains unshipped.
