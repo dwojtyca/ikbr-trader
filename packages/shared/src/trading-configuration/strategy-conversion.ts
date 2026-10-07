@@ -1,6 +1,6 @@
 import { TRADING_CONFIGURATION_SERVICES } from "./admission.js";
 import type { LoadedTradingConfiguration } from "./loader.js";
-import type { TradingConfigurationPool } from "./store.js";
+import type { TradingConfigurationDb, TradingConfigurationPool } from "./store.js";
 
 export async function preparePP2Conversion(pool: TradingConfigurationPool, input: {
   tradingEnabled: boolean; loaded: LoadedTradingConfiguration;
@@ -65,10 +65,15 @@ export async function preparePP2Conversion(pool: TradingConfigurationPool, input
           AND (r.delivery_started_at IS NOT NULL OR r.claim_until>clock_timestamp())) RETURNING p.id`);
     for (const row of drained.rows) await db.query(`UPDATE proposal_ai_reviews SET status='EXPIRED'
       WHERE proposed_order_id=$1 AND status IN ('PENDING','APPROVED')`, [row.id]);
-    await db.query("SELECT capture_strategy_binding_inheritance($1)", [sourceHash]);
-    await db.query("INSERT INTO strategy_runtime_conversion(singleton,source_hash,v2_not_before_bucket_ms) VALUES(TRUE,$1,$2)", [sourceHash, cutoff]);
+    await capturePP2Conversion(db, sourceHash, cutoff);
     await db.query("COMMIT");
     return { sourceHash, notBeforeBucketMs: cutoff };
   } catch (error) { await db.query("ROLLBACK"); throw error; }
   finally { db.release(); }
+}
+
+export async function capturePP2Conversion(db: TradingConfigurationDb, sourceHash: string, notBeforeBucketMs?: number): Promise<void> {
+  const cutoff = notBeforeBucketMs ?? Number((await db.query("SELECT (floor(extract(epoch FROM clock_timestamp())/60)+1)*60000 AS cutoff")).rows[0].cutoff);
+  await db.query("SELECT capture_strategy_binding_inheritance($1)", [sourceHash]);
+  await db.query("INSERT INTO strategy_runtime_conversion(singleton,source_hash,v2_not_before_bucket_ms) VALUES(TRUE,$1,$2)", [sourceHash, cutoff]);
 }

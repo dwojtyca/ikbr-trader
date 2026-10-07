@@ -120,3 +120,78 @@ audit tables or rewrite hashes to restore an older configuration. Existing suppo
 protection, reconciliation and close management use retained evidence. A separately
 reviewed transition is required to remove the durable entry hold; PP1 supplies no
 reset switch.
+
+## Retained history after proposal retention
+
+A database can have no proposals or broker-order links and still be historical.
+`broker_execution_fills` intentionally survives proposal retention, together with
+legacy strategy safety state. Inspect both before selecting the fresh-install path.
+A missing management source must block first bundle adoption while legacy preparation
+is still possible. Do not delete retained fills, reconstruct counters from incomplete
+commissions, or treat unlabelled fills as manual transactions to satisfy a gate.
+
+The narrow repair for an installation already latched without that source is defined
+in the [retained-state recovery plan](../implementation/phase3/PP7_RETAINED_STATE_RECOVERY_PLAN.md).
+It requires an explicit reviewed inspection and recovery, disabled writes, matching
+bundle peers and no owned/reserved proposal state. It captures the existing global
+safety rows unchanged and retains the original rollout audit. It does not reconstruct
+historical ownership or authorize an order. A normal failed conversion never invokes
+this repair automatically. Consult the package implementation report for release and
+operational validation before using the recovery command.
+
+### Explicit retained-state inspection and recovery
+
+Use the reviewed image and apply migration29 through the normal backed-up migration
+procedure first. Stop all producers; all four service observations must still match
+the original first bundle. Set explicit Paper/account allowlist, `TRADING_ENABLED=false`,
+`EXECUTION_ENTRIES_PAUSED=true`, `TRADING_LOOP_ENABLED=false`, `LLM_AGENT_ENABLED=false`.
+The command uses the configured PostgreSQL database and makes no broker/provider call.
+Do not point tests or fixture commands at that database.
+
+Prepare a private directory with mode 0700 and files with mode 0600. The bundle, legacy evidence and
+inspection paths must be absolute, canonical regular files (no symlinks). Legacy
+input is `{ "schemaVersion":1, "sourceHash":"…", "canonical":"…" }`, produced
+from the actual retained old authority with existing `createLegacyManagementSnapshot`.
+The shared decoder checks its canonical identity; a newly fabricated old policy is
+not acceptable evidence. Extra provenance can describe the retained private backup,
+but must never include raw environment text, account credentials or API keys.
+
+From an environment configured with that private bundle and the operational database:
+
+```sh
+node apps/execution-engine/dist/retained-state-recovery-cli.js inspect \
+  --legacy-evidence /absolute/private/legacy-authority.json \
+  --out /absolute/private/inspection.json
+```
+
+Inspect returns eligibility, fixed refusal reasons and state/history digests/counts.
+It locks for a consistent read then rolls back; it writes no database attestation.
+An ineligible receipt is a refusal, regardless of the process exit status. Review
+an eligible receipt and the preserved-state scope before executing:
+
+```sh
+node apps/execution-engine/dist/retained-state-recovery-cli.js recover \
+  --legacy-evidence /absolute/private/legacy-authority.json \
+  --inspection /absolute/private/inspection.json \
+  --out /absolute/private/recovery.json
+```
+
+Recovery verifies every reviewed digest again under locks. A changed fill/state,
+foreign account, changed first bundle, nonempty ownership/reservation, unknown source
+outcome or stale/mixed peers refuses. Do not edit the inspection or remove rows to
+pass. It preserves all existing Paper attempt budgets/debts and migration holds.
+It copies all existing global strategy safety rows, never neutral defaults. The
+legacy file is archival evidence only: old/current minTick or policy parity is not
+required with zero ownership, and it validates no current broker metadata.
+
+The receipt records present-state inheritance, not reconstructed historical trade
+ownership. The SQL boundary checks source identity, authority envelope/hash, state
+and history evidence; the shared parser checks complete canonical instrument/binding
+semantics. Direct manual SQL insertion is not an operator recovery interface.
+
+Output uses create-only files. If commit succeeded but output delivery failed, keep
+the original reviewed inspection and retry the same operation to a new output path;
+the immutable receipt is returned without recapturing state or moving the cutoff.
+A different inspection does not reset the conversion. After success, wait for the
+recorded future-minute cutoff and use read-only strategy evaluation. Recheck the
+ordinary broker, accounting, research, risk and lifecycle gates before activation.

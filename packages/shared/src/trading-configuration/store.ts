@@ -146,6 +146,11 @@ export class TradingConfigurationStore {
         if (input.legacyAuthority) validateAttributedManagementCompatibility(input.legacyAuthority, retained, attributedManagement);
         return { preparationPending: pending, managementAuthority: retained, attributedManagement, legacyOwnership: ownership.filter(row => !row.attributed), ownership, legacySourceHash: loaded.migrationPrepare ? snapshot!.sourceHash : sourceHash };
       }
+      if (!rollout.bundle_latched && !loaded.legacySourceHash) {
+        await db.query("LOCK TABLE proposed_orders IN EXCLUSIVE MODE");
+        await db.query("LOCK TABLE proposal_ai_reviews IN EXCLUSIVE MODE");
+        await db.query("LOCK TABLE broker_order_links,lifecycle_close_operations,broker_execution_fills IN SHARE MODE");
+      }
       const canonical = canonicalizeTradingConfiguration(loaded.configuration);
       decodeTradingConfigurationSnapshot(canonical, loaded.effectiveHash);
       await db.query("INSERT INTO trading_configuration_snapshots(effective_hash,schema_version,canonical_version,canonical_json) VALUES($1,1,1,$2) ON CONFLICT DO NOTHING", [loaded.effectiveHash, canonical]);
@@ -172,6 +177,12 @@ export class TradingConfigurationStore {
             WHERE c.close_proposal_id=po.id AND c.original_proposal_id=ANY($1::bigint[]) AND c.original_hash=original.client_order_hash)) LIMIT 1`,
           [rollout.bundle_latched ? attributed.map(item => item.originalProposalId) : []]);
         if (history.rows.length) throw new Error("LEGACY_MANAGEMENT_SNAPSHOT_REQUIRED");
+        if (!rollout.bundle_latched) {
+          const historical = await db.query(`SELECT 1 WHERE EXISTS(SELECT 1 FROM proposed_orders WHERE execution_attempted_at IS NOT NULL)
+            OR EXISTS(SELECT 1 FROM broker_execution_fills) OR EXISTS(SELECT 1 FROM broker_order_links)
+            OR EXISTS(SELECT 1 FROM lifecycle_close_operations)`);
+          if (historical.rows.length) throw new Error("LEGACY_STATE_SOURCE_UNPROVEN");
+        }
       }
       const retained = sourceHash ? await this.readManagement(db, sourceHash) : null;
       validateRetainedOwnership(retained, ownership.filter(row => !row.attributed));

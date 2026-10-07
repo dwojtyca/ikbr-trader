@@ -13,3 +13,4 @@ export * from "./trading-configuration/attribution.js";
 export * from "./trading-configuration/strategy-conversion.js";
 export * from "./trading-configuration/economic-evidence.js";
 export * from './trading-configuration/stock-management.js';
+export * from "./trading-configuration/retained-state-recovery.js";
