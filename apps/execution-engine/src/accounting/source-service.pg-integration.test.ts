@@ -40,10 +40,12 @@ class Socket extends EventEmitter implements AccountingSocket {
   }
 }
 test("F1 durable production source, qualification, capture and admission", { skip: !url }, async t => {
-  const connection = new URL(url!);
-  assert.ok(connection.pathname.includes("test") || connection.pathname.includes("validation"), "isolated TEST_POSTGRES_URL required");
-  const pool = new Pool({ connectionString: url, max: 6 });
-  await runMigrations(pool);
+  const connection = new URL(url!), database = `pp7_f1_${randomUUID().replaceAll("-", "")}`;
+  connection.pathname = "/postgres";
+  const admin = new Pool({ connectionString: connection.href });
+  connection.pathname = `/${database}`;
+  const pool = new Pool({ connectionString: connection.href, max: 6 });
+  let created = false;
   async function fixture() {
     const account = "F1_" + randomUUID(), process = "session_" + randomUUID();
     const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: "ibkr-tws-seven-day-v1", environment: "paper", accountId: account,
@@ -78,6 +80,9 @@ test("F1 durable production source, qualification, capture and admission", { ski
     return { pool, account, process, settings, socket, identity, store, service, qualify, capture, drained };
   }
   try {
+    await admin.query(`CREATE DATABASE ${database}`);
+    created = true;
+    await runMigrations(pool);
     await t.test("empty first account qualifies without historical sample and zero day reaches production reader", async () => {
       const f = await fixture();
       const { inspection } = await f.qualify(); assert.equal(inspection.corroboration, "NOT_OBSERVED");
@@ -115,13 +120,17 @@ test("F1 durable production source, qualification, capture and admission", { ski
     });
     await t.test("execution-only new information and revision changes during final transaction fence deny", async () => {
       const f = await fixture(); await f.qualify(); const { joined } = await f.capture();
-      const db = await pool.connect(); await db.query("BEGIN");
-      await f.service.readCapture(db, joined.accounting!, true);
-      const fill = f.socket.fill();
-      f.service.observeExecution({ execId: String(fill.exec.execId), accountId: f.account, orderId: 1, conid: "123", symbol: "TEST", secType: "STK", currency: "USD", exchange: "NASDAQ",
-        side: "BUY", shares: 1, price: 100, executedAt: new Date(Math.max(paperAccountDayStart(Date.now()), Date.now() - 60_000)).toISOString() }, async () => {});
-      assert.throws(() => f.service.assertCurrent(joined.accounting), /PERSISTENCE_PENDING/);
-      await db.query("COMMIT"); db.release(); await f.drained();
+      const db = await pool.connect();
+      try {
+        await db.query("BEGIN");
+        await f.service.readCapture(db, joined.accounting!, true);
+        const fill = f.socket.fill();
+        f.service.observeExecution({ execId: String(fill.exec.execId), accountId: f.account, orderId: 1, conid: "123", symbol: "TEST", secType: "STK", currency: "USD", exchange: "NASDAQ",
+          side: "BUY", shares: 1, price: 100, executedAt: new Date(Math.max(paperAccountDayStart(Date.now()), Date.now() - 60_000)).toISOString() }, async () => {});
+        assert.throws(() => f.service.assertCurrent(joined.accounting), /PERSISTENCE_PENDING/);
+        await db.query("COMMIT");
+      } finally { try { await db.query("ROLLBACK"); } finally { db.release(); } }
+      await f.drained();
       assert.throws(() => f.service.assertCurrent(joined.accounting), /REVISION_CHANGED/);
       await f.service.close();
     });
@@ -217,18 +226,19 @@ test("F1 durable production source, qualification, capture and admission", { ski
     await t.test("qualification rechecks freshness and socket identity after waiting for the source lock", async () => {
       for (const mode of ["inspection-age", "artifact-age", "disconnect"]) {
         const f = await fixture(), holder = await pool.connect(), original = f.store.recordQualification.bind(f.store);
-        let entered!: () => void; const atLock = new Promise<void>(resolve => { entered = resolve; });
-        f.store.recordQualification = async (record, guard) => {
-          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE", [f.store.sourceId]);
-          entered(); return original(record, guard);
-        };
-        const qualifying = f.qualify(); const rejected = assert.rejects(qualifying, /INSPECTION_INVALID|QUALIFICATION_INVALID|SOURCE_GAP/);
-        await atLock; const now = Date.now;
+        const now = Date.now;
         try {
+          let entered!: () => void; const atLock = new Promise<void>(resolve => { entered = resolve; });
+          f.store.recordQualification = async (record, guard) => {
+            await holder.query("BEGIN"); await holder.query("SELECT 1 FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE", [f.store.sourceId]);
+            entered(); return original(record, guard);
+          };
+          const qualifying = f.qualify(); const rejected = assert.rejects(qualifying, /INSPECTION_INVALID|QUALIFICATION_INVALID|SOURCE_GAP/);
+          await Promise.race([atLock, rejected.then(() => { throw new Error("qualification ended before acquiring its lock"); })]);
           if (mode === "disconnect") f.socket.disconnect();
           else Date.now = () => now() + (mode === "inspection-age" ? 11000 : 31 * 60_000);
           await holder.query("COMMIT"); await rejected;
-        } finally { Date.now = now; await holder.query("ROLLBACK"); holder.release(); }
+        } finally { Date.now = now; try { await holder.query("ROLLBACK"); } finally { holder.release(); } }
         assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_qualifications WHERE source_id=$1", [f.store.sourceId])).rows[0].count, "0");
         assert.equal(f.service.status().qualificationId, null); await f.service.close();
       }
@@ -265,5 +275,15 @@ test("F1 durable production source, qualification, capture and admission", { ski
       const invalidating = f.service.invalidate("operator settings changed"); assert.throws(() => f.service.assertCurrent(next.joined.accounting)); await invalidating;
       assert.equal(f.service.status().qualificationId, null); await f.service.close();
     });
-  } finally { await pool.end(); }
+  } finally {
+    try {
+      let remaining = pool.totalCount;
+      const removed = new Promise<void>(resolve => {
+        if (remaining === 0) resolve();
+        else pool.on("remove", () => { if (--remaining === 0) resolve(); });
+      });
+      try { await pool.end(); await removed; }
+      finally { if (created) await admin.query(`DROP DATABASE ${database}`); }
+    } finally { await admin.end(); }
+  }
 });

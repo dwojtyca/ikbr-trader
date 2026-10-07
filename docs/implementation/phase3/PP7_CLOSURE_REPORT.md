@@ -14,7 +14,12 @@ Scope and accepted contracts are in the [closure plan](PP7_CLOSURE_PLAN.md).
 | F1 | Qualified read-only TWS account-day executions/costs, durable source evidence and invalidation before entry dispatch | [Report](PP7_F1_IMPLEMENTATION_REPORT.md); independent hostile review accepted |
 
 The clean combined F1/E1b candidate passed all required local validation.
-Source publication and exact-commit CI remain pending. Full host unit tests
+Source is published as `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d`, but its
+[exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37598003618)
+failed PostgreSQL integration. The reproduced F1 test setup defect and reviewed
+fixture-only repair are documented in the F1 report. The repaired candidate
+passed all local checks, including 2459/2459 integration tests against the exact CI
+base name and controlled cleanup failures. Repair publication and CI remain pending. Full host unit tests
 passed 3019 cases with 143 database-dependent skips; lint, typecheck and build
 passed. The full isolated PostgreSQL command covers the database-dependent paths.
 The first integration attempt found a stale migration list in a legacy-upgrade
@@ -22,7 +27,7 @@ test. Adding migration 27 preserved every ownership, AI and daily-budget asserti
 the one-line repair passed independent review. Its complete integration rerun
 passed **2459 tests, zero skips and failures**. The clean no-cache Docker rebuild
 passed for `ikbr-trader:pp7-closure-verify`. Both package implementations and all
-eight release documents passed independent review; 33 local links resolve. No
+eight release documents passed independent review; all local links resolve. No
 strategy/simulator change or new strategy backtest is claimed.
 
 The final Docker image inspection returned
@@ -74,5 +79,18 @@ All 25 pre-existing dirty files are preserved by private SHA-256 baseline checks
 Only reviewed package paths may be committed on main. Tests use isolated
 PostgreSQL and a clean repository archive; no operational database fixture was run.
 No broker order, broker UI automation, paid model generation, Marketaux acquisition
-or subscription change was performed. Exact release commits, CI and final local
-validation are recorded below once available.
+or subscription change was performed. The first source commit contains exactly
+53 reviewed paths; its post-push audit confirmed only the 25 original dirty files
+remain. The failed CI is retained rather than replaced by local passing evidence.
+
+## Fixture repair validation
+
+Production code is unchanged by the CI follow-up. The F1 fixture now creates and
+cleans up its own database instead of relying on the name of the supplied base.
+All 13 normal fixture cases pass; injected migration and transaction-body failures
+both preserve the base and remove the owned child. Full lint, typecheck, unit,
+isolated integration and build checks passed on the clean repaired candidate.
+The final repaired image is
+`sha256:50983bcd506ab3511ad6150fd64a3a787b2e7f9c5f69eea098689938386af65d`.
+The independent final review and private hashes cover the single test-file repair
+and release-document updates; exact-commit CI is still required after publication.

@@ -1,7 +1,8 @@
 # PP7 E1b implementation: actual paginated Marketaux news
 
 2026-10-07. Status: **targeted checks and independent hostile implementation/document
-review and full local repository checks passed; publication/CI pending**. This is code
+review and full local repository checks passed; published source CI failed in F1
+integration setup; fixture repair passed all local checks, follow-up CI pending**. This is code
 evidence, not real-source qualification or Paper launch acceptance.
 The [contract](PP7_NEWS_FEED_CONTRACT.md) and
 [operator runbook](../../runbooks/PAPER_RESEARCH_NEWS.md) define scope and operation.
@@ -132,8 +133,13 @@ integration passed after that test-only repair: 2459 cases, zero skips/failures,
 image `ikbr-trader:pp7-closure-verify`.
 Complete outputs are saved in `/private/tmp/pp7-closure-final-*.log`.
 
-Source publication and exact-commit CI are pending. The final eight-document
-review accepted the narrative, 33 local links and scoped whitespace; all 25
+Source was published as `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d`. Its
+[CI run](https://github.com/dwojtyca/ikbr-trader/actions/runs/37598003618) passed
+lint/typecheck/unit tests but failed integration. A deterministic F1 database-name
+fixture defect was reproduced; the accepted repair and successful CI-shaped
+local validation are
+recorded in the [F1 report](PP7_F1_IMPLEMENTATION_REPORT.md). E1b source is unchanged. The final eight-document
+review accepted the narrative, all local links and scoped whitespace; all 25
 pre-existing file hashes remain unchanged. Mechanical
 verification uses `gpt-6-luna`/low because requested `gpt-5.6-luna`/low is unavailable
 in the exposed subagent list. Runtime model/token telemetry is unavailable. No

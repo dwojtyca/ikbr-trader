@@ -14,6 +14,11 @@ passed hostile re-review after four findings were fixed in one round. The
 review after two implementation findings were repaired. Their combined clean
 candidate passed lint, typecheck, 3019 unit tests (143 database-dependent skips),
 2459 isolated integration tests without skips, build and a clean Docker rebuild.
+Published combined source `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d` then failed
+CI integration; the reproduced F1 fixture setup defect has a reviewed repair
+contract below. Its repaired clean candidate passed all local checks and
+2459/2459 integration tests against the CI-shaped base; repair publication/CI
+remain pending.
 The [closure report](PP7_CLOSURE_REPORT.md) records readiness separately from
 source delivery. Calendar/model
 work and H retain their unresolved acceptance requirements. Baseline
@@ -377,6 +382,48 @@ hashes. Full PP7 completion still requires Gates A–D; code, deployed readiness
 observed Paper execution are separate statuses.
 
 ## Latest operational evidence, 2026-10-07
+
+### F1 integration fixture repair after source publication
+
+Source commit `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d` passed CI unit,
+lint and typecheck steps but failed PostgreSQL integration. The published F1
+fixture requires a database pathname containing `test` or `validation`; the
+workflow supplies `ikbr_trader_ci`. An isolated invocation with that exact URL
+reproduced its assertion before constructing a PostgreSQL pool. This is a test
+setup defect; full CI logs require authentication and are not available locally.
+
+Repair only `accounting/source-service.pg-integration.test.ts` and release
+documentation. Follow the repository's existing temporary-database fixture
+pattern: derive an admin connection from the explicit `TEST_POSTGRES_URL`, create
+a generated `pp7_f1_<uuid>` database, and run migrations and all existing scenarios
+only in that owned child. Remove the pathname heuristic. Never migrate, truncate
+or drop the caller's base database, accept a caller-supplied child name, force-drop
+a database or alter production configuration. Keep all thirteen existing test
+cases/assertions and production source unchanged.
+
+Put CREATE and migration/body work inside cleanup control flow. Mark ownership
+only after successful CREATE; always close the child pool and admin pool, and
+attempt DROP only for the generated successfully created child. Nested finally
+blocks retain admin cleanup if another cleanup fails. Prefer existing teardown
+patterns; do not introduce a generic database abstraction for this single fixture.
+
+Acceptance: an independent plan review before editing, a different implementation
+review, the actual fixture passing with CI's base name, unchanged base tables and
+no surviving owned child after success and controlled migration/body failures in
+private validation copies. The body failure must occur after a checked-out client
+begins a transaction, proving unconditional client release before pool shutdown. Inspect CREATE/DROP failure cleanup control flow in the
+independent review without adding a new test framework. Re-run the full required
+checks on the repaired clean candidate and exact-commit CI. Preserve the original
+failed run and all 25 unrelated dirty paths. No operational database or broker
+action belongs to this repair.
+
+Independent Astra/high plan review accepted this contract. A different final
+reviewer identified one P2 client-lifetime cleanup finding, repaired in one round.
+Both controlled failure receipts and the normal 13-case fixture demonstrate base
+preservation and child cleanup. The complete repaired validation passed lint,
+typecheck, 3019 host unit tests (143 database-dependent skips), all 2459 isolated
+integration tests without skips, build and a no-cache Docker build. Publication
+and exact-commit CI remain the final source acceptance step.
 
 At 07:37:57 UTC a single read-only TCP check of the configured Paper endpoint
 returned `ECONNREFUSED`. No broker API call or order was attempted and master
