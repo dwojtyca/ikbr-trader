@@ -3,7 +3,7 @@
 2026-10-07. Implementation is accepted after one hostile repair round and all
 required local checks passed for the initial candidate. Source was published, but
 its CI integration failed. The independently reviewed fixture-only repair has
-passed all local checks against CI-shaped PostgreSQL; repair publication/CI remain pending. This is a code package under the
+passed all local checks against CI-shaped PostgreSQL and its exact-commit CI. This is a code package under the
 [accepted F1 contract](PP7_ACCOUNTING_SOURCE_CONTRACT.md); it is not real broker
 qualification or permission to activate Paper trading.
 
@@ -81,7 +81,7 @@ the reviewed repair changes the candidate.
 | `pnpm build` | Passed |
 | Clean Docker build | Passed after repair, `ikbr-trader:pp7-closure-verify` |
 | Scoped diff, links, private baseline preservation | Eight-document independent review accepted; all local links resolve; 25 baseline hashes unchanged |
-| Main commit and exact-commit CI | `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d` published; integration failed in CI, fixture repair passed local checks, repair publication/CI pending |
+| Main commit and exact-commit CI | `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d` published; integration failed in CI, fixture repair `9e75be1f61b6a4c5e49202ef3292c4de631b48d6` passed exact-commit [CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37602198343) |
 
 The final combined candidate was created from `bc5d6d62b825ee69d8862142401f91badb5b07ff`
 plus the reviewed F1/E1b paths, excluding the 25 pre-existing dirty files. Its
@@ -147,7 +147,8 @@ clients and pools and drops only the successfully created child. Production code
 and all thirteen existing test cases remain unchanged. Independent implementation
 review found one P2 cleanup issue spanning two checked-out client lifetimes; the
 lead repaired unconditional rollback/release and the qualification lock wait.
-The different final reviewer accepted the source pending measured validation.
+The different final reviewer subsequently accepted the five-path source/document
+package after verifying the measurements below.
 The repaired fixture passed all 13 cases with the exact CI base name
 `ikbr_trader_ci`. Before/after base table lists and sentinel contents match, and
 no owned child remains. In private diagnostic copies, an invalid migration and a
@@ -166,7 +167,10 @@ Full integration against the CI-shaped base passed 2459/2459 with zero failures
 or skips in 116.402 seconds. The full host unit suite passed 3019 with 143
 PostgreSQL-dependent skips; lint had zero errors and two existing warnings.
 Typecheck, build and the no-cache image build passed. All 25 baseline file hashes
-and the accepted fixture hash match. Exact repair-commit CI follows publication.
+and the accepted fixture hash match. The repair was committed and pushed as
+`9e75be1f61b6a4c5e49202ef3292c4de631b48d6`; its [exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37602198343)
+passed install, lint, typecheck, unit tests, PostgreSQL integration and build.
+The original failed CI remains recorded above.
 Complete logs are `/private/tmp/pp7-ci-fixture-repair-*.log`.
 
 The repair's independent plan reviewer was Astra/high `plan_research_feeds`;

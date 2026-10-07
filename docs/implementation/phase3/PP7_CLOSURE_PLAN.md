@@ -17,8 +17,8 @@ candidate passed lint, typecheck, 3019 unit tests (143 database-dependent skips)
 Published combined source `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d` then failed
 CI integration; the reproduced F1 fixture setup defect has a reviewed repair
 contract below. Its repaired clean candidate passed all local checks and
-2459/2459 integration tests against the CI-shaped base; repair publication/CI
-remain pending.
+2459/2459 integration tests against the CI-shaped base. The repair was published
+as `9e75be1f61b6a4c5e49202ef3292c4de631b48d6` and its [exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37602198343) passed.
 The [closure report](PP7_CLOSURE_REPORT.md) records readiness separately from
 source delivery. Calendar/model
 work and H retain their unresolved acceptance requirements. Baseline
@@ -422,8 +422,9 @@ reviewer identified one P2 client-lifetime cleanup finding, repaired in one roun
 Both controlled failure receipts and the normal 13-case fixture demonstrate base
 preservation and child cleanup. The complete repaired validation passed lint,
 typecheck, 3019 host unit tests (143 database-dependent skips), all 2459 isolated
-integration tests without skips, build and a no-cache Docker build. Publication
-and exact-commit CI remain the final source acceptance step.
+integration tests without skips, build and a no-cache Docker build. The repair was published as
+`9e75be1f61b6a4c5e49202ef3292c4de631b48d6`; its exact-commit CI passed all required steps.
+The original source run failure remains part of the delivery evidence.
 
 At 07:37:57 UTC a single read-only TCP check of the configured Paper endpoint
 returned `ECONNREFUSED`. No broker API call or order was attempted and master

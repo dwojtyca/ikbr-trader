@@ -1,8 +1,8 @@
 # PP7 E1b implementation: actual paginated Marketaux news
 
 2026-10-07. Status: **targeted checks and independent hostile implementation/document
-review and full local repository checks passed; published source CI failed in F1
-integration setup; fixture repair passed all local checks, follow-up CI pending**. This is code
+review and full local repository checks passed; published fixture repair passed
+exact-commit CI after the initial F1 integration-setup failure**. This is code
 evidence, not real-source qualification or Paper launch acceptance.
 The [contract](PP7_NEWS_FEED_CONTRACT.md) and
 [operator runbook](../../runbooks/PAPER_RESEARCH_NEWS.md) define scope and operation.
@@ -138,7 +138,9 @@ Source was published as `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d`. Its
 lint/typecheck/unit tests but failed integration. A deterministic F1 database-name
 fixture defect was reproduced; the accepted repair and successful CI-shaped
 local validation are
-recorded in the [F1 report](PP7_F1_IMPLEMENTATION_REPORT.md). E1b source is unchanged. The final eight-document
+recorded in the [F1 report](PP7_F1_IMPLEMENTATION_REPORT.md). Repair commit
+`9e75be1f61b6a4c5e49202ef3292c4de631b48d6` passed [exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37602198343),
+including PostgreSQL integration and build. E1b source is unchanged. The final eight-document
 review accepted the narrative, all local links and scoped whitespace; all 25
 pre-existing file hashes remain unchanged. Mechanical
 verification uses `gpt-6-luna`/low because requested `gpt-5.6-luna`/low is unavailable

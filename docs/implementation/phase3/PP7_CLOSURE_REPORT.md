@@ -1,6 +1,6 @@
 # PP7 closure status, 2026-10-07
 
-**PP7 is not operationally complete. Trading remains disabled.** The normal
+**PP7 is not operationally complete. This delivery did not activate trading.** The normal
 scheduler, proposal, AI, risk, bracket and exit paths exist. This delivery adds
 three missing source capabilities; it does not record a real Paper entry or exit.
 Scope and accepted contracts are in the [closure plan](PP7_CLOSURE_PLAN.md).
@@ -19,7 +19,9 @@ Source is published as `ddffe1009dae4b5a7d67bb4a0ad86c6d7705c56d`, but its
 failed PostgreSQL integration. The reproduced F1 test setup defect and reviewed
 fixture-only repair are documented in the F1 report. The repaired candidate
 passed all local checks, including 2459/2459 integration tests against the exact CI
-base name and controlled cleanup failures. Repair publication and CI remain pending. Full host unit tests
+base name and controlled cleanup failures. Repair commit
+`9e75be1f61b6a4c5e49202ef3292c4de631b48d6` passed [exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/37602198343),
+including integration and build. Full host unit tests
 passed 3019 cases with 143 database-dependent skips; lint, typecheck and build
 passed. The full isolated PostgreSQL command covers the database-dependent paths.
 The first integration attempt found a stale migration list in a legacy-upgrade
@@ -93,4 +95,10 @@ isolated integration and build checks passed on the clean repaired candidate.
 The final repaired image is
 `sha256:50983bcd506ab3511ad6150fd64a3a787b2e7f9c5f69eea098689938386af65d`.
 The independent final review and private hashes cover the single test-file repair
-and release-document updates; exact-commit CI is still required after publication.
+and release-document updates. The repair was pushed to main and its exact-commit
+CI passed. The remaining operational gates above remain unproven.
+
+At 09:45:47 UTC on 2026-10-07 a narrow local `.env` check still showed
+`IBKR_ENVIRONMENT=paper`, `TRADING_ENABLED=false` and
+`TRADING_LOOP_ENABLED=false`. This is local configuration evidence, not an
+inspection of a deployed process or an additional broker connection.
