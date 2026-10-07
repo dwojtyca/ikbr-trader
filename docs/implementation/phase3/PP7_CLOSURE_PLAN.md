@@ -1,7 +1,10 @@
 # PP7 closure: real Paper sources and operational readiness
 
 2026-10-06, updated 2026-10-07. E1a implementation and required local checks are
-accepted; publication/CI are pending. See the [E1a report](PP7_E1A_IMPLEMENTATION_REPORT.md).
+accepted and published as `b1a4a907d3d8617f922a31cfe45b691a040c7e72`.
+Exact-commit CI failed at `pnpm test`; a reproduced Linux cleanup defect is now
+repaired and independently reviewed, with replacement publication/CI pending. See the
+[E1a report](PP7_E1A_IMPLEMENTATION_REPORT.md).
 The [F1 source contract](PP7_ACCOUNTING_SOURCE_CONTRACT.md)
 is independently accepted after two blocking findings were repaired. Remaining
 source/model work and H require their supplemental contract reviews. Baseline
@@ -289,6 +292,30 @@ sources, but publishes ERROR/ineligible current-source coverage; authority metad
 is historical review provenance and must match the actual selected fact/digest,
 never imply a fresh corroborating acquisition. A different independent reviewer
 must review the implementation.
+
+E1a publication follow-up: the generated encrypted PDF's fixed-width xref table
+was detected as text by Git and produced trailing-space warnings during staged
+diff checking. Add a narrow root `.gitattributes` entry marking exactly
+`apps/llm-agent/src/research-provider-fixtures/encrypted-test.pdf` as `binary`.
+Do not change its bytes or parser behavior. Acceptance: unchanged PDF SHA-256,
+Git reports the fixture as binary, scoped diff checking passes, document links
+and source/CI evidence stay accurate. Independent plan and document/metadata
+reviews apply; unchanged runtime suites need no local repeat for this Git metadata.
+
+E1a decoder repair contract (2026-10-07): isolated Linux reproduction identified
+an uncaught cleanup error: PDF.js 6.4.299's document proxy has no `destroy()`
+method. Its loading task owns destruction. The worker currently publishes before
+cleanup, allowing the error and result to race. In the fixed worker, accumulate
+the result or stable failure, await the loading task's supported `destroy()` in
+all acquired-task paths, then publish exactly one result. Cleanup failure becomes
+`RESEARCH_PDF_DECODE_FAILED`; it cannot overwrite an already published success.
+Keep the parent deadline, unconditional worker termination, bounded local bytes,
+trusted module URL and all extraction checks. Do not suppress a failed cleanup or
+expose decoder text. Add actual-worker tests with a controlled test-only module for
+loading-task-only cleanup and a rejecting cleanup, alongside existing real-PDF
+success/error tests. Scope: extractor, its test, this plan and E1a report. No
+provider/refresh changes overlap E1b. Independent plan/final review and the full
+required runtime validation, clean Docker build and exact-commit CI apply.
 
 ## H: two protected positions, bounded extension after first Paper proof
 

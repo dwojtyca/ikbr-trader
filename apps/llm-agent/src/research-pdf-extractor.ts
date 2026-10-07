@@ -13,14 +13,15 @@ const DECODER = String.raw`
 const { parentPort, workerData } = require("node:worker_threads");
 const { bytes, pageNumbers, limits, moduleUrl } = workerData;
 (async () => {
-  let task, document, encrypted = false;
+  let task, document, cleanupPromise, outcome, encrypted = false;
+  const cleanup = () => cleanupPromise ??= Promise.resolve().then(() => task.destroy());
   const fail = code => { throw new Error(code); };
   try {
     const { getDocument } = await import(moduleUrl);
     task = getDocument({ data: bytes, useSystemFonts: false, useWorkerFetch: false,
       isEvalSupported: false, disableFontFace: true, stopAtErrors: true, enableXfa: false,
       disableAutoFetch: true, disableStream: true, disableRange: true, verbosity: 0 });
-    task.onPassword = () => { encrypted = true; void task.destroy(); };
+    task.onPassword = () => { encrypted = true; void cleanup().catch(() => {}); };
     document = await task.promise;
     if (encrypted || await document.getPermissions() !== null) fail("RESEARCH_PDF_ENCRYPTED");
     if (document.numPages > limits.maxPages) fail("RESEARCH_PDF_PAGE_LIMIT");
@@ -59,14 +60,17 @@ const { bytes, pageNumbers, limits, moduleUrl } = workerData;
       if (!items.length) fail("RESEARCH_PDF_TEXT_MISSING");
       pages.push({ pageNumber, width: viewport.width, height: viewport.height, items });
     }
-    parentPort.postMessage({ document: { pageCount: document.numPages, pages } });
+    outcome = { document: { pageCount: document.numPages, pages } };
   } catch (error) {
     const known = new Set(${JSON.stringify([...FAILURE_CODES])});
-    parentPort.postMessage({ error: encrypted ? "RESEARCH_PDF_ENCRYPTED" : known.has(error?.message) ? error.message : "RESEARCH_PDF_DECODE_FAILED" });
+    outcome = { error: encrypted ? "RESEARCH_PDF_ENCRYPTED" : known.has(error?.message) ? error.message : "RESEARCH_PDF_DECODE_FAILED" };
   } finally {
-    if (document) await document.destroy();
-    else if (task) await task.destroy();
+    if (task) {
+      try { await cleanup(); }
+      catch { outcome = { error: "RESEARCH_PDF_DECODE_FAILED" }; }
+    }
   }
+  parentPort.postMessage(outcome);
 })();
 `;
 

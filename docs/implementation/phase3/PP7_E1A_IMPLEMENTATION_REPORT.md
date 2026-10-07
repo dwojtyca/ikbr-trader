@@ -1,7 +1,8 @@
 # PP7 E1a: authoritative PKO periodic report extraction
 
-2026-10-07. E1a implementation and hostile review accepted; required local checks
-passed. Publication/CI evidence is pending. **PP7 as a whole is not complete.**
+2026-10-07. E1a was published, but its exact-commit CI failed. A reproduced Linux
+decoder cleanup defect is repaired and independently accepted; the required local
+checks pass again. Repair publication/CI are pending. **PP7 is not complete.**
 This package implements the PDF financial-report portion of
 [the closure plan](PP7_CLOSURE_PLAN.md). Accounting implementation, actual news and
 calendar coverage, source/model qualification and operational Gates A–D remain.
@@ -76,8 +77,8 @@ simulator behavior changes require backtests.
 | `pnpm build` | Passed |
 | Clean `docker build --no-cache` | Passed, image `ikbr-trader:pp7-e1a-verify` |
 | `pnpm test:integration` | Passed in isolated Docker/PostgreSQL: 2427 passed, 0 failures, 0 skips |
-| Scoped diff, links and final report review | Pending publication checks |
-| Exact-commit GitHub CI | Pending publication |
+| Scoped links and final report review | Passed independent review; initial staged diff check reported PDF xref whitespace, addressed by the separately reviewed binary-attribute follow-up |
+| Exact-commit GitHub CI | Failed at `pnpm test` for `b1a4a907d3d8617f922a31cfe45b691a040c7e72`; investigation remains open |
 
 Initial test-environment failures are retained in private logs. The sandbox denied
 local HTTP listeners, so the same unit suite ran successfully with that permission.
@@ -87,6 +88,47 @@ PostgreSQL on the same VM removes that clock mismatch. A subsequent VM run cross
 Warsaw midnight and hit the existing fixtures' `PAPER_RUN_CROSS_DAY_WINDOW` guard.
 The final integration run passed outside that fixture boundary; no production
 time guard or assertion was weakened.
+
+The reviewed 20-path package was committed and pushed normally to `main` as
+`b1a4a907d3d8617f922a31cfe45b691a040c7e72`. Its
+[CI run](https://github.com/dwojtyca/ikbr-trader/actions/runs/37538572261)
+failed during `pnpm test`; public annotations only identify exit code 1, and the
+log API returned HTTP 403 without credentials. A Linux reproduction of the unit
+suite exposed a cleanup defect: PDF.js 6.4.299's document proxy has no `destroy()`
+method; the loading task owns destruction. Posting the result before cleanup let
+an uncaught cleanup error race the result. The initial CI failure is not waived.
+The six staged whitespace findings were inside the unchanged generated encrypted
+PDF's valid fixed-width cross-reference table. A follow-up marks only that path
+as binary in `.gitattributes`; it does not alter the PDF or application behavior.
+
+The independently reviewed repair awaits exactly one loading-task cleanup before
+publishing its result. Password handling shares the same cleanup promise with an
+immediate rejection handler. Cleanup failure produces a stable denial; parent
+timeout and unconditional worker termination remain. Four actual-worker scenarios
+assert that cleanup completes exactly once for success, cleanup failure, a known
+page-limit failure and an encrypted-document path. The test-only module is
+injected through the existing worker factory; the production module URL is fixed.
+
+| Repair validation | Result |
+| --- | --- |
+| Independent hostile review | Accepted; reviewer reran all six extractor tests |
+| PDF extractor and refresh targeted tests | 12 passed, 0 failed |
+| Linux llm-agent unit suite | 155 passed, 7 expected database skips, 0 failed |
+| `pnpm lint`, `pnpm typecheck`, `pnpm build` | Passed; same two existing lint warnings |
+| Full host `pnpm test` | 2986 passed, 133 expected database skips, 0 failed |
+| Clean Docker build | Passed, `ikbr-trader:pp7-e1a-repair-verify` |
+| Isolated PostgreSQL `pnpm test:integration` | 2427 passed, 0 failed, 0 skipped |
+| Binary metadata | Exact fixture SHA-256 unchanged; Git binary attribute confirmed; scoped whitespace check passes |
+| Repair exact-commit CI | Pending publication |
+
+Additional failed validation attempts remain recorded rather than hidden. One
+host run observed about 925 seconds inside existing asynchronous tests and exceeded
+an AI test deadline; the unchanged rerun passed. Running the entire unit suite in
+the application image lacks the Docker CLI needed by two existing Compose tests;
+the full host suite covers those checks. An initial integration rerun hit one
+existing `xyz_nyse` daily-loss freshness denial; its isolated 17-test file and the
+subsequent full integration run both passed without source or assertion changes.
+The fresh Linux llm-agent suite specifically exercises the repaired decoder.
 
 ## Operational status
 

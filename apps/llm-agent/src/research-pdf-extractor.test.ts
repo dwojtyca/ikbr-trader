@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
-import type { Worker, WorkerOptions } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import { extractResearchPdf } from "./research-pdf-extractor.js";
 import { PDF_RESEARCH_LIMITS, type PdfTextDocument } from "./research-pdf-types.js";
 import { pdfBytes } from "./research-pdf-binary.testfixture.js";
@@ -61,6 +61,52 @@ test("actual decoder bounds extracted text", async () => {
   const bytes = pdfBytes({ ...simple, pages: [{ ...simple.pages[0], width: 2000,
     items: Array.from({ length: 1100 }, () => ({ ...simple.pages[0].items[0], text: "x".repeat(1000) })) }] });
   await assert.rejects(extractResearchPdf(bytes, hash(bytes), [1]), /TEXT_LIMIT/);
+});
+
+test("actual worker awaits one loading-task cleanup before publishing success or a stable failure", async () => {
+  const bytes = pdfBytes(simple);
+  for (const mode of ["success", "cleanup_failure", "page_limit", "encrypted"] as const) {
+    const state = new Int32Array(new SharedArrayBuffer(8));
+    const module = `
+      import { workerData } from 'node:worker_threads';
+      export function getDocument() {
+        const state = new Int32Array(workerData.cleanupState);
+        let rejectDocument;
+        const document = {
+          numPages: ${mode === "page_limit" ? 101 : 1},
+          getPermissions: async () => null,
+          getPage: async () => ({ rotate: 0, userUnit: 1, view: [0, 0, 600, 800],
+            getViewport: () => ({ width: 600, height: 800 }), cleanup() {},
+            streamTextContent: () => new ReadableStream({ start(c) {
+              c.enqueue({ items: [{ str: '42', width: 10, height: 10, transform: [10, 0, 0, 10, 20, 760] }] });
+              c.close();
+            } })
+          })
+        };
+        const task = {
+          promise: ${mode === "encrypted" ? "new Promise((_resolve, reject) => { rejectDocument = reject; })" : "Promise.resolve(document)"},
+          async destroy() {
+            Atomics.add(state, 0, 1);
+            await new Promise(resolve => setTimeout(resolve, 25));
+            Atomics.store(state, 1, 1);
+            ${mode === "cleanup_failure" ? "throw new Error('untrusted cleanup detail');" : ""}
+            if (rejectDocument) rejectDocument(new Error('password required'));
+          }
+        };
+        ${mode === "encrypted" ? "setImmediate(() => task.onPassword());" : ""}
+        return task;
+      }
+    `;
+    const promise = extractResearchPdf(bytes, hash(bytes), [1], {
+      createWorker: (code, options) => new Worker(code, { ...options,
+        workerData: { ...options.workerData, cleanupState: state.buffer,
+          moduleUrl: "data:text/javascript;base64," + Buffer.from(module).toString("base64") } }),
+    });
+    if (mode === "success") assert.equal((await promise).pages[0].items[0].text, "42");
+    else await assert.rejects(promise, mode === "cleanup_failure" ? /^Error: RESEARCH_PDF_DECODE_FAILED$/ : mode === "page_limit" ? /PAGE_LIMIT/ : /ENCRYPTED/);
+    assert.equal(Atomics.load(state, 0), 1, mode + " must destroy exactly once");
+    assert.equal(Atomics.load(state, 1), 1, mode + " must await cleanup before publishing");
+  }
 });
 
 test("worker timeout/error/success always awaits termination and never returns decoder messages", async t => {
