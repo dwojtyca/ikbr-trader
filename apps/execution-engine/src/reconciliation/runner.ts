@@ -131,7 +131,10 @@ export class ReconciliationRunner {
     let captureError: Error | null = null;
     try {
       const oldest = await this.#findOldestAmbiguousAttemptedAt();
+      const generation = (await client.query(`SELECT position_generation FROM reconciliation_runs WHERE id=$1 AND account_id=$2 AND session_id=$3`,
+        [runId, context.accountId, context.sessionId])).rows[0]?.position_generation;
       snapshot = await this.broker.capture({
+        reconciliationRunId: Number(runId), positionGeneration: generation == null ? undefined : Number(generation),
         accountId: context.accountId,
         sessionId: context.sessionId,
         sessionStartedAt: context.sessionStartedAt,

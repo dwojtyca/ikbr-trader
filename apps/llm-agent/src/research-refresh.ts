@@ -3,6 +3,10 @@ import { normalizeResearchSource } from "./research-providers.js";
 import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
 import { extractResearchPdf } from "./research-pdf-extractor.js";
 import { parseIssuerPdfMapping } from "./research-pdf-mapping.js";
+import { createHash } from "node:crypto";
+import { MARKETAUX_MAX_ACQUISITION_BYTES, MARKETAUX_MAX_ACQUISITION_MS, marketauxCallIdentity, marketauxQualificationDeadline, marketauxWindow, parseMarketauxNewsConfig, type MarketauxPageReceipt, type MarketauxRequest } from "@ikbr/shared/instrument-research";
+import { createMarketauxFetch, sanitizeMarketauxError, type MarketauxFetch } from "./research-marketaux-fetch.js";
+import { marketauxRecordSetHash, parseMarketauxPage, type MarketauxNewsRecord } from "./research-marketaux.js";
 
 type Role = "reports" | "news" | "calendar";
 type SourceStore = Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot">;
@@ -57,7 +61,7 @@ function removePriorSourceRole(snapshot: InstrumentResearchSnapshotV1, sourceId:
 export class ResearchRefreshScheduler {
   private inFlight = false;
   private readonly attemptedSlots = new Map<string, number>();
-  constructor(private readonly options: { manifest: ResearchManifestV1; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number }) {}
+  constructor(private readonly options: { manifest: ResearchManifestV1; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch }) {}
 
   async tick(): Promise<void> {
     if (!this.options.manifest.refreshEnabled || this.inFlight) return;
@@ -82,6 +86,7 @@ export class ResearchRefreshScheduler {
   }
 
   private async refreshRole(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, slotKey: string): Promise<void> {
+    if (source.adapter === "marketaux-news") return this.refreshMarketaux(policy, source, slot, slotKey);
     const { manifest, manifestHash, store, accountId } = this.options;
     const startedAt = new Date((this.options.now ?? Date.now)()).toISOString();
     const previous = await store.latestSnapshot({ configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId });
@@ -164,6 +169,119 @@ export class ResearchRefreshScheduler {
       ...occurrenceWindow,
       complete, evidenceRefs: refs, reason });
     await store.storeSnapshot(snapshot, slotKey);
+  }
+
+  private async refreshMarketaux(policy: ResearchInstrumentPolicy, source: ResearchSource, slot: number, slotKey: string): Promise<void> {
+    const { manifest, manifestHash, store, accountId } = this.options;
+    const now = this.options.now ?? Date.now, startedAt = now(), window = marketauxWindow(slot);
+    const previous = await store.latestSnapshot({ configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId });
+    const snapshot: InstrumentResearchSnapshotV1 = previous ? structuredClone(previous.snapshot) : {
+      schemaVersion: 1, configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId,
+      mappingHash: researchHash(policy), createdAt: new Date(startedAt).toISOString(), evidence: [], coverage: [], reports: [], facts: [], news: [], events: [],
+    };
+    removePriorSourceRole(snapshot, source.id, "news");
+    const baseline = structuredClone(snapshot);
+    const failure = (status: "ERROR" | "UNVERIFIED", reason: string) => {
+      Object.assign(snapshot, structuredClone(baseline));
+      snapshot.createdAt = new Date(now()).toISOString();
+      snapshot.coverage.push({ sourceId: source.id, role: "news", status, checkedAt: window.asOf, windowStart: window.windowStart, windowEnd: window.asOf,
+        complete: false, evidenceRefs: [], reason });
+      parseResearchSnapshot(snapshot, manifest);
+    };
+    const config = parseMarketauxNewsConfig(source, policy);
+    let allowed = source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && source.maxRequestsPerDay > 0 && source.costMicrosPerCall <= source.maxCostMicrosPerDay;
+    try { marketauxQualificationDeadline(config, now()); } catch { allowed = false; }
+    if (!allowed) {
+      failure("UNVERIFIED", "RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE");
+      await store.storeSnapshot(snapshot, slotKey); return;
+    }
+    let admissionDeadline = 0;
+    try {
+      if (!this.options.marketauxApiKey?.trim()) throw new Error("RESEARCH_MARKETAUX_KEY_MISSING");
+      admissionDeadline = Math.min(startedAt + MARKETAUX_MAX_ACQUISITION_MS, marketauxQualificationDeadline(config, now()));
+      const checkpoint = () => {
+        marketauxQualificationDeadline(config, now());
+        if (now() >= admissionDeadline) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
+      };
+      const fetch = this.options.marketauxFetch ?? createMarketauxFetch(this.options.marketauxApiKey);
+      const providerSources = manifest.instruments.flatMap(instrument => instrument.sources).filter(candidate => candidate.provider === source.provider);
+      const maxRequestsPerDay = Math.min(...providerSources.map(candidate => candidate.maxRequestsPerDay));
+      const maxCostMicrosPerDay = Math.min(...providerSources.map(candidate => candidate.maxCostMicrosPerDay));
+      const reservedCostMicros = Math.max(...providerSources.map(candidate => candidate.costMicrosPerCall));
+      let bytes = 0, firstFound = -1;
+      const passes: MarketauxNewsRecord[][] = [], receipts: MarketauxPageReceipt[] = [];
+      const firstPages = new Map<string, MarketauxPageReceipt>();
+      for (const pass of [1, 2] as const) {
+        const records: MarketauxNewsRecord[] = [], ids = new Set<string>();
+        let found = -1, pageCount = 1;
+        for (let page = 1; page <= pageCount; page++) {
+          checkpoint();
+          const remainingBytes = MARKETAUX_MAX_ACQUISITION_BYTES - bytes;
+          if (remainingBytes <= 0) throw new Error("RESEARCH_MARKETAUX_BYTES_EXCEEDED");
+          const descriptor: MarketauxRequest = { sourceUrl: source.urls[0], ...window, pass, page };
+          const identity = marketauxCallIdentity(manifestHash, policy.instrumentId, source, descriptor);
+          const deadlineAt = new Date(Math.min(now() + 10000, admissionDeadline)).toISOString();
+          await store.reserveCall({ accountId, provider: source.provider, kind: "source", configHash: manifest.configHash, manifestHash,
+            callKey: identity.callKey, requestHash: identity.requestHash, reservedCostMicros, maxRequestsPerDay, maxCostMicrosPerDay, deadlineAt });
+          let result: ResearchFetchResult;
+          try {
+            checkpoint();
+            if (now() >= Date.parse(deadlineAt)) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
+            result = await fetch(source, descriptor, deadlineAt, Math.min(10 * 1024 * 1024, remainingBytes));
+          } catch (error) {
+            await store.recordCallOutcome(identity.callKey, /^RESEARCH_SOURCE_HTTP_\d{3}$/.test(sanitizeMarketauxError(error)) ? "FAILED" : "UNKNOWN");
+            throw error;
+          }
+          await store.recordCallOutcome(identity.callKey, "SUCCEEDED");
+          checkpoint();
+          if (now() >= Date.parse(deadlineAt)) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
+          if (result.contentType.split(";")[0].trim().toLowerCase() !== "application/json") throw new Error("RESEARCH_MARKETAUX_CONTENT_TYPE_INVALID");
+          bytes += result.payload.length;
+          if (result.payload.length > 10 * 1024 * 1024 || bytes > MARKETAUX_MAX_ACQUISITION_BYTES) throw new Error("RESEARCH_MARKETAUX_BYTES_EXCEEDED");
+          const parsed = parseMarketauxPage(JSON.parse(result.payload.toString("utf8")) as unknown, config, descriptor);
+          if ((found >= 0 && parsed.found !== found) || (pass === 2 && parsed.found !== firstFound)) throw new Error("RESEARCH_MARKETAUX_RESULT_CHANGED");
+          found = parsed.found; pageCount = Math.max(1, Math.ceil(found / config.pageSize));
+          const receipt: MarketauxPageReceipt = { ...identity, pass, page, fetchedAt: new Date(now()).toISOString(), contentHash: createHash("sha256").update(result.payload).digest("hex"), found, returned: parsed.returned, limit: parsed.limit };
+          receipts.push(receipt);
+          for (const record of parsed.records) {
+            if (ids.has(record.uuid)) throw new Error("RESEARCH_MARKETAUX_DUPLICATE_UUID");
+            ids.add(record.uuid); records.push(record);
+            if (pass === 1) firstPages.set(record.uuid, receipt);
+          }
+        }
+        if (records.length !== found) throw new Error("RESEARCH_MARKETAUX_RESULT_CHANGED");
+        if (pass === 1) firstFound = found;
+        passes.push(records);
+      }
+      const recordSetHash = marketauxRecordSetHash(passes[0]);
+      if (recordSetHash !== marketauxRecordSetHash(passes[1])) throw new Error("RESEARCH_MARKETAUX_RESULT_CHANGED");
+      const refs: string[] = [];
+      for (const record of passes[0].filter(record => record.inWindow)) {
+        const page = firstPages.get(record.uuid)!;
+        const ref = "ev_" + researchHash({ sourceId: source.id, role: "news", ref: record.uuid });
+        refs.push(ref);
+        snapshot.evidence.push({ ref, sourceId: source.id, documentId: "marketaux:" + record.uuid, url: source.urls[0], contentHash: page.contentHash,
+          issuerId: policy.issuerId, issuerIdentifier: source.issuerIdentifier, published: { precision: "instant", at: record.publishedAt },
+          fetchedAt: page.fetchedAt, observedAt: page.fetchedAt, automation: source.automation, retention: source.retention });
+        snapshot.news.push({ id: "news_" + researchHash({ sourceId: source.id, role: "news", id: record.uuid }), evidenceRef: ref, title: record.title });
+      }
+      checkpoint();
+      snapshot.createdAt = new Date(now()).toISOString();
+      snapshot.coverage.push({ sourceId: source.id, role: "news", status: refs.length ? "AVAILABLE" : "EMPTY", checkedAt: window.asOf,
+        windowStart: window.windowStart, windowEnd: window.asOf, complete: true, evidenceRefs: refs, reason: "RESEARCH_MARKETAUX_TWO_PASSES_COMPLETE",
+        acquisition: { kind: "marketaux-news-v1", queryStart: new Date(Date.parse(window.windowStart) - 1000).toISOString(), queryEnd: new Date(Date.parse(window.asOf) + 1000).toISOString(),
+          asOf: window.asOf, entityQualificationHash: researchHash(config.qualification), entitlementHash: researchHash(config.entitlement),
+          found: firstFound, emitted: refs.length, recordSetHash, pages: receipts } });
+      parseResearchSnapshot(snapshot, manifest);
+      checkpoint();
+    } catch (error) { failure("ERROR", sanitizeMarketauxError(error)); }
+    const complete = snapshot.coverage.find(row => row.sourceId === source.id && row.role === "news")!.complete;
+    try { await store.storeSnapshot(snapshot, slotKey, complete ? new Date(admissionDeadline).toISOString() : undefined); }
+    catch (error) {
+      if (!complete || !(error instanceof Error) || error.message !== "RESEARCH_SNAPSHOT_ADMISSION_EXPIRED") throw error;
+      failure("ERROR", "RESEARCH_SNAPSHOT_ADMISSION_EXPIRED");
+      await store.storeSnapshot(snapshot, slotKey);
+    }
   }
 
   private async fetchReserved(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, url: string): Promise<ResearchFetchResult> {

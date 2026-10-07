@@ -11,6 +11,8 @@
  * See docs/implementation/phase2/PR15_PLAN.md §3.
  */
 
+import type { AccountingCaptureReference } from "../accounting/types.js";
+
 export interface SourceCoverage {
   readonly available: boolean;
   /**
@@ -29,6 +31,7 @@ export interface SourceCoverage {
 export interface ExecutionsCoverage
   extends Omit<SourceCoverage, "boundedWindow"> {
   readonly window: {
+    readonly certifiedFrom?: string;
     readonly from: string;
     readonly to: string;
     readonly exposureWindowComplete: boolean;
@@ -92,6 +95,7 @@ export interface BrokerExecutionRow {
 }
 
 export interface BrokerReconciliationSnapshot {
+  readonly accounting?: AccountingCaptureReference;
   readonly exposureComplete: boolean;
   readonly recoveryComplete: boolean;
   readonly capturedAt: Date;
@@ -112,6 +116,8 @@ export interface BrokerReconciliationSnapshot {
 }
 
 export interface BrokerReconciliationCaptureRequest {
+  readonly reconciliationRunId?: number;
+  readonly positionGeneration?: number;
   readonly accountId: string;
   readonly sessionId: string;
   readonly sessionStartedAt: Date;

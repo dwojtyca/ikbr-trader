@@ -95,7 +95,8 @@ export class ResearchStore {
     researchAssert(hash === row.snapshot_hash && canonicalJson(snapshot) === row.canonical_json && Number.isSafeInteger(sequence) && sequence > 0, "RESEARCH_SNAPSHOT_CORRUPT");
     return { id: row.id, hash, sequence, snapshot };
   }
-  async storeSnapshot(input: InstrumentResearchSnapshotV1, refreshSlot?: string): Promise<StoredResearchSnapshot> {
+  async storeSnapshot(input: InstrumentResearchSnapshotV1, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
+    if (admissionDeadlineAt !== undefined) researchTime(admissionDeadlineAt);
     return this.transaction(async db => {
       await this.assertAuthority(input, db); const manifest = await this.readManifest(input, db), snapshot = parseResearchSnapshot(input, manifest);
       researchAssert(researchTime(snapshot.createdAt) <= await this.now(db), "RESEARCH_FUTURE_SNAPSHOT");
@@ -112,7 +113,11 @@ export class ResearchStore {
       }
       const sequence = Number(head.sequence) + 1; researchAssert(Number.isSafeInteger(sequence));
       const id = randomUUID(), hash = researchHash(snapshot);
-      await db.query("INSERT INTO research_snapshots(id,snapshot_hash,config_hash,manifest_hash,instrument_id,sequence,canonical_json) VALUES($1,$2,$3,$4,$5,$6,$7)", [id, hash, ...key, sequence, canonicalJson(snapshot)]);
+      if (admissionDeadlineAt !== undefined) researchAssert(await this.now(db) < researchTime(admissionDeadlineAt), "RESEARCH_SNAPSHOT_ADMISSION_EXPIRED");
+      const inserted = await db.query(`INSERT INTO research_snapshots(id,snapshot_hash,config_hash,manifest_hash,instrument_id,sequence,canonical_json)
+        SELECT $1,$2,$3,$4,$5,$6,$7 WHERE $8::timestamptz IS NULL OR clock_timestamp() < $8::timestamptz RETURNING id`,
+        [id, hash, ...key, sequence, canonicalJson(snapshot), admissionDeadlineAt ?? null]);
+      researchAssert(inserted.rows.length === 1, "RESEARCH_SNAPSHOT_ADMISSION_EXPIRED");
       await db.query("UPDATE research_snapshot_heads SET snapshot_id=$4,sequence=$5 WHERE config_hash=$1 AND manifest_hash=$2 AND instrument_id=$3", [...key, id, sequence]);
       if (refreshSlot !== undefined) {
         researchAssert(refreshSlot.length > 0 && refreshSlot.length <= 1000, "RESEARCH_REFRESH_SLOT_INVALID");

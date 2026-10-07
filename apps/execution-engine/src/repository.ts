@@ -495,8 +495,9 @@ export class ExecutionRepository {
     }
     await assertPaperDailyLossUnchanged(client, daily, context);
     const fresh = this.paper?.context();
+    if (fresh?.accounting) fresh.accounting.assertCurrent(daily.accounting);
     if (!fresh || fresh.accountId !== context.accountId || fresh.sessionId !== context.sessionId || fresh.connectionGeneration !== context.connectionGeneration ||
-        fresh.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough) || fresh.nowMs >= risk.validUntilMs) throw new Error("paper_daily_loss_changed");
+        (!fresh.accounting && fresh.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough)) || fresh.nowMs >= risk.validUntilMs) throw new Error("paper_daily_loss_changed");
   }
 
   private async unresolvedPaperOwnership(client: PoolClient, accountId: string, exceptId?: number): Promise<number | undefined> {
@@ -616,8 +617,12 @@ export class ExecutionRepository {
       if (finalPaperRisk) {
         const context = this.paper?.context(), daily = finalPaperRisk.dailyLossEvidence;
         if (!context || !daily || context.accountId !== daily.accountId || context.sessionId !== daily.sessionId ||
-            context.connectionGeneration !== daily.connectionGeneration || context.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough) ||
+            context.connectionGeneration !== daily.connectionGeneration || (!context.accounting && context.lastBrokerFillObservedAt >= Date.parse(daily.coveredThrough)) ||
             context.nowMs >= finalPaperRisk.validUntilMs) throw new Error("paper_daily_loss_changed");
+        if (context.accounting) {
+          if (!daily.accounting) throw new Error("paper_daily_loss_changed");
+          context.accounting.assertCurrent(daily.accounting);
+        }
       }
       researchPermit.assertCurrent();
       if (Date.now() >= researchPermit.validUntilMs) throw new Error("RESEARCH_DISPATCH_EXPIRED");

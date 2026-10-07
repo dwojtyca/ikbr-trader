@@ -6,7 +6,7 @@ export type ResearchMetric = "net_interest_income" | "net_profit" | "loans" | "d
 export interface ResearchSource {
   id: string;
   provider: string;
-  adapter: "sec-json" | "issuer-document";
+  adapter: "sec-json" | "issuer-document" | "marketaux-news";
   parserConfig: Record<string, unknown>;
   roles: ("reports" | "news" | "calendar")[];
   urls: string[];
@@ -64,6 +64,7 @@ export interface ResearchEvidence {
   retention: ResearchSource["retention"];
 }
 export interface ResearchSourceResult {
+  acquisition?: import("./marketaux.js").MarketauxAcquisition;
   sourceId: string;
   role: "reports" | "news" | "calendar";
   status: ResearchCoverage;

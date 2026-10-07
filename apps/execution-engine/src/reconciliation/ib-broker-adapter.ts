@@ -9,11 +9,13 @@ import type {
   SourceCoverage,
 } from "./broker-adapter.js";
 import { deriveCompletenessFlags } from "./broker-adapter.js";
+import type { AccountingJoin } from "../accounting/types.js";
 
 export class IbBrokerReconciliationAdapter
   implements BrokerReconciliationAdapter
 {
-  constructor(private readonly tws: TwsExecutionClient, private readonly completed: Pick<CompletedOrdersClient, "load">) {}
+  constructor(private readonly tws: TwsExecutionClient, private readonly completed: Pick<CompletedOrdersClient, "load">,
+    private readonly accounting?: AccountingJoin) {}
 
   async capture(
     req: BrokerReconciliationCaptureRequest,
@@ -192,7 +194,7 @@ export class IbBrokerReconciliationAdapter
       executedAt: r.executedAt,
     }));
 
-    return {
+    const snapshot: BrokerReconciliationSnapshot = {
       connectionGeneration: generation,
       exposureComplete: flags.exposureComplete,
       recoveryComplete: flags.recoveryComplete,
@@ -207,6 +209,14 @@ export class IbBrokerReconciliationAdapter
       completedOrders: completedResult.rows,
       executions,
     };
+    if (!this.accounting || !req.reconciliationRunId || !req.positionGeneration) return snapshot;
+    try {
+      return await this.accounting.join(snapshot, { runId: req.reconciliationRunId, positionGeneration: req.positionGeneration,
+        recoveryStart, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal });
+    } catch {
+      // Accounting failure denies entries through its authority; retain reconciliation for exits.
+      return snapshot;
+    }
   }
 }
 

@@ -24,6 +24,8 @@ const optionalTrimmedString = z.preprocess(
 // and logged at startup. Runtime enforcement lands in PR2..PR5.
 // -----------------------------------------------------------------------
 const rawSchema = z.object({
+  EXECUTION_ACCOUNTING_SOURCE_PATH: optionalTrimmedString,
+  EXECUTION_ACCOUNTING_SOURCE_SHA256: optionalTrimmedString,
   EXECUTION_EXTERNAL_ORDERS_JSON: z.string().default("[]").transform(parseExternalOrders),
   EXECUTION_BROKER_TIME_ZONE: z.preprocess(
     value => value === "" ? undefined : value, z.enum(["UTC", "Europe/Warsaw"]).optional()),
@@ -240,6 +242,11 @@ function validateExecutionSecurity(
   data: RawExecutionEnv,
   ctx: z.RefinementCtx,
 ): void {
+  if (Boolean(data.EXECUTION_ACCOUNTING_SOURCE_PATH) !== Boolean(data.EXECUTION_ACCOUNTING_SOURCE_SHA256)
+    || data.EXECUTION_ACCOUNTING_SOURCE_SHA256 && !/^[a-f0-9]{64}$/.test(data.EXECUTION_ACCOUNTING_SOURCE_SHA256)
+    || data.EXECUTION_ACCOUNTING_SOURCE_PATH && (data.IBKR_ENVIRONMENT !== "paper" || !data.EXECUTION_BROKER_TIME_ZONE)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["EXECUTION_ACCOUNTING_SOURCE_PATH"], message: "Accounting requires paired path/hash, Paper environment and explicit execution timezone" });
+  }
   for (const key of ["EXECUTION_CLIENT_ID", "INGESTION_CLIENT_ID", "BACKTEST_INGESTION_CLIENT_ID", "IBKR_ES_ACQUISITION_CLIENT_ID"] as const) {
     if (data.IB_METADATA_CLIENT_ID === data[key]) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["IB_METADATA_CLIENT_ID"],

@@ -1,15 +1,18 @@
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Pool, PoolClient } from 'pg';
+import type { AccountingAuthority, AccountingCaptureReference } from './accounting/types.js';
 
 export interface PaperDailyLossEvidence {
   accountId: string; sessionId: string; connectionGeneration: number; positionGeneration: number;
   reconciliationRunId: number; accountDate: string; periodStart: string; coveredThrough: string;
   capturedAt: string; debits: Record<'USD' | 'PLN', number>; fingerprint: string;
+  accounting?: AccountingCaptureReference;
 }
 export interface PaperDailyLossContext {
   accountId: string; sessionId: string; connectionGeneration: number; nowMs: number;
   lastBrokerFillObservedAt: number;
+  accounting?: AccountingAuthority;
 }
 export interface PaperDailyLossRows { run: unknown; sync: unknown; fills: unknown[] }
 const object = (v: unknown): Record<string, unknown> | null => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : null;
@@ -67,7 +70,11 @@ export function buildPaperDailyLoss(rows: PaperDailyLossRows, context: PaperDail
         !Number.isSafeInteger(source.count) || Number(source.count) < (name === 'session' ? 1 : 0) ||
         (name !== 'session' && (!Array.isArray(snapshot[name]) || source.count !== (snapshot[name] as unknown[]).length))) return fail('coverage_unavailable');
   }
-  if (!finite(context.lastBrokerFillObservedAt) || context.lastBrokerFillObservedAt >= time(window.to)) return fail('changed');
+  const accounting = snapshot.accounting as AccountingCaptureReference | undefined;
+  if (context.accounting) {
+    if (!accounting || accounting.reconciliationRunId !== Number(run.id) || accounting.positionGeneration !== Number(sync.generation)) return fail('coverage_unavailable');
+    try { context.accounting.assertCurrent(accounting); } catch { return fail('changed'); }
+  } else if (!finite(context.lastBrokerFillObservedAt) || context.lastBrokerFillObservedAt >= time(window.to)) return fail('changed');
   const broker = new Map<string, Record<string, unknown>>();
   for (const raw of snapshot.executions) {
     const row = object(raw);
@@ -95,7 +102,8 @@ export function buildPaperDailyLoss(rows: PaperDailyLossRows, context: PaperDail
   }
   const identity = { accountId, sessionId, connectionGeneration, positionGeneration: Number(sync.generation),
     reconciliationRunId: Number(run.id), accountDate: paperAccountDate(nowMs), periodStart: new Date(start).toISOString(),
-    coveredThrough: new Date(time(window.to)).toISOString(), capturedAt: new Date(time(snapshot.capturedAt)).toISOString(), debits };
+    coveredThrough: new Date(time(window.to)).toISOString(), capturedAt: new Date(time(snapshot.capturedAt)).toISOString(), debits,
+    ...(accounting ? { accounting } : {}) };
   return { ok: true, evidence: { ...identity, fingerprint: digest({ identity, coverage, fills: [...fills].sort((a, b) => String(a!.exec_id).localeCompare(String(b!.exec_id))) }) } };
 }
 
@@ -115,7 +123,7 @@ export function assessPaperDailyLoss(value: unknown, context: { accountId: strin
   return { ok: true, evidence: value as PaperDailyLossEvidence, validUntilMs: time(row.coveredThrough) + 10_000 };
 }
 
-export async function readPaperDailyLoss(db: Pick<Pool | PoolClient, 'query'>, context: PaperDailyLossContext) {
+export async function readPaperDailyLoss(db: Pick<Pool | PoolClient, 'query'>, context: PaperDailyLossContext, lockAccounting = false) {
   const result = await db.query<PaperDailyLossRows>(`SELECT
     (SELECT row_to_json(r) FROM reconciliation_runs r WHERE r.account_id=$1 ORDER BY r.id DESC LIMIT 1) AS run,
     (SELECT row_to_json(s) FROM broker_snapshot_syncs s WHERE s.account_id=$1) AS sync,
@@ -123,9 +131,22 @@ export async function readPaperDailyLoss(db: Pick<Pool | PoolClient, 'query'>, c
       WHERE (f.account_id=$1 OR f.account_id IS NULL OR f.account_id='')
       AND (f.executed_at IS NULL OR f.executed_at >= $2)), '[]'::json) AS fills`,
   [context.accountId, new Date(paperAccountDayStart(context.nowMs))]);
-  return buildPaperDailyLoss(result.rows[0], context);
+  const rows = result.rows[0];
+  if (context.accounting) {
+    const snapshot = object(object(rows.run)?.broker_snapshot), reference = snapshot?.accounting as AccountingCaptureReference | undefined;
+    if (!reference) return { ok: false as const, reason: 'paper_daily_loss_coverage_unavailable' };
+    try {
+      const capture = await context.accounting.readCapture(db, reference, lockAccounting);
+      const fees = new Map(capture.commissions.map(f => [f.execId, f]));
+      rows.fills = capture.executions.map(e => ({ exec_id: e.execId, account_id: e.accountId, conid: e.conId, sec_type: e.secType,
+        broker_order_id: e.brokerOrderId, side: e.side, shares: e.shares, price: e.price, currency: e.currency,
+        executed_at: e.executedAt, commission_currency: fees.get(e.execId)?.currency,
+        commission: fees.get(e.execId)?.commission, realized_pnl: fees.get(e.execId)?.realizedPnL }));
+    } catch { return { ok: false as const, reason: 'paper_daily_loss_changed' }; }
+  }
+  return buildPaperDailyLoss(rows, context);
 }
 export async function assertPaperDailyLossUnchanged(db: Pick<Pool | PoolClient, 'query'>, expected: PaperDailyLossEvidence, context: PaperDailyLossContext): Promise<void> {
-  const current = await readPaperDailyLoss(db, context);
+  const current = await readPaperDailyLoss(db, context, true);
   if (!current.ok || current.evidence.fingerprint !== expected.fingerprint) throw new Error('paper_daily_loss_changed');
 }

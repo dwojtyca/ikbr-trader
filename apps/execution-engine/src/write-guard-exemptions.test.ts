@@ -154,6 +154,9 @@ describe("isWriteGuardExempt — closed exemption list", () => {
     assert.deepEqual(
       WRITE_GUARD_EXEMPT_ROUTES.map((e) => `${e.method} ${e.routePath}`).sort(),
       [
+        "POST /execution/accounting/source/inspect",
+        "POST /execution/accounting/source/invalidate",
+        "POST /execution/accounting/source/qualify",
         "POST /execution/cancel-proposed/:id",
         "POST /execution/entry-control/pause",
         "POST /execution/lifecycle/:id/close/reconcile",

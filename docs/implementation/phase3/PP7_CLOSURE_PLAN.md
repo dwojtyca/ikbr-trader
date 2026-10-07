@@ -2,12 +2,21 @@
 
 2026-10-06, updated 2026-10-07. E1a implementation and required local checks are
 accepted and published as `b1a4a907d3d8617f922a31cfe45b691a040c7e72`.
-Exact-commit CI failed at `pnpm test`; a reproduced Linux cleanup defect is now
-repaired and independently reviewed, with replacement publication/CI pending. See the
+The first exact-commit CI failed at `pnpm test`; the reproduced Linux cleanup
+defect was repaired in `bc5d6d62b825ee69d8862142401f91badb5b07ff`, whose exact-commit
+CI passed. See the
 [E1a report](PP7_E1A_IMPLEMENTATION_REPORT.md).
 The [F1 source contract](PP7_ACCOUNTING_SOURCE_CONTRACT.md)
-is independently accepted after two blocking findings were repaired. Remaining
-source/model work and H require their supplemental contract reviews. Baseline
+was independently accepted after two plan findings were repaired; its implementation
+passed hostile re-review after four findings were fixed in one round. The
+[F1 report](PP7_F1_IMPLEMENTATION_REPORT.md) tracks release validation. The accepted
+[news contract](PP7_NEWS_FEED_CONTRACT.md) and its implementation passed independent
+review after two implementation findings were repaired. Their combined clean
+candidate passed lint, typecheck, 3019 unit tests (143 database-dependent skips),
+2459 isolated integration tests without skips, build and a clean Docker rebuild.
+The [closure report](PP7_CLOSURE_REPORT.md) records readiness separately from
+source delivery. Calendar/model
+work and H retain their unresolved acceptance requirements. Baseline
 `197b13738620a648ce6a2c373d6bd4bff75ecfae`. This continues
 [PP7](PP7_IMPLEMENTATION_PLAN.md); it does not restart PP0–PP6 or declare the
 operational gates complete. The owner requested implementation sufficient to run
@@ -366,3 +375,31 @@ checks and review/repair effort in the closure report. Commit/push only reviewed
 scope on main and verify GitHub CI for that exact SHA. Recheck preserved dirty-file
 hashes. Full PP7 completion still requires Gates A–D; code, deployed readiness and
 observed Paper execution are separate statuses.
+
+## Latest operational evidence, 2026-10-07
+
+At 07:37:57 UTC a single read-only TCP check of the configured Paper endpoint
+returned `ECONNREFUSED`. No broker API call or order was attempted and master
+writes remained disabled. Actual TWS product/build/settings qualification,
+current broker reconciliation and quotes remain unavailable.
+
+At 07:29:28 UTC the existing OpenAI credential successfully read metadata for the
+configured `gpt-5.4` model (`GET /v1/models/gpt-5.4`, HTTP 200). The
+[official model documentation](https://developers.openai.com/api/docs/models/gpt-5.4)
+lists Chat Completions and Structured Outputs support; the
+[request reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+documents the existing JSON-schema format and completion-token cap. This supports
+the client's protocol choice, but does not prove a successful production-shaped
+generation, available credit or latency within the bot's deadline. No generation
+or paid model call was performed, and the research example remains unqualified.
+
+Actual Marketaux plan and PKO/AAPL entity qualification still need evidence. No
+Marketaux provider call or subscription change was made. Calendar adapters and
+their positive completeness/publication/occurrence contract remain unresolved;
+news acquisition does not satisfy that mandatory group. These are explicit
+remaining implementation/operational requirements, not optional warnings or a
+claim that supplying credentials alone makes the bot ready.
+
+Gate A remains unproven, no actual PKO/AAPL Gate B round trip has been recorded,
+and Gate C session counts remain zero. Entry activation, trading budget/window
+adoption and the later two-position H extension have not been performed.

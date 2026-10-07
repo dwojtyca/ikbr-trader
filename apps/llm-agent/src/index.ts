@@ -34,7 +34,7 @@ let researchHeartbeat: NodeJS.Timeout | undefined;
 let refreshTimer: NodeJS.Timeout | undefined;
 const refreshAccountId = researchBudgetAccountId(process.env, research?.manifest.refreshEnabled ?? false);
 const refreshScheduler = research && refreshAccountId ? new ResearchRefreshScheduler({ manifest: research.manifest,
-  manifestHash: research.hash, accountId: refreshAccountId, store: researchStore }) : null;
+  manifestHash: research.hash, accountId: refreshAccountId, store: researchStore, marketauxApiKey: config.LLM_AGENT_MARKETAUX_API_KEY }) : null;
 
 const workerId = `llm-agent-${process.pid}`;
 let inFlight = false;

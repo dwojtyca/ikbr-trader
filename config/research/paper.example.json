@@ -678,7 +678,6 @@
             "kind": "UNVERIFIED_FEED_COVERAGE"
           },
           "roles": [
-            "news",
             "calendar"
           ],
           "urls": [
@@ -691,6 +690,62 @@
           "automation": "UNVERIFIED",
           "retention": "UNVERIFIED",
           "permissionEvidenceUrl": "https://www.pkobp.pl/regulacje-prawne/regulamin-strony-internetowej",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        },
+        {
+          "id": "marketaux_news",
+          "provider": "https://api.marketaux.com",
+          "adapter": "marketaux-news",
+          "parserConfig": {
+            "kind": "marketaux-news-v1",
+            "entity": {
+              "symbol": "UNVERIFIED_PKO_PROVIDER_SYMBOL",
+              "name": "Powszechna Kasa Oszczędności Bank Polski Spółka Akcyjna",
+              "type": "equity",
+              "country": "pl",
+              "exchange": null
+            },
+            "qualification": {
+              "outcome": "UNVERIFIED",
+              "verifiedAt": "2026-10-06T00:00:00Z",
+              "expiresAt": "2026-10-07T00:00:00Z",
+              "evidenceUrl": "https://api.marketaux.com/v1/entity/search?symbols=UNVERIFIED_PKO_PROVIDER_SYMBOL",
+              "receiptHash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "issuerIdentifier": {
+                "scheme": "LEI",
+                "value": "P4GTT6GF1W40CVIMFR43"
+              },
+              "conId": 35146360
+            },
+            "entitlement": {
+              "outcome": "UNVERIFIED",
+              "verifiedAt": "2026-10-06T00:00:00Z",
+              "expiresAt": "2026-10-07T00:00:00Z",
+              "evidenceUrl": "https://www.marketaux.com/pricing",
+              "receiptHash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "maxArticlesPerRequest": 3,
+              "maxRequestsPerDay": 0,
+              "maxCostMicrosPerDay": 0
+            },
+            "pageSize": 3,
+            "maxPagesPerPass": 10,
+            "maxArticles": 30
+          },
+          "roles": [
+            "news"
+          ],
+          "urls": [
+            "https://api.marketaux.com/v1/news/all?symbols=UNVERIFIED_PKO_PROVIDER_SYMBOL&countries=pl&entity_types=equity&filter_entities=true&must_have_entities=true&group_similar=false&limit=3"
+          ],
+          "issuerIdentifier": {
+            "scheme": "LEI",
+            "value": "P4GTT6GF1W40CVIMFR43"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.marketaux.com/documentation",
           "maxRequestsPerDay": 0,
           "maxCostMicrosPerDay": 0,
           "costMicrosPerCall": 0
@@ -809,7 +864,6 @@
             "kind": "UNVERIFIED_FEED_COVERAGE"
           },
           "roles": [
-            "news",
             "calendar"
           ],
           "urls": [
@@ -822,6 +876,62 @@
           "automation": "UNVERIFIED",
           "retention": "UNVERIFIED",
           "permissionEvidenceUrl": "https://investor.apple.com/investor-relations/default.aspx",
+          "maxRequestsPerDay": 0,
+          "maxCostMicrosPerDay": 0,
+          "costMicrosPerCall": 0
+        },
+        {
+          "id": "marketaux_news",
+          "provider": "https://api.marketaux.com",
+          "adapter": "marketaux-news",
+          "parserConfig": {
+            "kind": "marketaux-news-v1",
+            "entity": {
+              "symbol": "AAPL",
+              "name": "Apple Inc.",
+              "type": "equity",
+              "country": "us",
+              "exchange": null
+            },
+            "qualification": {
+              "outcome": "UNVERIFIED",
+              "verifiedAt": "2026-10-06T00:00:00Z",
+              "expiresAt": "2026-10-07T00:00:00Z",
+              "evidenceUrl": "https://api.marketaux.com/v1/entity/search?symbols=AAPL",
+              "receiptHash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "issuerIdentifier": {
+                "scheme": "CIK",
+                "value": "0000320193"
+              },
+              "conId": 265598
+            },
+            "entitlement": {
+              "outcome": "UNVERIFIED",
+              "verifiedAt": "2026-10-06T00:00:00Z",
+              "expiresAt": "2026-10-07T00:00:00Z",
+              "evidenceUrl": "https://www.marketaux.com/pricing",
+              "receiptHash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "maxArticlesPerRequest": 3,
+              "maxRequestsPerDay": 0,
+              "maxCostMicrosPerDay": 0
+            },
+            "pageSize": 3,
+            "maxPagesPerPass": 10,
+            "maxArticles": 30
+          },
+          "roles": [
+            "news"
+          ],
+          "urls": [
+            "https://api.marketaux.com/v1/news/all?symbols=AAPL&countries=us&entity_types=equity&filter_entities=true&must_have_entities=true&group_similar=false&limit=3"
+          ],
+          "issuerIdentifier": {
+            "scheme": "CIK",
+            "value": "0000320193"
+          },
+          "automation": "UNVERIFIED",
+          "retention": "UNVERIFIED",
+          "permissionEvidenceUrl": "https://www.marketaux.com/documentation",
           "maxRequestsPerDay": 0,
           "maxCostMicrosPerDay": 0,
           "costMicrosPerCall": 0

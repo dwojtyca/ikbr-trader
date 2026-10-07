@@ -1,3 +1,4 @@
+import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
 import type { InstrumentResearchSnapshotV1, ResearchEligibility, ResearchManifestV1, ResearchMetric } from "./types.js";
 import { parseResearchSnapshot, publicationRange, researchTime } from "./validation.js";
 
@@ -24,6 +25,13 @@ export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1,
     if (!sources.length) deny(`RESEARCH_${role.toUpperCase()}_MISSING`);
     for (const source of sources) {
       if (source.automation !== "PERMITTED" || ["UNVERIFIED", "DENIED"].includes(source.retention)) deny("RESEARCH_PERMISSION_UNVERIFIED");
+      if (source.adapter === "marketaux-news") {
+        try {
+          const config = parseMarketauxNewsConfig(source, policy);
+          deadlines.push(researchTime(config.qualification.expiresAt), researchTime(config.entitlement.expiresAt));
+          marketauxQualificationDeadline(config, nowMs);
+        } catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }
+      }
       const c = s.coverage.find(x => x.sourceId === source.id && x.role === role);
       if (!c) { deny(`RESEARCH_${role.toUpperCase()}_MISSING`); continue; }
       const maxAge = role === "news" ? 1800000 : DAY;

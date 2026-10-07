@@ -157,6 +157,8 @@ interface OpenOrderContext {
 }
 
 export interface BrokerExecutionFill {
+  rawExecutionTime?: string;
+  permId?: number; orderRef?: string; clientId?: number;
   execId: string;
   secType?: string;
   orderId?: number;
@@ -311,6 +313,7 @@ export class TwsExecutionClient {
     ) => void,
     private readonly dependencies: {
       ib?: unknown;
+      onAccountingIngressFailure?: (kind: "execution" | "commission", raw: unknown) => void;
       resolveBoundInstrument?: (id: string) => BoundInstrument | undefined;
       resolveManagementInstrument?: (id: string, originalProposalId?: number) => BoundInstrument | undefined | Promise<BoundInstrument | undefined>;
       assertEntryAllowed?: () => Promise<void>;
@@ -2533,6 +2536,9 @@ export class TwsExecutionClient {
         contract: ContractShape,
         exec: Record<string, unknown>,
       ) => {
+        if (!exec || typeof exec !== "object" || !contract || typeof contract !== "object") {
+          this.dependencies.onAccountingIngressFailure?.("execution", { reqId, contract, exec }); return;
+        }
         const sideRaw = String(exec.side ?? "")
           .trim()
           .toUpperCase();
@@ -2550,8 +2556,10 @@ export class TwsExecutionClient {
           !side ||
           !Number.isFinite(shares) ||
           !Number.isFinite(price)
-        )
+        ) {
+          this.dependencies.onAccountingIngressFailure?.("execution", { reqId, contract, exec });
           return;
+        }
 
         this.onBrokerExecutionFill?.({
           execId,
@@ -2580,13 +2588,18 @@ export class TwsExecutionClient {
           executedAt: typeof exec.time === "string"
             ? parseIbExecutionTime(exec.time, this.config.executionTimeZone)?.toISOString()
             : undefined,
+          rawExecutionTime: typeof exec.time === "string" ? exec.time : undefined,
+          permId: toNum(exec.permId), clientId: toNum(exec.clientId), orderRef: typeof exec.orderRef === "string" ? exec.orderRef : undefined,
         });
       },
     );
 
     this.ib.on("commissionReport", (report: Record<string, unknown>) => {
+      if (!report || typeof report !== "object") {
+        this.dependencies.onAccountingIngressFailure?.("commission", report); return;
+      }
       const execId = String(report.execId ?? "").trim();
-      if (!execId) return;
+      if (!execId) { this.dependencies.onAccountingIngressFailure?.("commission", report); return; }
 
       this.onBrokerCommissionReport?.({
         execId,

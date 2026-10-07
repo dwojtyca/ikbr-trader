@@ -81,6 +81,12 @@ import { buildSubmissionApplicationService } from "./reconciliation/submission-s
 import { loadDurableReadiness } from "./reconciliation/durable-readiness.js";
 import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapter.js";
 
+import { loadAccountingSettings } from "./accounting/config.js";
+import { AccountingSourceStore } from "./accounting/source-store.js";
+import { AccountingSourceService } from "./accounting/source-service.js";
+import { accountingHash } from "./accounting/types.js";
+import { registerAccountingRoutes } from "./accounting/routes.js";
+
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const entryControls = new EntryControlStore(pool);
@@ -127,6 +133,12 @@ const configurationMetadata = new ConfigurationMetadataClient({ host: config.IB_
   port: config.IB_SOCKET_PORT, clientId: config.IB_CONFIG_METADATA_CLIENT_ID });
 const wseMetadata = new WseMetadataClient({ host: config.IB_SOCKET_HOST,
   port: config.IB_SOCKET_PORT, clientId: config.IB_METADATA_CLIENT_ID });
+const loadedAccounting = loadAccountingSettings({ path: config.EXECUTION_ACCOUNTING_SOURCE_PATH, sha256: config.EXECUTION_ACCOUNTING_SOURCE_SHA256,
+  environment: config.IBKR_ENVIRONMENT, host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT, accountId: config.IBKR_ACCOUNT_ID,
+  allowedAccounts: config.allowedPaperAccounts, timeZone: config.EXECUTION_BROKER_TIME_ZONE,
+  clientIds: [config.EXECUTION_CLIENT_ID, config.INGESTION_CLIENT_ID, config.BACKTEST_INGESTION_CLIENT_ID, config.IBKR_ES_ACQUISITION_CLIENT_ID,
+    config.IB_METADATA_CLIENT_ID, config.IB_COMPLETED_ORDERS_CLIENT_ID, config.IB_CONFIG_METADATA_CLIENT_ID, config.SESSION_SCHEDULE_CLIENT_ID] });
+let accountingSource: AccountingSourceService | undefined;
 let lastBrokerFillObservedAt = 0;
 const tws = new TwsExecutionClient(
   {
@@ -186,7 +198,10 @@ const tws = new TwsExecutionClient(
     // a previous account CANNOT invalidate a different account's
     // snapshot.
     const status = String(update.status ?? "").toUpperCase();
-    if (status === "FILLED") lastBrokerFillObservedAt = Date.now();
+    if (status === "FILLED") {
+      lastBrokerFillObservedAt = Date.now();
+      accountingSource?.observeOrderStatus(update);
+    }
     void (async () => {
       try {
         if (status === "FILLED" && lastActiveAccountId !== null) {
@@ -282,7 +297,7 @@ const tws = new TwsExecutionClient(
     // it does NOT match `lastActiveAccountId`, log and SKIP —
     // an event from a different (or previous) account MUST NOT
     // invalidate the current active account's snapshot.
-    void (async () => {
+    const persist = async () => {
       try {
         const eventAccount = fill.accountId ?? lastActiveAccountId;
         const shouldApply =
@@ -314,31 +329,37 @@ const tws = new TwsExecutionClient(
         }
       } catch (err) {
         app.log.warn({ fill, err }, "failed to persist broker execution fill");
+        throw err;
       }
-    })();
+    };
+    if (accountingSource) accountingSource.observeExecution(fill, persist);
+    else void persist().catch(() => undefined);
   },
   (report) => {
     lastBrokerFillObservedAt = Date.now();
-    void repo.applyBrokerCommissionReport(report).catch((err) => {
-      app.log.warn(
-        { report, err },
-        "failed to persist broker commission report",
-      );
-    });
+    const persist = () => repo.applyBrokerCommissionReport(report);
+    if (accountingSource) accountingSource.observeCommission(report, persist);
+    else void persist().catch(err => app.log.warn({ err }, "failed to persist broker commission report"));
   },
   { resolveBoundInstrument: id => instrumentBindingAuthority.getBoundInstrument(id),
     resolveManagementInstrument: resolveOriginalManagementInstrument,
     loadStockMetadata,
     assertEntryAllowed: assertNewEntryAllowed,
+    onAccountingIngressFailure: (kind, raw) => accountingSource?.observeIngressFailure(kind, raw),
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
+
+if (loadedAccounting) accountingSource = new AccountingSourceService(
+  new AccountingSourceStore(pool, accountingHash({ account: loadedAccounting.settings.accountId, kind: "tws-accounting" }), EXECUTION_PROCESS_OWNER_ID),
+  loadedAccounting.settings, loadedAccounting.sha256, () => ({ connected: tws.isConnected(), accountId: lastActiveAccountId,
+    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }));
 
 // PR15 — production reconciliation wiring. Uses the REAL
 // `IbBrokerReconciliationAdapter` backed by the same `tws`
 // client the write path uses. Fake adapter is test-only.
 const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws, new CompletedOrdersClient({
   host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT, clientId: config.IB_COMPLETED_ORDERS_CLIENT_ID,
-}));
+}), accountingSource);
 const reconRunner = new ReconciliationRunner(
   pool,
   repo,
@@ -564,6 +585,7 @@ function entryPermitDependencies(accountId: string) {
   return {
     assertCurrent: () => {
       assertLifecycleManagement();
+      accountingSource?.assertCurrent();
       if (!lifecycleLocallyHealthy || accountId !== lastActiveAccountId || generation !== tws.getConnectionGeneration())
         throw new EntryControlError("LIFECYCLE_LOCAL_STATE_UNAVAILABLE");
     },
@@ -579,6 +601,7 @@ async function assertNewEntryAllowed() {
   await configurationRuntime.assertEntryAllowed();
   const context = entryControlContext();
   await entryControls.check(context, entryPermitDependencies(context.accountId));
+  accountingSource?.assertCurrent();
 }
 
 const READY_AUDIT_CACHE_TTL_MS = 7_000;
@@ -1084,6 +1107,7 @@ const readFreshAiRisk: FreshAiRiskReader = async (order, bound, accountId, sessi
           feeReserve: config.EXECUTION_AI_FEE_RESERVE_PLN,
         },
       } });
+    if (assessed.ok) accountingSource?.assertCurrent(assessed.evidence.dailyLossEvidence?.accounting);
     return assessed.ok ? { ...assessed, snapshot } : assessed;
 };
 
@@ -1099,7 +1123,8 @@ registerResearchOrderContextRoute(app, { repo, prepare: async order => {
   if (!assessed.ok) throw new Error(assessed.reason);
   const reconciliation = await readContextReconciliation(pool, accountId);
   if (!tws.isConnected() || generation !== tws.getConnectionGeneration() || lastActiveAccountId !== accountId) throw new Error("RESEARCH_CONTEXT_SESSION_CHANGED");
-  if (!assessed.evidence.dailyLossEvidence || lastBrokerFillObservedAt >= Date.parse(assessed.evidence.dailyLossEvidence.coveredThrough)) throw new Error("RESEARCH_CONTEXT_BROKER_FILL_CHANGED");
+  accountingSource?.assertCurrent(assessed.evidence.dailyLossEvidence?.accounting);
+  if (!assessed.evidence.dailyLossEvidence || (!accountingSource && lastBrokerFillObservedAt >= Date.parse(assessed.evidence.dailyLossEvidence.coveredThrough))) throw new Error("RESEARCH_CONTEXT_BROKER_FILL_CHANGED");
   return { effectiveConfigHash: tradingConfiguration.loaded.effectiveHash, accountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
     connectionGeneration: generation, snapshot: assessed.snapshot, risk: assessed.evidence, reconciliation };
 } });
@@ -1527,7 +1552,8 @@ registerCancelProposedRoute(app, {
 
 function paperDailyContext() {
   return lastActiveAccountId && tws.isConnected() ? { accountId: lastActiveAccountId, sessionId: EXECUTION_PROCESS_OWNER_ID,
-    connectionGeneration: tws.getConnectionGeneration(), nowMs: Date.now(), lastBrokerFillObservedAt } : null;
+    connectionGeneration: tws.getConnectionGeneration(), nowMs: Date.now(), lastBrokerFillObservedAt,
+    ...(accountingSource ? { accounting: accountingSource } : {}) } : null;
 }
 async function resolveOriginalManagementInstrument(id: string, originalProposalId?: number): Promise<BoundInstrument | undefined> {
   if (originalProposalId !== undefined) {
@@ -1770,6 +1796,7 @@ async function main(): Promise<void> {
   // the scheduler / broker never come online against a partial schema.
   try {
     await repo.init();
+    await accountingSource?.initialize();
     for (const accountId of config.allowedPaperAccounts) await entryControls.adopt(accountId, config.tradingEnabled);
     await configurationRuntime.initialize();
     if (loadedResearch && tradingConfiguration.loaded.mode === "bundle") {
@@ -1869,6 +1896,12 @@ async function main(): Promise<void> {
     assertEnvironmentAllowsWrite(cfg, lastActiveAccountId);
   });
 
+  registerAccountingRoutes(app, { source: accountingSource, assertAccount: () => {
+    assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
+    if (accountingSource && lastActiveAccountId !== accountingSource.settings.accountId) throw new Error("ACCOUNTING_IDENTITY_INVALID");
+  }, entriesPaused: async () => config.EXECUTION_ENTRIES_PAUSED === "true" || Boolean(lastActiveAccountId && (await entryControls.read(lastActiveAccountId)).control?.paused) });
+  accountingSource?.start();
+
   // PR15 — register reconciliation routes.
   registerReconciliationRoutes(app, {
     reconRepo,
@@ -1940,6 +1973,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
       await lifecycleObserver.stop();
       await lifecycleAlertWorker.stop();
       await reconScheduler.stop();
+      await accountingSource?.close();
       tws.disconnect();
       await app.close();
       await diagnosticPool.end();

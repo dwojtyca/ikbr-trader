@@ -49,6 +49,15 @@ export function assertResearchPdfResponse(payload: Uint8Array, contentType: stri
 export async function fetchResearchSource(source: ResearchSource, sourceUrl: string, deadlineAt: string,
   deps: { resolveAddress?: typeof resolvePublicResearchAddress; httpsRequest?: typeof request } = {}): Promise<ResearchFetchResult> {
   const url = assertResearchSourceUrl(source, sourceUrl);
+  const result = await fetchBoundedResearchUrl(url, deadlineAt, source.parserConfig.kind === "issuer-pdf-table" ? "application/pdf" : "application/json, application/xhtml+xml, text/html;q=0.8", deps);
+  if (source.parserConfig.kind === "issuer-pdf-table") assertResearchPdfResponse(result.payload, result.contentType);
+  return result;
+}
+
+export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, accept: string,
+  deps: { resolveAddress?: typeof resolvePublicResearchAddress; httpsRequest?: typeof request } = {}, maxBytes = RESEARCH_SOURCE_MAX_BYTES): Promise<ResearchFetchResult> {
+  if (!safeResearchUrl(url.href)) throw new Error("RESEARCH_SOURCE_URL_NOT_ALLOWED");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > RESEARCH_SOURCE_MAX_BYTES) throw new Error("RESEARCH_SOURCE_TOO_LARGE");
   const remaining = Date.parse(deadlineAt) - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > RESEARCH_SOURCE_TIMEOUT_MS) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
   const controller = new AbortController();
@@ -64,18 +73,18 @@ export async function fetchResearchSource(source: ResearchSource, sourceUrl: str
   return new Promise<ResearchFetchResult>((resolve, reject) => {
     const options = {
       method: "GET", signal: controller.signal, agent: false, autoSelectFamily: false, maxHeaderSize: 16 * 1024,
-      headers: { "Accept": source.parserConfig.kind === "issuer-pdf-table" ? "application/pdf" : "application/json, application/xhtml+xml, text/html;q=0.8", "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
+      headers: { "Accept": accept, "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
       lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
     } satisfies RequestOptions & { autoSelectFamily: boolean };
     const req = (deps.httpsRequest ?? request)(url, options, response => {
       if (response.statusCode !== 200) { response.destroy(); req.destroy(); reject(new Error(`RESEARCH_SOURCE_HTTP_${response.statusCode ?? "UNKNOWN"}`)); return; }
       if (response.headers.location) { response.destroy(); req.destroy(); reject(new Error("RESEARCH_SOURCE_REDIRECT")); return; }
       const declared = Number(response.headers["content-length"] ?? 0);
-      if (declared > RESEARCH_SOURCE_MAX_BYTES) { response.destroy(); req.destroy(); reject(new Error("RESEARCH_SOURCE_TOO_LARGE")); return; }
+      if (declared > maxBytes) { response.destroy(); req.destroy(); reject(new Error("RESEARCH_SOURCE_TOO_LARGE")); return; }
       const chunks: Buffer[] = []; let size = 0;
       response.on("data", (chunk: Buffer) => {
         size += chunk.length;
-        if (size > RESEARCH_SOURCE_MAX_BYTES) { response.destroy(new Error("RESEARCH_SOURCE_TOO_LARGE")); req.destroy(); return; }
+        if (size > maxBytes) { response.destroy(new Error("RESEARCH_SOURCE_TOO_LARGE")); req.destroy(); return; }
         chunks.push(chunk);
       });
       response.on("error", reject);
@@ -83,7 +92,6 @@ export async function fetchResearchSource(source: ResearchSource, sourceUrl: str
         const payload = Buffer.concat(chunks);
         const contentType = String(response.headers["content-type"] ?? "");
         try {
-          if (source.parserConfig.kind === "issuer-pdf-table") assertResearchPdfResponse(payload, contentType);
           resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType });
         } catch (error) { reject(error); }
       });

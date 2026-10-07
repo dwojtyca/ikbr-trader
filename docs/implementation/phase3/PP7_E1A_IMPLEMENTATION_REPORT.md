@@ -1,11 +1,13 @@
 # PP7 E1a: authoritative PKO periodic report extraction
 
-2026-10-07. E1a was published, but its exact-commit CI failed. A reproduced Linux
-decoder cleanup defect is repaired and independently accepted; the required local
-checks pass again. Repair publication/CI are pending. **PP7 is not complete.**
+2026-10-07. E1a and its independently accepted Linux decoder repair are published.
+The repair's exact-commit CI and required local checks pass. The initial failed
+run is retained below. **PP7 is not complete.**
 This package implements the PDF financial-report portion of
-[the closure plan](PP7_CLOSURE_PLAN.md). Accounting implementation, actual news and
-calendar coverage, source/model qualification and operational Gates A–D remain.
+[the closure plan](PP7_CLOSURE_PLAN.md). Accounting and news implementation are
+tracked in the [F1 report](PP7_F1_IMPLEMENTATION_REPORT.md) and
+[E1b report](PP7_E1B_IMPLEMENTATION_REPORT.md). Calendar implementation,
+real-source/model qualification and operational Gates A–D remain.
 
 ## Delivered behavior
 
@@ -78,7 +80,7 @@ simulator behavior changes require backtests.
 | Clean `docker build --no-cache` | Passed, image `ikbr-trader:pp7-e1a-verify` |
 | `pnpm test:integration` | Passed in isolated Docker/PostgreSQL: 2427 passed, 0 failures, 0 skips |
 | Scoped links and final report review | Passed independent review; initial staged diff check reported PDF xref whitespace, addressed by the separately reviewed binary-attribute follow-up |
-| Exact-commit GitHub CI | Failed at `pnpm test` for `b1a4a907d3d8617f922a31cfe45b691a040c7e72`; investigation remains open |
+| Exact-commit GitHub CI | Failed at `pnpm test` for `b1a4a907d3d8617f922a31cfe45b691a040c7e72`; root cause reproduced, repair and successful follow-up CI recorded below |
 
 Initial test-environment failures are retained in private logs. The sandbox denied
 local HTTP listeners, so the same unit suite ran successfully with that permission.
@@ -119,7 +121,7 @@ injected through the existing worker factory; the production module URL is fixed
 | Clean Docker build | Passed, `ikbr-trader:pp7-e1a-repair-verify` |
 | Isolated PostgreSQL `pnpm test:integration` | 2427 passed, 0 failed, 0 skipped |
 | Binary metadata | Exact fixture SHA-256 unchanged; Git binary attribute confirmed; scoped whitespace check passes |
-| Repair exact-commit CI | Pending publication |
+| Repair exact-commit CI | Passed for `bc5d6d62b825ee69d8862142401f91badb5b07ff` — [run 37587966443](https://github.com/dwojtyca/ikbr-trader/actions/runs/37587966443) |
 
 Additional failed validation attempts remain recorded rather than hidden. One
 host run observed about 925 seconds inside existing asynchronous tests and exceeded
@@ -129,6 +131,10 @@ the full host suite covers those checks. An initial integration rerun hit one
 existing `xyz_nyse` daily-loss freshness denial; its isolated 17-test file and the
 subsequent full integration run both passed without source or assertion changes.
 The fresh Linux llm-agent suite specifically exercises the repaired decoder.
+The repair was committed and pushed normally as
+`bc5d6d62b825ee69d8862142401f91badb5b07ff`; its CI passed installation, lint,
+typecheck, unit tests, PostgreSQL integration and build. Publication preserved
+all 25 recorded pre-existing dirty files and excluded concurrent F1/news edits.
 
 ## Operational status
 

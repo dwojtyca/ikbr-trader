@@ -1,3 +1,4 @@
+import { parseMarketauxNewsConfig, validateMarketauxAcquisition } from "./marketaux.js";
 import { isIP } from "node:net";
 import { canonicalJson, computeTradingConfigurationHash, sha256 } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
@@ -82,7 +83,7 @@ export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
   integer(model.maxInputChars, 1, 200000); integer(model.maxOutputTokens, 1, 10000);
   for (const k of ["maxCostMicrosPerCall", "maxRequestsPerDay", "maxCostMicrosPerDay"]) integer(model[k]);
   arr(m.instruments, 100); researchAssert(m.instruments.length > 0); unique(m.instruments, "instrumentId");
-  const listings = new Set<string>(), sourceIdentities = new Map<string, string>();
+  const listings = new Set<string>(), sourceIdentities = new Map<string, string>(), marketauxEntities = new Map<string, string>();
   for (const value of m.instruments) {
     const p = obj(value, "instrumentId assetClass listing issuerId legalName country sector business identifiers verification profile reportingCurrency annual periodic bankCapitalMetric sources");
     for (const k of ["instrumentId", "issuerId", "legalName", "country", "sector"]) txt(p[k]); txt(p.business, 4000); txt(p.reportingCurrency, 3); researchAssert(/^[A-Z]{3}$/.test(p.reportingCurrency));
@@ -98,7 +99,7 @@ export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
     arr(p.sources, 20); unique(p.sources, "id");
     for (const source of p.sources) {
       const s = obj(source, "id provider adapter parserConfig roles urls issuerIdentifier automation retention permissionEvidenceUrl maxRequestsPerDay maxCostMicrosPerDay costMicrosPerCall");
-      txt(s.id); txt(s.provider); choice(s.adapter, "sec-json issuer-document"); arr(s.roles, 3); researchAssert(s.roles.length > 0 && new Set(s.roles).size === s.roles.length); for (const role of s.roles) choice(role, "reports news calendar");
+      txt(s.id); txt(s.provider); choice(s.adapter, "sec-json issuer-document marketaux-news"); arr(s.roles, 3); researchAssert(s.roles.length > 0 && new Set(s.roles).size === s.roles.length); for (const role of s.roles) choice(role, "reports news calendar");
       researchAssert(s.parserConfig && typeof s.parserConfig === "object" && !Array.isArray(s.parserConfig) && Object.getPrototypeOf(s.parserConfig) === Object.prototype && canonicalJson(s.parserConfig).length <= 50000, "RESEARCH_PARSER_CONFIG_INVALID");
       jsonValue(s.parserConfig);
       arr(s.urls, 100); researchAssert(s.urls.length > 0 && new Set(s.urls).size === s.urls.length); for (const url of s.urls) researchAssert(safeResearchUrl(url), "RESEARCH_SOURCE_URL_INVALID");
@@ -106,6 +107,11 @@ export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
       identifier(s.issuerIdentifier); researchAssert(p.identifiers.some(i => canonicalJson(i) === canonicalJson(s.issuerIdentifier)), "RESEARCH_SOURCE_IDENTITY_MISMATCH");
       choice(s.automation, "PERMITTED UNVERIFIED DENIED"); choice(s.retention, "FACTS_AND_REFERENCES FULL_DOCUMENT UNVERIFIED DENIED"); researchAssert(safeResearchUrl(s.permissionEvidenceUrl));
       for (const k of ["maxRequestsPerDay", "maxCostMicrosPerDay", "costMicrosPerCall"]) integer(s[k]);
+      if (s.adapter === "marketaux-news" || (s.parserConfig as Record<string, unknown>).kind === "marketaux-news-v1") {
+        const config = parseMarketauxNewsConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
+        researchAssert(!marketauxEntities.has(config.entity.symbol) || marketauxEntities.get(config.entity.symbol) === p.issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY");
+        marketauxEntities.set(config.entity.symbol, String(p.issuerId));
+      }
       const sourceKey = `${s.provider}:${canonicalJson(s.issuerIdentifier)}`, issuerId = String(p.issuerId);
       researchAssert(!sourceIdentities.has(sourceKey) || sourceIdentities.get(sourceKey) === issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY"); sourceIdentities.set(sourceKey, issuerId);
     }
@@ -133,13 +139,16 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1
   for (const value of s.coverage as unknown[]) {
     const hasOccurrenceRange = value !== null && typeof value === "object" &&
       (Object.hasOwn(value, "occurrenceWindowStart") || Object.hasOwn(value, "occurrenceWindowEnd"));
+    const hasAcquisition = value !== null && typeof value === "object" && Object.hasOwn(value, "acquisition");
     const c = obj(value, "sourceId role status checkedAt windowStart windowEnd complete evidenceRefs reason" +
-      (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : ""));
+      (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : "") + (hasAcquisition ? " acquisition" : ""));
     const source = policy.sources.find(x => x.id === c.sourceId); researchAssert(source && source.roles.includes(c.role as "reports"), "RESEARCH_COVERAGE_SOURCE_INVALID");
     const key = `${c.sourceId}:${c.role}`; researchAssert(!coverageKeys.has(key), "RESEARCH_DUPLICATE_COVERAGE"); coverageKeys.add(key);
     choice(c.status, "AVAILABLE EMPTY MISSING STALE UNVERIFIED ERROR NOT_APPLICABLE"); researchTime(c.checkedAt); const start = researchTime(c.windowStart), end = researchTime(c.windowEnd); researchAssert(start <= end && typeof c.complete === "boolean");
     if (hasOccurrenceRange) researchAssert(c.role === "calendar" && researchTime(c.occurrenceWindowStart) <= researchTime(c.occurrenceWindowEnd), "RESEARCH_CALENDAR_RANGE_INVALID");
     researchAssert(typeof c.reason === "string" && c.reason.length <= 1000); arr(c.evidenceRefs); researchAssert(new Set(c.evidenceRefs).size === c.evidenceRefs.length);
+    if (source.adapter === "marketaux-news") validateMarketauxAcquisition(c as unknown as import("./types.js").ResearchSourceResult, source, policy, String(s.manifestHash), String(s.createdAt));
+    else researchAssert(!hasAcquisition, "RESEARCH_MARKETAUX_RECEIPT_INVALID");
     for (const ref of c.evidenceRefs) researchAssert(typeof ref === "string" && refs.has(ref) && evidence.some(e => (e as Record<string, unknown>).ref === ref && (e as Record<string, unknown>).sourceId === c.sourceId));
   }
   for (const value of reports) {
@@ -155,6 +164,19 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1
   }
   for (const value of s.news as unknown[]) { const n = obj(value, "id evidenceRef title"); txt(n.id); txt(n.title, 1000); researchAssert(refs.has(n.evidenceRef as string)); }
   for (const value of s.events as unknown[]) { const e = obj(value, "id kind occurs evidenceRef title"); txt(e.id); txt(e.title, 1000); choice(e.kind, "earnings material other"); publicationRange(e.occurs as ResearchPublication); researchAssert(refs.has(e.evidenceRef as string)); }
+  for (const source of policy.sources.filter(source => source.adapter === "marketaux-news")) {
+    const coverage = (s.coverage as import("./types.js").ResearchSourceResult[]).find(c => c.sourceId === source.id);
+    const sourceEvidence = (evidence as import("./types.js").ResearchEvidence[]).filter(e => e.sourceId === source.id);
+    if (!coverage?.complete) { researchAssert(sourceEvidence.length === 0, "RESEARCH_MARKETAUX_RECEIPT_INVALID"); continue; }
+    researchAssert(sourceEvidence.length === coverage.acquisition!.emitted && sourceEvidence.every(e => coverage.evidenceRefs.includes(e.ref)), "RESEARCH_MARKETAUX_RECEIPT_INVALID");
+    unique(sourceEvidence, "documentId");
+    for (const e of sourceEvidence) {
+      researchAssert(/^marketaux:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(e.documentId) && e.published.precision === "instant" &&
+        researchTime(e.published.at) >= researchTime(coverage.windowStart) && researchTime(e.published.at) <= researchTime(coverage.windowEnd) && e.observedAt === e.fetchedAt &&
+        coverage.acquisition!.pages.some(page => page.pass === 1 && page.contentHash === e.contentHash && page.fetchedAt === e.fetchedAt) &&
+        (s.news as { evidenceRef: string }[]).filter(n => n.evidenceRef === e.ref).length === 1, "RESEARCH_MARKETAUX_RECEIPT_INVALID");
+    }
+  }
   researchAssert(canonicalJson(raw).length <= 2000000, "RESEARCH_SNAPSHOT_TOO_LARGE");
   return structuredClone(raw) as InstrumentResearchSnapshotV1;
 }
