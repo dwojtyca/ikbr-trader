@@ -1,5 +1,9 @@
 # PP7 closure: real Paper sources and operational readiness
 
+Owner-selected next four steps (2026-10-07):
+[WSH contract and adapter → disabled Gate A → first supervised PKO round trip](PP7_WSH_TO_FIRST_PAPER_PLAN.md).
+This supplements E1/Gates A–B; it does not declare full PP7 acceptance or authorize trading.
+
 2026-10-06, updated 2026-10-07. E1a implementation and required local checks are
 accepted and published as `b1a4a907d3d8617f922a31cfe45b691a040c7e72`.
 The first exact-commit CI failed at `pnpm test`; the reproduced Linux cleanup
