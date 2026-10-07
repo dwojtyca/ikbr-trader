@@ -5,7 +5,7 @@ import { Pool } from 'pg';
 import type { ProposedOrder } from '@ikbr/shared';
 import { computeClientOrderHash } from '@ikbr/shared/client-order-hash';
 import { buildStrategyAttribution, canonicalizeTradingConfiguration } from '@ikbr/shared/trading-config';
-import { ResearchStore, researchHash, type ResearchOrderContextV1 } from '@ikbr/shared/instrument-research';
+import { ResearchStore, researchHash, RESEARCH_SYSTEM_PROMPT, RESEARCH_REQUEST_VERSION, researchWireRequest, type ResearchOrderContextV1 } from '@ikbr/shared/instrument-research';
 import { researchFixture } from '@ikbr/shared/instrument-research-testfixture';
 import { createResearchEntryValidator } from './research-entry-guard.js';
 import { runMigrations } from './migrations.js';
@@ -43,9 +43,10 @@ async function seed(pool:Pool,mutateDecision?:(decision:Record<string,unknown>)=
   quote:{bid:99,ask:100,bidObservedAt:stamp(-400),askObservedAt:stamp(-200)},valuation:{quoteCurrency:'USD',valuationCurrency:'USD',quoteNotional:100,quoteStopRisk:1,fxToUsd:1,fxSource:'same_currency',fxValuationBuffer:1},
   fees:{currency:'USD',reserve:5,source:'configured_risk_reserve',estimateStatus:'UNAVAILABLE'},
   risk:{ok:true,evidence:{accountId,sessionId,instrumentId:instrument.id,conid:order.conid!,assessedAtMs:now-200,validUntilMs:now+9500}}};
- const request={schemaVersion:'pp4-ai-request-v1',model:r.manifest.model.model,promptVersion:r.manifest.model.promptVersion,outputSchemaVersion:r.manifest.model.outputSchemaVersion,
-  maxOutputTokens:r.manifest.model.maxOutputTokens,context:{research,orderContext:context,proposal:order,identity:{clientOrderHash:hash,instrumentId:instrument.id,conid:order.conid,accountId,sessionId,
+ const request={schemaVersion:RESEARCH_REQUEST_VERSION,model:r.manifest.model.model,promptVersion:r.manifest.model.promptVersion,outputSchemaVersion:r.manifest.model.outputSchemaVersion,
+  maxOutputTokens:r.manifest.model.maxOutputTokens,systemPrompt:RESEARCH_SYSTEM_PROMPT,providerRequest:{} as Record<string,unknown>,context:{research,orderContext:context,proposal:order,identity:{clientOrderHash:hash,instrumentId:instrument.id,conid:order.conid,accountId,sessionId,
    strategyAttribution:order.strategyAttribution,strategyTrigger:order.strategyTrigger},indicators:null}};
+ request.providerRequest=researchWireRequest(request);
  const requestHash=researchHash(request),modelDecision={decision:'EXECUTE',reason:'fixture verified research',confidence:.8,riskFlags:[],evidenceRefs:research.eligibility.requiredEvidenceRefs};
  const decision={...modelDecision,model:request.model,promptVersion:request.promptVersion,outputSchemaVersion:request.outputSchemaVersion,contextHash:requestHash,research:research.binding,context:request.context,
   timings:{startedAt:stamp(-100),completedAt:stamp(-50),latencyMs:50,outcome:'COMPLETED'}};

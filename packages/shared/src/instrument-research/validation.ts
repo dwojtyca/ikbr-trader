@@ -1,8 +1,9 @@
+import { parseWshConfig, validateWshEvidence, validateWshEvent, validateWshCoverage } from "./wsh.js";
 import { parseMarketauxNewsConfig, validateMarketauxAcquisition } from "./marketaux.js";
 import { isIP } from "node:net";
 import { canonicalJson, computeTradingConfigurationHash, sha256 } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
-import type { InstrumentResearchSnapshotV1, ResearchManifestV1, ResearchPublication } from "./types.js";
+import type { ResearchSnapshot, ResearchManifest, ResearchPublication } from "./types.js";
 
 export const researchHash = (value: unknown): string => sha256(canonicalJson(value));
 export function researchAssert(condition: unknown, code = "RESEARCH_SCHEMA_INVALID"): asserts condition { if (!condition) throw new Error(code); }
@@ -63,7 +64,7 @@ export function publicationRange(v: ResearchPublication): { start: number; end: 
 }
 function reportRequirement(v: unknown): void { const r = obj(v, "periodStart periodEnd nextPublicationDeadline scope"); date(r.periodStart); date(r.periodEnd); researchAssert(r.periodStart <= r.periodEnd); choice(r.scope, "consolidated separate"); researchTime(r.nextPublicationDeadline); }
 
-export function parseResearchManifest(raw: unknown, configuration: TradingConfigurationV1, expectedConfigHash: string): ResearchManifestV1 {
+export function parseResearchManifest(raw: unknown, configuration: TradingConfigurationV1, expectedConfigHash: string): ResearchManifest {
   const m = validateResearchManifest(raw);
   researchAssert(computeTradingConfigurationHash(configuration) === expectedConfigHash && m.configHash === expectedConfigHash, "RESEARCH_CONFIG_MISMATCH");
   for (const policy of m.instruments) {
@@ -75,8 +76,8 @@ export function parseResearchManifest(raw: unknown, configuration: TradingConfig
   for (const instrument of configuration.instruments.filter(i => i.entryEnabled)) researchAssert(m.instruments.some(i => i.instrumentId === instrument.id), "RESEARCH_MAPPING_MISSING");
   return m;
 }
-export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
-  const m = obj(raw, "schemaVersion configHash instruments refreshEnabled model"); researchAssert(m.schemaVersion === 1 && isResearchHash(m.configHash) && typeof m.refreshEnabled === "boolean");
+export function validateResearchManifest(raw: unknown): ResearchManifest {
+  const m = obj(raw, "schemaVersion configHash instruments refreshEnabled model"); researchAssert((m.schemaVersion === 1 || m.schemaVersion === 2) && isResearchHash(m.configHash) && typeof m.refreshEnabled === "boolean");
   const model = obj(m.model, "provider model promptVersion outputSchemaVersion maxInputChars maxOutputTokens maxCostMicrosPerCall maxRequestsPerDay maxCostMicrosPerDay");
   for (const k of ["provider", "model", "promptVersion", "outputSchemaVersion"]) txt(model[k]);
   researchAssert(model.provider === "openai", "RESEARCH_MODEL_PROVIDER_UNSUPPORTED");
@@ -99,14 +100,15 @@ export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
     arr(p.sources, 20); unique(p.sources, "id");
     for (const source of p.sources) {
       const s = obj(source, "id provider adapter parserConfig roles urls issuerIdentifier automation retention permissionEvidenceUrl maxRequestsPerDay maxCostMicrosPerDay costMicrosPerCall");
-      txt(s.id); txt(s.provider); choice(s.adapter, "sec-json issuer-document marketaux-news"); arr(s.roles, 3); researchAssert(s.roles.length > 0 && new Set(s.roles).size === s.roles.length); for (const role of s.roles) choice(role, "reports news calendar");
+      txt(s.id); txt(s.provider); choice(s.adapter, m.schemaVersion === 2 ? "sec-json issuer-document marketaux-news ibkr-wsh" : "sec-json issuer-document marketaux-news"); arr(s.roles, 3); researchAssert(s.roles.length > 0 && new Set(s.roles).size === s.roles.length); for (const role of s.roles) choice(role, "reports news calendar");
       researchAssert(s.parserConfig && typeof s.parserConfig === "object" && !Array.isArray(s.parserConfig) && Object.getPrototypeOf(s.parserConfig) === Object.prototype && canonicalJson(s.parserConfig).length <= 50000, "RESEARCH_PARSER_CONFIG_INVALID");
       jsonValue(s.parserConfig);
-      arr(s.urls, 100); researchAssert(s.urls.length > 0 && new Set(s.urls).size === s.urls.length); for (const url of s.urls) researchAssert(safeResearchUrl(url), "RESEARCH_SOURCE_URL_INVALID");
+      arr(s.urls, 100); researchAssert((s.adapter === "ibkr-wsh" ? s.urls.length === 0 : s.urls.length > 0) && new Set(s.urls).size === s.urls.length); for (const url of s.urls) researchAssert(safeResearchUrl(url), "RESEARCH_SOURCE_URL_INVALID");
       researchAssert(s.urls.every(url => new URL(String(url)).origin === s.provider), "RESEARCH_PROVIDER_ORIGIN_MISMATCH");
       identifier(s.issuerIdentifier); researchAssert(p.identifiers.some(i => canonicalJson(i) === canonicalJson(s.issuerIdentifier)), "RESEARCH_SOURCE_IDENTITY_MISMATCH");
       choice(s.automation, "PERMITTED UNVERIFIED DENIED"); choice(s.retention, "FACTS_AND_REFERENCES FULL_DOCUMENT UNVERIFIED DENIED"); researchAssert(safeResearchUrl(s.permissionEvidenceUrl));
       for (const k of ["maxRequestsPerDay", "maxCostMicrosPerDay", "costMicrosPerCall"]) integer(s[k]);
+      if (s.adapter === "ibkr-wsh") parseWshConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
       if (s.adapter === "marketaux-news" || (s.parserConfig as Record<string, unknown>).kind === "marketaux-news-v1") {
         const config = parseMarketauxNewsConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
         researchAssert(!marketauxEntities.has(config.entity.symbol) || marketauxEntities.get(config.entity.symbol) === p.issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY");
@@ -115,34 +117,46 @@ export function validateResearchManifest(raw: unknown): ResearchManifestV1 {
       const sourceKey = `${s.provider}:${canonicalJson(s.issuerIdentifier)}`, issuerId = String(p.issuerId);
       researchAssert(!sourceIdentities.has(sourceKey) || sourceIdentities.get(sourceKey) === issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY"); sourceIdentities.set(sourceKey, issuerId);
     }
+    researchAssert((p.sources as import("./types.js").ResearchSource[]).filter(s => s.adapter === "ibkr-wsh").length <= 1, "RESEARCH_WSH_DUPLICATE_SOURCE");
+    if ((p.sources as import("./types.js").ResearchSource[]).some(s => s.adapter === "ibkr-wsh")) researchAssert((p.sources as import("./types.js").ResearchSource[]).filter(s => s.roles.includes("calendar")).length === 1, "RESEARCH_WSH_CALENDAR_SOURCE_CONFLICT");
   }
-  return structuredClone(raw) as ResearchManifestV1;
+  return structuredClone(raw) as ResearchManifest;
 }
 
-export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1): InstrumentResearchSnapshotV1 {
+export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifest): ResearchSnapshot {
   const s = obj(raw, "schemaVersion configHash manifestHash instrumentId mappingHash createdAt evidence coverage reports facts news events");
-  researchAssert(s.schemaVersion === 1 && s.configHash === manifest.configHash && s.manifestHash === researchHash(manifest), "RESEARCH_SNAPSHOT_IDENTITY_INVALID");
+  researchAssert(s.schemaVersion === manifest.schemaVersion && s.configHash === manifest.configHash && s.manifestHash === researchHash(manifest), "RESEARCH_SNAPSHOT_IDENTITY_INVALID");
   const policy = manifest.instruments.find(i => i.instrumentId === s.instrumentId); researchAssert(policy && s.mappingHash === researchHash(policy), "RESEARCH_MAPPING_MISMATCH"); researchTime(s.createdAt);
   for (const k of ["evidence", "coverage", "reports", "facts", "news", "events"]) arr(s[k]);
   const evidence = s.evidence as unknown[], reports = s.reports as unknown[];
   unique(evidence, "ref"); unique(reports, "id"); unique(s.facts as unknown[], "id"); unique(s.news as unknown[], "id"); unique(s.events as unknown[], "id");
   const refs = new Set<string>(), reportIds = new Set<string>();
   for (const value of evidence) {
+    if (value && typeof value === "object" && "kind" in value && value.kind === "wsh-calendar") {
+      researchAssert(s.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
+      validateWshEvidence(value, policy, String(s.createdAt)); refs.add((value as import("./wsh.js").WshEvidence).ref); continue;
+    }
     const e = obj(value, "ref sourceId documentId url contentHash issuerId issuerIdentifier published fetchedAt observedAt automation retention");
     for (const k of ["ref", "sourceId", "documentId"]) txt(e[k]); researchAssert(isResearchHash(e.contentHash));
     const source = policy.sources.find(x => x.id === e.sourceId); researchAssert(source && e.issuerId === policy.issuerId && canonicalJson(e.issuerIdentifier) === canonicalJson(source.issuerIdentifier), "RESEARCH_EVIDENCE_ISSUER_MISMATCH");
+    researchAssert(source.adapter !== "ibkr-wsh", "RESEARCH_WSH_EVIDENCE_INVALID");
     researchAssert(safeResearchUrl(e.url) && source.urls.includes(e.url), "RESEARCH_EVIDENCE_URL_MISMATCH");
     publicationRange(e.published as ResearchPublication); researchTime(e.fetchedAt); researchTime(e.observedAt);
     choice(e.automation, "PERMITTED UNVERIFIED DENIED"); choice(e.retention, "FACTS_AND_REFERENCES FULL_DOCUMENT UNVERIFIED DENIED"); refs.add(e.ref as string);
   }
   const coverageKeys = new Set<string>();
   for (const value of s.coverage as unknown[]) {
+    if (value && typeof value === "object" && "wshAcquisition" in value) {
+      researchAssert(s.schemaVersion === 2); validateWshCoverage(value, policy, evidence, String(s.createdAt));
+      const c = value as import("./wsh.js").WshSourceResult;
+      const key = `${c.sourceId}:${c.role}`; researchAssert(!coverageKeys.has(key), "RESEARCH_DUPLICATE_COVERAGE"); coverageKeys.add(key); continue;
+    }
     const hasOccurrenceRange = value !== null && typeof value === "object" &&
       (Object.hasOwn(value, "occurrenceWindowStart") || Object.hasOwn(value, "occurrenceWindowEnd"));
     const hasAcquisition = value !== null && typeof value === "object" && Object.hasOwn(value, "acquisition");
     const c = obj(value, "sourceId role status checkedAt windowStart windowEnd complete evidenceRefs reason" +
       (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : "") + (hasAcquisition ? " acquisition" : ""));
-    const source = policy.sources.find(x => x.id === c.sourceId); researchAssert(source && source.roles.includes(c.role as "reports"), "RESEARCH_COVERAGE_SOURCE_INVALID");
+    const source = policy.sources.find(x => x.id === c.sourceId); researchAssert(source && (source.adapter !== "ibkr-wsh" || c.complete === false && !["AVAILABLE", "EMPTY"].includes(String(c.status))) && source.roles.includes(c.role as "reports"), "RESEARCH_COVERAGE_SOURCE_INVALID");
     const key = `${c.sourceId}:${c.role}`; researchAssert(!coverageKeys.has(key), "RESEARCH_DUPLICATE_COVERAGE"); coverageKeys.add(key);
     choice(c.status, "AVAILABLE EMPTY MISSING STALE UNVERIFIED ERROR NOT_APPLICABLE"); researchTime(c.checkedAt); const start = researchTime(c.windowStart), end = researchTime(c.windowEnd); researchAssert(start <= end && typeof c.complete === "boolean");
     if (hasOccurrenceRange) researchAssert(c.role === "calendar" && researchTime(c.occurrenceWindowStart) <= researchTime(c.occurrenceWindowEnd), "RESEARCH_CALENDAR_RANGE_INVALID");
@@ -151,19 +165,25 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1
     else researchAssert(!hasAcquisition, "RESEARCH_MARKETAUX_RECEIPT_INVALID");
     for (const ref of c.evidenceRefs) researchAssert(typeof ref === "string" && refs.has(ref) && evidence.some(e => (e as Record<string, unknown>).ref === ref && (e as Record<string, unknown>).sourceId === c.sourceId));
   }
+  const httpRefs = new Set((evidence as (import("./types.js").ResearchEvidence | import("./wsh.js").WshEvidence)[]).filter(e => e.published !== null).map(e => e.ref));
   for (const value of reports) {
-    const r = obj(value, "id kind periodStart periodEnd scope evidenceRef supersedes"); txt(r.id); choice(r.kind, "annual periodic"); date(r.periodStart); date(r.periodEnd); researchAssert(r.periodStart <= r.periodEnd); choice(r.scope, "consolidated separate"); researchAssert(refs.has(r.evidenceRef as string)); researchAssert(r.supersedes === null || typeof r.supersedes === "string"); reportIds.add(r.id as string);
+    const r = obj(value, "id kind periodStart periodEnd scope evidenceRef supersedes"); txt(r.id); choice(r.kind, "annual periodic"); date(r.periodStart); date(r.periodEnd); researchAssert(r.periodStart <= r.periodEnd); choice(r.scope, "consolidated separate"); researchAssert(httpRefs.has(r.evidenceRef as string)); researchAssert(r.supersedes === null || typeof r.supersedes === "string"); reportIds.add(r.id as string);
   }
   for (const value of s.facts as unknown[]) {
-    const f = obj(value, "id reportId metric value unit currency scale periodStart periodEnd periodType scope evidenceRef sourcePointer supersedes"); txt(f.id); researchAssert(reportIds.has(f.reportId as string) && refs.has(f.evidenceRef as string)); txt(f.sourcePointer, 1000);
+    const f = obj(value, "id reportId metric value unit currency scale periodStart periodEnd periodType scope evidenceRef sourcePointer supersedes"); txt(f.id); researchAssert(reportIds.has(f.reportId as string) && httpRefs.has(f.evidenceRef as string)); txt(f.sourcePointer, 1000);
     choice(f.metric, "net_interest_income net_profit loans deposits cet1_ratio tier1_ratio revenue net_income operating_cash_flow total_debt"); researchAssert(typeof f.value === "number" && Number.isFinite(f.value) && !Object.is(f.value, -0));
     choice(f.unit, "currency percent decimal"); researchAssert(f.currency === null || typeof f.currency === "string" && /^[A-Z]{3}$/.test(f.currency));
     researchAssert(typeof f.scale === "number" && [1, 1000, 1000000, 1000000000].includes(f.scale)); date(f.periodEnd); choice(f.periodType, "instant duration"); choice(f.scope, "consolidated separate");
     if (f.periodType === "duration") { date(f.periodStart); researchAssert(f.periodStart <= f.periodEnd); } else researchAssert(f.periodStart === null);
     researchAssert(f.supersedes === null || typeof f.supersedes === "string");
   }
-  for (const value of s.news as unknown[]) { const n = obj(value, "id evidenceRef title"); txt(n.id); txt(n.title, 1000); researchAssert(refs.has(n.evidenceRef as string)); }
-  for (const value of s.events as unknown[]) { const e = obj(value, "id kind occurs evidenceRef title"); txt(e.id); txt(e.title, 1000); choice(e.kind, "earnings material other"); publicationRange(e.occurs as ResearchPublication); researchAssert(refs.has(e.evidenceRef as string)); }
+  for (const value of s.news as unknown[]) { const n = obj(value, "id evidenceRef title" + (s.schemaVersion === 2 ? " description snippet providerSentiment" : "")); if (s.schemaVersion === 2) { for (const field of [n.description, n.snippet]) researchAssert(field === null || typeof field === "string" && field.length <= 8000); const sentiment = n.providerSentiment as Record<string, unknown>; researchAssert(sentiment && (sentiment.status === "NOT_PROVIDED" && Object.keys(sentiment).length === 1 || sentiment.status === "PROVIDED" && Object.keys(sentiment).sort().join(",") === "score,status" && (sentiment.score === null || typeof sentiment.score === "number" && Number.isFinite(sentiment.score) && sentiment.score >= -1 && sentiment.score <= 1))); } txt(n.id); txt(n.title, 1000); researchAssert(httpRefs.has(n.evidenceRef as string)); }
+  for (const value of s.events as unknown[]) { if (value && typeof value === "object" && "kind" in value && value.kind === "wsh-calendar") { researchAssert(s.schemaVersion === 2); validateWshEvent(value, policy, evidence); continue; } const e = obj(value, "id kind occurs evidenceRef title"); txt(e.id); txt(e.title, 1000); choice(e.kind, "earnings material other"); publicationRange(e.occurs as ResearchPublication); researchAssert(httpRefs.has(e.evidenceRef as string)); }
+  for (const source of policy.sources.filter(source => source.adapter === "ibkr-wsh")) {
+    const own = (evidence as import("./wsh.js").WshEvidence[]).filter(e => e.sourceId === source.id);
+    const events = s.events as (import("./types.js").ResearchEvent | import("./wsh.js").WshEvent)[];
+    researchAssert(own.every(e => events.filter(event => event.kind === "wsh-calendar" && event.evidenceRef === e.ref).length === 1), "RESEARCH_WSH_EVENT_COUNT_MISMATCH");
+  }
   for (const source of policy.sources.filter(source => source.adapter === "marketaux-news")) {
     const coverage = (s.coverage as import("./types.js").ResearchSourceResult[]).find(c => c.sourceId === source.id);
     const sourceEvidence = (evidence as import("./types.js").ResearchEvidence[]).filter(e => e.sourceId === source.id);
@@ -178,5 +198,5 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifestV1
     }
   }
   researchAssert(canonicalJson(raw).length <= 2000000, "RESEARCH_SNAPSHOT_TOO_LARGE");
-  return structuredClone(raw) as InstrumentResearchSnapshotV1;
+  return structuredClone(raw) as ResearchSnapshot;
 }

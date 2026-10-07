@@ -1,5 +1,7 @@
 # Current project state
 
+Owner correction 2026-10-07: [WSH context implementation](phase3/PP7_WSH_CONTEXT_IMPLEMENTATION_REPORT.md) removes event-proximity vetoes and supplies available calendar/news/forecast context to AI for existing technical proposals. Its report distinguishes source validation from operational readiness; this note does not certify a Paper entry.
+
 Source update: 2026-10-06; PP7 reviewed source published with successful exact-commit CI. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)
 supersedes the operator-security gap below. Other capability and broker observations
 retain the September26 audit baseline `6cbd2c7ee9d4b9d15537441ffd9ffc714f1d306f`.

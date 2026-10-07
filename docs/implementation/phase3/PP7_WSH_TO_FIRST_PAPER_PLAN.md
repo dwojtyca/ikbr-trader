@@ -1,5 +1,7 @@
 # PP7: od kontraktu WSH do pierwszej nadzorowanej transakcji PKO
 
+Aktualizacja właściciela 2026-10-07: [kontrakt kontekstu WSH](PP7_WSH_PROSPECTIVE_IMPLEMENTATION_PLAN.md) zastępuje wcześniejsze wymagania automatycznej blokady wokół wydarzeń i gwarancji pełnego kalendarza. Strategia generuje zwykłą propozycję; AI ocenia ją z dostępnymi wydarzeniami, prognozami i newsami. Nie dokładamy źródła potwierdzającego kalendarz. Pozostałe bramki operacyjne zachowują zastosowanie.
+
 Data: 2026-10-07. Status: plan zaakceptowany w niezależnym przeglądzie Astra/high.
 Akceptacja planu nie zatwierdza jeszcze rozstrzygnięć kontraktu WSH z G1
 ani aktywacji operacyjnej z G3/G4.

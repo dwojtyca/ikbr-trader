@@ -19,7 +19,8 @@
     "pdfjs-dist": "6.4.299",
     "pg": "^8.13.0",
     "saxes": "6.0.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@stoqey/ib": "1.6.10"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

@@ -1,5 +1,10 @@
 # Paper research: Marketaux news qualification and operation
 
+Updated 2026-10-07: the [WSH context contract](RESEARCH_CONTEXT_WSH.md) adds V2
+news descriptions, snippets and matched-issuer sentiment for AI adjudication.
+Calendar proximity is context, not an automatic entry veto; WSH is the sole
+calendar source and does not require an additional issuer-confirmation feed.
+
 This runbook describes the E1b news implementation under the
 [accepted contract](../implementation/phase3/PP7_NEWS_FEED_CONTRACT.md).
 The [implementation report](../implementation/phase3/PP7_E1B_IMPLEMENTATION_REPORT.md)
@@ -100,8 +105,10 @@ database failure propagates and is not described as a successfully published ERR
 Receipts retain credential-free request identity, page counts, actual response
 hashes and times. Article evidence points to the allowlisted provider query and a
 `marketaux:<uuid>` document ID. Publisher URLs affect the consistency digest but
-are not clickable snapshot links or network authorization. Full bodies, snippets,
-descriptions, highlights and images are not retained.
+are not clickable snapshot links or network authorization. V1 retains title-only
+news. V2 additionally retains bounded provider descriptions/snippets and optional
+matched-issuer sentiment in the immutable AI context. Full article bodies,
+highlights and images are not retained.
 
 Qualification and entitlement expiry cap requests and transactional publication.
 They also cap stored research eligibility, AI preparation and final binding even
@@ -112,9 +119,9 @@ deleting reservations or fabricating an EMPTY result.
 ## Remaining launch gates
 
 PKO/AAPL entity and plan qualification must be evidenced privately before real
-provider operation. Complete calendars remain mandatory: Marketaux news does not
-prove future event occurrence coverage. The PKO calendar audit missed a reported
-extraordinary meeting; Apple IR access did not establish exhaustive coverage.
+provider operation. A valid configured WSH query supplies the required calendar
+context; neither WSH nor Marketaux claims exhaustive real-world coverage. The
+earlier issuer-page calendar audit is not an additional launch prerequisite.
 Report extraction, model access/budgets, broker accounting, risk, alerts and the
 supervised Paper acceptance gates remain separate requirements. See the
 [closure plan](../implementation/phase3/PP7_CLOSURE_PLAN.md) and

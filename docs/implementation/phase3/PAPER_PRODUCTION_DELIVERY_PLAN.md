@@ -1,5 +1,7 @@
 # Production-style Paper bot delivery plan
 
+Owner correction 2026-10-07: [WSH context contract](PP7_WSH_PROSPECTIVE_IMPLEMENTATION_PLAN.md) supersedes event-proximity blackout requirements. Existing technical proposals receive AI adjudication using available reports, forecasts, news and calendar context. No strategy/signal changes or additional calendar feed are required by this package.
+
 Date: 2026-09-26; PP5/PP6 source status updated 2026-10-04. Status: **delivery specification**;
 PP0 is implemented and published with successful CI, recorded in the [PP0 report](PP0_IMPLEMENTATION_REPORT.md).
 PP1 source implements the bounded [configuration contract](PP1_CONFIGURATION_CONTRACT.md),

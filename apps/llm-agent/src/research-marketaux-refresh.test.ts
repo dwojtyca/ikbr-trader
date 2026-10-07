@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { request } from "node:https";
-import { parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
+import { parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
 import { ResearchRefreshScheduler, researchSourceSlot } from "./research-refresh.js";
 import { marketauxFixture, marketauxResponse } from "./research-marketaux.testfixture.js";
 import type { ResearchFetchResult } from "./research-fetch.js";
@@ -17,7 +17,18 @@ function setup() {
     onStore: (_snapshot: InstrumentResearchSnapshotV1, _deadline: string | undefined) => {},
     response: (request: MarketauxRequest): ResearchFetchResult => marketauxResponse([f.article(1), f.article(2), f.article(3)].slice((request.page - 1) * 2, request.page * 2), request.page, 3),
   };
+  const unsupportedWshCall = async (): Promise<never> => { throw new Error("unexpected WSH call in HTTP-only fixture"); };
   const store = {
+    readSnapshot: unsupportedWshCall,
+    withWshEndpointLock: unsupportedWshCall,
+    pendingWshAcquisition: unsupportedWshCall,
+    beginWshAcquisition: unsupportedWshCall,
+    reserveWshCall: unsupportedWshCall,
+    assertWshAcquisition: unsupportedWshCall,
+    publishWshSnapshot: unsupportedWshCall,
+    finishWshFailure: unsupportedWshCall,
+    retireWshAcquisition: unsupportedWshCall,
+    readWshAcquisition: unsupportedWshCall,
     latestSnapshot: async () => state.prior,
     withRefreshLock: async (_identity: unknown, run: () => Promise<void>) => { if (locked) return false; locked = true; try { await run(); return true; } finally { locked = false; } },
     hasRefreshSlot: async (slotKey: string) => state.slots.has(slotKey) || ["reports", "calendar"].some(role => slotKey === "research_slot_" + researchHash({ manifestHash: f.manifestHash, instrumentId: f.policy.instrumentId, sourceId: "official", role, slot: researchSourceSlot(state.now, role as "reports" | "calendar") })),
@@ -28,7 +39,9 @@ function setup() {
       return { callKey: r.callKey, reservedAt: new Date(state.now).toISOString(), budgetDay: new Date(state.now).toISOString().slice(0, 10) };
     },
     recordCallOutcome: async (callKey: string, outcome: string) => { state.outcomes.push(callKey + ":" + outcome); },
-    storeSnapshot: async (snapshot: InstrumentResearchSnapshotV1, slotKey?: string, deadline?: string) => {
+    storeSnapshot: async (snapshot: ResearchSnapshot, slotKey?: string, deadline?: string) => {
+      assert.equal(snapshot.schemaVersion, 1);
+      if (snapshot.schemaVersion !== 1) throw new Error("V1 fixture received V2");
       state.onStore(snapshot, deadline);
       parseResearchSnapshot(snapshot, f.manifest);
       if (slotKey && state.slots.has(slotKey)) throw new Error("duplicate slot");

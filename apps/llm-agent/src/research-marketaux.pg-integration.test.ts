@@ -44,9 +44,19 @@ async function seed(pool: Pool, expiryMs = 3_600_000, budget = 1000, twoIssuers 
   const requests: MarketauxRequest[] = [];
   let beforeStore: ((snapshot: InstrumentResearchSnapshotV1, deadline?: string) => Promise<void>) | undefined;
   const scheduler = () => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash, accountId: "DU_TEST", marketauxApiKey: "synthetic-secret", store: {
+    readSnapshot: store.readSnapshot.bind(store),
+    withWshEndpointLock: store.withWshEndpointLock.bind(store),
+    pendingWshAcquisition: store.pendingWshAcquisition.bind(store),
+    beginWshAcquisition: store.beginWshAcquisition.bind(store),
+    reserveWshCall: store.reserveWshCall.bind(store),
+    assertWshAcquisition: store.assertWshAcquisition.bind(store),
+    publishWshSnapshot: store.publishWshSnapshot.bind(store),
+    finishWshFailure: store.finishWshFailure.bind(store),
+    retireWshAcquisition: store.retireWshAcquisition.bind(store),
+    readWshAcquisition: store.readWshAcquisition.bind(store),
     latestSnapshot: store.latestSnapshot.bind(store), withRefreshLock: store.withRefreshLock.bind(store), reserveCall: store.reserveCall.bind(store), recordCallOutcome: store.recordCallOutcome.bind(store),
     hasRefreshSlot: async key => skipped.has(key) || store.hasRefreshSlot(key),
-    storeSnapshot: async (snapshot, slot, deadline) => { await beforeStore?.(snapshot, deadline); return store.storeSnapshot(snapshot, slot, deadline); },
+    storeSnapshot: async (snapshot, slot, deadline) => { assert.equal(snapshot.schemaVersion, 1); if (snapshot.schemaVersion !== 1) throw new Error("V1 fixture received V2"); await beforeStore?.(snapshot, deadline); return store.storeSnapshot(snapshot, slot, deadline); },
   }, marketauxFetch: async (source, request) => { requests.push(request); return marketauxResponse([{ ...f.article(1), entities: [source.parserConfig.entity] }], request.page, 1); } });
   return { ...f, store, scheduler, requests, beforeStore: (hook: typeof beforeStore) => { beforeStore = hook; } };
 }

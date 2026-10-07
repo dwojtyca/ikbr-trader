@@ -128,12 +128,13 @@ test("a successful empty news slot survives restart without a duplicate call or 
   assert.equal(state.fetches, 1);
   assert.equal(state.snapshots.length, 1);
 });
-test("refresh persists independent future calendar range, while absent or past-only range stays unverified", async () => {
+test("refresh preserves historical calendar ranges without requiring an event blackout horizon", async () => {
   const now = Date.now();
   for (const calendar of [{}, { occurrenceWindowStart: new Date(now - 2 * 86400000).toISOString(), occurrenceWindowEnd: new Date(now - 86400000).toISOString() }]) {
     const state = setup(2, false, calendar); await state.make().tick();
     const coverage = (state.snapshots[0] as any).coverage[0];
-    assert.equal(coverage.status, "UNVERIFIED"); assert.equal(coverage.complete, false);
+    assert.equal(coverage.status, "occurrenceWindowStart" in calendar ? "EMPTY" : "UNVERIFIED");
+    assert.equal(coverage.complete, "occurrenceWindowStart" in calendar);
     await state.make().tick(); assert.equal(state.fetches, 1);
   }
   const range = { occurrenceWindowStart: new Date(now - 2 * 86400000).toISOString(), occurrenceWindowEnd: new Date(now + 3 * 86400000).toISOString() };
@@ -153,4 +154,31 @@ test("concurrent ticks never fetch the same source twice", async () => {
   await Promise.all([scheduler.tick(), other.tick()]);
   assert.equal(state.fetches, 1);
   assert.equal(state.snapshots.length, 1);
+});
+
+test("V2 Marketaux enrichment reaches the merged snapshot while WSH evidence remains immutable", async () => {
+  const { wshSnapshotFixture } = await import("@ikbr/shared/instrument-research-testfixture");
+  const { marketauxFixture, marketauxResponse } = await import("./research-marketaux.testfixture.js");
+  const f = wshSnapshotFixture(), news = marketauxFixture();
+  f.policy.sources[0].roles = ["reports"];
+  f.policy.sources.push(news.source); f.manifest.instruments = [f.policy];
+  const manifestHash = researchHash(f.manifest); f.snapshot.manifestHash = manifestHash; f.snapshot.mappingHash = researchHash(f.policy);
+  f.snapshot.coverage = f.snapshot.coverage.filter(c => c.role !== "news");
+  const originalWsh = structuredClone(f.snapshot.evidence.filter(e => e.published === null));
+  let saved = f.snapshot, calls = 0;
+  const article = { ...news.article(1), description: "Issuer description", snippet: "Available excerpt", entities: [{ ...news.newsConfig.entity, sentiment_score: -0.35 }] };
+  const slots = new Set<string>();
+  const store: any = {
+    latestSnapshot: async () => ({ id: "prior", hash: researchHash(saved), sequence: 1, snapshot: saved }),
+    withRefreshLock: async (_id: unknown, run: () => Promise<void>) => { await run(); return true; },
+    hasRefreshSlot: async (key: string) => slots.has(key) || f.policy.sources.filter(s => s.adapter !== "marketaux-news").some(s => key === "research_slot_" + researchHash({ manifestHash, instrumentId: f.policy.instrumentId, sourceId: s.id, role: s.roles[0], slot: researchSourceSlot(news.now, s.adapter === "ibkr-wsh" ? "news" : "reports") })),
+    reserveCall: async () => {}, recordCallOutcome: async () => {},
+    storeSnapshot: async (snapshot: typeof saved, slot: string) => { parseResearchSnapshot(snapshot, f.manifest); saved = snapshot; slots.add(slot); },
+  };
+  await new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash, accountId: "DU1", store, now: () => news.now, marketauxApiKey: "fixture-only", marketauxFetch: async (_source, request) => { calls++; return marketauxResponse([article], request.page, 1); } }).tick();
+  assert.equal(calls, 2);
+  assert.equal(saved.news[0].description, article.description); assert.equal(saved.news[0].snippet, article.snippet);
+  assert.deepEqual(saved.news[0].providerSentiment, { status: "PROVIDED", score: -0.35 });
+  assert.deepEqual(saved.evidence.filter(e => e.published === null), originalWsh);
+  assert.deepEqual(saved.reports, f.snapshot.reports);
 });

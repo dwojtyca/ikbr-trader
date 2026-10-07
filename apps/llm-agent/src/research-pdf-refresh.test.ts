@@ -48,7 +48,18 @@ function refreshHarness(malformed = false) {
   const reservations: ResearchCallReservation[] = [], outcomes: { key: string; outcome: string }[] = [];
   let fetches = 0, locked = false;
   let response: ResearchFetchResult = { payload: f.bytes, contentHash: digest(f.bytes), contentType: "application/pdf" };
+  const unsupportedWshCall = async (): Promise<never> => { throw new Error("unexpected WSH call in HTTP-only fixture"); };
   const store: ConstructorParameters<typeof ResearchRefreshScheduler>[0]["store"] = {
+    readSnapshot: unsupportedWshCall,
+    withWshEndpointLock: unsupportedWshCall,
+    pendingWshAcquisition: unsupportedWshCall,
+    beginWshAcquisition: unsupportedWshCall,
+    reserveWshCall: unsupportedWshCall,
+    assertWshAcquisition: unsupportedWshCall,
+    publishWshSnapshot: unsupportedWshCall,
+    finishWshFailure: unsupportedWshCall,
+    retireWshAcquisition: unsupportedWshCall,
+    readWshAcquisition: unsupportedWshCall,
     latestSnapshot: async () => structuredClone(snapshots.at(-1)!),
     hasRefreshSlot: async key => slots.has(key),
     withRefreshLock: async (_identity, work) => { if (locked) return false; locked = true; try { await work(); return true; } finally { locked = false; } },
@@ -80,6 +91,8 @@ test("production PDF refresh publishes five extracted facts, preserves unrelated
   const coverage = snapshot.coverage.find(item => item.sourceId === h.f.source.id)!;
   assert.equal(coverage.status, "AVAILABLE"); assert.equal(coverage.complete, true); assert.equal(coverage.evidenceRefs.length, 1);
   const evidence = snapshot.evidence.find(item => item.ref === coverage.evidenceRefs[0])!;
+  assert.notEqual(evidence.published, null);
+  if (evidence.published === null) throw new Error("HTTP report received socket evidence");
   assert.equal(evidence.contentHash, digest(h.f.bytes));
   assert.ok(snapshot.facts.every(fact => fact.evidenceRef === evidence.ref));
   assert.deepEqual(snapshot.evidence.find(item => item.ref === "preserved_annual"), h.snapshots[0].snapshot.evidence[0]);

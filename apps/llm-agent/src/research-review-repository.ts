@@ -1,8 +1,8 @@
 import type { Pool, PoolClient } from "pg";
-import { ResearchStore, researchHash, validateResearchOrderContext, type ValidatedResearchBinding, type ResearchManifestV1 } from "@ikbr/shared/instrument-research";
+import { ResearchStore, researchHash, validateResearchOrderContext, validateResearchAiRequest, type ValidatedResearchBinding, type ResearchManifest } from "@ikbr/shared/instrument-research";
 import { canonicalJson } from "@ikbr/shared/trading-config";
 import { BoundReviewRepository, type BoundClaim, type BoundDecision, type BoundReviewStore } from "./bound-review-repository.js";
-import { researchWireRequest, RESEARCH_SYSTEM_PROMPT, validateResearchModelDecision, type ResearchModelRequest, type ResearchModelResult } from "./research-decision.js";
+import { validateResearchModelDecision, type ResearchModelRequest, type ResearchModelResult } from "./research-decision.js";
 
 export interface ModelReservation { startedAt: string; deadlineAt: string; requestHash: string; callKey: string }
 export interface ResearchReviewStore extends BoundReviewStore {
@@ -13,7 +13,7 @@ export interface ResearchReviewStore extends BoundReviewStore {
 
 export class ResearchBoundReviewRepository extends BoundReviewRepository implements ResearchReviewStore {
   private readonly researchStore: ResearchStore;
-  constructor(pool: Pool, private readonly research: { manifest: ResearchManifestV1; hash: string } | null) {
+  constructor(pool: Pool, private readonly research: { manifest: ResearchManifest; hash: string } | null) {
     super(pool, { effectiveConfigHash: research?.manifest.configHash });
     this.researchStore = new ResearchStore(pool);
   }
@@ -58,12 +58,8 @@ export class ResearchBoundReviewRepository extends BoundReviewRepository impleme
       validateResearchOrderContext(request.context.orderContext, { proposedOrderId: claim.order.id,
         clientOrderHash: identity.clientOrderHash, effectiveConfigHash: identity.configHash, accountId: claim.identity.accountId,
         sessionId: claim.identity.sessionId, instrumentId: identity.instrumentId, conid: claim.identity.conid }, nowMs);
-      if (request.systemPrompt !== RESEARCH_SYSTEM_PROMPT || canonicalJson(request.providerRequest) !== canonicalJson(researchWireRequest(request)))
-        throw new Error("AI_WIRE_REQUEST_MISMATCH");
       const model = validated.manifest.model;
-      if (request.model !== model.model || request.promptVersion !== model.promptVersion || request.outputSchemaVersion !== model.outputSchemaVersion ||
-          request.maxOutputTokens !== model.maxOutputTokens || JSON.stringify(request).length > model.maxInputChars)
-        throw new Error("AI_MODEL_CONFIGURATION_MISMATCH");
+      validateResearchAiRequest(request as unknown as Record<string, unknown>, model);
       const deadlineMs = Math.min(nowMs + 10_000, review.claim_until.getTime() - 1000, review.expires_at.getTime() - 1000);
       if (deadlineMs <= nowMs + 100) throw new Error("AI_DEADLINE_EXHAUSTED");
       const requestHash = researchHash(request), callKey = `model:proposal:${claim.order.id}`;

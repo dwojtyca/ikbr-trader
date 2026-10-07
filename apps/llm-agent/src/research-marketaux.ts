@@ -1,6 +1,6 @@
-import { researchHash, safeResearchUrl, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest } from "@ikbr/shared/instrument-research";
+import { researchHash, safeResearchUrl, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest, type ResearchNewsV2 } from "@ikbr/shared/instrument-research";
 
-export interface MarketauxNewsRecord { uuid: string; title: string; url: string; publishedAt: string; originalPublishedAt: string; entity: MarketauxEntity; inWindow: boolean }
+export interface MarketauxNewsRecord { uuid: string; title: string; url: string; publishedAt: string; originalPublishedAt: string; entity: MarketauxEntity; inWindow: boolean; enrichment?: { description: string | null; snippet: string | null; providerSentiment: ResearchNewsV2["providerSentiment"] } }
 export interface MarketauxPage { found: number; returned: number; limit: number; page: number; records: MarketauxNewsRecord[] }
 function invalid(): never { throw new Error("RESEARCH_MARKETAUX_PAYLOAD_INVALID"); }
 function object(value: unknown): Record<string, unknown> {
@@ -18,7 +18,21 @@ function timestamp(value: unknown): { micros: bigint; canonical: string; origina
   return { micros, canonical: new Date(Number(micros / 1000n)).toISOString(), original: value };
 }
 
-export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, request: MarketauxRequest): MarketauxPage {
+function optionalText(value: unknown): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > 8000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(value)) invalid();
+  return value;
+}
+
+function enrichment(item: Record<string, unknown>, sentiment: unknown): NonNullable<MarketauxNewsRecord["enrichment"]> {
+  let providerSentiment: ResearchNewsV2["providerSentiment"];
+  if (sentiment === undefined || sentiment === null) providerSentiment = { status: "NOT_PROVIDED" };
+  else if (typeof sentiment === "number" && Number.isFinite(sentiment) && sentiment >= -1 && sentiment <= 1) providerSentiment = { status: "PROVIDED", score: sentiment };
+  else return invalid();
+  return { description: optionalText(item.description), snippet: optionalText(item.snippet), providerSentiment };
+}
+
+export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, request: MarketauxRequest, schemaVersion: 1 | 2 = 1): MarketauxPage {
   const root = object(input), meta = object(root.meta);
   if (Object.hasOwn(root, "error") || Object.hasOwn(root, "errors") || !Array.isArray(root.data)) invalid();
   for (const key of ["found", "returned", "limit", "page"]) if (!Number.isSafeInteger(meta[key]) || Number(meta[key]) < 0) invalid();
@@ -41,7 +55,8 @@ export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, 
     const published = timestamp(item.published_at);
     if (published.micros < start - 1_000_000n || published.micros > end + 1_000_000n) throw new Error("RESEARCH_MARKETAUX_PUBLICATION_OUTSIDE_QUERY");
     return { uuid, title: item.title, url: item.url, publishedAt: published.canonical, originalPublishedAt: published.original,
-      entity: { ...config.entity }, inWindow: published.micros >= start && published.micros <= end };
+      entity: { ...config.entity }, inWindow: published.micros >= start && published.micros <= end,
+      ...(schemaVersion === 2 ? { enrichment: enrichment(item, matched[0].sentiment_score) } : {}) };
   });
   return { found, returned, limit: config.pageSize, page: request.page, records };
 }
@@ -49,5 +64,5 @@ export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, 
 export function marketauxRecordSetHash(records: MarketauxNewsRecord[]): string {
   const sorted = [...records].sort((a, b) => a.uuid.localeCompare(b.uuid));
   if (new Set(sorted.map(record => record.uuid)).size !== sorted.length) throw new Error("RESEARCH_MARKETAUX_DUPLICATE_UUID");
-  return researchHash(sorted.map(({ uuid, title, url, originalPublishedAt, entity }) => ({ uuid, title, url, originalPublishedAt, entity })));
+  return researchHash(sorted.map(({ uuid, title, url, originalPublishedAt, entity, enrichment }) => ({ uuid, title, url, originalPublishedAt, entity, ...(enrichment === undefined ? {} : { enrichment }) })));
 }

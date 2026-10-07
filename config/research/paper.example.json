@@ -5,7 +5,7 @@
   "model": {
     "provider": "openai",
     "model": "UNVERIFIED_MODEL",
-    "promptVersion": "pp4-research-v1",
+    "promptVersion": "pp7-research-context-v2",
     "outputSchemaVersion": "pp4-decision-v1",
     "maxInputChars": 100000,
     "maxOutputTokens": 1000,

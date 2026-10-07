@@ -1,12 +1,14 @@
+import { parseWshConfig, wshQualificationDeadline, wshLedgerKey, type WshAcquisition, type WshAcquisitionRecord, type WshEndpointLease } from "./wsh.js";
 import { randomUUID } from "node:crypto";
 import { canonicalJson, decodeTradingConfigurationSnapshot } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
 import { isResearchHash, parseResearchManifest, parseResearchSnapshot, researchAssert, researchHash, researchTime } from "./validation.js";
-import type { InstrumentResearchSnapshotV1, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifestV1, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
+import type { ResearchSnapshot, InstrumentResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
 
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : String(v);
 export class ResearchStore {
+  private readonly wshLeases = new WeakMap<WshEndpointLease, ResearchConnection>();
   constructor(private readonly pool: ResearchPool) {}
   async withRefreshLock(identity: ResearchIdentity & { instrumentId: string }, run: () => Promise<void>): Promise<boolean> {
     const db = await this.pool.connect();
@@ -31,7 +33,7 @@ export class ResearchStore {
     catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
   }
   private async now(db: ResearchDb): Promise<number> { return researchTime(iso((await db.query("SELECT clock_timestamp() AS now")).rows[0].now)); }
-  async registerManifest(input: { manifest: ResearchManifestV1; configuration: TradingConfigurationV1; tradingEnabled: boolean; adopt: boolean }): Promise<{ hash: string }> {
+  async registerManifest(input: { manifest: ResearchManifest; configuration: TradingConfigurationV1; tradingEnabled: boolean; adopt: boolean }): Promise<{ hash: string }> {
     const manifest = parseResearchManifest(input.manifest, input.configuration, input.manifest.configHash), hash = researchHash(manifest);
     return this.transaction(async db => {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`research-authority:${manifest.configHash}`]);
@@ -49,7 +51,8 @@ export class ResearchStore {
           OR EXISTS(SELECT 1 FROM proposal_ai_reviews WHERE claim_until>clock_timestamp()
             OR (delivery_started_at IS NOT NULL AND (delivery_outcome IS NULL OR delivery_outcome ILIKE '%unknown%')))
           OR EXISTS(SELECT 1 FROM research_call_reservations r LEFT JOIN research_call_outcomes o USING(call_key)
-            WHERE r.kind='model' AND (o.call_key IS NULL OR o.outcome='UNKNOWN'))`);
+            WHERE r.kind='model' AND (o.call_key IS NULL OR o.outcome='UNKNOWN'))
+          OR EXISTS(SELECT 1 FROM research_wsh_acquisitions WHERE state='PENDING' AND retired_at IS NULL)`);
         researchAssert(!active.rows.length, "RESEARCH_ADOPTION_ACTIVE_OR_UNKNOWN_WORK");
         await db.query(`INSERT INTO research_authority(config_hash,manifest_hash) VALUES($1,$2) ON CONFLICT(config_hash)
           DO UPDATE SET manifest_hash=EXCLUDED.manifest_hash,adopted_at=clock_timestamp()`, [manifest.configHash, hash]);
@@ -82,23 +85,27 @@ export class ResearchStore {
       return { validUntilMs: Math.min(...observations.map(o => researchTime(iso(o.expires_at)))) };
     }, existing);
   }
-  private async readManifest(identity: ResearchIdentity, db: ResearchDb): Promise<ResearchManifestV1> {
+  private async readManifest(identity: ResearchIdentity, db: ResearchDb): Promise<ResearchManifest> {
     const row = (await db.query(`SELECT r.canonical_json,c.canonical_json AS config_json FROM research_manifests r
       JOIN trading_configuration_snapshots c ON c.effective_hash=r.config_hash WHERE r.manifest_hash=$1 AND r.config_hash=$2`, [identity.manifestHash, identity.configHash])).rows[0];
     researchAssert(row && typeof row.canonical_json === "string" && typeof row.config_json === "string", "RESEARCH_MANIFEST_MISSING");
     const manifest = parseResearchManifest(JSON.parse(row.canonical_json), decodeTradingConfigurationSnapshot(row.config_json, identity.configHash), identity.configHash);
     researchAssert(researchHash(manifest) === identity.manifestHash && canonicalJson(manifest) === row.canonical_json, "RESEARCH_MANIFEST_CORRUPT"); return manifest;
   }
-  private decode(row: Record<string, unknown>, manifest: ResearchManifestV1): StoredResearchSnapshot {
+  private decode(row: Record<string, unknown>, manifest: ResearchManifest): StoredResearchSnapshot {
     researchAssert(typeof row.canonical_json === "string" && typeof row.id === "string");
     const snapshot = parseResearchSnapshot(JSON.parse(row.canonical_json), manifest), hash = researchHash(snapshot), sequence = Number(row.sequence);
     researchAssert(hash === row.snapshot_hash && canonicalJson(snapshot) === row.canonical_json && Number.isSafeInteger(sequence) && sequence > 0, "RESEARCH_SNAPSHOT_CORRUPT");
     return { id: row.id, hash, sequence, snapshot };
   }
-  async storeSnapshot(input: InstrumentResearchSnapshotV1, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
+  async storeSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
+    return this.persistSnapshot(input, refreshSlot, admissionDeadlineAt);
+  }
+  private async persistSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string, existing?: ResearchDb, publishingAcquisitionId?: string): Promise<StoredResearchSnapshot> {
     if (admissionDeadlineAt !== undefined) researchTime(admissionDeadlineAt);
     return this.transaction(async db => {
       await this.assertAuthority(input, db); const manifest = await this.readManifest(input, db), snapshot = parseResearchSnapshot(input, manifest);
+      await this.assertWshSnapshotProvenance(snapshot, db, publishingAcquisitionId);
       researchAssert(researchTime(snapshot.createdAt) <= await this.now(db), "RESEARCH_FUTURE_SNAPSHOT");
       const key = [snapshot.configHash, snapshot.manifestHash, snapshot.instrumentId];
       await db.query("INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", key);
@@ -124,7 +131,7 @@ export class ResearchStore {
         await db.query("INSERT INTO research_refresh_slots(slot_key,snapshot_id) VALUES($1,$2)", [refreshSlot, id]);
       }
       return { id, hash, sequence, snapshot };
-    });
+    }, existing);
   }
   async latestSnapshot(identity: ResearchIdentity & { instrumentId: string }, existing?: ResearchDb, lockHead = false): Promise<StoredResearchSnapshot | null> {
     return this.transaction(async db => {
@@ -196,6 +203,160 @@ export class ResearchStore {
         [input.callKey, input.accountId, input.provider, input.kind, input.configHash, input.manifestHash, input.requestHash, input.reservedCostMicros, new Date(now).toISOString(), input.deadlineAt, day]);
       return { callKey: input.callKey, reservedAt: new Date(now).toISOString(), budgetDay: day };
     }, existing);
+  }
+  // Lock order: caller proposal/review locks, authority/observations, WSH endpoint
+  // row (WSH writers only), budget, snapshot head. Endpoint session lock is held
+  // outside transactions. No acquisition takes proposal/review locks.
+  async withWshEndpointLock(endpointId: string, run: (lease: WshEndpointLease) => Promise<void>): Promise<boolean> {
+    researchAssert(endpointId.length > 0 && endpointId.length <= 500);
+    const db = await this.pool.connect(), key = `research-wsh-endpoint:${endpointId}`;
+    let locked = false;
+    const lease: WshEndpointLease = { endpointId, assertHeld: async () => {
+      researchAssert(this.wshLeases.get(lease) === db, "RESEARCH_WSH_LOCK_LOST");
+      const found = (await db.query(`SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid()
+        AND classid=((hashtext($1)::bigint >> 32) & 4294967295)::oid
+        AND objid=(hashtext($1)::bigint & 4294967295)::oid AND objsubid=1 AND granted`, [key])).rows;
+      researchAssert(found.length === 1, "RESEARCH_WSH_LOCK_LOST");
+    } };
+    try {
+      locked = (await db.query("SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS locked", [key])).rows[0]?.locked === true;
+      if (!locked) return false;
+      this.wshLeases.set(lease, db); await run(lease); return true;
+    } finally {
+      this.wshLeases.delete(lease);
+      try { if (locked) await db.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [key]); }
+      finally { db.release(); }
+    }
+  }
+  private async wshTransaction<T>(lease: WshEndpointLease, fn: (db: ResearchDb) => Promise<T>): Promise<T> {
+    await lease.assertHeld(); const db = this.wshLeases.get(lease); researchAssert(db, "RESEARCH_WSH_LOCK_LOST");
+    try { await db.query("BEGIN"); const result = await fn(db); await lease.assertHeld(); await db.query("COMMIT"); return result; }
+    catch (error) { try { await db.query("ROLLBACK"); } catch { /* Preserve the original uncertain result. */ } throw error; }
+  }
+  private async wshSource(identity: ResearchIdentity & { sourceId: string; instrumentId: string }, db: ResearchDb) {
+    const manifest = await this.readManifest(identity, db); researchAssert(manifest.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
+    const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId), source = policy?.sources.find(s => s.id === identity.sourceId);
+    researchAssert(policy && source, "RESEARCH_WSH_SOURCE_INVALID"); const config = parseWshConfig(source, policy);
+    researchAssert(source.automation === "PERMITTED" && !["UNVERIFIED","DENIED"].includes(source.retention), "RESEARCH_PERMISSION_UNVERIFIED");
+    wshQualificationDeadline(config, await this.now(db)); return { manifest, policy, source, config };
+  }
+  private async assertWshFence(lease: WshEndpointLease, acquisition: WshAcquisition, db: ResearchDb): Promise<void> {
+    researchAssert(acquisition.endpointId === lease.endpointId, "RESEARCH_WSH_FENCE_MISMATCH");
+    const endpoint = (await db.query("SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE", [lease.endpointId])).rows[0];
+    const row = (await db.query("SELECT * FROM research_wsh_acquisitions WHERE id=$1 FOR UPDATE", [acquisition.id])).rows[0];
+    researchAssert(endpoint && Number(endpoint.generation) === acquisition.generation && row && Number(row.generation) === acquisition.generation && row.endpoint_id === acquisition.endpointId && row.session_id === acquisition.sessionId && row.source_id === acquisition.sourceId && row.instrument_id === acquisition.instrumentId && row.config_hash === acquisition.configHash && row.manifest_hash === acquisition.manifestHash && row.state === "PENDING" && row.retired_at === null, "RESEARCH_WSH_GENERATION_RETIRED");
+  }
+  async beginWshAcquisition(lease: WshEndpointLease, input: ResearchIdentity & { instrumentId: string; sourceId: string; sessionId: string; reservation: ResearchCallReservation }): Promise<WshAcquisition> {
+    researchAssert(input.sessionId.length > 0 && input.sessionId.length <= 500);
+    return this.wshTransaction(lease, async db => {
+      await this.assertAuthority(input, db); const { config } = await this.wshSource(input, db);
+      researchAssert(config.endpointId === lease.endpointId && input.reservation.kind === "source" && input.reservation.provider === "ibkr-wsh" && input.reservation.configHash === input.configHash && input.reservation.manifestHash === input.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
+      await db.query("INSERT INTO research_wsh_endpoints(endpoint_id) VALUES($1) ON CONFLICT DO NOTHING", [lease.endpointId]);
+      await db.query("SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE", [lease.endpointId]);
+      researchAssert(!(await db.query("SELECT 1 FROM research_wsh_acquisitions WHERE endpoint_id=$1 AND state='PENDING' AND retired_at IS NULL", [lease.endpointId])).rows.length, "RESEARCH_WSH_RECOVERY_REQUIRED");
+      researchAssert(researchTime(input.reservation.deadlineAt) <= await this.now(db) + config.timeoutMs, "RESEARCH_WSH_CALL_DEADLINE_INVALID");
+      const ledgerKey = wshLedgerKey(config.isin);
+      researchAssert(!(await db.query("SELECT 1 FROM research_wsh_acquisitions WHERE ledger_key=$1 AND started_at>clock_timestamp()-interval '15 minutes'", [ledgerKey])).rows.length, "RESEARCH_WSH_SLOT_TOO_EARLY");
+      const generation = Number((await db.query("UPDATE research_wsh_endpoints SET generation=generation+1 WHERE endpoint_id=$1 RETURNING generation", [lease.endpointId])).rows[0].generation);
+      researchAssert(Number.isSafeInteger(generation)); const id = randomUUID();
+      const row = (await db.query(`INSERT INTO research_wsh_acquisitions(id,endpoint_id,generation,session_id,source_id,instrument_id,ledger_key,config_hash,manifest_hash,state)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'PENDING') RETURNING started_at`, [id,lease.endpointId,generation,input.sessionId,input.sourceId,input.instrumentId,ledgerKey,input.configHash,input.manifestHash])).rows[0];
+      await this.reserveCall(input.reservation, db);
+      await db.query("INSERT INTO research_wsh_acquisition_calls(acquisition_id,call_key) VALUES($1,$2)", [id,input.reservation.callKey]);
+      return { id,endpointId:lease.endpointId,generation,sessionId:input.sessionId,sourceId:input.sourceId,instrumentId:input.instrumentId,configHash:input.configHash,manifestHash:input.manifestHash,startedAt:iso(row.started_at) };
+    });
+  }
+  async reserveWshCall(lease: WshEndpointLease, acquisition: WshAcquisition, reservation: ResearchCallReservation): Promise<void> {
+    await this.wshTransaction(lease, async db => {
+      await this.assertAuthority(acquisition, db); const { config } = await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
+      researchAssert(researchTime(reservation.deadlineAt) <= await this.now(db) + config.timeoutMs, "RESEARCH_WSH_CALL_DEADLINE_INVALID");
+      researchAssert(reservation.kind === "source" && reservation.provider === "ibkr-wsh" && reservation.configHash === acquisition.configHash && reservation.manifestHash === acquisition.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
+      const metadata = (await db.query(`SELECT o.outcome,o.recorded_at,r.deadline_at FROM research_wsh_acquisition_calls c
+        JOIN research_call_reservations r USING(call_key) LEFT JOIN research_call_outcomes o USING(call_key) WHERE c.acquisition_id=$1`, [acquisition.id])).rows;
+      researchAssert(metadata.length === 1 && metadata[0].outcome === "SUCCEEDED" && researchTime(iso(metadata[0].recorded_at)) < researchTime(iso(metadata[0].deadline_at)), "RESEARCH_WSH_METADATA_NOT_COMPLETED");
+      await this.reserveCall(reservation, db);
+      await db.query("INSERT INTO research_wsh_acquisition_calls(acquisition_id,call_key) VALUES($1,$2)", [acquisition.id,reservation.callKey]);
+    });
+  }
+  async assertWshAcquisition(lease: WshEndpointLease, acquisition: WshAcquisition): Promise<void> {
+    await this.wshTransaction(lease, async db => { await this.assertAuthority(acquisition, db); await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db); });
+  }
+  async readWshAcquisition(id: string): Promise<WshAcquisitionRecord | null> {
+    const row = (await this.pool.query("SELECT * FROM research_wsh_acquisitions WHERE id=$1", [id])).rows[0];
+    return row ? { ...row, generation: Number(row.generation) } as WshAcquisitionRecord : null;
+  }
+  async pendingWshAcquisition(lease: WshEndpointLease): Promise<WshAcquisition | null> {
+    await lease.assertHeld();
+    const row = (await this.pool.query("SELECT * FROM research_wsh_acquisitions WHERE endpoint_id=$1 AND state='PENDING' AND retired_at IS NULL", [lease.endpointId])).rows[0];
+    return row ? { id:String(row.id),endpointId:String(row.endpoint_id),generation:Number(row.generation),sessionId:String(row.session_id),sourceId:String(row.source_id),instrumentId:String(row.instrument_id),configHash:String(row.config_hash),manifestHash:String(row.manifest_hash),startedAt:iso(row.started_at) } : null;
+  }
+  private async assertWshSnapshotProvenance(snapshot: ResearchSnapshot, db: ResearchDb, publishingId?: string): Promise<void> {
+    if (snapshot.schemaVersion !== 2) return;
+    for (const coverage of snapshot.coverage) {
+      if (!("wshAcquisition" in coverage)) continue;
+      const a = coverage.wshAcquisition;
+      const row = (await db.query("SELECT * FROM research_wsh_acquisitions WHERE id=$1", [a.acquisitionId])).rows[0];
+      researchAssert(row && row.config_hash === snapshot.configHash && row.manifest_hash === snapshot.manifestHash && row.instrument_id === snapshot.instrumentId && row.source_id === coverage.sourceId && Number(row.generation) === a.generation && row.session_id === a.sessionId && (row.state === "PUBLISHED" || row.state === "PENDING" && row.id === publishingId), "RESEARCH_WSH_ACQUISITION_INVALID");
+      if (row.state === "PUBLISHED") {
+        const original = (await db.query("SELECT canonical_json FROM research_snapshots WHERE id=$1", [row.snapshot_id])).rows[0];
+        researchAssert(original && typeof original.canonical_json === "string", "RESEARCH_WSH_ACQUISITION_INVALID");
+        const published = JSON.parse(original.canonical_json) as InstrumentResearchSnapshotV2;
+        const projection = (value: ResearchSnapshot) => { const evidence = value.evidence.filter(e => e.sourceId === coverage.sourceId), refs = new Set(evidence.map(e => e.ref)); return { coverage: value.coverage.filter(c => c.sourceId === coverage.sourceId), evidence, events: value.events.filter(e => refs.has(e.evidenceRef)) }; };
+        researchAssert(canonicalJson(projection(snapshot)) === canonicalJson(projection(published)), "RESEARCH_WSH_PUBLISHED_CONTEXT_IMMUTABLE");
+      }
+    }
+    for (const e of snapshot.evidence) {
+      if (e.published !== null) continue;
+      const row = (await db.query("SELECT first_observed_at FROM research_wsh_first_observations WHERE ledger_key=$1 AND event_key=$2 AND version_hash=$3", [wshLedgerKey(e.issuerIdentifier.value),e.documentId,e.versionHash])).rows[0];
+      researchAssert(row && iso(row.first_observed_at) === e.firstObservedAt, "RESEARCH_WSH_FIRST_OBSERVATION_INVALID");
+    }
+  }
+  async publishWshSnapshot(lease: WshEndpointLease, acquisition: WshAcquisition, input: InstrumentResearchSnapshotV2, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
+    return this.wshTransaction(lease, async db => {
+      await this.assertAuthority(acquisition, db); await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
+      researchAssert(input.configHash === acquisition.configHash && input.manifestHash === acquisition.manifestHash && input.instrumentId === acquisition.instrumentId, "RESEARCH_WSH_PUBLICATION_IDENTITY_INVALID");
+      const coverage = input.coverage.find(c => c.sourceId === acquisition.sourceId);
+      researchAssert(coverage && "wshAcquisition" in coverage && coverage.wshAcquisition.acquisitionId === acquisition.id && coverage.complete, "RESEARCH_WSH_PUBLICATION_INVALID");
+      const calls = (await db.query(`SELECT r.* FROM research_call_reservations r JOIN research_wsh_acquisition_calls c USING(call_key)
+        WHERE c.acquisition_id=$1 ORDER BY r.reserved_at`, [acquisition.id])).rows;
+      researchAssert(calls.length === 2 && calls[1].request_hash === coverage.wshAcquisition.requestHash && await this.now(db) < researchTime(iso(calls[1].deadline_at)), "RESEARCH_WSH_CALL_EXPIRED_OR_MISMATCHED");
+      const snapshot = structuredClone(input);
+      for (const e of snapshot.evidence) {
+        if (e.published !== null || e.sourceId !== acquisition.sourceId) continue;
+        await db.query("INSERT INTO research_wsh_first_observations(ledger_key,event_key,version_hash,acquisition_id) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [wshLedgerKey(e.issuerIdentifier.value),e.documentId,e.versionHash,acquisition.id]);
+        const row = (await db.query("SELECT first_observed_at FROM research_wsh_first_observations WHERE ledger_key=$1 AND event_key=$2 AND version_hash=$3", [wshLedgerKey(e.issuerIdentifier.value),e.documentId,e.versionHash])).rows[0];
+        e.firstObservedAt = iso(row.first_observed_at);
+      }
+      snapshot.createdAt = new Date(await this.now(db)).toISOString();
+      const deadline = new Date(Math.min(researchTime(iso(calls[1].deadline_at)), admissionDeadlineAt ? researchTime(admissionDeadlineAt) : Infinity)).toISOString();
+      const stored = await this.persistSnapshot(snapshot, refreshSlot, deadline, db, acquisition.id);
+      for (const call of calls) await this.recordCallOutcome(String(call.call_key), "SUCCEEDED", db);
+      await db.query("UPDATE research_wsh_acquisitions SET state='PUBLISHED',snapshot_id=$2,retired_at=clock_timestamp() WHERE id=$1", [acquisition.id,stored.id]);
+      return stored;
+    });
+  }
+  async retireWshAcquisition(lease: WshEndpointLease, acquisition: WshAcquisition, outcome: "FAILED" | "UNKNOWN", existing?: ResearchDb): Promise<void> {
+    const retire = async (db: ResearchDb) => {
+      await this.assertWshFence(lease, acquisition, db);
+      const calls = (await db.query("SELECT call_key FROM research_wsh_acquisition_calls WHERE acquisition_id=$1", [acquisition.id])).rows;
+      for (const call of calls) {
+        const previous = (await db.query("SELECT 1 FROM research_call_outcomes WHERE call_key=$1", [call.call_key])).rows;
+        if (!previous.length) await this.recordCallOutcome(String(call.call_key), outcome, db);
+      }
+      await db.query("UPDATE research_wsh_acquisitions SET state=$2,retired_at=clock_timestamp() WHERE id=$1", [acquisition.id,outcome]);
+      await db.query("UPDATE research_wsh_endpoints SET generation=generation+1 WHERE endpoint_id=$1", [lease.endpointId]);
+    };
+    if (existing) await retire(existing); else await this.wshTransaction(lease, retire);
+  }
+  async finishWshFailure(lease: WshEndpointLease, acquisition: WshAcquisition, snapshot: InstrumentResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN", refreshSlot?: string): Promise<StoredResearchSnapshot> {
+    return this.wshTransaction(lease, async db => {
+      await this.assertAuthority(acquisition, db); await this.assertWshFence(lease, acquisition, db);
+      researchAssert(snapshot.configHash === acquisition.configHash && snapshot.manifestHash === acquisition.manifestHash && snapshot.instrumentId === acquisition.instrumentId && snapshot.coverage.some(c => c.sourceId === acquisition.sourceId && !c.complete && c.status !== "AVAILABLE" && c.status !== "EMPTY"), "RESEARCH_WSH_NEGATIVE_INVALID");
+      researchAssert(!snapshot.evidence.some(e => e.sourceId === acquisition.sourceId) && !snapshot.events.some(e => snapshot.evidence.find(v => v.ref === e.evidenceRef)?.sourceId === acquisition.sourceId), "RESEARCH_WSH_NEGATIVE_INVALID");
+      const stored = await this.persistSnapshot(snapshot, refreshSlot, undefined, db);
+      await this.retireWshAcquisition(lease, acquisition, outcome, db);
+      await db.query("UPDATE research_wsh_acquisitions SET snapshot_id=$2 WHERE id=$1", [acquisition.id,stored.id]); return stored;
+    });
   }
   async recordCallOutcome(callKey: string, outcome: "SUCCESS" | "SUCCEEDED" | "FAILED" | "UNKNOWN", existing?: ResearchDb): Promise<void> {
     const normalized = outcome === "SUCCESS" ? "SUCCEEDED" : outcome, db = existing ?? this.pool;

@@ -8,6 +8,7 @@ import { createTradingConfigurationRuntime, TradingConfigurationStore } from "@i
 import { ExecutionApiClient } from "./execution-api-client.js";
 import { LlmAgentRepository } from "./repository.js";
 import { ResearchRefreshScheduler, researchBudgetAccountId } from "./research-refresh.js";
+import { loadWshRuntimeConfiguration } from "./research-wsh-transport.js";
 
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const configurationStore = new TradingConfigurationStore(pool);
@@ -33,8 +34,10 @@ const boundWorker = new BoundReviewWorker({
 let researchHeartbeat: NodeJS.Timeout | undefined;
 let refreshTimer: NodeJS.Timeout | undefined;
 const refreshAccountId = researchBudgetAccountId(process.env, research?.manifest.refreshEnabled ?? false);
+const wshRuntime = loadWshRuntimeConfiguration(process.env);
 const refreshScheduler = research && refreshAccountId ? new ResearchRefreshScheduler({ manifest: research.manifest,
-  manifestHash: research.hash, accountId: refreshAccountId, store: researchStore, marketauxApiKey: config.LLM_AGENT_MARKETAUX_API_KEY }) : null;
+  manifestHash: research.hash, accountId: refreshAccountId, store: researchStore, marketauxApiKey: config.LLM_AGENT_MARKETAUX_API_KEY,
+  wsh: { runtime: wshRuntime } }) : null;
 
 const workerId = `llm-agent-${process.pid}`;
 let inFlight = false;

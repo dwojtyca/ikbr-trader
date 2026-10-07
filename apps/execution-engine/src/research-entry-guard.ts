@@ -1,7 +1,7 @@
 import type { PoolClient } from 'pg';
 import type { ProposedOrder } from '@ikbr/shared';
 import { canonicalJson } from '@ikbr/shared/trading-config';
-import { researchHash, validateResearchOrderContext, type ResearchStore, type ResearchIdentity } from '@ikbr/shared/instrument-research';
+import { researchHash, validateResearchOrderContext, validateResearchAiRequest, type ResearchStore, type ResearchIdentity } from '@ikbr/shared/instrument-research';
 import { aiApprovalFailure, readAiProposalReview } from './ai-proposal-review.js';
 
 export interface ResearchEntryPermit { validUntilMs: number; assertCurrent: () => void }
@@ -26,6 +26,7 @@ export function createResearchEntryValidator(options: { store: Pick<ResearchStor
     if (!call || !object(call.request_json) || researchHash(call.request_json) !== call.request_hash ||
         call.research_snapshot_id !== validated.binding.snapshotId) throw new Error('RESEARCH_MODEL_REQUEST_INVALID');
     const request = call.request_json, context = request.context;
+    validateResearchAiRequest(request, validated.manifest.model);
     const outcome = call.outcome_json;
     if (!object(outcome) || outcome.kind !== 'COMPLETED' || !object(outcome.result) || !object(outcome.result.decision))
       throw new Error('RESEARCH_MODEL_OUTCOME_INVALID');
@@ -37,7 +38,7 @@ export function createResearchEntryValidator(options: { store: Pick<ResearchStor
         canonicalJson(context.research.manifest) !== canonicalJson(validated.manifest) ||
         canonicalJson(decision.research) !== canonicalJson(validated.binding) ||
         canonicalJson(decision.context) !== canonicalJson(context) || decision.contextHash !== call.request_hash ||
-        request.schemaVersion !== 'pp4-ai-request-v1' || request.model !== call.model ||
+        request.model !== call.model ||
         request.promptVersion !== call.prompt_version || request.outputSchemaVersion !== call.output_schema_version ||
         decision.model !== call.model || decision.promptVersion !== call.prompt_version || decision.outputSchemaVersion !== call.output_schema_version ||
         call.model !== validated.manifest.model.model || call.prompt_version !== validated.manifest.model.promptVersion ||

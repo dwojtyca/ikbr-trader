@@ -1,5 +1,5 @@
 import type { DiagnosticCoverage, DiagnosticField, DiagnosticQuery, DiagnosticReport, DiagnosticScalar } from '@ikbr/shared/diagnostics';
-import { evaluateResearchEligibility, researchHash, validateResearchManifest, type InstrumentResearchSnapshotV1 } from '@ikbr/shared/instrument-research';
+import { evaluateResearchEligibility, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
 import { requireSessionSchedule, type SessionScheduleEvidence } from '@ikbr/shared';
 import type { DiagnosticReadModelDeps } from './read-model.js';
 
@@ -197,12 +197,15 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
       try {
         const manifest = validateResearchManifest(JSON.parse(String(researchRow.manifest_json)));
         if (manifest.configHash !== config.configHash || researchHash(manifest) !== researchRow.manifest_hash) throw Error('MANIFEST_IDENTITY');
-        const snapshot = JSON.parse(String(researchRow.snapshot_json)) as InstrumentResearchSnapshotV1;
+        const snapshot = JSON.parse(String(researchRow.snapshot_json)) as ResearchSnapshot;
         if (researchHash(snapshot) !== researchRow.snapshot_hash || snapshot.instrumentId !== item.id || snapshot.configHash !== config.configHash) throw Error('SNAPSHOT_IDENTITY');
         const eligibility = evaluateResearchEligibility(snapshot, manifest, now);
         set(fields, field('researchCoverage', 'Pokrycie badań', eligibility.eligible ? 'ELIGIBLE_AT_REPORT_TIME' : 'INELIGIBLE_AT_REPORT_TIME'));
         set(fields, field('researchBlockers', 'Blokady badań', eligibility.reasons.join(', ') || null));
         set(fields, field('researchExpiresAt', 'Ważność oceny badań do', eligibility.expiresAt));
+        set(fields, field('calendarUse', 'Rola kalendarza', 'Kontekst decyzji AI; bez blokady wejść przed i po wydarzeniu'));
+        set(fields, field('calendarEventCount', 'Wydarzenia w kontekście AI', snapshot.events.length));
+        set(fields, field('newsNarrativeCount', 'Newsy z opisem lub fragmentem', snapshot.schemaVersion === 2 ? snapshot.news.filter(n => n.description || n.snippet).length : 0));
         set(fields, field('researchRequiredEvidenceRefs', 'Wymagane odsyłacze dowodów', eligibility.requiredEvidenceRefs.join(', ') || null, 'identifier'));
         for (const source of snapshot.coverage) {
           if (fields.length + 7 > 200) {

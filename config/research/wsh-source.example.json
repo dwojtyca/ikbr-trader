@@ -1,0 +1,48 @@
+{
+  "id": "wsh_calendar",
+  "provider": "ibkr-wsh",
+  "adapter": "ibkr-wsh",
+  "roles": [
+    "calendar"
+  ],
+  "urls": [],
+  "issuerIdentifier": {
+    "scheme": "ISIN",
+    "value": "PLPKO0000016"
+  },
+  "automation": "UNVERIFIED",
+  "retention": "UNVERIFIED",
+  "permissionEvidenceUrl": "https://www.wallstreethorizon.com/interactive-brokers",
+  "maxRequestsPerDay": 0,
+  "maxCostMicrosPerDay": 0,
+  "costMicrosPerCall": 0,
+  "parserConfig": {
+    "kind": "ibkr-wsh-v1",
+    "endpointId": "unqualified-example",
+    "conId": 35146360,
+    "isin": "PLPKO0000016",
+    "issuerTimeZone": "Europe/Warsaw",
+    "qualification": {
+      "id": "EXAMPLE_NOT_QUALIFIED",
+      "validFrom": "2000-01-01T00:00:00.000Z",
+      "expiresAt": "2000-01-02T00:00:00.000Z",
+      "endpointOwnershipRef": "EXAMPLE_NO_ENDPOINT_OWNERSHIP",
+      "metadataHash": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "entitlement": {
+      "reference": "EXAMPLE_NO_ENTITLEMENT",
+      "validFrom": "2000-01-01T00:00:00.000Z",
+      "expiresAt": "2000-01-02T00:00:00.000Z",
+      "termsReference": "EXAMPLE_VERIFY_SUBSCRIBED_TERMS"
+    },
+    "lookbackDays": 7,
+    "lookaheadDays": 45,
+    "edgeDays": 2,
+    "totalLimit": 100,
+    "timeoutMs": 10000,
+    "maxEventBytes": 1048576,
+    "maxMetadataBytes": 524288,
+    "refreshIntervalMs": 900000,
+    "maxAgeMs": 900000
+  }
+}

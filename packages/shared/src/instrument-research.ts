@@ -5,3 +5,5 @@ export * from "./instrument-research/store.js";
 export * from "./instrument-research/loader.js";
 export * from "./research-order-context.js";
 export * from "./instrument-research/marketaux.js";
+export * from "./instrument-research/wsh.js";
+export * from "./instrument-research/ai-contract.js";

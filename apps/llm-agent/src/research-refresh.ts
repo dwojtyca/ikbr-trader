@@ -1,4 +1,5 @@
-import { parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchInstrumentPolicy, type ResearchManifestV1, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
+import { parseResearchSnapshot, researchHash, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
+import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
 import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
 import { extractResearchPdf } from "./research-pdf-extractor.js";
@@ -9,7 +10,7 @@ import { createMarketauxFetch, sanitizeMarketauxError, type MarketauxFetch } fro
 import { marketauxRecordSetHash, parseMarketauxPage, type MarketauxNewsRecord } from "./research-marketaux.js";
 
 type Role = "reports" | "news" | "calendar";
-type SourceStore = Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot">;
+type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot">;
 type Fetch = (source: ResearchSource, url: string, deadlineAt: string) => Promise<ResearchFetchResult>;
 const REFRESH_INTERVAL_MS: Record<Role, number> = { reports: 86400000, news: 900000, calendar: 86400000 };
 const RETRYABLE_HTTP = /^RESEARCH_SOURCE_HTTP_(429|500|502|503|504)$/;
@@ -46,7 +47,7 @@ async function parsePdfPayload(source: ResearchSource, result: ResearchFetchResu
   return extractResearchPdf(result.payload, mapping.documentSha256, mapping.pages.map(page => page.pageNumber));
 }
 
-function removePriorSourceRole(snapshot: InstrumentResearchSnapshotV1, sourceId: string, role: Role): void {
+function removePriorSourceRole(snapshot: ResearchSnapshot, sourceId: string, role: Role): void {
   const old = snapshot.coverage.find(row => row.sourceId === sourceId && row.role === role);
   const refs = new Set(old?.evidenceRefs ?? []);
   const reportIds = new Set(snapshot.reports.filter(row => refs.has(row.evidenceRef)).map(row => row.id));
@@ -61,7 +62,7 @@ function removePriorSourceRole(snapshot: InstrumentResearchSnapshotV1, sourceId:
 export class ResearchRefreshScheduler {
   private inFlight = false;
   private readonly attemptedSlots = new Map<string, number>();
-  constructor(private readonly options: { manifest: ResearchManifestV1; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch }) {}
+  constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; wsh?: WshRefreshRuntime }) {}
 
   async tick(): Promise<void> {
     if (!this.options.manifest.refreshEnabled || this.inFlight) return;
@@ -71,13 +72,13 @@ export class ResearchRefreshScheduler {
         if (policy.assetClass === "etf") continue;
         await this.options.store.withRefreshLock({ configHash: this.options.manifest.configHash, manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId }, async () => {
           for (const source of policy.sources) for (const role of source.roles) {
-            const slot = researchSourceSlot((this.options.now ?? Date.now)(), role);
+            const slot = researchSourceSlot((this.options.now ?? Date.now)(), source.adapter === "ibkr-wsh" ? "news" : role);
             const key = [this.options.manifestHash, policy.instrumentId, source.id, role].join(":");
             if (this.attemptedSlots.get(key) === slot) continue;
             const slotKey = "research_slot_" + researchHash({ manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId, sourceId: source.id, role, slot });
             if (await this.options.store.hasRefreshSlot(slotKey)) { this.attemptedSlots.set(key, slot); continue; }
             this.attemptedSlots.set(key, slot);
-            try { await this.refreshRole(policy, source, role, slot, slotKey); }
+            try { if (await this.refreshRole(policy, source, role, slot, slotKey) === false) this.attemptedSlots.delete(key); }
             catch (error) { this.attemptedSlots.delete(key); throw error; }
           }
         });
@@ -85,13 +86,14 @@ export class ResearchRefreshScheduler {
     } finally { this.inFlight = false; }
   }
 
-  private async refreshRole(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, slotKey: string): Promise<void> {
+  private async refreshRole(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, slotKey: string): Promise<boolean | void> {
+    if (source.adapter === "ibkr-wsh") return refreshWsh({ ...this.options, policy, source, slotKey });
     if (source.adapter === "marketaux-news") return this.refreshMarketaux(policy, source, slot, slotKey);
     const { manifest, manifestHash, store, accountId } = this.options;
     const startedAt = new Date((this.options.now ?? Date.now)()).toISOString();
     const previous = await store.latestSnapshot({ configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId });
-    const snapshot: InstrumentResearchSnapshotV1 = previous ? structuredClone(previous.snapshot) : {
-      schemaVersion: 1, configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId,
+    const snapshot: ResearchSnapshot = previous ? structuredClone(previous.snapshot) : {
+      schemaVersion: manifest.schemaVersion, configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId,
       mappingHash: researchHash(policy), createdAt: startedAt, evidence: [], coverage: [], reports: [], facts: [], news: [], events: [],
     };
     removePriorSourceRole(snapshot, source.id, role);
@@ -139,7 +141,9 @@ export class ResearchRefreshScheduler {
           result.coverage.evidenceRefs = result.coverage.evidenceRefs.map(ref => evidenceIds.get(ref)!);
           if (result.coverage.role !== role) throw new Error("RESEARCH_SOURCE_ROLE_MISMATCH");
           snapshot.evidence.push(...result.evidence);
-          snapshot.news.push(...result.news); snapshot.events.push(...result.events);
+          if (snapshot.schemaVersion === 2) snapshot.news.push(...result.news.map(row => ({ ...row, description: null, snippet: null, providerSentiment: { status: "NOT_PROVIDED" as const } })));
+          else snapshot.news.push(...result.news);
+          snapshot.events.push(...result.events);
           refs = result.evidence.map(row => row.ref);
           coveredWindow = { start: result.coverage.windowStart, end: result.coverage.windowEnd };
           sourceCheckedAt = result.coverage.checkedAt;
@@ -148,10 +152,9 @@ export class ResearchRefreshScheduler {
           };
           const windowComplete = role === "news"
             ? coveredWindow.end === sourceCheckedAt && Date.parse(coveredWindow.start) <= Date.parse(sourceCheckedAt) - 86400000
-            : occurrenceWindow !== null && Date.parse(occurrenceWindow.occurrenceWindowStart) <= Date.parse(fetchedAt) - 86400000 &&
-              Date.parse(occurrenceWindow.occurrenceWindowEnd) > Date.parse(fetchedAt) + 86400000;
+            : true;
           status = windowComplete && (result.coverage.status === "AVAILABLE" || result.coverage.status === "EMPTY") ? result.coverage.status : "UNVERIFIED";
-          reason = windowComplete ? result.coverage.reason : role === "news" ? "declared news window does not cover its as-of time" : "calendar occurrence window does not cover the entry blackout horizon";
+          reason = windowComplete ? result.coverage.reason : "declared news window does not cover its as-of time";
           complete = windowComplete && result.coverage.complete;
         }
         parseResearchSnapshot(snapshot, manifest);
@@ -175,8 +178,8 @@ export class ResearchRefreshScheduler {
     const { manifest, manifestHash, store, accountId } = this.options;
     const now = this.options.now ?? Date.now, startedAt = now(), window = marketauxWindow(slot);
     const previous = await store.latestSnapshot({ configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId });
-    const snapshot: InstrumentResearchSnapshotV1 = previous ? structuredClone(previous.snapshot) : {
-      schemaVersion: 1, configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId,
+    const snapshot: ResearchSnapshot = previous ? structuredClone(previous.snapshot) : {
+      schemaVersion: manifest.schemaVersion, configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId,
       mappingHash: researchHash(policy), createdAt: new Date(startedAt).toISOString(), evidence: [], coverage: [], reports: [], facts: [], news: [], events: [],
     };
     removePriorSourceRole(snapshot, source.id, "news");
@@ -238,7 +241,7 @@ export class ResearchRefreshScheduler {
           if (result.contentType.split(";")[0].trim().toLowerCase() !== "application/json") throw new Error("RESEARCH_MARKETAUX_CONTENT_TYPE_INVALID");
           bytes += result.payload.length;
           if (result.payload.length > 10 * 1024 * 1024 || bytes > MARKETAUX_MAX_ACQUISITION_BYTES) throw new Error("RESEARCH_MARKETAUX_BYTES_EXCEEDED");
-          const parsed = parseMarketauxPage(JSON.parse(result.payload.toString("utf8")) as unknown, config, descriptor);
+          const parsed = parseMarketauxPage(JSON.parse(result.payload.toString("utf8")) as unknown, config, descriptor, manifest.schemaVersion);
           if ((found >= 0 && parsed.found !== found) || (pass === 2 && parsed.found !== firstFound)) throw new Error("RESEARCH_MARKETAUX_RESULT_CHANGED");
           found = parsed.found; pageCount = Math.max(1, Math.ceil(found / config.pageSize));
           const receipt: MarketauxPageReceipt = { ...identity, pass, page, fetchedAt: new Date(now()).toISOString(), contentHash: createHash("sha256").update(result.payload).digest("hex"), found, returned: parsed.returned, limit: parsed.limit };
@@ -263,7 +266,11 @@ export class ResearchRefreshScheduler {
         snapshot.evidence.push({ ref, sourceId: source.id, documentId: "marketaux:" + record.uuid, url: source.urls[0], contentHash: page.contentHash,
           issuerId: policy.issuerId, issuerIdentifier: source.issuerIdentifier, published: { precision: "instant", at: record.publishedAt },
           fetchedAt: page.fetchedAt, observedAt: page.fetchedAt, automation: source.automation, retention: source.retention });
-        snapshot.news.push({ id: "news_" + researchHash({ sourceId: source.id, role: "news", id: record.uuid }), evidenceRef: ref, title: record.title });
+        const news = { id: "news_" + researchHash({ sourceId: source.id, role: "news", id: record.uuid }), evidenceRef: ref, title: record.title };
+        if (snapshot.schemaVersion === 2) {
+          if (!record.enrichment) throw new Error("RESEARCH_MARKETAUX_PAYLOAD_INVALID");
+          snapshot.news.push({ ...news, ...record.enrichment });
+        } else snapshot.news.push(news);
       }
       checkpoint();
       snapshot.createdAt = new Date(now()).toISOString();

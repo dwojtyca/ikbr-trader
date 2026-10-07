@@ -31,27 +31,24 @@ test("source failures, incomplete news queries, unknown permissions and stale ch
   const unverified = structuredClone(f.snapshot); unverified.evidence[0].retention = "UNVERIFIED";
   assert.equal(evaluateResearchEligibility(unverified, f.manifest, now).eligible, false);
 });
-test("legacy calendar snapshots remain readable and byte-identical but cannot certify upcoming events", () => {
+test("legacy calendar snapshots remain readable and byte-identical without occurrence admission policy", () => {
   const f = researchFixture(now), calendar = f.snapshot.coverage[2];
   delete calendar.occurrenceWindowStart; delete calendar.occurrenceWindowEnd;
   calendar.windowStart = "2020-01-01T00:00:00Z"; calendar.windowEnd = "2020-01-02T00:00:00Z";
   const before = JSON.stringify(f.snapshot), hash = researchHash(f.snapshot);
   assert.deepEqual(parseResearchSnapshot(f.snapshot, f.manifest), f.snapshot);
-  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+  assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, true);
   assert.equal(JSON.stringify(f.snapshot), before); assert.equal(researchHash(f.snapshot), hash);
 });
-test("calendar coverage spans both blackout boundaries and expires when its forward horizon runs out", () => {
+test("event horizon never caps eligibility or imposes proximity admission", () => {
   const f = researchFixture(now), calendar = f.snapshot.coverage[2];
-  calendar.occurrenceWindowEnd = new Date(now + 86400000 + 5000).toISOString();
-  const eligible = evaluateResearchEligibility(f.snapshot, f.manifest, now);
-  assert.equal(eligible.eligible, true); assert.equal(eligible.expiresAt, new Date(now + 5000).toISOString());
-  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now + 5000).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
-  calendar.occurrenceWindowEnd = new Date(now + 3 * 86400000).toISOString();
-  calendar.occurrenceWindowStart = new Date(now - 86400000 + 1).toISOString();
-  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
-  calendar.occurrenceWindowStart = new Date(now - 2 * 86400000).toISOString();
-  calendar.occurrenceWindowEnd = new Date(now - 1).toISOString();
-  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_CALENDAR_WINDOW_INCOMPLETE"));
+  const original = evaluateResearchEligibility(f.snapshot, f.manifest, now);
+  for (const offset of [-1000, 0, 1000, 86400000]) {
+    calendar.occurrenceWindowStart = new Date(now - 86400000).toISOString();
+    calendar.occurrenceWindowEnd = new Date(now + offset).toISOString();
+    const evaluated = evaluateResearchEligibility(f.snapshot, f.manifest, now);
+    assert.equal(evaluated.eligible, true); assert.equal(evaluated.expiresAt, original.expiresAt);
+  }
 });
 test("calendar range is paired, role-specific, ordered and not a substitute for source as-of time", () => {
   const f = researchFixture(now);
@@ -64,13 +61,13 @@ test("calendar range is paired, role-specific, ordered and not a substitute for 
   f.snapshot.coverage[2].checkedAt = new Date(now + 1).toISOString();
   assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_SOURCE_STALE_OR_FUTURE"));
 });
-test("future occurrence is valid when covered, while future publication and out-of-range occurrence deny", () => {
+test("event occurrence is context while future publication still denies", () => {
   const f = researchFixture(now), calendar = f.snapshot.coverage[2];
   calendar.status = "AVAILABLE"; calendar.evidenceRefs = ["reports"];
   f.snapshot.events.push({ id: "event", kind: "earnings", occurs: { precision: "instant", at: new Date(now + 2 * 86400000).toISOString() }, evidenceRef: "reports", title: "Known future earnings" });
   assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, true);
   f.snapshot.events[0].occurs = { precision: "instant", at: new Date(now + 4 * 86400000).toISOString() };
-  assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_EVENT_OUTSIDE_WINDOW"));
+  assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, true);
   f.snapshot.events[0].occurs = { precision: "instant", at: new Date(now + 2 * 86400000).toISOString() };
   f.snapshot.evidence[0].published = { precision: "instant", at: new Date(now + 1).toISOString() };
   assert.ok(evaluateResearchEligibility(f.snapshot, f.manifest, now).reasons.includes("RESEARCH_FUTURE_EVIDENCE"));
@@ -91,14 +88,14 @@ test("units, reporting periods, revisions, identity and future evidence cannot f
   const bank = researchFixture(now, "pko_wse"); bank.snapshot.facts.find(f => f.metric === "tier1_ratio")!.metric = "cet1_ratio";
   assert.equal(evaluateResearchEligibility(bank.snapshot, bank.manifest, now).eligible, false);
 });
-test("date-only publication waits for source-local day end and event blackout covers DST day", () => {
+test("date-only publication waits for source-local day end and nearby events remain context", () => {
   const spring = publicationRange({ precision: "date", date: "2026-03-29", timeZone: "Europe/Warsaw" });
   assert.equal(spring.end - spring.start, 23 * 3600000);
   const f = researchFixture(now); f.snapshot.evidence[0].published = { precision: "date", date: "2026-10-04", timeZone: "America/New_York" };
   assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, false);
   const event = researchFixture(now); event.snapshot.coverage[2].status = "AVAILABLE"; event.snapshot.coverage[2].evidenceRefs = ["reports"];
   event.snapshot.events.push({ id: "earnings", kind: "earnings", occurs: { precision: "date", date: "2026-10-05", timeZone: "Europe/Warsaw" }, evidenceRef: "reports", title: "Earnings" });
-  assert.ok(evaluateResearchEligibility(event.snapshot, event.manifest, now).reasons.includes("RESEARCH_EVENT_BLACKOUT"));
+  assert.equal(evaluateResearchEligibility(event.snapshot, event.manifest, now).eligible, true);
 });
 test("immutable canonical identity changes on policy/permission changes and unsupported ETF denies", () => {
   const f = researchFixture(now), hash = researchHash(f.manifest); f.manifest.model.model = "other";

@@ -6,7 +6,7 @@ export type ResearchMetric = "net_interest_income" | "net_profit" | "loans" | "d
 export interface ResearchSource {
   id: string;
   provider: string;
-  adapter: "sec-json" | "issuer-document" | "marketaux-news";
+  adapter: "sec-json" | "issuer-document" | "marketaux-news" | "ibkr-wsh";
   parserConfig: Record<string, unknown>;
   roles: ("reports" | "news" | "calendar")[];
   urls: string[];
@@ -117,12 +117,12 @@ export interface InstrumentResearchSnapshotV1 {
   news: { id: string; evidenceRef: string; title: string }[];
   events: ResearchEvent[];
 }
-export interface StoredResearchSnapshot { id: string; hash: string; sequence: number; snapshot: InstrumentResearchSnapshotV1 }
+export interface StoredResearchSnapshot { id: string; hash: string; sequence: number; snapshot: ResearchSnapshot }
 export interface ResearchIdentity { configHash: string; manifestHash: string }
 export interface ResearchBindingIdentity extends ResearchIdentity { proposalId: number; clientOrderHash: string; instrumentId: string }
 export interface ResearchBinding extends ResearchBindingIdentity { snapshotId: string; snapshotHash: string; sequence: number }
 export interface ResearchEligibility { eligible: boolean; reasons: string[]; expiresAt: string | null; requiredEvidenceRefs: string[] }
-export interface ValidatedResearchBinding { binding: ResearchBinding; stored: StoredResearchSnapshot; manifest: ResearchManifestV1; eligibility: ResearchEligibility }
+export interface ValidatedResearchBinding { binding: ResearchBinding; stored: StoredResearchSnapshot; manifest: ResearchManifest; eligibility: ResearchEligibility }
 export interface ResearchDb { query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }
 export interface ResearchConnection extends ResearchDb { release(): void }
 export interface ResearchPool extends ResearchDb { connect(): Promise<ResearchConnection> }
@@ -142,3 +142,15 @@ export interface ResearchEtfDescriptor {
   holdingsRefs: string[]; concentration: number; feePercent: number; leveraged: boolean; inverse: boolean;
   distributionPolicy: string; domicile: string; currency: string; hedged: boolean; entrySupport: "NOT_SUPPORTED";
 }
+
+export interface ResearchManifestV2 extends Omit<ResearchManifestV1, "schemaVersion"> { schemaVersion: 2 }
+export type ResearchManifest = ResearchManifestV1 | ResearchManifestV2;
+export interface ResearchNewsV2 { id: string; evidenceRef: string; title: string; description: string | null; snippet: string | null; providerSentiment: { status: "PROVIDED"; score: number | null } | { status: "NOT_PROVIDED" } }
+export interface InstrumentResearchSnapshotV2 extends Omit<InstrumentResearchSnapshotV1, "schemaVersion" | "evidence" | "coverage" | "events" | "news"> {
+  schemaVersion: 2;
+  evidence: (ResearchEvidence | import("./wsh.js").WshEvidence)[];
+  coverage: (ResearchSourceResult | import("./wsh.js").WshSourceResult)[];
+  events: (ResearchEvent | import("./wsh.js").WshEvent)[];
+  news: ResearchNewsV2[];
+}
+export type ResearchSnapshot = InstrumentResearchSnapshotV1 | InstrumentResearchSnapshotV2;

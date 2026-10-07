@@ -1,5 +1,7 @@
 # AI Trading Platform roadmap
 
+Owner correction 2026-10-07: calendar events inform AI adjudication of existing technical proposals; no automatic event-proximity blackout or new signal logic. The [WSH context package](phase3/PP7_WSH_CONTEXT_IMPLEMENTATION_REPORT.md) records implementation and validation separately from deployment and Paper trade evidence.
+
 Updated: 2026-10-06 (PP7 reviewed source published with successful CI; operational Gates A–D remain unaccepted).
 Current code/evidence: [CURRENT_STATE.md](CURRENT_STATE.md).
 Detailed execution sequence: [Production-style Paper delivery](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md).

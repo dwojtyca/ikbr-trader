@@ -1,24 +1,29 @@
+import { parseWshConfig, wshQualificationDeadline } from "./wsh.js";
 import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
-import type { InstrumentResearchSnapshotV1, ResearchEligibility, ResearchManifestV1, ResearchMetric } from "./types.js";
+import type { ResearchSnapshot, ResearchEligibility, ResearchManifest, ResearchMetric } from "./types.js";
 import { parseResearchSnapshot, publicationRange, researchTime } from "./validation.js";
 
 const DAY = 86400000;
-export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1, manifest: ResearchManifestV1, nowMs: number): ResearchEligibility {
+export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: ResearchManifest, nowMs: number): ResearchEligibility {
   const reasons = new Set<string>(), required = new Set<string>(), deadlines: number[] = [];
   const deny = (reason: string) => { reasons.add(reason); };
   if (!Number.isFinite(nowMs)) return { eligible: false, reasons: ["RESEARCH_TIME_INVALID"], expiresAt: null, requiredEvidenceRefs: [] };
-  let s: InstrumentResearchSnapshotV1;
+  let s: ResearchSnapshot;
   try { s = parseResearchSnapshot(input, manifest); } catch (e) { return { eligible: false, reasons: [e instanceof Error ? e.message : "RESEARCH_SCHEMA_INVALID"], expiresAt: null, requiredEvidenceRefs: [] }; }
   const policy = manifest.instruments.find(p => p.instrumentId === s.instrumentId)!;
   if (policy.assetClass !== "stock" || policy.profile === "etf") deny("RESEARCH_NOT_SUPPORTED");
   if (policy.verification.outcome !== "VERIFIED" || researchTime(policy.verification.verifiedAt) > nowMs) deny("RESEARCH_ISSUER_UNVERIFIED");
   if (researchTime(s.createdAt) > nowMs) deny("RESEARCH_FUTURE_SNAPSHOT");
   const evidence = new Map(s.evidence.map(e => [e.ref, e]));
-  const published = (ref: string) => publicationRange(evidence.get(ref)!.published).end;
+  const published = (ref: string) => publicationRange(evidence.get(ref)!.published!).end;
   for (const e of s.evidence) {
     const source = policy.sources.find(x => x.id === e.sourceId)!;
     if (e.automation !== "PERMITTED" || source.automation !== "PERMITTED" || ["UNVERIFIED", "DENIED"].includes(e.retention) || ["UNVERIFIED", "DENIED"].includes(source.retention)) deny("RESEARCH_PERMISSION_UNVERIFIED");
-    if (published(e.ref) > nowMs || publicationRange(e.published).start > researchTime(e.fetchedAt) || researchTime(e.fetchedAt) > nowMs || researchTime(e.observedAt) > nowMs || researchTime(e.fetchedAt) > researchTime(s.createdAt) || researchTime(e.observedAt) > researchTime(e.fetchedAt)) deny("RESEARCH_FUTURE_EVIDENCE");
+    if (e.published === null) {
+      if (researchTime(e.firstObservedAt) > nowMs || researchTime(e.receiptAt) > nowMs) deny("RESEARCH_FUTURE_EVIDENCE");
+      continue;
+    }
+    if (published(e.ref) > nowMs || publicationRange(e.published!).start > researchTime(e.fetchedAt) || researchTime(e.fetchedAt) > nowMs || researchTime(e.observedAt) > nowMs || researchTime(e.fetchedAt) > researchTime(s.createdAt) || researchTime(e.observedAt) > researchTime(e.fetchedAt)) deny("RESEARCH_FUTURE_EVIDENCE");
   }
   for (const role of ["reports", "news", "calendar"] as const) {
     const sources = policy.sources.filter(x => x.roles.includes(role));
@@ -32,22 +37,18 @@ export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1,
           marketauxQualificationDeadline(config, nowMs);
         } catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }
       }
+      if (source.adapter === "ibkr-wsh") {
+        try { deadlines.push(wshQualificationDeadline(parseWshConfig(source, policy), nowMs)); }
+        catch { deny("RESEARCH_WSH_QUALIFICATION_UNAVAILABLE"); }
+      }
       const c = s.coverage.find(x => x.sourceId === source.id && x.role === role);
       if (!c) { deny(`RESEARCH_${role.toUpperCase()}_MISSING`); continue; }
-      const maxAge = role === "news" ? 1800000 : DAY;
+      const maxAge = source.adapter === "ibkr-wsh" ? 900000 : role === "news" ? 1800000 : DAY;
       const checked = researchTime(c.checkedAt), start = researchTime(c.windowStart), end = researchTime(c.windowEnd);
       deadlines.push(checked + maxAge);
       if (checked > nowMs || checked > researchTime(s.createdAt) || end > checked || nowMs - checked >= maxAge) deny("RESEARCH_SOURCE_STALE_OR_FUTURE");
       if (!c.complete || !(c.status === "AVAILABLE" || role !== "reports" && c.status === "EMPTY")) deny(`RESEARCH_${role.toUpperCase()}_${c.status}`);
       if (role === "news" && (end < checked || start > checked - DAY)) deny("RESEARCH_NEWS_WINDOW_INCOMPLETE");
-      if (role === "calendar") {
-        if (c.occurrenceWindowStart === undefined || c.occurrenceWindowEnd === undefined) deny("RESEARCH_CALENDAR_WINDOW_INCOMPLETE");
-        else {
-          const occurrenceStart = researchTime(c.occurrenceWindowStart), occurrenceEnd = researchTime(c.occurrenceWindowEnd);
-          deadlines.push(occurrenceEnd - DAY);
-          if (occurrenceStart > nowMs - DAY || occurrenceEnd <= nowMs + DAY) deny("RESEARCH_CALENDAR_WINDOW_INCOMPLETE");
-        }
-      }
       if (c.status === "AVAILABLE" && !c.evidenceRefs.length) deny("RESEARCH_COVERAGE_EVIDENCE_MISSING");
       if (c.status === "EMPTY" && (c.evidenceRefs.length || (role === "news" ? s.news : s.events).some(x => evidence.get(x.evidenceRef)?.sourceId === source.id))) deny("RESEARCH_FALSE_EMPTY");
       for (const ref of c.evidenceRefs) required.add(ref);
@@ -100,16 +101,7 @@ export function evaluateResearchEligibility(input: InstrumentResearchSnapshotV1,
   }
   for (const event of s.events) {
     if (!covered(event.evidenceRef, "calendar")) deny("RESEARCH_EVENT_UNCOVERED");
-    const range = publicationRange(event.occurs);
-    const coverage = s.coverage.find(c => c.role === "calendar" && c.evidenceRefs.includes(event.evidenceRef));
-    if (!coverage?.occurrenceWindowStart || !coverage.occurrenceWindowEnd ||
-        range.start < researchTime(coverage.occurrenceWindowStart) || range.end > researchTime(coverage.occurrenceWindowEnd)) deny("RESEARCH_EVENT_OUTSIDE_WINDOW");
     required.add(event.evidenceRef);
-    if (event.kind === "earnings" || event.kind === "material") {
-      const start = range.start - DAY, end = range.end + DAY;
-      if (nowMs >= start && nowMs <= end) deny("RESEARCH_EVENT_BLACKOUT");
-      if (start > nowMs) deadlines.push(start);
-    }
   }
   return { eligible: reasons.size === 0, reasons: [...reasons].sort(), expiresAt: deadlines.length ? new Date(Math.min(...deadlines)).toISOString() : null, requiredEvidenceRefs: [...required].sort() };
 }
