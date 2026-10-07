@@ -87,6 +87,14 @@ not prerequisites and must remain preserved outside these commits.
 
 ### 3.1 Model assignments
 
+2026-10-07 addition: the optional [LOCAL proposal route](MODEL_ROUTING_GUIDE.md#local--supervised-edit-proposals)
+may be evaluated for individual noncritical L-eligible subtasks after the lead
+provides a current accepted packet. It does not reassign whole PP packages or
+replace S/A/RS/RA, required validation, or M's supervised publication duties.
+Astra/Sol applies and tests proposed edits; the local worker has no execution
+tools. See the [runbook](../../runbooks/LOCAL_LLM_CODING.md) and
+[pilot evidence](LOCAL_LLM_WORKFLOW_REPORT.md) before dispatch.
+
 The assignments below split implementation within each package. Quality and working
 mechanisms take priority over token use. [Routing guide](MODEL_ROUTING_GUIDE.md)
 defines task packets, eligibility, review independence, escalation and the first

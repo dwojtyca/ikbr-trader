@@ -83,6 +83,13 @@ initial issuers. A missing provider contract is an explicit delivery blocker.
 
 ## Implementation models
 
+An optional [supervised LOCAL pilot](phase3/MODEL_ROUTING_GUIDE.md#local--supervised-edit-proposals)
+now allows individually bounded noncritical edit proposals from an installed LLM,
+with Astra/Sol controlling context, patch application, tests and escalation.
+See [setup](../runbooks/LOCAL_LLM_CODING.md) and
+[probe evidence](phase3/LOCAL_LLM_WORKFLOW_REPORT.md). This does not change the
+delivery queue or authorize local handling of critical PP packages.
+
 The [task-level model matrix](phase3/PAPER_PRODUCTION_DELIVERY_PLAN.md#31-model-assignments)
 assigns Luna medium to bounded implementation, Sol medium to noncritical integration
 and Astra high to critical semantics and integration. Mechanical duties retain

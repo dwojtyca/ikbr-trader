@@ -14,6 +14,10 @@ These changes do not activate or deploy trading.
 
 ## Start here
 
+For local coding assistance: [supervised LM Studio workflow](runbooks/LOCAL_LLM_CODING.md),
+[routing policy](implementation/phase3/MODEL_ROUTING_GUIDE.md#local--supervised-edit-proposals)
+and [probe results](implementation/phase3/LOCAL_LLM_WORKFLOW_REPORT.md).
+
 1. [Current project state](implementation/CURRENT_STATE.md): what exists, gaps,
    source pointers and dated broker/test evidence.
 2. [Roadmap](implementation/ROADMAP.md): owner-selected sequence for production-style
@@ -61,6 +65,9 @@ and are intentionally unpublished/preserved.
 
 | Document | Status / use |
 | --- | --- |
+| [runbooks/LOCAL_LLM_CODING.md](runbooks/LOCAL_LLM_CODING.md) | Supervised local edit proposals, setup and bounded task example |
+| [implementation/phase3/LOCAL_LLM_WORKFLOW_PLAN.md](implementation/phase3/LOCAL_LLM_WORKFLOW_PLAN.md) | Accepted local coding workflow scope and validation |
+| [implementation/phase3/LOCAL_LLM_WORKFLOW_REPORT.md](implementation/phase3/LOCAL_LLM_WORKFLOW_REPORT.md) | Actual local model probes, limitations and review/publication evidence |
 | [README.md](README.md) | Current navigation and complete inventory |
 | [implementation/phase3/PP5_IMPLEMENTATION_PLAN.md](implementation/phase3/PP5_IMPLEMENTATION_PLAN.md) | Accepted PP5-A/B scope and safety contract |
 | [implementation/phase3/PP5_IMPLEMENTATION_REPORT.md](implementation/phase3/PP5_IMPLEMENTATION_REPORT.md) | PP5 changes, review, checks and publication evidence |
