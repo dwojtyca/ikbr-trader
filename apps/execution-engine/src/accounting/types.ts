@@ -46,6 +46,15 @@ export interface SourceInspection {
   executionIds: string[]; observationIds: string[]; replayId: number; replayEndId: string;
   corroboration: "OBSERVED" | "NOT_OBSERVED";
 }
+export interface ClockRecoveryEvidence {
+  id: string; inspection: SourceInspection; barrier: AccountingBarrier;
+  accountId: string; settingsHash: string; gapEpoch: number;
+  executions: CanonicalExecution[]; commissions: CanonicalCommission[]; observationIds: string[];
+}
+export interface ClockRecoveryReceipt {
+  id: string; inspectionId: string; sourceId: string; connectionGeneration: number;
+  recoveredAt: string; qualificationId: string | null; gap: true; brokerReadOnly: true;
+}
 export interface StoredQualification {
   id: string; input: OperatorQualificationV1; settings: SourceSettingsV1;
   protocolVersion: number; expiresAt: string; inspectionId: string;

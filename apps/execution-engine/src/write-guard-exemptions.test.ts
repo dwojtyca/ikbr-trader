@@ -157,6 +157,7 @@ describe("isWriteGuardExempt — closed exemption list", () => {
         "POST /execution/accounting/source/inspect",
         "POST /execution/accounting/source/invalidate",
         "POST /execution/accounting/source/qualify",
+      "POST /execution/accounting/source/recover-clock",
         "POST /execution/cancel-proposed/:id",
         "POST /execution/entry-control/pause",
         "POST /execution/lifecycle/:id/close/reconcile",

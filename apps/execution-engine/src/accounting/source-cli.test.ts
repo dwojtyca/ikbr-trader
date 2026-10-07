@@ -26,7 +26,11 @@ test("public CLI normalizes pnpm separator, protects artifacts and never retries
     await accountingCommand(["--", "qualify", "--input", path, "--evidence-dir", privateDir], env);
     assert.deepEqual(JSON.parse(String(calls.at(-1)?.init?.body)), input);
     await accountingCommand(["invalidate", "--reason", "operator changed settings"], env);
+    const recovered = join(privateDir, "recovery.json");
+    await accountingCommand(["recover-clock", "--out", recovered], env);
+    assert.equal(calls.at(-1)?.url.endsWith("/recover-clock"), true); assert.equal(statSync(recovered).mode & 0o777, 0o600);
     const before = calls.length;
+    await assert.rejects(accountingCommand(["recover-clock", "--out", recovered], env), /PRIVATE_FILE_EXISTS/);
     for (const args of [["--", "--", "status"], ["status", "--extra", "x"], ["inspect"]]) await assert.rejects(accountingCommand(args, env), /CLI_ARGUMENT_INVALID/);
     await assert.rejects(accountingCommand(["status"], {}), /CLI_AUTH_REQUIRED/);
     await assert.rejects(accountingCommand(["status"], { ...env, EXECUTION_ACCOUNTING_API_URL: "http://remote.invalid" }), /CLI_ENDPOINT_INVALID/);

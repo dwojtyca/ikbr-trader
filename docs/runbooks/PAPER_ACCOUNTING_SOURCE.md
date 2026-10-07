@@ -106,9 +106,32 @@ Corrections, contradictory records, buffer overflow and failed persistence retai
 holds. Neither restarting nor deleting local rows resolves a durable accounting
 contradiction. Keep source observations and qualification history for audit.
 
+For a durable `ACCOUNTING_CLOCK_INVALID` alone, use the authenticated recovery
+command with `TRADING_ENABLED=false` and effective entries paused:
+
+```sh
+pnpm --filter @ikbr/execution-engine accounting:source -- recover-clock --out /absolute/private/clock-recovery.json
+```
+
+The output directory must have mode 0700; the command creates a new mode-0600
+file and refuses existing files or symlink paths. It never changes trading switches.
+Recovery retires the accounting socket, verifies a fresh connection and clock, and
+completes the existing execution/commission replay. It atomically records the
+recovery receipt and clears only the clock hold. Qualification identity and expiry
+remain unchanged; a missing qualification remains missing. The source retains its
+gap and needs a subsequent joined reconciliation capture before entry admission.
+
+Recovery refuses non-clock holds, persistence problems, missing costs and retained
+contradictions, including failures that an older clock update may have overwritten.
+Restart or a good clock callback alone cannot clear the hold. A failed recovery
+retires its attempted connection; another explicit attempt needs fresh evidence.
+Rejected clock diagnostics are retained without inventing missing values from
+older failures. Fix settings and obtain fresh operator qualification evidence if
+settings changed. This command does not resolve execution corrections or retry orders.
+
 `status` reports the current hold, qualification expiry, pending persistence and
 capture identity. A qualified source can still be held by stale broker evidence,
 incomplete reconciliation or other entry requirements. Healthy source status does
 not establish research coverage, an AI approval, a strategy signal or permission
-to trade. The first real PKO entry and exit still follow the
-[GPW round-trip runbook](GPW_PAPER_ROUND_TRIP.md) and current PP7 gates.
+to trade. The supervised entry and exit still follow the selected
+[AAPL](AAPL_PAPER_ROUND_TRIP.md) or [GPW](GPW_PAPER_ROUND_TRIP.md) runbook and current PP7 gates.

@@ -454,8 +454,21 @@ Use stable diagnostic codes, including:
 | `ACCOUNTING_CORRECTION_UNRESOLVED` | Durable hold; separate audited resolution contract. |
 | `ACCOUNTING_PERSISTENCE_PENDING` / `FAILED` | No publication or admission until durable recovery. |
 | `ACCOUNTING_IDENTITY_INVALID` | Whole capture invalid; no filtering away bad rows. |
-| `ACCOUNTING_CLOCK_INVALID` / `TIMESTAMP_INVALID` | Fix clock/configuration; requalify if settings changed. |
+| `ACCOUNTING_CLOCK_INVALID` | Explicit disabled-Paper `recover-clock` after fresh complete evidence; see the bounded recovery contract below. |
+| `ACCOUNTING_TIMESTAMP_INVALID` | Repair configuration/evidence; clock recovery cannot clear this hold. |
 | `ACCOUNTING_EVIDENCE_STALE` / `REVISION_CHANGED` | Fresh complete capture required. |
+
+The [clock recovery plan](PP7_ACCOUNTING_CLOCK_RECOVERY_PLAN.md) adds only an
+explicit authenticated `POST /execution/accounting/source/recover-clock` operation.
+Server-owned Paper, disabled-write and effective-pause guards apply. A newly
+instantiated accounting socket fences retired callbacks and accepts a clock only
+after its request is armed. A valid clock plus complete replay/real costs is checked
+against immutable observations, both clocks and the current source-row revision.
+Retained non-clock contradictions, including previously overwritten ones, refuse
+recovery. The immutable receipt and exact clock-hold clear commit together; gap
+stays true, old captures stay invalid and qualification ID/expiry do not change.
+Normal qualification and joined reconciliation remain separate entry requirements.
+This operation cannot clear timestamp, identity, correction or persistence holds.
 
 [IBKR reset messages][resets] allow delayed execution reports during upstream
 outages. Neither 1101 nor 1102 closes an accounting gap. Always replay after

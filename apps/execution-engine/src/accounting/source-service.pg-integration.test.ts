@@ -50,8 +50,14 @@ test("F1 durable production source, qualification, capture and admission", { ski
     const account = "F1_" + randomUUID(), process = "session_" + randomUUID();
     const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: "ibkr-tws-seven-day-v1", environment: "paper", accountId: account,
       endpoint: { host: "test.invalid", port: 1 }, sourceClientId: 0, executionTimeZone: "UTC" };
-    const socket = new Socket(account), identity = { connected: true, accountId: account, sessionId: process, generation: 1 };
-    const store = new AccountingSourceStore(pool, randomUUID(), process), service = new AccountingSourceService(store, settings, "a".repeat(64), () => identity, () => socket);
+    let socket = new Socket(account), initialSocket = true;
+    const next = { configure: (_socket: Socket) => {} };
+    const identity = { connected: true, accountId: account, sessionId: process, generation: 1 };
+    const store = new AccountingSourceStore(pool, randomUUID(), process), service = new AccountingSourceService(store, settings, "a".repeat(64), () => identity, () => {
+      if (initialSocket) initialSocket = false;
+      else { const replacement = new Socket(account); replacement.fills = socket.fills; socket = replacement; next.configure(socket); }
+      return socket;
+    });
     await service.initialize(); service.start();
     await pool.query(`INSERT INTO broker_snapshot_syncs(account_id,session_id,observed_at,complete,generation) VALUES($1,$2,clock_timestamp(),true,1)`, [account, process]);
     const qualify = async () => {
@@ -77,7 +83,7 @@ test("F1 durable production source, qualification, capture and admission", { ski
       return { joined, context, day: await readPaperDailyLoss(pool, context) };
     };
     const drained = async () => { for (let n = 0; n < 200 && service.status().pending; n++) await delay(2); assert.equal(service.status().pending, 0); };
-    return { pool, account, process, settings, socket, identity, store, service, qualify, capture, drained };
+    return { pool, account, process, settings, get socket() { return socket; }, next, identity, store, service, qualify, capture, drained };
   }
   try {
     await admin.query(`CREATE DATABASE ${database}`);
@@ -266,6 +272,143 @@ test("F1 durable production source, qualification, capture and admission", { ski
       await f.service.close();
       const replacement = new AccountingSourceService(new AccountingSourceStore(pool, f.store.sourceId, randomUUID()), f.settings, "a".repeat(64), () => f.identity, () => new Socket(f.account));
       await replacement.initialize(); replacement.start(); await assert.rejects(replacement.inspect(100), /CORRECTION_UNRESOLVED/); await replacement.close();
+    });
+    await t.test("pure durable clock hold recovers only on a fresh complete replay and preserves qualification", async () => {
+      for (const qualified of [false, true]) {
+        const f = await fixture(); if (qualified) { f.socket.fills = [f.socket.fill()]; await f.qualify(); await f.capture(); }
+        await f.drained(); const q = f.service.status().qualificationId;
+        const old = f.socket; await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+        const receipt = await f.service.recoverClock();
+        assert.notEqual(old, f.socket); assert.equal(receipt.qualificationId, q); assert.equal(receipt.gap, true);
+        const control = await f.store.control(); assert.equal(control.hold, null); assert.equal(control.gap, true); assert.equal(control.qualification_id, q);
+        assert.throws(() => f.service.assertCurrent(), qualified ? /EVIDENCE_STALE/ : /QUALIFICATION_REQUIRED/);
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "1");
+        await assert.rejects(f.service.recoverClock(), /HOLD_MISMATCH/);
+        if (qualified) assert.equal((await f.capture()).day.ok, true);
+        await f.service.close();
+      }
+    });
+    await t.test("clock cannot overwrite stronger holds and old overwritten failures cannot recover", async () => {
+      for (const mode of ["stronger", "historical", "invalid", "correction", "family"]) {
+        const f = await fixture(); await f.drained();
+        if (mode === "invalid") { f.service.observeIngressFailure("execution", null); await f.drained(); }
+        else if (mode === "correction" || mode === "family") {
+          const fill = f.socket.fill(mode === "family" ? "a.b.01" : "corrected.01", paperAccountDayStart(Date.now())-3600_000);
+          f.socket.emit("execDetails", -1, fill.contract, fill.exec);
+          f.socket.emit("execDetails", -1, fill.contract, { ...fill.exec, ...(mode === "family" ? { execId: "a.02" } : { price: 99 }) }); await f.drained();
+        } else await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_IDENTITY_INVALID");
+        await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+        assert.notEqual((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+        let active = f.service;
+        if (mode !== "stronger") {
+          await pool.query("UPDATE broker_accounting_sources SET hold='ACCOUNTING_CLOCK_INVALID' WHERE source_id=$1", [f.store.sourceId]);
+          await f.service.close();
+          active = new AccountingSourceService(new AccountingSourceStore(pool, f.store.sourceId, randomUUID()), f.settings, "a".repeat(64), () => f.identity, () => new Socket(f.account));
+          await active.initialize();
+        }
+        await assert.rejects(active.recoverClock(), mode === "stronger" ? /IDENTITY_INVALID|HOLD_MISMATCH/ : /HISTORY_CONFLICT/);
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+        await active.close();
+      }
+    });
+    await t.test("recovery rejects bad clocks, missing costs and new replay gaps", async () => {
+      for (const mode of ["clock", "fee", "end", "gap", "orphan", "future"]) {
+        const f = await fixture(); await f.drained(); await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+        f.next.configure = socket => {
+          if (mode === "clock") socket.reqCurrentTime = () => { socket.emit("currentTime", NaN); socket.emit("currentTime", Math.floor(Date.now()/1000)); };
+          if (mode === "fee") socket.fills = [{ ...socket.fill(), fee: undefined }];
+          if (mode === "end") socket.omitEnd = true;
+          if (mode === "gap") socket.afterReplay = () => socket.disconnect();
+          if (mode === "orphan") socket.afterReplay = () => socket.emit("commissionReport", { execId: "orphan", currency: "USD", commission: 1, realizedPNL: 0 });
+          if (mode === "future") socket.fills = [socket.fill("future", Date.now()+60_000)];
+        };
+        await assert.rejects(f.service.recoverClock(100));
+        assert.equal((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+        await f.service.close();
+      }
+    });
+    await t.test("recovery fences callbacks and staleness while awaiting the source row lock", async () => {
+      for (const mode of ["clock", "correction", "disconnect", "execution-session", "revocation", "age"]) {
+        const f = await fixture(), holder = await pool.connect(), original = f.store.recoverClock.bind(f.store), now = Date.now;
+        await f.drained(); if (mode === "correction") f.socket.fills = [f.socket.fill("race.01")];
+        await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+        let entered!: () => void; const atLock = new Promise<void>(resolve => { entered = resolve; });
+        f.store.recoverClock = async (e, guard) => {
+          await holder.query("BEGIN"); await holder.query("SELECT 1 FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE", [f.store.sourceId]);
+          entered(); return original(e, guard);
+        };
+        try {
+          const operation = f.service.recoverClock(), rejection = assert.rejects(operation);
+          await Promise.race([atLock, rejection.then(() => { throw Error("recovery failed before lock"); })]);
+          if (mode === "clock") f.socket.emit("currentTime", NaN);
+          if (mode === "correction") { const fill = f.socket.fills[0]; f.socket.emit("execDetails", -1, fill.contract, { ...fill.exec, price: 99 }); }
+          if (mode === "disconnect") f.socket.disconnect();
+          if (mode === "execution-session") f.identity.generation++;
+          const invalidating = mode === "revocation" ? f.service.invalidate("fixture revocation") : undefined;
+          if (mode === "age") Date.now = () => now()+11_000;
+          await holder.query("COMMIT"); await rejection; await invalidating;
+        } finally { Date.now = now; await holder.query("ROLLBACK"); holder.release(); }
+        assert.equal((await f.store.control()).hold, mode === "correction" ? "ACCOUNTING_CORRECTION_UNRESOLVED" : "ACCOUNTING_CLOCK_INVALID");
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+        await f.service.close();
+      }
+    });
+    await t.test("clock recovery receipt and clear roll back together after an injected database failure", async () => {
+      const f = await fixture(); await f.drained(); await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+      await pool.query(`CREATE FUNCTION clock_recovery_fixture_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF OLD.hold='ACCOUNTING_CLOCK_INVALID' AND NEW.hold IS NULL THEN RAISE EXCEPTION 'fixture injected failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER clock_recovery_fixture_failure BEFORE UPDATE ON broker_accounting_sources FOR EACH ROW EXECUTE FUNCTION clock_recovery_fixture_failure()`);
+      try {
+        await assert.rejects(f.service.recoverClock(), /fixture injected failure/);
+        assert.equal((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+      } finally {
+        await pool.query("DROP TRIGGER clock_recovery_fixture_failure ON broker_accounting_sources; DROP FUNCTION clock_recovery_fixture_failure()");
+        await f.service.close();
+      }
+    });
+    await t.test("restart preserves old clock hold and recovery requires new current evidence", async () => {
+      const f = await fixture(); await f.qualify(); const q = f.service.status().qualificationId;
+      await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID"); await f.service.close();
+      const store = new AccountingSourceStore(pool, f.store.sourceId, randomUUID());
+      const replacement = new AccountingSourceService(store, f.settings, "a".repeat(64), () => f.identity, () => new Socket(f.account));
+      await replacement.initialize();
+      assert.equal((await store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+      await assert.rejects(replacement.inspect(), /CLOCK_INVALID/);
+      const receipt = await replacement.recoverClock();
+      assert.equal(receipt.qualificationId, q); assert.equal((await store.control()).hold, null);
+      assert.throws(() => replacement.assertCurrent(), /EVIDENCE_STALE/); await replacement.close();
+    });
+    await t.test("a callback immediately before recovery commit prevents a stale clear", async () => {
+      const f = await fixture(); await f.drained(); await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+      const original = f.store.transaction.bind(f.store);
+      f.store.transaction = (fn, beforeCommit) => original(async db => {
+        const result = await fn(db);
+        if (result && typeof result === "object" && "receipt" in result) f.socket.emit("currentTime", NaN);
+        return result;
+      }, beforeCommit);
+      await assert.rejects(f.service.recoverClock(), /PERSISTENCE_PENDING|CLOCK_RECOVERY_CHANGED/);
+      assert.equal((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+      assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+      await f.service.close();
+    });
+    await t.test("final database clock freshness rejects a stale transaction independently of process time", async () => {
+      const f = await fixture(); await f.drained(); await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
+      const original = f.store.transaction.bind(f.store), now = Date.now, frozen = Date.now();
+      f.store.transaction = (fn, beforeCommit) => original(db => fn(new Proxy(db, { get(target, property) {
+        if (property !== "query") return Reflect.get(target, property);
+        return async (text: string, values?: unknown[]) => {
+          const result = await db.query(text, values);
+          if (text.includes("AS recovery_database_now")) result.rows[0].recovery_database_now = new Date(frozen+11_000);
+          return result;
+        };
+      } })), beforeCommit);
+      try { Date.now = () => frozen; await assert.rejects(f.service.recoverClock(), /CLOCK_RECOVERY_STALE/); }
+      finally { Date.now = now; }
+      assert.equal((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
+      assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+      await f.service.close();
     });
     await t.test("reconnect reuses unchanged unexpired settings only after new full replay; revocation is immediate", async () => {
       const f = await fixture(); await f.qualify(); const first = await f.capture(); const q = f.service.status().qualificationId;

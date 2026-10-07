@@ -1896,7 +1896,7 @@ async function main(): Promise<void> {
     assertEnvironmentAllowsWrite(cfg, lastActiveAccountId);
   });
 
-  registerAccountingRoutes(app, { source: accountingSource, assertAccount: () => {
+  registerAccountingRoutes(app, { source: accountingSource, recoveryEnvironment: () => envGuardConfig(), assertAccount: () => {
     assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
     if (accountingSource && lastActiveAccountId !== accountingSource.settings.accountId) throw new Error("ACCOUNTING_IDENTITY_INVALID");
   }, entriesPaused: async () => config.EXECUTION_ENTRIES_PAUSED === "true" || Boolean(lastActiveAccountId && (await entryControls.read(lastActiveAccountId)).control?.paused) });

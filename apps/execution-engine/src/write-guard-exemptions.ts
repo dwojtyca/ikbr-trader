@@ -52,7 +52,7 @@ export interface WriteGuardExemption {
 }
 
 export const WRITE_GUARD_EXEMPT_ROUTES: readonly WriteGuardExemption[] = [
-  ...["inspect", "qualify", "invalidate"].map(action => ({ method: "POST" as const,
+  ...["inspect", "qualify", "invalidate", "recover-clock"].map(action => ({ method: "POST" as const,
     routePath: `/execution/accounting/source/${action}`, rationale: "Read-only broker accounting or local qualification/revocation; exact authenticated account-guarded control." })),
   ...["schedule", "cancel", "adopt"].map(action => ({
     method: "POST" as const, routePath: `/execution/paper-policy/${action}`,

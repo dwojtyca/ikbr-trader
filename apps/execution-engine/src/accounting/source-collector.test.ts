@@ -46,3 +46,33 @@ test("wrong end, clock skew, abort and disconnect never complete a replay", asyn
     await assert.rejects(collector.replay(20, controller.signal));
   }
 });
+test("fresh sockets fence retired callbacks and ignore unsolicited clocks before request", async () => {
+  const sockets: Array<EventEmitter & AccountingSocket> = [], events: string[] = [];
+  let delayClock = false;
+  const collector = new AccountingSourceCollector(settings, { observe: e => events.push(e.kind), gap: () => events.push("gap") }, () => {
+    const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 178, connect: () => { socket.emit("server", 178, "time"); socket.emit("nextValidId", 1); },
+      disconnect: () => socket.emit("disconnected"), reqManagedAccts: () => { socket.emit("currentTime", Math.floor(Date.now() / 1000)); socket.emit("managedAccounts", settings.accountId); },
+      reqCurrentTime: () => { if (!delayClock) socket.emit("currentTime", Math.floor(Date.now() / 1000)); },
+      reqExecutions: (id: number) => socket.emit("execDetailsEnd", id) }); sockets.push(socket); return socket;
+  });
+  await collector.replay(100, new AbortController().signal); collector.close(); delayClock = true;
+  const replay = collector.replay(1000, new AbortController().signal); await new Promise(resolve => setImmediate(resolve));
+  const before = [...events]; sockets[0].emit("currentTime", Math.floor(Date.now() / 1000)); sockets[0].emit("disconnected");
+  assert.deepEqual(events, before); assert.equal(events.filter(e => e === "clock").length, 1);
+  sockets[1].emit("currentTime", Math.floor(Date.now() / 1000)); assert.equal((await replay).generation, 2);
+  collector.close();
+});
+test("invalid first clock records bounded evidence and cannot accept a later good callback", async () => {
+  for (const value of [NaN, Infinity, -Infinity, 1.5, 1e20, "not a number", {}, Math.floor(Date.now() / 1000) - 10]) {
+    const observed: Array<{ kind: string; value: unknown }> = [], socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 178, connect: () => { socket.emit("server", 178, "time"); socket.emit("nextValidId", 1); }, disconnect: () => {},
+      reqManagedAccts: () => socket.emit("managedAccounts", settings.accountId),
+      reqCurrentTime: () => { socket.emit("currentTime", value); socket.emit("currentTime", Math.floor(Date.now() / 1000)); },
+      reqExecutions: () => { throw Error("must never replay after rejected clock"); } });
+    const collector = new AccountingSourceCollector(settings, { observe: e => observed.push(e), gap: () => {} }, () => socket);
+    await assert.rejects(collector.replay(100, new AbortController().signal), /CLOCK_INVALID/);
+    const rejected = observed.filter(e => e.kind === "clock_rejected"); assert.equal(rejected.length, 1);
+    assert.equal(observed.some(e => e.kind === "clock"), false); assert.ok(JSON.stringify(rejected[0]).length < 700);
+  }
+});

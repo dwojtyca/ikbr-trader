@@ -7,7 +7,7 @@ import { parseQualification } from "./config.js";
 import { AccountingSourceCollector, type AccountingSocket, type CollectorObservation } from "./source-collector.js";
 import { AccountingSourceStore, type SourceControl, type SourceObservation } from "./source-store.js";
 import { accountingError, accountingHash, accountingNumber, accountingReference, type AccountingBarrier, type AccountingCapture, type AccountingCaptureReference,
-  type AccountingLane, type CanonicalExecution, type CanonicalCommission, type SourceInspection, type SourceSettingsV1, type StoredQualification } from "./types.js";
+  type ClockRecoveryReceipt, type AccountingLane, type CanonicalExecution, type CanonicalCommission, type SourceInspection, type SourceSettingsV1, type StoredQualification } from "./types.js";
 
 export interface ExecutionSourceIdentity { connected: boolean; accountId: string | null; sessionId: string; generation: number }
 export class AccountingSourceService {
@@ -123,10 +123,10 @@ export class AccountingSourceService {
       executionSessionId: execution.sessionId, executionConnectionGeneration: execution.generation,
       semanticRevision: Number(this.control?.semantic_revision ?? -1), lanes: structuredClone(this.lanes) };
   }
-  private assertDrained() {
+  private assertDrained(allowClockHold = false) {
     if (!this.initialized || this.failed) throw accountingError("PERSISTENCE_FAILED");
     if (this.pending || Object.values(this.lanes).some(lane => lane.pending || lane.received !== lane.persisted)) throw accountingError("PERSISTENCE_PENDING");
-    if (this.control?.hold) throw accountingError(this.control.hold);
+    if (this.control?.hold && !(allowClockHold && this.control.hold === "ACCOUNTING_CLOCK_INVALID")) throw accountingError(this.control.hold);
   }
   private assertIdentity() {
     const e = this.executionIdentity(), s = this.collector.identity();
@@ -165,7 +165,7 @@ export class AccountingSourceService {
     for (const fee of this.commissions.values()) if (!this.executions.has(fee.execId)) throw accountingError("FEE_PENDING");
     return { executions: executions.sort((a, b) => a.execId.localeCompare(b.execId)), commissions: commissions.sort((a, b) => a.execId.localeCompare(b.execId)) };
   }
-  private async inspectInternal(timeoutMs: number, signal: AbortSignal): Promise<SourceInspection> {
+  private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false): Promise<SourceInspection> {
     this.requestObservations.clear(); this.endIds.clear();
     this.collector.connect(); const epoch = this.gapEpoch, execution = this.executionIdentity();
     const deadline = Date.now() + Math.min(timeoutMs, 10_000);
@@ -173,7 +173,7 @@ export class AccountingSourceService {
     const through = Date.parse(replay.brokerTime), start = paperAccountDayStart(Date.now());
     if (paperAccountDate(through) !== paperAccountDate(Date.now())) throw accountingError("EVIDENCE_STALE");
     while (true) {
-      await this.drain(); this.assertDrained(); this.assertIdentity();
+      await this.drain(); this.assertDrained(allowClockHold); this.assertIdentity();
       if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())) throw accountingError("SOURCE_GAP");
       try { this.costs(replay.executionIds, start, through); break; }
       catch (error) {
@@ -199,11 +199,45 @@ export class AccountingSourceService {
     if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
     try { return await this.inspectInternal(timeoutMs, signal); } finally { this.busy = false; }
   }
+  async recoverClock(timeoutMs = 9000, signal = new AbortController().signal): Promise<ClockRecoveryReceipt> {
+    if (this.settings.environment !== "paper") throw accountingError("CLOCK_RECOVERY_REQUIRES_DISABLED_PAPER");
+    if (this.busy || this.pending) throw accountingError("SOURCE_BUSY");
+    this.assertDrained(true); this.busy = true;
+    let acquisitionStarted = false;
+    try {
+      this.control = await this.store.control(); this.assertDrained(true);
+      if (this.control.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
+      acquisitionStarted = true;
+      this.collector.close(); this.connectionObservations.clear(); this.collector.connect();
+      await this.drain(); this.assertDrained(true);
+      const inspection = await this.inspectInternal(timeoutMs, signal, true);
+      await this.drain(); this.assertDrained(true); this.assertIdentity();
+      const barrier = this.barrier(), epoch = this.gapEpoch, through = Date.parse(inspection.brokerTime);
+      if (inspection.executionIds.some(id => !this.executions.has(id) || Date.parse(this.executions.get(id)!.executedAt) > through)) throw accountingError("REVISION_CHANGED");
+      const rows = this.costs(inspection.executionIds, paperAccountDayStart(through), through);
+      const observationIds = rows.commissions.map(fee => this.valueObservations.get(`commission:${fee.execId}`)!);
+      if (observationIds.some(id => !id)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const result = await this.store.recoverClock({ id: randomUUID(), inspection, barrier, gapEpoch: epoch,
+        accountId: this.settings.accountId, settingsHash: this.settingsHash, ...rows, observationIds }, () => {
+        this.assertDrained(true); this.assertIdentity();
+        if (signal.aborted || this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("CLOCK_RECOVERY_CHANGED");
+      });
+      this.control = result.control; this.gap = true; this.latest = undefined;
+      return result.receipt;
+    } catch (error) {
+      if (acquisitionStarted) { this.collector.close(); await this.drain(); }
+      throw error;
+    } finally { this.busy = false; }
+  }
   async qualify(value: unknown): Promise<{ qualificationId: string; expiresAt: string; settingsHash: string; corroboration: string }> {
+    if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
+    try { return await this.qualifyInternal(value); } finally { this.busy = false; }
+  }
+  private async qualifyInternal(value: unknown): Promise<{ qualificationId: string; expiresAt: string; settingsHash: string; corroboration: string }> {
     const input = parseQualification(value, Date.now()), prior = await this.store.inspection(input.inspectionId);
     if (input.settingsSha256 !== this.settingsHash || input.executionTimeZone !== this.settings.executionTimeZone || prior.connectionGeneration !== this.collector.identity().generation
       || prior.processSessionId !== this.store.sessionId) throw accountingError("SETTINGS_MISMATCH");
-    const fresh = await this.inspect();
+    const fresh = await this.inspectInternal(9000, new AbortController().signal);
     if (fresh.connectionGeneration !== prior.connectionGeneration || Date.now() - Date.parse(fresh.brokerTime) >= 10_000) throw accountingError("INSPECTION_INVALID");
     const record: StoredQualification = { id: randomUUID(), input, settings: this.settings, protocolVersion: fresh.protocolVersion,
       inspectionId: fresh.id, expiresAt: new Date(Date.parse(input.observedAt) + 7 * 86400_000).toISOString() };

@@ -3,7 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { paperAccountDate, paperAccountDayStart } from "../paper-daily-loss.js";
 import { parseQualification } from "./config.js";
 import { accountingError, accountingHash, accountingReference, accountingNumber, type AccountingCapture, type AccountingLane, type LaneBarrier,
-  type SourceInspection, type StoredQualification } from "./types.js";
+  type ClockRecoveryEvidence, type ClockRecoveryReceipt, type SourceInspection, type StoredQualification } from "./types.js";
 
 export interface SourceControl { source_id: string; process_session_id: string; connection_generation: string | number;
   semantic_revision: string | number; qualification_id: string | null; gap: boolean; hold: string | null;
@@ -14,9 +14,9 @@ export interface SourceObservation {
 }
 export class AccountingSourceStore {
   constructor(readonly pool: Pool, readonly sourceId: string, readonly sessionId: string) {}
-  async transaction<T>(fn: (db: PoolClient) => Promise<T>): Promise<T> {
+  async transaction<T>(fn: (db: PoolClient) => Promise<T>, beforeCommit?: () => void): Promise<T> {
     const db = await this.pool.connect();
-    try { await db.query("BEGIN"); const result = await fn(db); await db.query("COMMIT"); return result; }
+    try { await db.query("BEGIN"); const result = await fn(db); beforeCommit?.(); await db.query("COMMIT"); return result; }
     catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
   }
   async control(db: Pick<Pool | PoolClient, "query"> = this.pool, lock = false): Promise<SourceControl> {
@@ -50,12 +50,12 @@ export class AccountingSourceStore {
           WHERE source_id=$1 AND kind=$2 AND event_key=$3 ORDER BY sequence DESC LIMIT 1`, [this.sourceId, o.kind, o.key])).rows[0]?.value;
         if (prior && o.kind === "execution") value = { ...prior, ...(value as object) };
         changed = !prior || accountingHash(prior) !== accountingHash(value);
-        if (prior && changed) hold = "ACCOUNTING_CORRECTION_UNRESOLVED";
+        if (prior && changed) hold = this.preserveHold(hold, "ACCOUNTING_CORRECTION_UNRESOLVED");
         if (!prior && o.kind === "execution" && o.key?.includes(".")) {
           const family = o.key.slice(0, o.key.lastIndexOf(".") + 1);
           const sibling = await db.query(`SELECT 1 FROM broker_accounting_observations WHERE source_id=$1 AND kind='execution'
             AND left(event_key,length($2))=$2 AND event_key<>$3 LIMIT 1`, [this.sourceId, family, o.key]);
-          if (sibling.rowCount) hold = "ACCOUNTING_CORRECTION_UNRESOLVED";
+          if (sibling.rowCount) hold = this.preserveHold(hold, "ACCOUNTING_CORRECTION_UNRESOLVED");
         }
       }
       await this.insertObservation(db, { ...o, value });
@@ -65,6 +65,9 @@ export class AccountingSourceStore {
       return { control: await this.control(db), value };
     });
   }
+  private preserveHold(current: string | null, incoming: string): string {
+    return current && current !== "ACCOUNTING_CLOCK_INVALID" && current !== "ACCOUNTING_SOURCE_GAP" ? current : incoming;
+  }
   async gap(generation: number, hold?: string, revoke = false, reason?: string): Promise<SourceControl> {
     return this.transaction(async db => {
       await this.control(db, true);
@@ -72,10 +75,91 @@ export class AccountingSourceStore {
         kind: revoke ? "revocation" : "gap", value: { hold: hold ?? "ACCOUNTING_SOURCE_GAP", ...(reason ? { reason } : {}) }, receivedAt: new Date().toISOString() });
       await db.query(`UPDATE broker_accounting_sources SET gap=true,connection_generation=$2,semantic_revision=semantic_revision+1,
         qualification_id=CASE WHEN $4 THEN NULL ELSE qualification_id END,
-        hold=CASE WHEN $3::text IS NULL THEN hold ELSE $3 END,updated_at=clock_timestamp() WHERE source_id=$1`,
+        hold=CASE WHEN $3::text IS NULL THEN hold
+          WHEN hold IS NOT NULL AND hold NOT IN ('ACCOUNTING_CLOCK_INVALID','ACCOUNTING_SOURCE_GAP') THEN hold
+          WHEN $3='ACCOUNTING_SOURCE_GAP' THEN hold ELSE $3 END,updated_at=clock_timestamp() WHERE source_id=$1`,
       [this.sourceId, generation, hold ?? null, revoke]);
       return this.control(db);
     });
+  }
+  async recoverClock(e: ClockRecoveryEvidence, assertCurrent: () => void): Promise<{ control: SourceControl; receipt: ClockRecoveryReceipt }> {
+    const fresh = () => {
+      assertCurrent();
+      const through = Date.parse(e.inspection.brokerTime), now = Date.now();
+      if (!Number.isFinite(through) || through > now || now - through >= 10_000 || paperAccountDate(through) !== paperAccountDate(now)) throw accountingError("CLOCK_RECOVERY_STALE");
+    };
+    return this.transaction(async db => {
+      const control = await this.control(db, true); fresh();
+      const identity = (await db.query("SELECT account_id,clock_timestamp() AS now FROM broker_accounting_sources WHERE source_id=$1", [this.sourceId])).rows[0];
+      const databaseNow = new Date(identity.now).getTime(), through = Date.parse(e.inspection.brokerTime);
+      if (control.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
+      if (identity.account_id !== e.accountId || control.settings_hash !== e.settingsHash
+        || Number(control.connection_generation) !== e.barrier.sourceConnectionGeneration || Number(control.semantic_revision) !== e.barrier.semanticRevision
+        || e.barrier.sourceId !== this.sourceId || e.barrier.sourceProcessSessionId !== this.sessionId
+        || accountingHash(control.lanes) !== accountingHash(e.barrier.lanes)
+        || Object.values(e.barrier.lanes).some(l => l.pending || l.received !== l.persisted)
+        || e.inspection.sourceId !== this.sourceId || e.inspection.processSessionId !== this.sessionId
+        || e.inspection.connectionGeneration !== Number(control.connection_generation)
+        || !Number.isFinite(databaseNow) || through > databaseNow || databaseNow - through >= 10_000
+        || paperAccountDate(through) !== paperAccountDate(databaseNow)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const hidden = await db.query(`SELECT 1 FROM broker_accounting_observations WHERE source_id=$1 AND
+        (kind='invalid_broker_event' OR (kind IN ('gap','revocation') AND payload->'value'->>'hold' NOT IN ('ACCOUNTING_CLOCK_INVALID','ACCOUNTING_SOURCE_GAP')))
+        UNION ALL SELECT 1 FROM broker_accounting_observations WHERE source_id=$1 AND kind IN ('execution','commission')
+          GROUP BY kind,event_key HAVING count(DISTINCT payload_hash)>1
+        UNION ALL SELECT 1 FROM broker_accounting_observations a WHERE a.source_id=$1 AND a.kind='execution' AND strpos(a.event_key,'.')>0
+          AND NOT EXISTS(SELECT 1 FROM broker_accounting_observations prior WHERE prior.source_id=a.source_id AND prior.kind='execution'
+            AND prior.event_key=a.event_key AND prior.sequence<a.sequence)
+          AND EXISTS(SELECT 1 FROM broker_accounting_observations sibling WHERE sibling.source_id=a.source_id AND sibling.kind='execution'
+            AND sibling.event_key<>a.event_key AND sibling.sequence<a.sequence
+            AND left(sibling.event_key,length(regexp_replace(a.event_key,'[^.]*$','')))=regexp_replace(a.event_key,'[^.]*$','')) LIMIT 1`, [this.sourceId]);
+      if (hidden.rowCount) throw accountingError("CLOCK_RECOVERY_HISTORY_CONFLICT");
+      const failed = (await db.query(`SELECT id FROM broker_accounting_observations WHERE source_id=$1 AND kind='gap'
+        AND payload->'value'->>'hold'='ACCOUNTING_CLOCK_INVALID' ORDER BY sequence DESC LIMIT 1`, [this.sourceId])).rows[0];
+      if (!failed) throw accountingError("CLOCK_RECOVERY_HISTORY_UNAVAILABLE");
+      const ids = [...new Set([...e.inspection.observationIds, e.inspection.id, ...e.observationIds])];
+      const rows = (await db.query(`SELECT id,kind,request_id,process_session_id,connection_generation,lane,lane_sequence,sequence,payload->'value' AS value,payload_hash
+        FROM broker_accounting_observations WHERE source_id=$1 AND id=ANY($2::uuid[])`, [this.sourceId, ids])).rows;
+      if (rows.length !== ids.length || rows.some(r => accountingHash(r.value) !== r.payload_hash)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const current = rows.filter(r => r.process_session_id === this.sessionId && Number(r.connection_generation) === e.barrier.sourceConnectionGeneration);
+      const inspection = current.find(r => r.id === e.inspection.id && r.kind === "inspection");
+      const request = current.filter(r => Number(r.request_id) === e.inspection.replayId);
+      const clock = request.find(r => r.kind === "clock" && r.value.brokerTime === e.inspection.brokerTime);
+      const start = request.find(r => r.kind === "replay_start"), end = request.find(r => r.kind === "replay_end" && r.id === e.inspection.replayEndId);
+      if (!inspection || accountingHash(inspection.value) !== accountingHash(e.inspection) || !clock || !start || !end
+        || !(Number(clock.sequence) < Number(start.sequence) && Number(start.sequence) < Number(end.sequence) && Number(end.sequence) < Number(inspection.sequence))
+        || !current.some(r => r.kind === "handshake" && r.value.protocolVersion === e.inspection.protocolVersion)
+        || !current.some(r => r.kind === "managed_accounts" && accountingHash(r.value) === accountingHash(e.inspection.accounts) && r.value.includes(e.accountId))
+        || current.some(r => Number(r.lane_sequence) > e.barrier.lanes[r.lane as AccountingLane].persisted)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const replay = new Map(request.filter(r => r.kind === "execution").map(r => [r.value.execId, r.value]));
+      if (accountingHash([...replay.keys()].sort()) !== accountingHash([...e.inspection.executionIds].sort())
+        || [...replay.values()].some(v => v.accountId !== e.accountId || !Number.isFinite(Date.parse(v.executedAt)) || Date.parse(v.executedAt) > through)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const latest = (await db.query(`SELECT DISTINCT ON(kind,event_key) kind,event_key,payload->'value' AS value,payload_hash
+        FROM broker_accounting_observations WHERE source_id=$1 AND kind IN ('execution','commission') ORDER BY kind,event_key,sequence DESC`, [this.sourceId])).rows;
+      if (latest.some(r => accountingHash(r.value) !== r.payload_hash)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      const executions = latest.filter(r => r.kind === "execution"), fees = latest.filter(r => r.kind === "commission");
+      const today = executions.filter(r => Date.parse(r.value.executedAt) >= paperAccountDayStart(through)).map(r => r.value).sort((a,b) => a.execId.localeCompare(b.execId));
+      if (fees.some(f => !executions.some(x => x.event_key === f.event_key)) || accountingHash(today) !== accountingHash(e.executions)
+        || e.commissions.length !== today.length || new Set(e.commissions.map(f => f.execId)).size !== today.length) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      for (const execution of today) {
+        const fee = e.commissions.find(f => f.execId === execution.execId), saved = fees.find(f => f.event_key === execution.execId);
+        if (!replay.has(execution.execId) || accountingHash(replay.get(execution.execId)) !== accountingHash(execution) || execution.pendingPriceRevision
+          || !accountingNumber(execution.price) || execution.price <= 0 || !accountingNumber(execution.shares) || execution.shares <= 0
+          || !fee || !saved || accountingHash(saved.value) !== accountingHash(fee) || fee.currency !== execution.currency
+          || !accountingNumber(fee.commission) || !accountingNumber(fee.realizedPnL)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
+      }
+      fresh();
+      const receipt: ClockRecoveryReceipt = { id: e.id, inspectionId: e.inspection.id, sourceId: this.sourceId,
+        connectionGeneration: e.inspection.connectionGeneration, recoveredAt: new Date().toISOString(), qualificationId: control.qualification_id, gap: true, brokerReadOnly: true };
+      await this.insertObservation(db, { id: receipt.id, lane: "accounting", laneSequence: 0, generation: receipt.connectionGeneration,
+        kind: "clock_recovery", value: { receipt, failedClockObservationId: failed.id, settingsHash: e.settingsHash, barrier: e.barrier,
+          gapEpoch: e.gapEpoch, observationIds: ids }, receivedAt: receipt.recoveredAt });
+      await db.query(`UPDATE broker_accounting_sources SET hold=NULL,gap=true,semantic_revision=semantic_revision+1,updated_at=clock_timestamp()
+        WHERE source_id=$1 AND hold='ACCOUNTING_CLOCK_INVALID'`, [this.sourceId]);
+      const next = await this.control(db);
+      const finalNow = new Date((await db.query("SELECT clock_timestamp() AS recovery_database_now")).rows[0].recovery_database_now).getTime();
+      if (!Number.isFinite(finalNow) || through > finalNow || finalNow - through >= 10_000 || paperAccountDate(through) !== paperAccountDate(finalNow)) throw accountingError("CLOCK_RECOVERY_STALE");
+      fresh(); return { control: next, receipt };
+    }, fresh);
   }
   async latestValues(): Promise<Array<{ id: string; kind: string; value: unknown }>> {
     return (await this.pool.query(`SELECT DISTINCT ON(kind,event_key) id,kind,payload->'value' AS value FROM broker_accounting_observations

@@ -11,7 +11,7 @@ export async function accountingCommand(args: string[], env: NodeJS.ProcessEnv =
     if (!options[i]?.startsWith("--") || !options[i + 1] || values.has(options[i])) throw accountingError("CLI_ARGUMENT_INVALID");
     values.set(options[i], options[i + 1]);
   }
-  const expected: Record<string, string[]> = { status: [], inspect: ["--out"], qualify: ["--input", "--evidence-dir"], invalidate: ["--reason"] };
+  const expected: Record<string, string[]> = { status: [], inspect: ["--out"], "recover-clock": ["--out"], qualify: ["--input", "--evidence-dir"], invalidate: ["--reason"] };
   if (!expected[command] || values.size !== expected[command].length || expected[command].some(key => !values.has(key))) throw accountingError("CLI_ARGUMENT_INVALID");
   const token = env.EXECUTION_API_TOKEN;
   if (!token || token.length < 32) throw accountingError("CLI_AUTH_REQUIRED");
@@ -24,16 +24,22 @@ export async function accountingCommand(args: string[], env: NodeJS.ProcessEnv =
     verifyQualificationArtifacts(body as ReturnType<typeof parseQualification>, resolve(values.get("--evidence-dir")!));
   }
   if (command === "invalidate") body = { reason: values.get("--reason") };
+  if (command === "inspect" || command === "recover-clock") {
+    const path = values.get("--out")!, parent = dirname(path), st = lstatSync(parent);
+    if (!isAbsolute(path) || st.isSymbolicLink() || !st.isDirectory() || (st.mode & 0o777) !== 0o700 || realpathSync(parent) !== resolve(parent)) throw accountingError("PRIVATE_FILE_INVALID");
+    try { lstatSync(path); throw accountingError("PRIVATE_FILE_EXISTS"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
   const response = await fetch(new URL(`/execution/accounting/source/${command}`, base), { method: command === "status" ? "GET" : "POST",
     headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: "error", signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw accountingError(`CLI_HTTP_${response.status}`);
   const result = await response.json() as Record<string, unknown>;
-  if (command === "inspect") {
+  if (command === "inspect" || command === "recover-clock") {
     const path = values.get("--out")!, parent = dirname(path), st = lstatSync(parent);
     if (!isAbsolute(path) || st.isSymbolicLink() || !st.isDirectory() || (st.mode & 0o777) !== 0o700 || realpathSync(parent) !== resolve(parent)) throw accountingError("PRIVATE_FILE_INVALID");
     writeFileSync(path, JSON.stringify(result, null, 2) + "\n", { mode: 0o600, flag: "wx" });
-    return { inspectionId: result.id, sourceGeneration: result.connectionGeneration, corroboration: result.corroboration, brokerReadOnly: true };
+    return { ...(command === "recover-clock" ? { recoveryId: result.id, inspectionId: result.inspectionId } : { inspectionId: result.id }), sourceGeneration: result.connectionGeneration, corroboration: result.corroboration, brokerReadOnly: true };
   }
   return { ...result, brokerReadOnly: true, tradingAuthorizationChanged: false };
 }
