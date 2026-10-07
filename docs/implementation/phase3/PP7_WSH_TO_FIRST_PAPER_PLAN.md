@@ -366,25 +366,54 @@ Sam zysk/strata z jednej transakcji nie ocenia rentowności strategii.
 
 ## 8. Odpowiedzialność, przeglądy i raportowanie
 
-| Zadanie | Wykonanie | Niezależna kontrola |
-| --- | --- | --- |
-| Kontrakt WSH, czas/kompletność, eligibility, budżety i integracja krytyczna | `gpt-6-astra` / high | `gpt-6-astra` / high |
-| Czysty mapper i testy po przyjęciu ścisłej specyfikacji | `gpt-6-luna` / medium | Finalna kontrola krytyczna Astra/high |
-| Znane wiring i czytelne komunikaty bez zmian guardów | `gpt-6-sol` / medium | Finalna kontrola krytyczna Astra/high |
-| Określone checks, scoped commit/push i dokładne CI | `gpt-5.6-luna` / low | Lead ocenia dowody |
-| Wdrożenie, interpretacja broker evidence, go/no-go i próba Paper | Lead Astra/high w autoryzowanym zakresie | Niezależny krytyczny przegląd zakresu i dowodów |
+Trasy oznaczają modele agentów programistycznych z
+[routing guide](MODEL_ROUTING_GUIDE.md); nie zmieniają modelu decyzji handlowej
+bota. M oznacza `gpt-5.6-luna` / low, z dozwolonym fallbackiem
+`gpt-6-luna` / low, gdy preferowany model nie jest dostępny. L to
+`gpt-6-luna` / medium, S — `gpt-6-sol` / medium, A — `gpt-6-astra` / high,
+RS — `gpt-6-sol` / high, a RA — `gpt-6-astra` / high. Dostępność sprawdza się
+w aktywnym selektorze; nie obiecywać dostępności na podstawie samej dokumentacji.
+RA ocenia krytyczny lub mieszany plan/implementację, RS wyłącznie wydanie
+w całości niekrytyczne. Review planu i końcowy review wykonują różni, niezależni
+autorzy.
 
-Każdy worker dostaje zaakceptowany kontrakt, dokładne pliki, zależności,
-dozwolone działania, komendy/testy, invariants i stop conditions według
-[routing guide](MODEL_ROUTING_GUIDE.md). Reviewer planu i reviewer implementacji
-muszą być różnymi agentami; żaden nie ocenia własnych zmian. Nie delegować
-semantyki bezpieczeństwa mapperowi. Niedostępność modelu ujawnić i zastosować
-dozwolony równy/silniejszy fallback, zachowując niezależność review.
+| ID / punkt | Konkretne zadanie i zależność | Trasa wykonania | Granica samodzielności i review |
+| --- | --- | --- | --- |
+| 1a / G1 | Inwentaryzacja wersji SDK, surowych pól i kształtu request/receipt z już autoryzowanych offline receipts; wynik wejściowy dla kontraktu | M | Bez nowych wywołań dostawcy i bez interpretowania semantyki. Astra zatwierdza użyte ustalenia kontraktu. |
+| 1b / G1 | Semantyka WSH, źródła, identity, kompletność, czas, niepewność, uprawnienia, limity i decyzja G1 | A | Rozstrzyga krytyczne znaczenie i pozytywną/negatywną kwalifikację. Niezależny RA akceptuje kontrakt przed implementacją. |
+| 2a / G2 | Czyste mapowanie/formaty, fixtures i helpery po G1 | L | Tylko określone pola, błędy i wartości; bez wyboru eligibility, statusów ani domyślnych decyzji. Końcowy RA przegląda zintegrowany pakiet. |
+| 2b / G2 | Renderowanie PP6 po polsku i testy dla dostarczonych stanów | L | Prezentuje podane stany; nie wylicza ryzyka, P&L ani eligibility. Końcowy RA przegląda zintegrowany pakiet. |
+| 2c / G2 | Znane wiring DI, loading konfiguracji, zależności i dokumentacja po uzgodnieniu wspólnego kontraktu | S | Nie zmienia auth, polityki sieciowej ani admission. Zmiana semantyki wraca do A; końcowy RA przegląda całość. |
+| 2d / G2 | Transport WSH i korelacja; timeout/współbieżność; blokady DB, rezerwacje budżetu, identity/hash/migracje/bindingi, negatywne snapshoty, eligibility i testy awarii/integracji | A | Cała krytyczna semantyka i testy pozostają A. Inny RA wykonuje hostile review zintegrowanego wydania. |
+| 2e / G2 | Uruchomienie zadanych pełnych checks, czystego builda Docker, scoped publication i obserwacja CI dokładnego SHA | M | Wyłącznie określone komendy i publikacja zatwierdzonego zakresu; awarie przekazuje leadowi, nie naprawia źródeł. Lead ocenia dowody. |
+| 3a / G3 | Przygotowanie znanych, zgodnych image/mount wiring po zatwierdzeniu kontraktu bezpieczeństwa i rollbacku przez A | S | Nie podejmuje decyzji rollout ani nie zmienia dostępu do socketu. A kontroluje plan wdrożenia i wykonanie w dozwolonym zakresie. |
+| 3b / G3 | Ściśle read-only zebranie świeżych statusów i zredagowanych receipts według listy zatwierdzonych poleceń | M | Bez `inspect`, kwalifikacji lub account-summary mogących utrwalać stan; bez paid calls, alertów i wnioskowania PASS. A interpretuje dowody. |
+| 3c / G3 | Kwalifikacja źródeł, prywatna konfiguracja/budżety, accounting/reconciliation, bezpieczeństwo, rollout i Gate A go/no-go | A | Krytyczna interpretacja i decyzje tylko w autoryzowanym zakresie. Niezależny RA kontroluje pakiet oraz dowody. |
+| 3d / G3 | Czytelne pokazanie dostarczonych statusów preflight i raportów | L | Nie wyprowadza PASS z brakujących, nieświeżych lub niejednoznacznych danych. A zatwierdza interpretację Gate A. |
+| 4a / G4 | Bounded manifest, autoryzacja operacyjna, koordynacja wznowienia/próby, entry/exit, incydenty i interpretacja dowodów | A | Wszystkie decyzje brokerowe, ryzyka i nieznane wyniki pozostają A; niezależny RA kontroluje plan/dowody i G4. |
+| 4b / G4 | Zadany read-only capture, timeline i format artefaktów | M | Bez zleceń, ponowień ani decyzji o wyniku. A ocenia kompletność dowodu. |
+| 4c / G4 | Czytelny raport końcowy z ustalonych przez A statusów i kwot | L | Bez własnych obliczeń P&L i bez dopisywania twierdzeń. A weryfikuje wynik. |
+| 4d / G4 | Ocena końcowa kompletności G4, bieżącego stanu brokera i rozliczenia | A | Rozstrzyga PASS/INCONCLUSIVE/HOLD na podstawie dowodów; nie rozszerza autoryzacji. Niezależny RA sprawdza pakiet krytyczny. |
 
-Raport każdego pakietu oddziela: kontrakt, wydany kod, kwalifikację źródeł,
-preflight oraz broker proof. Zawiera komendy i wyniki, SHA/CI, hashe prywatnych
-dowodów, otwarte blokady, requested/actual model i effort, liczbę napraw/eskalacji,
-czas oraz token usage, jeżeli jest dostępne. Brak danych o tokenach to unavailable.
+Każda delegacja podaje zaakceptowany kontrakt, baseline i zastane dirty files,
+konkretne pliki, zależności, dozwolone akcje, invariants, acceptance, komendy
+oraz warunki zatrzymania zgodnie z routing guide. Wspólny kontrakt powstaje
+sekwencyjnie przed równoległą pracą na rozłącznych plikach. Małe powiązane
+zadania łączy się; nie tworzy się workera dla każdej funkcji. Nowa niejasność
+krytyczna, brakujący invariant lub zmiana zakresu trafia od razu do A i wymaga
+aktualizacji planu/review przed dalszą implementacją. Po jednej nieskutecznej
+celowanej naprawie zwykłego problemu L przekazuje go S; powracający problem
+S trafia do A. Licznik napraw nie zeruje się przy zmianie workera. Awaria
+mechanicznego checka wraca do leada bez naprawy źródła; promocja modelu nie
+rozszerza uprawnień ani akceptacji.
+
+Raport pakietu odróżnia requested, assigned i actual model/effort oraz zawiera
+wynik akceptacji, liczbę napraw/promocji, review findings, elapsed time i tokeny,
+gdy telemetria je udostępnia. Brak telemetrii oznacza `unavailable`, nie zero.
+Ocena obejmuje lead integration, review i rework całego zaakceptowanego wyniku;
+nie zakłada się procentowej oszczędności. Operacyjny rollout, provider calls,
+alerty i Paper pozostają pod istniejącą autoryzacją. Uzupełnienie routingu
+nie zalicza G1–G4 ani nie stanowi zgody na handel.
 
 ## 9. Odbiór i publikacja samego planu
 
@@ -401,3 +430,35 @@ To dokumentacja: nie uruchamiać ponownie niezmienionych lokalnych runtime suite
 wyłącznie dla prozy. Commit/push na `main` i dokładne GitHub CI są wymagane
 zgodnie z AGENTS.md. Wynik publikacji zapisuje raport; pełne przyszłe checks G2
 i operacyjne G3/G4 pozostają osobnymi pracami.
+
+### 9.1 Uzupełnienie na prośbę właściciela: modele dla konkretnych zadań
+
+2026-10-07. Status: kontrakt routingu oraz gotowe uzupełnienie dokumentacji
+zaakceptowane w dwóch niezależnych przeglądach Astra/high.
+Bez zmian kodu, konfiguracji, bramek G1–G4, budżetów lub autoryzacji operacyjnej.
+Właściciel potwierdził publikację planu do `dwojtyca/ikbr-trader`, `main`,
+i polecił przypisywać proste zadania tańszym modelom, trudniejsze silniejszym.
+
+Kontrakt tej poprawki: użyć dokładnych tras M/L/S/A/RS/RA z routing guide;
+rozpisać zadania osobno dla wszystkich czterech punktów, wraz z zależnościami,
+granicą samodzielności i przeglądem. Astra ustala semantykę bezpieczeństwa,
+kompletność i interpretację dowodów; Luna implementuje również konkretne czyste
+helpery/testy/prezentację po przyjęciu kontraktu; Sol integruje znane niekrytyczne
+interfejsy. Prace mechaniczne nie obejmują napraw źródeł ani decyzji go/no-go.
+Wątpliwość krytyczna trafia od razu do Astra; zwykły problem po jednej nieudanej
+celowanej naprawie przechodzi Luna → Sol, następnie do Astra przy dalszym problemie.
+Nie resetować tej granicy przez zmianę workera. Plan/final reviewer są niezależni
+i różni; wspólny review pakietu krytycznego nie wymaga review każdego helpera.
+
+Odbiór: tabela wskazuje implementację, nie tylko testy do delegacji; każda z prac
+dotyczących sekretów, budżetów, hashy, eligibility, migracji, ownership, brokera
+lub nieznanego wyniku pozostaje A/RA. Małe powiązane prace można łączyć;
+nie tworzyć agentów dla każdej drobnej operacji. Uwzględnić dostępność modeli,
+jawny fallback, requested/assigned/actual telemetry, czas, naprawy i koszt
+całego zaakceptowanego wyniku bez obietnicy procentowych oszczędności.
+Dotyczy to agentów programistycznych; model decyzji handlowej bota pozostaje bez zmian.
+
+Lead przygotowuje ten kontrakt; niezależny Astra/high sprawdza go przed edycją
+sekcji 8. Wąską redakcję według zaakceptowanego kontraktu wykonuje Luna/medium.
+Inny Astra/high sprawdza gotowy diff. Walidacja dokumentów, scoped commit/push
+i CI dokładnego SHA pozostają zgodne z sekcją 9; bez nowych lokalnych runtime tests.

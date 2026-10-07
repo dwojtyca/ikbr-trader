@@ -63,3 +63,36 @@ Aktualne zadanie nie ustanawia wyjątków od pełnego review i testów przyszłe
   kody wyjścia, link/wynik CI oraz pomiary workera są rejestrowane w prywatnym
   `/private/tmp/pp7-next-four-plan/publication.json` i wyniku zadania.
   Raport nie zawiera własnego przyszłego hasha ani z góry założonego wyniku CI.
+
+## Uzupełnienie routingu modeli PP7 — 2026-10-07
+
+Na podstawie zaakceptowanego kontraktu uzupełniono sekcję 8 planu o wykonawców
+per zadanie w G1–G4, zależności, granice samodzielności i niezależny review.
+Tabela obejmuje implementację czystych mapperów, helperów, fixtures i prezentacji
+przez L, znane niekrytyczne wiring przez S, krytyczne semantyki i decyzje przez A,
+a mechaniczne checks przez M. Potwierdza także jawny fallback M, eskalację po
+jednej celowanej naprawie, pomiar całego zaakceptowanego wyniku oraz niezależne
+RA dla krytycznego pakietu. Nie zmieniono kryteriów G1–G4, implementacji, modelu
+bota ani autoryzacji operacyjnej; routing nie jest zgodą na preflight lub handel.
+
+| Praca | Requested / assigned model i effort | Wynik / naprawy i eskalacje | Czas / tokeny |
+| --- | --- | --- | --- |
+| Redakcja przypisanych sekcji planu i raportu | `gpt-6-luna` / medium | Wykonanie zaakceptowane; 0 napraw / 0 eskalacji | Zakończenie 12:24:58 UTC; osobny pomiar elapsed i tokeny unavailable |
+| Niezależny review planu routingu | `gpt-6-astra` / high, według receipt lead | ACCEPT, 0 findings; 0 napraw / 0 eskalacji | 12:22:53–12:23:01 UTC, 8 s; tokeny unavailable |
+| Niezależny review gotowej dokumentacji | `gpt-6-astra` / high; inny agent niż reviewer planu | ACCEPT, 0 findings; 0 napraw / 0 eskalacji | 12:25:46–12:25:59 UTC, 13 s; tokeny unavailable |
+| Mechaniczne sprawdzenie i publikacja | `gpt-6-luna` / low jako ujawniony fallback niedostępnego `gpt-5.6-luna` / low | Wynik w receipt publikacji | Czas i dostępna telemetria w receipt |
+
+Requested/assigned modele odpowiadają dispatchom; odrębna telemetria modelu
+runtime jest unavailable. Nie wyliczono oszczędności z samego przypisania modeli.
+
+Ta poprawka jest dokumentacją. Nie uruchamiano lokalnych runtime suites.
+Lokalne odsyłacze, `git diff --check`, kontrola zakresu i wzorców sekretów:
+PASS. Wszystkie 25 zastanych dirty files zachowały hashe. Brak poprawek
+semantycznych po review; lead uzupełnił wyłącznie faktyczne statusy i pomiary.
+
+Pierwszy commit planu `ce042aa860fa3bb0dd67f2db37c5589f1e86a988` pozostał lokalny
+po odmowie automatycznej kontroli push. Następnie właściciel wyraźnie potwierdził
+publikację do `dwojtyca/ikbr-trader`, na `main`, i zamówił tę poprawkę routingu.
+Publikacja obejmuje oba przejrzane zakresy dokumentacyjne. Dokładny wynik push,
+SHA i CI jest rejestrowany w `/private/tmp/pp7-model-routing-update/publication.json`
+i wyniku zadania; ten tekst nie zakłada z góry sukcesu CI.
