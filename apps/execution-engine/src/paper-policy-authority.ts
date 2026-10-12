@@ -56,8 +56,8 @@ export class PaperPolicyAuthority {
         active = prior[0].run_id;
         if (active === target.runId) throw new PaperPolicyConflict('PAPER_POLICY_UNCHANGED');
         effective = target.effectiveAccountDate ?? target.windows.map(w => w.accountDate).sort()[0]!;
-        expiry = target.expiresAfterAccountDate ?? target.windows.map(w => w.accountDate).sort().at(-1)!;
-        if (effective <= today || expiry < effective) throw new PaperPolicyConflict('PAPER_POLICY_SUBSEQUENT_DAY_REQUIRED');
+        expiry = target.adoptionDeadlineAccountDate ?? target.expiresAfterAccountDate ?? target.windows.map(w => w.accountDate).sort().at(-1)!;
+        if ((target.version === 3 ? effective > today || expiry < today : effective <= today) || expiry < effective) throw new PaperPolicyConflict('PAPER_POLICY_SUBSEQUENT_DAY_REQUIRED');
         pending = target.runId;
         permit = await this.deps.readiness(db, accountId);
       } else {

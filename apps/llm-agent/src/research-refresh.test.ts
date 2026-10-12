@@ -99,11 +99,53 @@ function setup(budget: number, successfulNews = false, calendar?: { occurrenceWi
     reserveCall: async (reservation: any) => { if (reserved.has(reservation.callKey)) throw new Error("RESEARCH_CALL_ALREADY_RESERVED"); reserved.add(reservation.callKey); return { callKey: reservation.callKey, reservedAt: new Date().toISOString(), budgetDay: "2026-10-04" }; },
     recordCallOutcome: async () => {},
   };
-  const make = () => new ResearchRefreshScheduler({ manifest, manifestHash, accountId: "DU1", store: store as any,
+  const make = (marketauxOnDemand?: boolean) => new ResearchRefreshScheduler({ manifest, manifestHash, accountId: "DU1", store: store as any, marketauxOnDemand,
     fetch: async () => { fetches++; const end = new Date(Date.now() - 60000).toISOString();
       return { payload: Buffer.from(declared ? JSON.stringify({ role: source.roles[0], complete: true, windowStart: new Date(Date.parse(end) - 86400000).toISOString(), windowEnd: end, ...calendar, items: [] }) : "malformed"), contentHash: "a".repeat(64), contentType: declared ? "application/json" : "application/xhtml+xml" }; } });
-  return { make, snapshots, reserved, slots, get fetches() { return fetches; } };
+  return { make, snapshots, reserved, slots, store, manifest, manifestHash, source, get fetches() { return fetches; } };
 }
+
+test("on-demand Marketaux leaves periodic issuer reports and other news/calendar adapters unchanged", async () => {
+  for (const state of [setup(2), setup(2, true), setup(2, false, {})]) {
+    await state.make(true).tick();
+    assert.equal(state.fetches, 1); assert.equal(state.reserved.size, 1);
+  }
+});
+
+test("targeted demand and periodic workers share durable slots across concurrent processes and restart", async () => {
+  const state = setup(2), instrumentId = state.manifest.instruments[0].instrumentId;
+  const identity = { accountId: "DU1", configHash: state.manifest.configHash, manifestHash: state.manifestHash, instrumentId };
+  Object.assign(state.store, {
+    dueRepairs: async () => [{ ...identity, sourceId: state.source.id, role: "reports" }],
+    prepareRepair: async () => ({ state: "WAITING", sources: [{ sourceId: state.source.id, role: "reports", state: "WAITING", reasons: ["RESEARCH_SOURCE_MISSING"] }] }),
+  });
+  await Promise.all([state.make().tickRepairs(), state.make().tick(), state.make().tickRepairs()]);
+  assert.equal(state.fetches, 1); assert.equal(state.reserved.size, 1);
+  await state.make().tickRepairs(); assert.equal(state.fetches, 1);
+});
+
+test("repair demand with a hold or pending original acquisition never obtains another call identity", async () => {
+  for (const reason of ["RESEARCH_WAITING_EXISTING_ACQUISITION", "RESEARCH_WAITING_NEXT_SLOT", "RESEARCH_PROVIDER_OUTCOME_UNKNOWN"]) {
+    const state = setup(2), instrumentId = state.manifest.instruments[0].instrumentId;
+    Object.assign(state.store, {
+      dueRepairs: async () => [{ instrumentId, sourceId: state.source.id, role: "reports" }],
+      prepareRepair: async () => ({ state: reason.includes("UNKNOWN") ? "HOLD" : "WAITING", sources: [{ sourceId: state.source.id, role: "reports", state: "WAITING", reasons: [reason] }] }),
+    });
+    await state.make().tickRepairs(); assert.equal(state.fetches, 0); assert.equal(state.reserved.size, 0);
+  }
+});
+
+test("ordinary refresh persistence failure on one instrument does not starve subsequent instruments", async () => {
+  const state = setup(2); const first = state.manifest.instruments[0], second = structuredClone(first); second.instrumentId = "second_fixture";
+  state.manifest.instruments.push(second);
+  const original = state.store.withRefreshLock, visited: string[] = [];
+  state.store.withRefreshLock = async (identity: any, run) => {
+    visited.push(identity.instrumentId); if (identity.instrumentId === first.instrumentId) throw new Error("fixture persistence failure");
+    return original(identity, run);
+  };
+  await assert.rejects(state.make().tick(), /fixture persistence failure/);
+  assert.deepEqual(visited, [first.instrumentId, second.instrumentId]); assert.equal(state.fetches, 1);
+});
 
 test("zero budget makes no request and publishes unverified coverage", async () => {
   const setupResult = setup(0); await setupResult.make().tick();

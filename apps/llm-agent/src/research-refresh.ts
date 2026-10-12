@@ -1,4 +1,4 @@
-import { parseResearchSnapshot, researchHash, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
+import { parseResearchSnapshot, researchHash, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
 import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
 import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
@@ -10,7 +10,7 @@ import { createMarketauxFetch, sanitizeMarketauxError, type MarketauxFetch } fro
 import { marketauxRecordSetHash, parseMarketauxPage, type MarketauxNewsRecord } from "./research-marketaux.js";
 
 type Role = "reports" | "news" | "calendar";
-type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot">;
+type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot"> & Partial<Pick<ResearchStore, "dueRepairs" | "prepareRepair">>;
 type Fetch = (source: ResearchSource, url: string, deadlineAt: string) => Promise<ResearchFetchResult>;
 const REFRESH_INTERVAL_MS: Record<Role, number> = { reports: 86400000, news: 900000, calendar: 86400000 };
 const RETRYABLE_HTTP = /^RESEARCH_SOURCE_HTTP_(429|500|502|503|504)$/;
@@ -61,29 +61,66 @@ function removePriorSourceRole(snapshot: ResearchSnapshot, sourceId: string, rol
 
 export class ResearchRefreshScheduler {
   private inFlight = false;
+  private repairInFlight = false;
   private readonly attemptedSlots = new Map<string, number>();
-  constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; wsh?: WshRefreshRuntime }) {}
+  constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; marketauxOnDemand?: boolean; wsh?: WshRefreshRuntime }) {}
 
   async tick(): Promise<void> {
     if (!this.options.manifest.refreshEnabled || this.inFlight) return;
     this.inFlight = true;
     try {
+      const errors: unknown[] = [];
       for (const policy of this.options.manifest.instruments) {
         if (policy.assetClass === "etf") continue;
-        await this.options.store.withRefreshLock({ configHash: this.options.manifest.configHash, manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId }, async () => {
-          for (const source of policy.sources) for (const role of source.roles) {
-            const slot = researchSourceSlot((this.options.now ?? Date.now)(), source.adapter === "ibkr-wsh" ? "news" : role);
-            const key = [this.options.manifestHash, policy.instrumentId, source.id, role].join(":");
-            if (this.attemptedSlots.get(key) === slot) continue;
-            const slotKey = "research_slot_" + researchHash({ manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId, sourceId: source.id, role, slot });
-            if (await this.options.store.hasRefreshSlot(slotKey)) { this.attemptedSlots.set(key, slot); continue; }
-            this.attemptedSlots.set(key, slot);
-            try { if (await this.refreshRole(policy, source, role, slot, slotKey) === false) this.attemptedSlots.delete(key); }
-            catch (error) { this.attemptedSlots.delete(key); throw error; }
-          }
-        });
+        try {
+          await this.options.store.withRefreshLock({ configHash: this.options.manifest.configHash, manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId }, async () => {
+            for (const source of policy.sources) {
+              if (this.options.marketauxOnDemand && source.adapter === "marketaux-news") continue;
+              for (const role of source.roles) await this.refreshSlot(policy, source, role);
+            }
+          });
+        } catch (error) { errors.push(error); }
       }
+      if (errors.length) throw errors[0];
     } finally { this.inFlight = false; }
+  }
+
+  async tickRepairs(): Promise<void> {
+    const { store, manifest, manifestHash, accountId } = this.options;
+    if (!manifest.refreshEnabled || this.repairInFlight || !store.dueRepairs || !store.prepareRepair) return;
+    this.repairInFlight = true;
+    try {
+      const requests = await store.dueRepairs({ configHash: manifest.configHash, manifestHash, accountId });
+      const instruments = [...new Set(requests.map(row => row.instrumentId))], errors: unknown[] = [];
+      for (const instrumentId of instruments) {
+        const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId };
+        try {
+          await store.withRefreshLock(identity, async () => {
+            const inspected = await store.prepareRepair!(identity);
+            if (inspected.state !== "WAITING") return;
+            const policy = manifest.instruments.find(p => p.instrumentId === instrumentId)!;
+            for (const requested of inspected.sources) {
+              if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE"].includes(reason))) continue;
+              const source = policy.sources.find(s => s.id === requested.sourceId)!;
+              await this.refreshSlot(policy, source, requested.role);
+            }
+          });
+          await store.prepareRepair(identity);
+        } catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw errors[0];
+    } finally { this.repairInFlight = false; }
+  }
+
+  private async refreshSlot(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role): Promise<void> {
+    const slot = researchSourceSlot((this.options.now ?? Date.now)(), source.adapter === "ibkr-wsh" ? "news" : role);
+    const key = [this.options.manifestHash, policy.instrumentId, source.id, role].join(":");
+    if (this.attemptedSlots.get(key) === slot) return;
+    const slotKey = researchRefreshSlotKey(this.options.manifestHash, policy.instrumentId, source.id, role, slot);
+    if (await this.options.store.hasRefreshSlot(slotKey)) { this.attemptedSlots.set(key, slot); return; }
+    this.attemptedSlots.set(key, slot);
+    try { if (await this.refreshRole(policy, source, role, slot, slotKey) === false) this.attemptedSlots.delete(key); }
+    catch (error) { this.attemptedSlots.delete(key); throw error; }
   }
 
   private async refreshRole(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, slotKey: string): Promise<boolean | void> {

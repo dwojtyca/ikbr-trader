@@ -92,7 +92,7 @@ export class DiagnosticLoopRecorder {
       occurredAt:report.finishedAt,outcome:outcome.kind,
       evaluationKind:evaluation?.kind??null,
       reason:safeDiagnosticText(reason,privacy),
-      reasons:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.reasons:[reason])
+      reasons:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.reasons:outcome.kind==='SKIPPED'&&['WAITING_FOR_RESEARCH','RESEARCH_HOLD'].includes(outcome.reason)?[reason,...(outcome.message?.split(',')??[])]:[reason])
         .map(value=>safeDiagnosticText(value,privacy)),
       entryBlockers:(outcome.kind==='CONFIGURED_EVALUATION'?outcome.evaluation.entryBlockers:[])
         .map(value=>safeDiagnosticText(value,privacy)),

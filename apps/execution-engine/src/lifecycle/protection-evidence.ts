@@ -1,3 +1,4 @@
+import { isPriorTerminalExecution } from './cycle-evidence.js';
 import type { LifecycleEvidence, LifecycleOwnershipReport } from './ownership.js';
 export function protectionFailure(evidence: LifecycleEvidence, facts: LifecycleOwnershipReport): string | null {
   if (facts.status !== 'OWNED_POSITION' && facts.status !== 'PENDING_ENTRY') return 'protection_ownership_unavailable';
@@ -23,7 +24,7 @@ export function activeStockEvidenceFailure(evidence: import('./round-trip-eviden
   const snapshot=lifecycle.run?.broker_snapshot as {openOrders?:Array<Record<string,unknown>>;executions?:Array<Record<string,unknown>>}|null;
   if(!Array.isArray(snapshot?.openOrders)||!Array.isArray(snapshot?.executions))return 'stock_evidence_unavailable';
   const owned=(row:Record<string,unknown>)=>row.accountId===lifecycle.order.executionAccountId&&row.conId===lifecycle.order.conid;
-  const executions=snapshot.executions.filter(owned),orders=snapshot.openOrders.filter(owned);
+  const executions=snapshot.executions.filter(row=>owned(row)&&!isPriorTerminalExecution(row,lifecycle)),orders=snapshot.openOrders.filter(owned);
   if([...executions,...orders].some(row=>row.secType!=='STK'||row.currency!==currency))return 'stock_broker_type_or_currency_mismatch';
   const unique=new Map<unknown,Record<string,unknown>>();
   for(const row of executions){

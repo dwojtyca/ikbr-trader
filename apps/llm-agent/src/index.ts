@@ -33,10 +33,12 @@ const boundWorker = new BoundReviewWorker({
 });
 let researchHeartbeat: NodeJS.Timeout | undefined;
 let refreshTimer: NodeJS.Timeout | undefined;
+let repairTimer: NodeJS.Timeout | undefined;
 const refreshAccountId = researchBudgetAccountId(process.env, research?.manifest.refreshEnabled ?? false);
 const wshRuntime = loadWshRuntimeConfiguration(process.env);
 const refreshScheduler = research && refreshAccountId ? new ResearchRefreshScheduler({ manifest: research.manifest,
   manifestHash: research.hash, accountId: refreshAccountId, store: researchStore, marketauxApiKey: config.LLM_AGENT_MARKETAUX_API_KEY,
+  marketauxOnDemand: config.RESEARCH_MARKETAUX_ON_DEMAND,
   wsh: { runtime: wshRuntime } }) : null;
 
 const workerId = `llm-agent-${process.pid}`;
@@ -101,6 +103,10 @@ async function main(): Promise<void> {
     refreshTimer = setInterval(refresh, 60_000);
     refreshTimer.unref();
     refresh();
+    const repair = () => void refreshScheduler.tickRepairs().catch(() => log("error", "research repair unavailable"));
+    repairTimer = setInterval(repair, 2000);
+    repairTimer.unref();
+    repair();
   }
 
   log("info", "trading configuration loaded", configurationRuntime.diagnostics());
@@ -136,6 +142,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
       if (timer) clearInterval(timer);
       if (researchHeartbeat) clearInterval(researchHeartbeat);
       if (refreshTimer) clearInterval(refreshTimer);
+      if (repairTimer) clearInterval(repairTimer);
       await pool.end();
     } finally {
       process.exit(0);

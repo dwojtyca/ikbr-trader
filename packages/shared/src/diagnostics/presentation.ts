@@ -26,6 +26,8 @@ const reasons: Record<string, { message: string; impact: string; action: string 
   MARKET_CLOSED: { message: 'Rynek jest zamknięty.', impact: 'Ocena nie może teraz doprowadzić do wejścia.', action: 'Sprawdź następne okno sesji.' },
   STALE_DATA: { message: 'Dane są nieaktualne.', impact: 'Ocena opiera się na nieświeżych danych.', action: 'Sprawdź źródło danych i czas ostatniej obserwacji.' },
   RESEARCH_REQUIRED_STALE: { message: 'Wymagane dane badawcze są nieaktualne.', impact: 'Wymagany warunek badawczy nie jest spełniony.', action: 'Sprawdź status źródła i czas ostatniej obserwacji.' },
+  WAITING_FOR_RESEARCH: { message: 'Trwa uzupełnianie wymaganych danych badawczych.', impact: 'Bot czeka na dane przed utworzeniem propozycji i wywołaniem AI.', action: 'Kolejny cykl ponownie sprawdzi dane i aktualny sygnał; szczegóły źródła są w diagnostyce.' },
+  RESEARCH_HOLD: { message: 'Dane badawcze wymagają wyjaśnienia.', impact: 'Wejścia tego instrumentu czekają na rozwiązanie wskazanego problemu.', action: 'Sprawdź dokładny powód dotyczący uprawnień, budżetu, wyniku pobrania lub treści źródła.' },
   SUBMISSION_UNKNOWN: { message: 'Wynik wysłania zlecenia jest nieznany.', impact: 'Nie można potwierdzić wyniku operacji.', action: 'Sprawdź stan brokera i uzgodnienie; nie ponawiaj wysłania.' },
   SUBMITTED: { message: 'Zlecenie wysłano.', impact: 'Wysłanie nie potwierdza realizacji.', action: 'Sprawdź potwierdzenie i status realizacji u brokera.' },
   FILLED: { message: 'Zlecenie zostało zrealizowane.', impact: 'Zapis wskazuje realizację zlecenia.', action: 'Sprawdź ochronę pozycji i powiązane zapisy.' },

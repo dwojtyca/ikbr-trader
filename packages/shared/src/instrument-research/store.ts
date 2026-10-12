@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { canonicalJson, decodeTradingConfigurationSnapshot } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
+import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole } from "./repair.js";
+import { marketauxCallIdentity, marketauxWindow, parseMarketauxNewsConfig } from "./marketaux.js";
 import { isResearchHash, parseResearchManifest, parseResearchSnapshot, researchAssert, researchHash, researchTime } from "./validation.js";
 import type { ResearchSnapshot, InstrumentResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
 
@@ -25,6 +27,84 @@ export class ResearchStore {
   }
   async hasRefreshSlot(slotKey: string): Promise<boolean> {
     return (await this.pool.query("SELECT 1 FROM research_refresh_slots WHERE slot_key=$1", [slotKey])).rows.length > 0;
+  }
+  async prepareRepair(identity: ResearchRepairIdentity, existing?: ResearchDb): Promise<ResearchPreparation> {
+    return this.transaction(async db => {
+      researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), "RESEARCH_ACCOUNT_INVALID");
+      await this.assertAuthority(identity, db);
+      const manifest = await this.readManifest(identity, db), now = await this.now(db);
+      const stored = await this.latestSnapshot(identity, db, true);
+      const result = inspectResearch(manifest, identity.instrumentId, stored, now);
+      const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
+      for (const row of result.sources) {
+        if (row.state !== "WAITING" || result.state === "HOLD") continue;
+        const source = policy!.sources.find(s => s.id === row.sourceId)!;
+        const providers = manifest.instruments.flatMap(p => p.sources).filter(s => s.provider === source.provider);
+        const usage = (await db.query(`SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost
+          FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=(clock_timestamp() AT TIME ZONE 'UTC')::date`, [identity.accountId, source.provider])).rows[0];
+        if (Number(usage.requests) >= Math.min(...providers.map(s => s.maxRequestsPerDay)) || Number(usage.cost) + Math.max(...providers.map(s => s.costMicrosPerCall)) > Math.min(...providers.map(s => s.maxCostMicrosPerDay))) {
+          row.state = "HOLD"; row.reasons = ["RESEARCH_BUDGET_EXHAUSTED"]; row.nextCheckAt = null; continue;
+        }
+        const slot = researchRefreshSlot(source, row.role, now);
+        const slotKey = researchRefreshSlotKey(identity.manifestHash, identity.instrumentId, source.id, row.role, slot);
+        if ((await db.query("SELECT 1 FROM research_refresh_slots WHERE slot_key=$1", [slotKey])).rows.length) {
+          row.reasons = ["RESEARCH_WAITING_NEXT_SLOT"];
+          row.nextCheckAt = new Date((slot + 1) * researchRefreshInterval(source, row.role)).toISOString(); continue;
+        }
+        const keys: string[] = [];
+        if (source.adapter === "marketaux-news") {
+          const config = parseMarketauxNewsConfig(source, policy!), window = marketauxWindow(slot);
+          for (const pass of [1, 2] as const) for (let page = 1; page <= config.maxPagesPerPass; page++)
+            keys.push(marketauxCallIdentity(identity.manifestHash, identity.instrumentId, source, { sourceUrl: source.urls[0], ...window, pass, page }).callKey);
+        } else if (source.adapter !== "ibkr-wsh") {
+          for (const url of source.urls) for (const attempt of [1, 2]) keys.push("research_source_" + researchHash({ manifestHash: identity.manifestHash, instrumentId: identity.instrumentId, sourceId: source.id, role: row.role, slot, url, attempt }));
+        } else {
+          const acquisitions = (await db.query(`SELECT a.*,clock_timestamp() AS now FROM research_wsh_acquisitions a
+            WHERE ledger_key=$1 AND started_at>clock_timestamp()-interval '15 minutes' ORDER BY started_at DESC LIMIT 1`, [wshLedgerKey(parseWshConfig(source, policy!).isin)])).rows;
+          if (acquisitions.length) {
+            const acquisition = acquisitions[0];
+            if (["UNKNOWN", "FAILED"].includes(String(acquisition.state))) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"]; row.nextCheckAt = null; }
+            else { row.reasons = ["RESEARCH_WAITING_ACQUISITION_OR_PACING"]; row.nextCheckAt = new Date(acquisition.state === "PENDING" ? now + 5_000 : researchTime(iso(acquisition.started_at)) + 900_000).toISOString(); }
+          }
+        }
+        if (keys.length) {
+          const calls = (await db.query(`SELECT r.deadline_at,o.outcome FROM research_call_reservations r
+            LEFT JOIN research_call_outcomes o USING(call_key) WHERE r.call_key=ANY($1::text[])`, [keys])).rows;
+          if (calls.length) {
+            const unknown = calls.some(c => c.outcome === "UNKNOWN" || c.outcome == null && researchTime(iso(c.deadline_at)) <= now) || calls.every(c => researchTime(iso(c.deadline_at)) <= now);
+            if (unknown) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNKNOWN"]; row.nextCheckAt = null; }
+            else if (calls.some(c => c.outcome === "FAILED")) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"]; row.nextCheckAt = null; }
+            else { row.reasons = ["RESEARCH_WAITING_EXISTING_ACQUISITION"]; row.nextCheckAt = new Date(now + 5_000).toISOString(); }
+          }
+        }
+      }
+      if (result.sources.some(row => row.state === "HOLD")) {
+        result.state = "HOLD"; result.reasons = [...new Set([...result.reasons, ...result.sources.filter(s => s.state === "HOLD").flatMap(s => s.reasons)])].sort();
+      }
+      if (result.state === "WAITING") result.reasons = [...new Set(result.sources.filter(s => s.state === "WAITING").flatMap(s => s.reasons))].sort();
+      result.nextCheckAt = result.state === "WAITING" ? new Date(Math.min(...result.sources.filter(s => s.state === "WAITING").map(s => Date.parse(s.nextCheckAt!)))).toISOString() : null;
+      for (const row of result.sources) {
+        const state = result.state === "HOLD" ? "HOLD" : row.state;
+        const reasons = state === "HOLD" ? result.reasons : row.reasons;
+        const next = state === "WAITING" ? row.nextCheckAt : null;
+        const changed = await db.query(`INSERT INTO research_repair_requests(account_id,config_hash,manifest_hash,instrument_id,source_id,role,state,reasons,snapshot_id,next_check_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
+          ON CONFLICT(account_id,config_hash,manifest_hash,instrument_id,source_id,role) DO UPDATE SET
+            state=EXCLUDED.state,reasons=EXCLUDED.reasons,snapshot_id=EXCLUDED.snapshot_id,next_check_at=EXCLUDED.next_check_at,updated_at=clock_timestamp()
+          WHERE ROW(research_repair_requests.state,research_repair_requests.reasons,research_repair_requests.snapshot_id,research_repair_requests.next_check_at)
+            IS DISTINCT FROM ROW(EXCLUDED.state,EXCLUDED.reasons,EXCLUDED.snapshot_id,EXCLUDED.next_check_at) RETURNING id`,
+        [identity.accountId, identity.configHash, identity.manifestHash, identity.instrumentId, row.sourceId, row.role, state, JSON.stringify(reasons), result.snapshotId, next]);
+        if (changed.rows[0]) await db.query(`INSERT INTO research_repair_events(request_id,state,reasons,snapshot_id,next_check_at) VALUES($1,$2,$3::jsonb,$4,$5)`, [changed.rows[0].id, state, JSON.stringify(reasons), result.snapshotId, next]);
+      }
+      return result;
+    }, existing);
+  }
+  async dueRepairs(identity: ResearchIdentity & { accountId: string }): Promise<(ResearchRepairIdentity & { sourceId: string; role: ResearchRole })[]> {
+    await this.assertAuthority(identity);
+    const rows = (await this.pool.query(`SELECT instrument_id,source_id,role FROM research_repair_requests
+      WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND state='WAITING' AND next_check_at<=clock_timestamp()
+      ORDER BY next_check_at,id LIMIT 100`, [identity.accountId, identity.configHash, identity.manifestHash])).rows;
+    return rows.map(row => ({ ...identity, instrumentId: String(row.instrument_id), sourceId: String(row.source_id), role: row.role as ResearchRole }));
   }
   private async transaction<T>(fn: (db: ResearchDb) => Promise<T>, existing?: ResearchDb): Promise<T> {
     if (existing) return fn(existing);
@@ -160,7 +240,7 @@ export class ResearchStore {
       const review = (await db.query("SELECT * FROM proposal_ai_reviews WHERE proposed_order_id=$1 FOR UPDATE", [input.proposalId])).rows[0];
       researchAssert(proposal && review && proposal.client_order_hash_version === 2 && review.client_order_hash_version === 2 &&
         canonicalJson(proposal.strategy_attribution) === canonicalJson(review.strategy_attribution) && canonicalJson(proposal.strategy_trigger) === canonicalJson(review.strategy_trigger) &&
-        proposal.conid === review.conid && review.instrument_id === input.instrumentId && proposal.client_order_hash === input.clientOrderHash && proposal.instrument_id === input.instrumentId && proposal.strategy_configuration_hash === input.configHash && review.client_order_hash === input.clientOrderHash && review.status === "PENDING" && !review.decision_json && !proposal.execution_attempted_at, "RESEARCH_PROPOSAL_BINDING_INVALID");
+        proposal.conid === review.conid && review.instrument_id === input.instrumentId && proposal.client_order_hash === input.clientOrderHash && proposal.instrument_id === input.instrumentId && proposal.strategy_configuration_hash === input.configHash && review.client_order_hash === input.clientOrderHash && review.status === "PENDING" && !review.decision_json && !review.decided_at && !review.delivery_started_at && !review.delivery_outcome && proposal.status === "PROPOSED" && !proposal.execution_attempted_at && !proposal.broker_order_id, "RESEARCH_PROPOSAL_BINDING_INVALID");
       await this.assertAuthority(input, db);
       if (!(await this.getBinding(input.proposalId, db))) {
         const manifest = await this.readManifest(input, db), stored = await this.latestSnapshot(input, db, true);

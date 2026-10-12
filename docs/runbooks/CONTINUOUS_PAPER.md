@@ -1,0 +1,111 @@
+# Ciągła praca Paper
+
+Zakres zatwierdzony przez właściciela 12 października 2026: PKO i AAPL, po jednej
+całej akcji, najwyżej jedna otwarta pozycja na instrument, bez dziennego limitu
+liczby prób wejścia. Budżet AI wynosi 5 USD na dobę UTC, wspólnie dla obu
+instrumentów. Obowiązują dotychczasowe limity finansowe ryzyka i kosztów źródeł.
+Status wydania, kontroli i wdrożenia jest w
+[raporcie](../implementation/phase3/CONTINUOUS_PAPER_OPERATION_REPORT.md).
+
+## Co oznacza praca ciągła
+
+Usługi działają między sesjami i wracają po restarcie. Nowy tryb `recurring_sessions`
+w polityce v3 nie wymaga kolejnego półgodzinnego okna ani nowej polityki każdego
+dnia. Każde wejście nadal należy do konkretnej, aktualnie potwierdzonej sesji
+brokera. Przerwy, święta i skrócone sesje wynikają z tych danych. Pozycja ma
+przypisany termin wyjścia przed końcem swojej sesji; ten zakres nie obejmuje
+utrzymywania pozycji przez noc.
+
+Brak limitu liczby prób nie oznacza ponawiania zlecenia o nieznanym wyniku.
+Niepewny wynik, problem z ochroną albo uzgodnieniem rachunku wstrzymuje nowe
+wejścia. Każda próba zachowuje własny zapis, a kolejne poprawne transakcje tego
+samego instrumentu nie zastępują historii poprzednich.
+
+AI ocenia każdą nową propozycję ze świeżym kontekstem cenowym i sprawdzonym
+zestawem danych badawczych. Nie musi za każdym razem pobierać tego samego raportu
+spółki. Używa aktualnej, zapisanej wersji źródeł, przypisanej niezmiennie do tej
+oceny. Zużycie oraz zachowawcze rezerwacje kosztu są wspólne dla rachunku;
+restart ani nowa propozycja nie odnawiają budżetu. Wyczerpanie 5 USD może
+wstrzymać dalsze oceny do następnej doby UTC.
+
+## Gdy brakuje danych
+
+Przed utworzeniem propozycji bot sprawdza kompletność badań. Znany brak lub
+nieaktualne dane uruchamiają kolejkę uzupełnienia przez dotychczasowego dostawcę.
+Stan `WAITING` nie rezerwuje wejścia ani nie wywołuje AI. Kolejny cykl strategii
+sprawdza od nowa sygnał, ceny i ryzyko po uzupełnieniu danych.
+
+`RESEARCH_MARKETAUX_ON_DEMAND=true` pomija cykliczne pobieranie wiadomości
+Marketaux; pobiera je kolejka uruchomiona po rzeczywistym sygnale. Raporty i WSH
+pozostają cykliczne. Brak sygnału i brak oczekującego uzupełnienia oznacza zero
+żądań Marketaux. Domyślne `false` zachowuje wcześniejszy harmonogram. Pierwszy
+pełny zestaw badań należy przygotować przy wyłączonym handlu przez dotychczasową
+ścieżkę odświeżania, z tym samym rejestrem zużycia i limitami dostawcy.
+
+Przy 100 żądaniach wiadomości na dobę pełny harmonogram co15min dla obu spółek
+nie mieści się w limicie: dwie wymagane serie pobrania na każdą spółkę to minimum
+384 żądania/dobę, a stronicowanie może zwiększać zużycie. Tryb na żądanie ogranicza
+zbędne pobrania; nie gwarantuje wystarczającego budżetu przy każdej liczbie sygnałów.
+
+Pobieranie respektuje wspólne limity i odstępy dostawcy. Nie tworzy dodatkowej
+tożsamości wywołania, aby ponowić nieznany wynik. Brak praw dostępu, wygaśnięcie
+potwierdzenia uprawnień, zmiana nieobsługiwanego formatu raportu, przyszłe lub
+sprzeczne dane oraz wyczerpanie budżetu dają jawny `HOLD` dla instrumentu.
+Sam upływ czasu nie odnawia uprawnień. Ta wersja nie dodaje automatycznego
+rozpoznawania dowolnych nowych układów PDF ani odnawiania kwalifikacji źródeł.
+
+Jeżeli dane zestarzeją się już po zapisaniu propozycji, można poczekać na ich
+uzupełnienie tylko przed przypisaniem badań i wywołaniem modelu. Pierwotny termin
+ważności propozycji pozostaje niezmieniony. Po jego upływie potrzebny jest nowy
+naturalny sygnał; wcześniejsza propozycja nie jest odtwarzana.
+
+## Start danych i historia cen
+
+`INGESTION_AUTO_BOOTSTRAP_ENABLED=true` włącza automatyczne przygotowanie danych
+po uruchomieniu oraz po utracie połączenia. Domyślna wartość pozostaje `false`.
+Bot sprawdza zachowane świece i uzupełnia potrzebne braki z IBKR. Nie usuwa historii.
+Jednocześnie trwa najwyżej jedno przygotowanie; przerwa po błędzie rośnie od
+30 sekund do pięciu minut. Dotychczasowy limit pobierania pozostaje bez zmian.
+
+Uwierzytelnione `POST /stop` usługi ingestion utrwala zatrzymanie pobierania;
+restart procesu tego nie kasuje. `POST /bootstrap` jawnie wznawia pobieranie.
+To kontrola danych, osobna od zatrzymania nowych transakcji. Stan automatycznego
+przygotowania jest widoczny w `/health`, a świece i sesje w `/backfill-progress`.
+Logowanie do TWS/IB Gateway wykonuje właściciel.
+
+Obecny moduł odświeżania obsługuje maksymalnie dwa instrumenty. Dla 20 nie ma
+zatwierdzonego czasu startu ani obsługi ciągłego odświeżania. Zimny start wymagałby
+orientacyjnie sześciu pobrań historii i kalendarza na instrument, około 140 żądań.
+Przy lokalnym limicie 50 żądań na 10 minut oznacza to co najmniej około 20 minut
+oczekiwania na kolejne pule, plus odpowiedzi i zapis danych. To oszacowanie
+hipotetycznego rozszerzenia, a nie wynik pomiaru ani obietnica obsługi 20 walorów.
+
+## Zatrzymanie i codzienny odczyt
+
+Zatrzymanie nowych wejść przez istniejący interfejs:
+
+```sh
+pnpm paper:ops --env-file .env control pause --reason 'Zatrzymanie przez właściciela'
+pnpm paper:ops --env-file .env status
+pnpm paper:ops --env-file .env control supervision
+```
+
+Pauza jest trwała i pozostawia nadzór wyjść. Nie wyłączaj całego procesu wykonania
+ani `TRADING_ENABLED`, dopóki otwarte pozycje wymagają automatycznego zamknięcia.
+Pełne wyłączenie wymaga sprawdzenia pozycji, aktywnych zleceń i uzgodnienia IBKR.
+Szczegóły kontroli i ręcznej interwencji opisuje
+[obsługa terminalowa](PAPER_HEADLESS_OPERATIONS.md).
+
+## Kolejność wdrożenia
+
+Wymagane są recenzja, testy, CI dokładnego commitu i czysty obraz. W prywatnym
+zapisie wdrożenia zachowaj backup, wersje konfiguracji, digest obrazu oraz dowody
+rachunku Paper, rozliczeń, źródeł, kwotowań i alertów. Nowa polityka v3 wymaga
+adopcji przy wyłączonych zapisach, obu pauzach i świeżym potwierdzeniu braku
+nieuzgodnionych pozycji/zleceń. Adopcja nie wznawia handlu.
+
+Wszystkie usługi muszą używać tej samej zatwierdzonej konfiguracji. Dopiero po
+przejściu kontroli włącz źródła, AI, scheduler, nadzór i zapisy w zakresie zgody
+właściciela, a następnie jawnie wznów wejścia. Nie deklaruj gotowości na podstawie
+samego `/ready`, liczby świec ani testów. Faktyczne zlecenie i pełny obrót wymagają
+osobnych dowodów brokera.

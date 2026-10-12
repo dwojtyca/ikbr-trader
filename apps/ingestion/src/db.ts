@@ -10,6 +10,11 @@ export class MarketRepository {
       await client.query('BEGIN');
       // Same lock as the execution migration runner: startup DDL must not race versioned migrations.
       await client.query('SELECT pg_advisory_xact_lock($1)', [0x69_6b_62_72_31_34_32n.toString()]);
+      await client.query(`CREATE TABLE IF NOT EXISTS ingestion_auto_control (
+        singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
+        manually_stopped boolean NOT NULL DEFAULT false
+      );
+      INSERT INTO ingestion_auto_control(singleton,manually_stopped) VALUES(true,false) ON CONFLICT DO NOTHING`);
     await client.query(`CREATE TABLE IF NOT EXISTS aapl_schedule_state (
   instrument_id text PRIMARY KEY CHECK (instrument_id = 'aapl_nasdaq'),
   generation bigint NOT NULL CHECK (generation > 0),
@@ -94,6 +99,17 @@ CREATE INDEX IF NOT EXISTS instrument_contracts_symbol_idx ON instrument_contrac
       throw error;
     } finally { client.release(); }
 
+  }
+
+  async readIngestionStopped(): Promise<boolean> {
+    const { rows } = await this.pool.query('SELECT manually_stopped FROM ingestion_auto_control WHERE singleton=true');
+    if (rows.length !== 1 || typeof rows[0].manually_stopped !== 'boolean') throw new Error('INGESTION_CONTROL_UNAVAILABLE');
+    return rows[0].manually_stopped;
+  }
+
+  async writeIngestionStopped(stopped: boolean): Promise<void> {
+    const result = await this.pool.query('UPDATE ingestion_auto_control SET manually_stopped=$1 WHERE singleton=true', [stopped]);
+    if (result.rowCount !== 1) throw new Error('INGESTION_CONTROL_UNAVAILABLE');
   }
 
   async getSessionSchedule(identity: InstrumentSessionIdentity): Promise<SessionScheduleEvidence | null> {

@@ -1,7 +1,7 @@
 import type { BoundClaim, BoundDecision, BoundReviewStore, DeliveryOutcome } from "./bound-review-repository.js";
 import type { ResearchReviewStore, ModelReservation } from "./research-review-repository.js";
 import { buildResearchModelRequest, validateResearchModelDecision, type ResearchModelRequest, type ResearchModelResult } from "./research-decision.js";
-import { validateResearchOrderContext, type ResearchOrderContextV1 } from "@ikbr/shared/instrument-research";
+import { ResearchPreparationNeededError, validateResearchOrderContext, type ResearchOrderContextV1 } from "@ikbr/shared/instrument-research";
 
 interface BoundWorkerDependencies {
   assertEntryAllowed?: () => Promise<void>;
@@ -23,6 +23,7 @@ export class BoundReviewWorker {
     const claim = await this.deps.repository.claim();
     if (!claim) return false;
     const decision = await this.evaluate(claim);
+    if (!decision) return true;
     await this.deps.assertEntryAllowed?.();
     const mayDeliver = await this.deps.repository.finalize(claim, decision);
     if (mayDeliver) {
@@ -33,10 +34,11 @@ export class BoundReviewWorker {
     }
     return true;
   }
-  private async evaluate(claim: BoundClaim): Promise<BoundDecision> {
+  private async evaluate(claim: BoundClaim): Promise<BoundDecision | null> {
     const started = Date.now();
     let request: ResearchModelRequest | undefined;
     let reservation: ModelReservation | undefined;
+    let researchPrepared = false;
     const reject = (reason: string): BoundDecision => ({ decision: "REJECT", confidence: 0, reason,
       model: request?.model ?? this.deps.model, promptVersion: request?.promptVersion ?? this.deps.promptVersion,
       outputSchemaVersion: request?.outputSchemaVersion, riskFlags: [reason], evidenceRefs: [],
@@ -51,6 +53,7 @@ export class BoundReviewWorker {
     try {
       await this.deps.assertEntryAllowed?.();
       const research = await repository.prepareResearch(claim);
+      researchPrepared = true;
       const raw = await bounded(this.deps.execution.getAiContext(claim.order.id), 8000, "AI_CONTEXT_TIMEOUT");
       const identity = { proposedOrderId: claim.order.id, clientOrderHash: claim.identity.clientOrderHash,
         effectiveConfigHash: research.binding.configHash, accountId: claim.identity.accountId, sessionId: claim.identity.sessionId,
@@ -92,6 +95,7 @@ export class BoundReviewWorker {
         context: request.context, contextHash: reservation.requestHash, research: research.binding,
         timings: { startedAt: reservation.startedAt, completedAt, latencyMs: Date.parse(completedAt) - Date.parse(reservation.startedAt), outcome: "COMPLETED" } };
     } catch (error) {
+      if (!researchPrepared && !reservation && error instanceof ResearchPreparationNeededError && repository.waitForResearch && await repository.waitForResearch(claim, true)) return null;
       const code = error instanceof Error && /^[A-Z][A-Z0-9_]{2,100}$/.test(error.message) ? error.message : "RESEARCH_CONTEXT_UNAVAILABLE";
       if (reservation) await repository.recordModelOutcome(claim, reservation, { kind: code, completedAt: new Date().toISOString() });
       return reject(code);

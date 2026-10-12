@@ -108,8 +108,11 @@ export class LifecycleObserverRepository {
     return row.status === 'CLEAN' && row.session_id === sessionId && row.position_session === sessionId && row.complete === true && Number(row.holds) === 0 && row.broker_snapshot?.exposureComplete === true &&
       [row.completed_at,row.observed_at].every(value => value && new Date(value).getTime() <= now && now-new Date(value).getTime() < 10000);
   }
-  async fingerprint(id: number): Promise<string> {
-    const { rows } = await this.pool.query(`SELECT p.client_order_hash,p.instrument_id,p.conid,p.execution_account_id,p.execution_attempted_at,
+  async fingerprint(id: number): Promise<string> { return readLifecycleFingerprint(this.pool, id); }
+}
+
+export async function readLifecycleFingerprint(db: Pick<PoolClient, 'query'>, id: number): Promise<string> {
+    const { rows } = await db.query(`SELECT p.client_order_hash,p.instrument_id,p.conid,p.execution_account_id,p.execution_attempted_at,
       (SELECT jsonb_agg(jsonb_build_object('proposal',l.proposed_order_id,'role',l.role,'ordinal',l.role_ordinal,'account',l.account_id,'id',l.broker_order_id,'ref',l.order_ref,'perm',l.perm_id) ORDER BY l.proposed_order_id,l.role,l.role_ordinal) FROM broker_order_links l WHERE l.proposed_order_id=p.id OR l.proposed_order_id=c.close_proposal_id) AS links,
       (SELECT jsonb_agg(jsonb_build_object('exec',f.exec_id,'proposal',f.proposed_order_id,'account',f.account_id,'conid',f.conid,'id',f.broker_order_id,'side',f.side,'shares',f.shares,'price',f.price,'currency',f.currency,'at',f.executed_at,'commission',f.commission,'commissionCurrency',f.commission_currency,'realizedPnl',f.realized_pnl,'secType',f.sec_type,'typeConflict',f.sec_type_conflict) ORDER BY f.exec_id) FROM broker_execution_fills f WHERE f.proposed_order_id=p.id OR f.proposed_order_id=c.close_proposal_id OR (f.account_id=p.execution_account_id AND f.broker_order_id IN (SELECT broker_order_id FROM broker_order_links WHERE proposed_order_id=p.id OR proposed_order_id=c.close_proposal_id))) AS fills,
       c.close_proposal_id,c.submission_attempted_at,c.state AS close_state,c.terminals
@@ -117,4 +120,3 @@ export class LifecycleObserverRepository {
     if (rows.length !== 1) throw new Error('lifecycle_original_missing');
     return createHash('sha256').update(canonicalJson(JSON.parse(JSON.stringify(rows[0])))).digest('hex');
   }
-}

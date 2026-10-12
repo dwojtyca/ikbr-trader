@@ -1,4 +1,5 @@
 import { createMutationAuth, logSafeResponse, operatorSafeLogger } from "@ikbr/shared/http-auth";
+import { AutoBootstrapController } from "./auto-bootstrap.js";
 import { SessionScheduleAdapter } from "./session-schedule-adapter.js";
 import { SessionScheduleRefresh } from "./session-schedule-refresh.js";
 import { SessionNativeRefresh, sessionKey, SESSION_POLLING_CAPACITY } from "./session-native-refresh.js";
@@ -202,7 +203,7 @@ const twsClient = new TwsClient(
     }
   },
   (line) => app.log.info(line),
-  { onConnectionInvalidated: () => { for (const coordinator of scheduleCoordinators.values()) void coordinator.invalidate().catch(error => app.log.error(error, "Session schedule invalidation failed")); } },
+  { onConnectionInvalidated: () => { autoBootstrap?.invalidate(); for (const coordinator of scheduleCoordinators.values()) void coordinator.invalidate().catch(error => app.log.error(error, "Session schedule invalidation failed")); } },
 );
 
 function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIdentity {
@@ -238,11 +239,24 @@ sessionRefreshTimer.unref();
 app.addHook('onClose', async () => { clearInterval(sessionRefreshTimer); await sessionRefresh.idle();
   await Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.idle())); });
 
+const autoBootstrap = new AutoBootstrapController({
+  enabled: config.INGESTION_AUTO_BOOTSTRAP_ENABLED === "true",
+  readStopped: () => repo.readIngestionStopped(), writeStopped: stopped => repo.writeIngestionStopped(stopped),
+  bootstrap, stop: stopIngestionSession,
+  ready: () => twsClient.isConnected() && watchlistInstruments.length > 0 && watchlistInstruments.every(wanted =>
+    activeSubscriptions.some(actual => wanted.instrumentId ? actual.instrumentId === wanted.instrumentId : actual.symbol === wanted.symbol)),
+});
+let autoBootstrapTimer: ReturnType<typeof setInterval> | undefined;
+function runAutomaticBootstrap(): void {
+  void autoBootstrap.tick().catch(() => app.log.warn(autoBootstrap.diagnostics(), "Automatyczne przygotowanie danych nie powiodło się; ponowienie po przerwie"));
+}
+
 app.get("/health", async () => ({
   ok: true,
   connected: twsClient.isConnected(),
   bootstrapped: activeSubscriptions.length > 0,
   bootstrapping: bootstrapInFlight,
+  automaticBootstrap: autoBootstrap.diagnostics(),
   lastBootstrapAt,
   lastTickAt,
   lastCandleAt,
@@ -300,7 +314,7 @@ app.get("/watchlist", async () => {
   };
 });
 
-app.post("/bootstrap", async () => {
+async function bootstrap(isCurrent: () => boolean) {
   if (bootstrapInFlight) {
     return {
       alreadyRunning: true,
@@ -310,23 +324,25 @@ app.post("/bootstrap", async () => {
     };
   }
   bootstrapInFlight = true;
-  await sessionRefresh.idle();
-  nativeRefreshPaused = false;
-  backfillProgress = {
-    phase: "connecting",
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    totalSymbols: 0,
-    totalJobs: 0,
-    completedJobs: 0,
-    currentTimeframe: null,
-    currentSymbol: null,
-    completedSymbolsInJob: 0,
-    insertedByTimeframe: {},
-    failedTimeframes: [],
-  };
   try {
+    await sessionRefresh.idle();
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
+    nativeRefreshPaused = false;
+    backfillProgress = {
+      phase: "connecting",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      totalSymbols: 0,
+      totalJobs: 0,
+      completedJobs: 0,
+      currentTimeframe: null,
+      currentSymbol: null,
+      completedSymbolsInJob: 0,
+      insertedByTimeframe: {},
+      failedTimeframes: [],
+    };
     await twsClient.connect();
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     const accounts = await twsClient.getManagedAccounts();
     const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
     if (!accountId) {
@@ -364,6 +380,7 @@ app.post("/bootstrap", async () => {
       );
     }
     const subscriptions = bindingCheck.accepted;
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     for (const subscription of subscriptions) {
       if (subscription.instrumentContract) {
         await repo.upsertInstrumentContract(subscription.instrumentContract);
@@ -452,6 +469,7 @@ app.post("/bootstrap", async () => {
     };
     let jobIndex = 0;
     for (const job of enabledJobs) {
+      if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
       jobIndex += 1;
       if (backfillProgress) {
         backfillProgress.currentTimeframe = job.timeframe;
@@ -563,6 +581,7 @@ app.post("/bootstrap", async () => {
     twsClient.clearSubscriptions();
     activeSubscriptions = [];
     await sessionRefresh.run(subscriptions);
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     twsClient.addSubscriptions(subscriptions);
     activeSubscriptions = subscriptions;
     lastBootstrapAt = new Date();
@@ -591,10 +610,12 @@ app.post("/bootstrap", async () => {
   } finally {
     bootstrapInFlight = false;
   }
-});
+}
+
+app.post("/bootstrap", () => autoBootstrap.startManually());
 
 app.post("/stop", async () => {
-  await stopIngestionSession();
+  await autoBootstrap.stopManually();
   return {
     stopped: true,
     connected: twsClient.isConnected(),
@@ -611,6 +632,7 @@ async function main(): Promise<void> {
     legacyWatchlist: tradingConfiguration.loaded.mode === "bundle" ? [] : config.watchlistInstruments.filter(item => !item.instrumentId),
   }).mergedWatchlist];
   await repo.init();
+  await autoBootstrap.initialize();
   // Invalidate persisted evidence before serving requests, even before contract bootstrap creates subscriptions.
   for (const bound of instrumentBindingAuthority.listBoundInstruments()) {
     await coordinatorFor(buildInstrumentSessionIdentity(bound.instrument, bound)).invalidate();
@@ -621,9 +643,11 @@ async function main(): Promise<void> {
     host: config.INGESTION_BIND_HOST,
   });
   app.log.info(`ingestion service listening on ${address}`);
-  app.log.info(
-    "call POST /bootstrap once TWS/IB Gateway socket session is ready",
-  );
+  if (config.INGESTION_AUTO_BOOTSTRAP_ENABLED === "true") {
+    autoBootstrapTimer = setInterval(runAutomaticBootstrap, 5000);
+    autoBootstrapTimer.unref();
+    runAutomaticBootstrap();
+  } else app.log.info("call POST /bootstrap once TWS/IB Gateway socket session is ready");
   if (watchlistInstruments.length > 100) {
     app.log.warn(
       { size: watchlistInstruments.length },
@@ -641,7 +665,9 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     configurationRuntime.stopHeartbeat();
     try {
-      await stopIngestionSession();
+      if (autoBootstrapTimer) clearInterval(autoBootstrapTimer);
+      clearInterval(sessionRefreshTimer);
+      await autoBootstrap.shutdown();
       await pg.end();
       await redis.quit();
       await app.close();

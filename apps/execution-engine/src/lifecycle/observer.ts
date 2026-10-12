@@ -1,3 +1,4 @@
+import { terminalCycleFailure, cycleForRow } from './cycle-evidence.js';
 import type { BoundInstrument } from '@ikbr/shared';
 import type { CloseContext } from './close-types.js';
 import type { FullCloseService } from './close-service.js';
@@ -117,12 +118,10 @@ export class LifecycleObserver {
       const fingerprint = await this.store.fingerprint(id);
       if (fingerprintBefore !== fingerprint) { await fault('HISTORICAL_EVIDENCE_CHANGED', 'economic_evidence_changed_during_observation'); return false; }
       if (policy.terminalProof) {
-        const snapshot = evidence.lifecycle.run?.broker_snapshot as { openOrders?: Array<Record<string, unknown>>; executions?: Array<Record<string, unknown>> } | undefined;
-        const oldLinks = policy.terminalProof.links as Array<{ broker_order_id: string; order_ref: string; perm_id: string | null }>;
-        const own = (row: Record<string, unknown>) => row.accountId === accountId && oldLinks.some(link => row.brokerOrderId === link.broker_order_id || row.orderRef === link.order_ref || (link.perm_id !== null && row.permId === link.perm_id));
-        const knownExecutions = policy.terminalProof.executionIds as string[];
-        if (fingerprint !== policy.terminalFingerprint || !Array.isArray(snapshot?.openOrders) || !Array.isArray(snapshot?.executions) || snapshot.openOrders.some(own) || snapshot.executions.some(row => own(row) && !knownExecutions.includes(String(row.execId)))) {
-          await fault('HISTORICAL_EVIDENCE_CHANGED', 'terminal_proof_contradicted'); return false;
+        const cycle = evidence.lifecycle.cycles?.find(row=>row.proposalId===id);
+        const failure = cycle ? terminalCycleFailure(cycle,evidence.lifecycle,c) : 'terminal_evidence_unavailable';
+        if (failure || fingerprint !== policy.terminalFingerprint) {
+          await fault('HISTORICAL_EVIDENCE_CHANGED', failure ?? 'terminal_proof_contradicted'); return false;
         }
         status = policy.terminalProof.status === 'TERMINAL_UNFILLED' ? 'TERMINAL_UNFILLED' : 'FLAT'; observation = { terminalFingerprint: fingerprint }; return true;
       }
@@ -131,7 +130,7 @@ export class LifecycleObserver {
       if (roundTrip.status === 'COMPLETED' || isProvenUnfilledPaperEntry(evidence, c)) {
         status = roundTrip.status === 'COMPLETED' ? 'FLAT' : 'TERMINAL_UNFILLED'; observation = roundTrip;
         const snapshot = evidence.lifecycle.run?.broker_snapshot as { executions: Array<{ execId: string }> };
-        await this.store.observe(id, status, observation, { proof: { status, report: roundTrip, links: [...evidence.lifecycle.links, ...(evidence.close?.links ?? [])], executionIds: snapshot.executions.map(row => row.execId) }, fingerprint });
+        await this.store.observe(id, status, observation, { proof: { status, report: roundTrip, links: [...evidence.lifecycle.links, ...(evidence.close?.links ?? [])], executionIds: snapshot.executions.filter(row => !evidence.lifecycle.cycles?.length || cycleForRow(row as Record<string,unknown>,evidence.lifecycle.cycles)?.proposalId === id).map(row => row.execId) }, fingerprint });
         return true;
       }
       const stockEvidence = activeStockEvidenceFailure(evidence, context.bound.currency);

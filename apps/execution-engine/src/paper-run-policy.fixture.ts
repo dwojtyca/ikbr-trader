@@ -15,3 +15,20 @@ export function paperPolicyFixture(startsAt='2026-09-28T14:00:00Z', endsAt='2026
   const env = { IBKR_ENVIRONMENT: 'paper', PAPER_RUN_POLICY_JSON: JSON.stringify(manifest) };
   return { manifest, env, loaded, policy: parsePaperRunPolicy(env, loaded)! };
 }
+
+export function recurringPolicyFixture(date = '2026-10-12') {
+  const raw = JSON.parse(readFileSync(new URL('../../../packages/shared/src/trading-configuration/fixtures/valid-generic.json', import.meta.url), 'utf8'));
+  raw.instruments = raw.instruments.slice(0,2);
+  raw.entryPolicies = raw.entryPolicies.map((p: Record<string,unknown>) => ({...p,kind:'recurring_sessions',maxAttemptsPerAccountDay:null}));
+  raw.accountPolicies[0].maxOpenPositions = 2;
+  const parsed = parseTradingConfiguration(raw);
+  if (!parsed.ok) throw Error(JSON.stringify(parsed.issues));
+  const loaded = loadTradingConfiguration({TRADING_CONFIG_MODE:'bundle',TRADING_CONFIG_PATH:'/fixture.json',TRADING_CONFIG_EXPECTED_HASH:computeTradingConfigurationHash(parsed.configuration)}, {readFile:()=>JSON.stringify(raw)});
+  if (loaded.mode !== 'bundle') throw Error('fixture mode');
+  const manifest = {version:3,runId:'recurring_fixture',accountId:'DU_PP3_FIXTURE',effectiveConfigHash:loaded.effectiveHash,
+    accountDayTimeZone:'Europe/Warsaw',kind:'recurring_sessions',maxAttemptsPerAccountDay:null,maxAttemptsPerInstrumentDay:null,
+    instruments:loaded.configuration.instruments.map(i=>({instrumentId:i.id,conId:i.contract.conId})),effectiveAccountDate:date,adoptionDeadlineAccountDate:date,exitBeforeCloseMinutes:15,
+    currencyCaps:{PLN:{maxNotional:1000,maxStopRisk:10,feeReserve:5,maxDailyLoss:20},USD:{maxNotional:1000,maxStopRisk:10,feeReserve:5,maxDailyLoss:20}}};
+  const env={IBKR_ENVIRONMENT:'paper',PAPER_RUN_POLICY_JSON:manifest};
+  return {raw,loaded,manifest,env,policy:parsePaperRunPolicy(env,loaded)!};
+}

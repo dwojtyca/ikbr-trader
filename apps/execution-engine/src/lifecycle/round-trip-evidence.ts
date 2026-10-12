@@ -1,3 +1,5 @@
+import { terminalCycleFailure, isPriorTerminalExecution } from './cycle-evidence.js';
+import type { PaperSessionBinding } from '../paper-run-policy.js';
 import { getSupportedStockCapability, isSupportedLegacyStockManagementBound, sessionDateAt } from "@ikbr/shared";
 import { buildStrategyEconomicEvidence } from "@ikbr/shared/trading-config";
 import type { LifecycleContext, LifecycleEvidence, LifecycleLegLink } from "./ownership.js";
@@ -13,7 +15,7 @@ export interface RoundTripFill {
 export interface RoundTripEvidence {
   lifecycle: LifecycleEvidence;
   window: null | { source?: "paper" | "gpw" | "aapl"; instrumentId?: string; conid?: string; effectiveConfigHash?: string;
-    runPolicyHash?: string; policyKind?: "supervised_one_attempt" | "bounded_scheduled"; policyVersion?: 1 | 2; policyAdopted?: boolean; attemptId?: string; accountDate?: string; instrumentSessionDate?: string;
+    runPolicyHash?: string; policyKind?: "supervised_one_attempt" | "bounded_scheduled" | "recurring_sessions"; policyVersion?: 1 | 2 | 3; sessionBinding?: PaperSessionBinding; policyAdopted?: boolean; attemptId?: string; accountDate?: string; instrumentSessionDate?: string;
     runId: string; accountId: string; startsAt: Date | string; endsAt: Date | string;
     consumedProposalId: number | null; consumedAt: Date | string | null };
   close: null | { state: string; accountId: string; conid: string; originalHash: string;
@@ -27,7 +29,7 @@ const finite = (v: unknown): v is number => typeof v === "number" && Number.isFi
 const contractId = (v: unknown): v is string => typeof v === "string" && /^[1-9]\d*$/.test(v) && Number.isSafeInteger(Number(v));
 const side = (v: string) => ["BUY", "BOT"].includes(v) ? "BUY" : ["SELL", "SLD"].includes(v) ? "SELL" : null;
 
-export function evaluateRoundTrip(evidence: RoundTripEvidence, context: LifecycleContext) {
+function createRoundTripReport(evidence: RoundTripEvidence, context: LifecycleContext) {
   const { lifecycle, close } = evidence;
   const capability = context.bound ? getSupportedStockCapability(context.bound) : null;
   const legacy = !lifecycle.order.strategyAttribution && context.bound && isSupportedLegacyStockManagementBound(context.bound);
@@ -76,7 +78,24 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     netPnlPLN: null as number | null,
     netPnlUSD: null as number | null,
   };
+  return report;
+}
+
+export function evaluateRoundTrip(evidence: RoundTripEvidence, context: LifecycleContext) {
+  const { lifecycle, close } = evidence;
+  const capability = context.bound ? getSupportedStockCapability(context.bound) : null;
+  const legacy = !lifecycle.order.strategyAttribution && context.bound && isSupportedLegacyStockManagementBound(context.bound);
+  const quoteCurrency = capability?.quoteCurrency ?? (legacy ? context.bound!.currency as "USD" | "PLN" : null);
+  const windowSource = evidence.window?.source ?? (!lifecycle.order.strategyAttribution && legacy ? (quoteCurrency === "USD" ? "aapl" : "gpw") : null);
+  const review = record(lifecycle.review), decision = record(review?.decision_json), risk = record(review?.risk_evidence);
+  const report = createRoundTripReport(evidence,context);
   const refuse = (reason: string) => { report.reasons.push(reason); return report; };
+  const terminal = lifecycle.cycles?.find(c => c.proposalId === lifecycle.order.id && c.terminalProof);
+  if (terminal) {
+    const failure = terminalCycleFailure(terminal,lifecycle,context);
+    if (failure) return refuse(failure);
+    return { ...(terminal.terminalProof!.report as typeof report), readOnly: true as const, canSubmit: false as const };
+  }
   if (!quoteCurrency || (!capability && !legacy)) return refuse("scope_stock_capability_unsupported");
   let closeLink: LifecycleLegLink | null = null;
   if (close) {
@@ -116,13 +135,13 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
   const window = evidence.window;
   if (!window || !window.runId || window.accountId !== context.accountId || window.consumedProposalId !== lifecycle.order.id ||
     ![time(window.startsAt), time(window.endsAt), time(window.consumedAt), attempted].every(Number.isFinite) ||
-    time(window.endsAt) <= time(window.startsAt) || time(window.endsAt) - time(window.startsAt) > 3_600_000 ||
+    time(window.endsAt) <= time(window.startsAt) || (window.policyVersion !== 3 && time(window.endsAt) - time(window.startsAt) > 3_600_000) ||
     attempted < time(window.startsAt) || attempted >= time(window.endsAt) || time(window.consumedAt) < time(window.startsAt) ||
     time(window.consumedAt) >= time(window.endsAt) || time(window.consumedAt) > context.nowMs)
     return refuse("consumed_window_not_proven");
   if (lifecycle.order.strategyAttribution && (window.source !== "paper" || window.instrumentId !== lifecycle.order.instrumentId ||
     window.conid !== lifecycle.order.conid || window.effectiveConfigHash !== lifecycle.order.strategyAttribution.effectiveConfigHash ||
-    (window.policyKind !== "supervised_one_attempt" && !(window.policyKind === "bounded_scheduled" && window.policyVersion === 2 && window.policyAdopted === true)) || !window.runPolicyHash || !/^[a-f0-9]{64}$/.test(window.runPolicyHash) ||
+    (window.policyKind !== "supervised_one_attempt" && !(window.policyKind === "bounded_scheduled" && window.policyVersion === 2 && window.policyAdopted === true) && !(window.policyKind === 'recurring_sessions' && window.policyVersion === 3 && window.policyAdopted === true && window.sessionBinding && window.sessionBinding.sessionStart === new Date(time(window.startsAt)).toISOString() && time(window.endsAt) === time(window.sessionBinding.sessionEnd)-window.sessionBinding.exitBeforeCloseMinutes*60000)) || !window.runPolicyHash || !/^[a-f0-9]{64}$/.test(window.runPolicyHash) ||
     window.attemptId !== String(lifecycle.order.id) || !/^[1-9]\d*$/.test(window.attemptId) ||
     window.accountDate !== sessionDateAt(attempted, "Europe/Warsaw") ||
     window.instrumentSessionDate !== sessionDateAt(attempted, capability!.timeZone))) return refuse("generic_attempt_identity_not_proven");
@@ -132,7 +151,7 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
     return refuse("entry_risk_evidence_missing");
   report.entryRiskEvidence = JSON.parse(JSON.stringify(risk)) as Record<string, unknown>;
   const executions = (snapshot.executions as Record<string, unknown>[]).filter(row =>
-    row.accountId === context.accountId && row.conId === lifecycle.order.conid);
+    row.accountId === context.accountId && row.conId === lifecycle.order.conid && !isPriorTerminalExecution(row,lifecycle));
   const unique = new Map<string, Record<string, unknown>>();
   for (const execution of executions) {
     if (execution.secType !== "STK" || execution.currency !== quoteCurrency) return refuse("broker_fill_type_or_currency_mismatch");
@@ -178,4 +197,4 @@ export function evaluateRoundTrip(evidence: RoundTripEvidence, context: Lifecycl
   return report;
 }
 
-export type RoundTripReport = ReturnType<typeof evaluateRoundTrip>;
+export type RoundTripReport = ReturnType<typeof createRoundTripReport>;

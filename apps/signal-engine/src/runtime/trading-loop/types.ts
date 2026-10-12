@@ -31,6 +31,8 @@ import type {
  * concurrency cap) or at the runtime layer (paper guard, pipeline).
  */
 export type TradingLoopSkipReason =
+  | "WAITING_FOR_RESEARCH"
+  | "RESEARCH_HOLD"
   | "CONFIGURATION_NOT_READY"
   | "LOOP_DISABLED"
   | "NOT_IN_SCOPE"

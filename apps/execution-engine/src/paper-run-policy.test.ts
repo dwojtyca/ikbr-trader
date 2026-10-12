@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parsePaperRunPolicy, paperLocalDate, validatePaperPolicyTransition } from './paper-run-policy.js';
-import { paperPolicyFixture } from './paper-run-policy.fixture.js';
+import { paperPolicyFixture, recurringPolicyFixture } from './paper-run-policy.fixture.js';
 test('strict generic manifest resolves three stocks, freezes caps/windows, and has stable canonical identity', () => {
   const f = paperPolicyFixture();
   assert.equal(parsePaperRunPolicy({}, f.loaded), undefined);
@@ -73,4 +73,20 @@ test('v2 requires different Warsaw and instrument dates across DST boundaries', 
   const result = f.parse(base);
   assert.equal(result.windows[0].accountDate, '2026-10-29'); assert.equal(result.windows[0].sessionDate, '2026-10-28');
   assert.throws(() => f.parse({ ...base, windows: [us, { ...us, startsAt: '2026-10-29T01:00:00Z', endsAt: '2026-10-29T01:30:00Z' }] }), /DUPLICATE/);
+});
+
+test('v3 has explicit unlimited quotas and no finite active windows or expiry', () => {
+  const f=recurringPolicyFixture(); assert.equal(f.policy.version,3); assert.equal(f.policy.maxAttemptsPerAccountDay,null);
+  assert.equal(f.policy.maxAttemptsPerInstrumentDay,null); assert.equal(f.policy.windows.length,0); assert.equal(f.policy.instruments!.length,2);
+  assert.equal(f.policy.expiresAfterAccountDate,undefined);
+  assert.equal(parsePaperRunPolicy({...f.env,PAPER_RUN_POLICY_JSON:{...f.manifest,instruments:[...f.manifest.instruments].reverse()}},f.loaded)!.manifestHash,f.policy.manifestHash);
+  for(const value of [undefined,0,1,2,1e9,'null']) for(const key of ['maxAttemptsPerAccountDay','maxAttemptsPerInstrumentDay'])
+    assert.throws(()=>parsePaperRunPolicy({...f.env,PAPER_RUN_POLICY_JSON:{...f.manifest,[key]:value}},f.loaded));
+  for(const patch of [{windows:[]},{expiresAfterAccountDate:'2100-01-01'},{exitBeforeCloseMinutes:14},{exitBeforeCloseMinutes:61},{instruments:[f.manifest.instruments[0],f.manifest.instruments[0]]},{adoptionDeadlineAccountDate:'2026-10-11'}])
+    assert.throws(()=>parsePaperRunPolicy({...f.env,PAPER_RUN_POLICY_JSON:{...f.manifest,...patch}},f.loaded));
+});
+
+test('v3 scope cannot authorize more protected positions than the configured account cap',()=>{
+ const f=recurringPolicyFixture();const loaded={...f.loaded,configuration:{...f.loaded.configuration,accountPolicies:f.loaded.configuration.accountPolicies.map(p=>({...p,maxOpenPositions:1 as const}))}};
+ assert.throws(()=>parsePaperRunPolicy(f.env,loaded),/ACCOUNT_POSITION_CAP_INCOMPATIBLE/);
 });

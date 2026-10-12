@@ -31,6 +31,7 @@ const schema = z.object({
   LLM_AGENT_OPENAI_API_KEY: optionalTrimmedString,
   LLM_AGENT_OPENAI_BASE_URL: z.string().default("https://api.openai.com/v1"),
   LLM_AGENT_MARKETAUX_API_KEY: optionalTrimmedString,
+  RESEARCH_MARKETAUX_ON_DEMAND: z.enum(["true", "false"]).default("false").transform(value => value === "true"),
   LLM_AGENT_MARKETAUX_BASE_URL: z
     .string()
     .default("https://api.marketaux.com/v1/news/all"),

@@ -1,11 +1,12 @@
 import type { Pool, PoolClient } from "pg";
-import { ResearchStore, researchHash, validateResearchOrderContext, validateResearchAiRequest, type ValidatedResearchBinding, type ResearchManifest } from "@ikbr/shared/instrument-research";
+import { ResearchStore, researchHash, inspectResearch, ResearchPreparationNeededError, validateResearchOrderContext, validateResearchAiRequest, type ValidatedResearchBinding, type ResearchManifest } from "@ikbr/shared/instrument-research";
 import { canonicalJson } from "@ikbr/shared/trading-config";
 import { BoundReviewRepository, type BoundClaim, type BoundDecision, type BoundReviewStore } from "./bound-review-repository.js";
 import { validateResearchModelDecision, type ResearchModelRequest, type ResearchModelResult } from "./research-decision.js";
 
 export interface ModelReservation { startedAt: string; deadlineAt: string; requestHash: string; callKey: string }
 export interface ResearchReviewStore extends BoundReviewStore {
+  waitForResearch?(claim: BoundClaim, allowReadyRace?: boolean): Promise<boolean>;
   prepareResearch(claim: BoundClaim): Promise<ValidatedResearchBinding>;
   reserveModel(claim: BoundClaim, request: ResearchModelRequest): Promise<ModelReservation>;
   recordModelOutcome(claim: BoundClaim, reservation: ModelReservation, outcome: { kind: string; completedAt: string; result?: ResearchModelResult }): Promise<void>;
@@ -31,7 +32,8 @@ export class ResearchBoundReviewRepository extends BoundReviewRepository impleme
     await this.validateStrategyIdentity(client, row);
     const result = await client.query(`SELECT *,clock_timestamp() AS now FROM proposal_ai_reviews
       WHERE proposed_order_id=$1 AND claim_token=$2 AND status='PENDING'
-      AND claim_until>clock_timestamp() AND expires_at>clock_timestamp() AND delivery_started_at IS NULL FOR UPDATE`, [claim.order.id, claim.token]);
+      AND claim_until>clock_timestamp() AND expires_at>clock_timestamp() AND delivery_started_at IS NULL
+      AND delivery_outcome IS NULL AND decision_json IS NULL AND decided_at IS NULL FOR UPDATE`, [claim.order.id, claim.token]);
     if (!result.rows[0]) throw new Error("AI_CLAIM_EXPIRED");
     const review = result.rows[0];
     if (review.account_id !== claim.identity.accountId || review.session_id !== claim.identity.sessionId ||
@@ -43,8 +45,30 @@ export class ResearchBoundReviewRepository extends BoundReviewRepository impleme
     return this.transaction(async client => {
       await this.lockClaim(client, claim);
       const identity = this.identity(claim);
+      if (!await this.researchStore.getBinding(claim.order.id, client)) {
+        const stored = await this.researchStore.latestSnapshot(identity, client, true);
+        const now = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
+        if (inspectResearch(this.research!.manifest, identity.instrumentId, stored, now).state === "WAITING") throw new ResearchPreparationNeededError();
+      }
       await this.researchStore.bind(identity, client);
       return this.researchStore.validateBinding(identity, client, true);
+    });
+  }
+  async waitForResearch(claim: BoundClaim, allowReadyRace = false): Promise<boolean> {
+    return this.transaction(async client => {
+      const review = await this.lockClaim(client, claim);
+      if (await this.researchStore.getBinding(claim.order.id, client) || (await client.query("SELECT 1 FROM proposal_ai_model_calls WHERE proposed_order_id=$1", [claim.order.id])).rows.length) return false;
+      const identity = this.identity(claim);
+      const prepared = await this.researchStore.prepareRepair({ ...identity, accountId: claim.identity.accountId }, client);
+      if (prepared.state !== "WAITING" && !(allowReadyRace && prepared.state === "READY")) return false;
+      const now = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
+      const next = prepared.state === "READY" ? now : Math.min(review.expires_at.getTime(), Math.max(now + 2000, Date.parse(prepared.nextCheckAt!)));
+      await client.query(`INSERT INTO proposal_research_waits(proposed_order_id,config_hash,manifest_hash,instrument_id,snapshot_id,next_check_at,reasons)
+        VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) ON CONFLICT(proposed_order_id) DO UPDATE SET
+        snapshot_id=EXCLUDED.snapshot_id,next_check_at=EXCLUDED.next_check_at,reasons=EXCLUDED.reasons`,
+      [claim.order.id, identity.configHash, identity.manifestHash, identity.instrumentId, prepared.snapshotId, new Date(next), JSON.stringify(prepared.reasons)]);
+      await client.query("UPDATE proposal_ai_reviews SET claim_token=NULL,claim_until=NULL WHERE proposed_order_id=$1 AND claim_token=$2 AND status='PENDING'", [claim.order.id, claim.token]);
+      return true;
     });
   }
   async reserveModel(claim: BoundClaim, request: ResearchModelRequest): Promise<ModelReservation> {

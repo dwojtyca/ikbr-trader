@@ -1,3 +1,4 @@
+import { registerResearchPrepareRoute } from './research-prepare-route.js';
 import { PaperPolicyAuthority, PaperPolicyConflict } from "./paper-policy-authority.js";
 import { registerPaperPolicyControl } from "./paper-policy-control.js";
 import { registerStockMarketRoutes } from "./stock-market-routes.js";
@@ -102,7 +103,7 @@ const configurationRuntime = createTradingConfigurationRuntime({
 });
 const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, createSessionEntryGuard(id => instrumentBindingAuthority.getBoundInstrument(id)),
   () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.effectiveHash : undefined,
-  { policy: config.paperRunPolicy, exitMarginMinutes: config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES, context: paperDailyContext, resolveManagement: async (order, db) => order.strategyAttribution
+  { policy: config.paperRunPolicy, exitMarginMinutes: (config.paperRunPolicy?.exitBeforeCloseMinutes ?? config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES), context: paperDailyContext, resolveManagement: async (order, db) => order.strategyAttribution
     ? readOriginalStockManagementInstrument(db, order.strategyAttribution) : configurationRuntime.resolveManagementInstrument(order.instrumentId!) },
   createResearchEntryValidator({ store: researchStore, loadedIdentity: researchIdentity }), {
     permit: lifecycleEntryPermit,
@@ -111,7 +112,7 @@ const repo = new ExecutionRepository(pool, config.gpwWindow, config.aaplWindow, 
         : await configurationRuntime.resolveManagementInstrument(order.instrumentId!);
       if (!bound) throw new Error("LIFECYCLE_ENTRY_BINDING_UNAVAILABLE");
       const time = await db.query(`SELECT COALESCE((SELECT attempted_at FROM paper_entry_attempts WHERE proposed_order_id=$1),clock_timestamp()) AS attempted_at`, [order.id]);
-      await pinLifecycleEntryPolicy(db, order, bound, accountId, new Date(time.rows[0].attempted_at), config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES);
+      await pinLifecycleEntryPolicy(db, order, bound, accountId, new Date(time.rows[0].attempted_at), (config.paperRunPolicy?.exitBeforeCloseMinutes ?? config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES));
     },
     deadline: assertLifecycleEntryDeadline,
   });
@@ -1013,6 +1014,20 @@ async function ensureBrokerSession(): Promise<{
  * counts / ids appear in the boot log.
  */
 const instrumentBindingAuthority = tradingConfiguration.authority;
+registerResearchPrepareRoute(app, { store: researchStore, authorize: async input => {
+  await assertNewEntryAllowed();
+  const loaded = tradingConfiguration.loaded, identity = researchIdentity();
+  const accountId = entryControlContext().accountId;
+  assertActiveAccountAllowed(envGuardConfig(), accountId, { requireKnownAccount: true });
+  const instrument = loaded.mode === 'bundle' ? loaded.configuration.instruments.find(i => i.id === input.instrumentId && i.entryEnabled) : undefined;
+  const bound = instrumentBindingAuthority.getBoundInstrument(input.instrumentId);
+  if (config.IBKR_ENVIRONMENT !== 'paper' || loaded.mode !== 'bundle' || !identity || identity.configHash !== loaded.effectiveHash ||
+      input.effectiveConfigHash !== loaded.effectiveHash || !instrument || !bound || !getSupportedStockCapability(bound) ||
+      String(bound.conId) !== input.conid || String(instrument.contract.conId) !== input.conid) throw new Error('RESEARCH_PREPARATION_IDENTITY_INVALID');
+  if (loadedResearch?.manifest.refreshEnabled && process.env.RESEARCH_BUDGET_ACCOUNT_ID?.trim() !== accountId) throw new Error('RESEARCH_PREPARATION_BUDGET_ACCOUNT_MISMATCH');
+  return { accountId, ...identity, instrumentId: input.instrumentId };
+} });
+
 const configurationMetadataRoutes = registerConfigurationMetadataRoutes(app, {
   instruments: () => tradingConfiguration.loaded.mode === "bundle" ? tradingConfiguration.loaded.configuration.instruments : [],
   currentAccountId: () => lastActiveAccountId,
@@ -1662,7 +1677,7 @@ const lifecycleObserver = new LifecycleObserver(lifecycleStore, {
   assertManagementAllowed: assertLifecycleManagement,
   automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true",
   adoptExisting: config.EXECUTION_LIFECYCLE_ADOPT_EXISTING === "true",
-  exitBeforeCloseMinutes: config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES,
+  exitBeforeCloseMinutes: (config.paperRunPolicy?.exitBeforeCloseMinutes ?? config.EXECUTION_EXIT_BEFORE_CLOSE_MINUTES),
   onHealth: healthy => { lifecycleLocallyHealthy = healthy; },
   logCritical: reason => app.log.error({ reason }, "Lifecycle supervision requires attention"),
 });

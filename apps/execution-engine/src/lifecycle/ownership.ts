@@ -1,3 +1,4 @@
+import { terminalCycleFailure, isPriorTerminalExecution, type LifecycleCycle } from './cycle-evidence.js';
 import { getSupportedStockCapability, isSupportedLegacyStockManagementBound } from "@ikbr/shared";
 import type { BoundInstrument, ProposedOrder } from "@ikbr/shared";
 import { validatePersistedOrderIdentity } from "../repository.js";
@@ -24,6 +25,7 @@ export interface LifecycleRun {
   source_coverage: unknown;
 }
 export interface LifecycleEvidence {
+  cycles?: readonly LifecycleCycle[];
   positionSnapshot?: {
     accountId: string; sessionId: string; generation: number; complete: boolean; observedAt: Date | string;
     positions: Array<{ accountId: string; sessionId: string; conid: string | null; instrument: string; quantity: number; observedAt: Date | string }>;
@@ -121,6 +123,10 @@ export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: Lif
     stamp(review.delivery_started_at) > stamp(order.executionAttemptedAt) ||
     !Number.isFinite(stamp(review.expires_at)) || stamp(review.expires_at) <= stamp(order.executionAttemptedAt))
     return refuse("approval_invalid");
+  for (const cycle of evidence.cycles ?? []) if (cycle.proposalId !== order.id && cycle.terminalProof) {
+    const failure = terminalCycleFailure(cycle,evidence,context);
+    if (failure) return refuse(failure);
+  }
   if (evidence.activeHoldCount !== 0) return refuse("active_account_hold");
   if (evidence.competingProposalCount !== 0) return refuse("competing_proposal");
   if (!run || run.account_id !== accountId || run.session_id !== sessionId || !["CLEAN", "INCOMPLETE"].includes(run.status))
@@ -189,6 +195,7 @@ export function evaluateLifecycleFacts(evidence: LifecycleEvidence, context: Lif
         if (hasIdentity(row)) return refuse(`${source}_contract_mismatch`);
         continue;
       }
+      if (source === 'executions' && !hasIdentity(row) && isPriorTerminalExecution(row,evidence)) continue;
       const legIndex = correlate(row);
       if (legIndex < 0) return refuse(`${source}_uncorrelated`);
       if (nonempty(row.permId)) {

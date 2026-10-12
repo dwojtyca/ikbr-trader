@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { request } from "node:https";
-import { parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
+import { inspectResearch, parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
 import { ResearchRefreshScheduler, researchSourceSlot } from "./research-refresh.js";
 import { marketauxFixture, marketauxResponse } from "./research-marketaux.testfixture.js";
 import type { ResearchFetchResult } from "./research-fetch.js";
@@ -52,12 +52,84 @@ function setup() {
     },
   };
   let locked = false;
-  const make = (key: string | undefined = "synthetic-secret", fetch?: MarketauxFetch) => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash, accountId: "DU_TEST", store,
+  const make = (key: string | undefined = "synthetic-secret", fetch?: MarketauxFetch, marketauxOnDemand?: boolean) => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash, accountId: "DU_TEST", store, marketauxOnDemand,
     marketauxApiKey: key, now: () => state.now, marketauxFetch: fetch ?? (async (_source, descriptor) => { state.requests.push(descriptor); return state.response(descriptor); }) });
   const coverage = () => state.snapshots.at(-1)!.coverage.find(c => c.sourceId === f.source.id)!;
   const rehash = () => { f.manifestHash = researchHash(f.manifest); state.prior.snapshot.manifestHash = f.manifestHash; state.prior.snapshot.mappingHash = researchHash(f.policy); };
   return { f, state, store, make, coverage, rehash };
 }
+
+function enableRepairs(s: ReturnType<typeof setup>) {
+  let queued = false, inspections = 0;
+  const inspect = async () => {
+    inspections++;
+    const result = inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now);
+    queued = result.state === "WAITING";
+    return result;
+  };
+  Object.assign(s.store, {
+    dueRepairs: async () => queued ? [{ instrumentId: s.f.policy.instrumentId, sourceId: s.f.source.id, role: "news" }] : [],
+    prepareRepair: inspect,
+  });
+  return { enqueue: inspect, get inspections() { return inspections; } };
+}
+
+test("on-demand Marketaux makes no calls or inspections without a queued candidate, including after restart", async () => {
+  const s = setup(), repairs = enableRepairs(s);
+  for (let i = 0; i < 3; i++) {
+    const scheduler = s.make(undefined, undefined, true);
+    await Promise.all([scheduler.tick(), scheduler.tickRepairs()]);
+    s.state.now += 900000;
+  }
+  assert.equal(repairs.inspections, 0);
+  assert.equal(s.state.requests.length, 0); assert.equal(s.state.reservations.length, 0); assert.equal(s.state.snapshots.length, 0);
+});
+
+test("on-demand queued repair completes both passes, becomes READY and does not rearm when news becomes stale", async () => {
+  const s = setup(), repairs = enableRepairs(s);
+  assert.equal((await repairs.enqueue()).state, "WAITING");
+  await s.make(undefined, undefined, true).tickRepairs();
+  assert.equal(s.coverage().complete, true); assert.equal(s.state.requests.length, 4);
+  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "READY");
+  const inspections = repairs.inspections;
+  s.state.now += 1800001;
+  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "WAITING");
+  const restarted = s.make(undefined, undefined, true);
+  await Promise.all([restarted.tick(), restarted.tickRepairs()]);
+  assert.equal(s.state.requests.length, 4); assert.equal(repairs.inspections, inspections);
+  assert.equal((await repairs.enqueue()).state, "WAITING");
+  await restarted.tickRepairs();
+  assert.equal(s.state.requests.length, 8); assert.equal(s.coverage().complete, true);
+});
+
+test("default periodic preparation and on-demand repair share locks and slots across racing workers and restart", async () => {
+  for (const repairFirst of [true, false]) {
+    const s = setup(), repairs = enableRepairs(s);
+    assert.equal((await repairs.enqueue()).state, "WAITING");
+    const periodic = s.make(), repair = s.make(undefined, undefined, true);
+    await Promise.all(repairFirst ? [repair.tickRepairs(), periodic.tick()] : [periodic.tick(), repair.tickRepairs()]);
+    await s.make(undefined, undefined, true).tickRepairs();
+    await s.make().tick();
+    assert.equal(s.state.requests.length, 4); assert.equal(s.state.reservations.length, 4); assert.equal(s.state.snapshots.length, 1);
+  }
+});
+
+test("on-demand repair retains budget exhaustion and unknown outcome holds without replay after restart", async () => {
+  for (const mode of ["budget", "unknown"] as const) {
+    const s = setup();
+    if (mode === "budget") s.f.source.maxRequestsPerDay = 3;
+    else s.state.response = () => { throw new Error("unknown transport outcome"); };
+    s.rehash(); const repairs = enableRepairs(s);
+    assert.equal((await repairs.enqueue()).state, "WAITING");
+    await s.make(undefined, undefined, true).tickRepairs();
+    assert.equal(s.coverage().complete, false);
+    assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "HOLD");
+    const calls = s.state.requests.length; assert.equal(calls, mode === "budget" ? 3 : 1);
+    if (mode === "unknown") assert.ok(s.state.outcomes[0].endsWith(":UNKNOWN"));
+    await s.make(undefined, undefined, true).tickRepairs();
+    assert.equal(s.state.requests.length, calls);
+  }
+});
 
 test("production refresh publishes complete multi-page acquisition, preserves reports, and never repeats completed slot", async () => {
   const s = setup(); await s.make().tick();

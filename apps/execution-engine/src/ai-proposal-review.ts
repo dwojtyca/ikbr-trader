@@ -64,7 +64,7 @@ export async function expireAiProposals(db: PoolClient): Promise<void> {
   }
 }
 
-export async function findAccountReservation(db: PoolClient, accountId: string, exceptId?: number) {
+export async function findAccountReservation(db: PoolClient, accountId: string, exceptId?: number, recurringConid?: string | null) {
   const close = await findCloseReservation(db, accountId);
   if (close) return { id: Number(close.id), status: "SUBMITTED" as const, client_order_id: null };
   const result = await db.query<{ id: number; status: "PROPOSED" | "SUBMITTED"; client_order_id: string | null }>(`
@@ -72,7 +72,8 @@ export async function findAccountReservation(db: PoolClient, accountId: string, 
     LEFT JOIN proposal_ai_reviews r ON r.proposed_order_id=p.id
     WHERE p.status IN ('PROPOSED','SUBMITTED') AND ($2::bigint IS NULL OR p.id<>$2)
       AND (r.account_id=$1 OR p.execution_account_id=$1 OR r.proposed_order_id IS NULL)
-    ORDER BY p.id LIMIT 1`, [accountId, exceptId ?? null]);
+      AND ($3::text IS NULL OR p.conid=$3 OR p.conid IS NULL OR NOT EXISTS(SELECT 1 FROM lifecycle_supervision s WHERE s.original_proposal_id=p.id AND s.status='PROTECTED' AND s.observed_at>clock_timestamp()-interval '10 seconds'))
+    ORDER BY p.id LIMIT 1`, [accountId, exceptId ?? null, recurringConid ?? null]);
   return result.rows[0];
 }
 

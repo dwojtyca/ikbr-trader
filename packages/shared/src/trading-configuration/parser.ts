@@ -59,7 +59,7 @@ class Validator {
     if (!Number.isFinite(value) || Object.is(value, -0) || value < min || value > max || (integer && !Number.isSafeInteger(value)) || (positive && value <= 0)) this.add(path, "INVALID_VALUE");
     return value;
   }
-  literal<T extends string | number | boolean>(value: unknown, path: string, allowed: readonly T[], code = "UNSUPPORTED_CAPABILITY"): T | string {
+  literal<T extends string | number | boolean | null>(value: unknown, path: string, allowed: readonly T[], code = "UNSUPPORTED_CAPABILITY"): T | string {
     if (!allowed.includes(value as T)) {
       const expectedType = typeof allowed[0];
       this.add(path, typeof value === expectedType ? code : "INVALID_TYPE");
@@ -121,11 +121,11 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
   const byId = <T extends { id: string }>(rows: T[], path: string): T[] => {
     v.unique(rows.map((x) => x.id), rows.map((_, i) => `${path}[${i}].id`)); return rows;
   };
-  const accountPolicies = byId(readPolicies("accountPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), maxOpenPositions:v.literal(v.required(o,"maxOpenPositions",p),`${p}.maxOpenPositions`,[1]) as 1, accountDayTimeZone:v.literal(v.required(o,"accountDayTimeZone",p),`${p}.accountDayTimeZone`,["Europe/Warsaw"]) as "Europe/Warsaw" })), "$.accountPolicies");
+  const accountPolicies = byId(readPolicies("accountPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), maxOpenPositions:v.literal(v.required(o,"maxOpenPositions",p),`${p}.maxOpenPositions`,[1,2]) as 1 | 2, accountDayTimeZone:v.literal(v.required(o,"accountDayTimeZone",p),`${p}.accountDayTimeZone`,["Europe/Warsaw"]) as "Europe/Warsaw" })), "$.accountPolicies");
   const entryPolicies = byId(readPolicies("entryPolicies", 1, (o,p) => {
-    const kind = v.literal(v.required(o,"kind",p),`${p}.kind`,["supervised_one_attempt", "bounded_scheduled"]) as "supervised_one_attempt" | "bounded_scheduled";
+    const kind = v.literal(v.required(o,"kind",p),`${p}.kind`,["supervised_one_attempt", "bounded_scheduled", "recurring_sessions"]) as "supervised_one_attempt" | "bounded_scheduled" | "recurring_sessions";
     return { id:v.id(v.required(o,"id",p),`${p}.id`), kind,
-      maxAttemptsPerAccountDay:v.literal(v.required(o,"maxAttemptsPerAccountDay",p),`${p}.maxAttemptsPerAccountDay`,[kind === "bounded_scheduled" ? 2 : 1]) as 1 | 2 };
+      maxAttemptsPerAccountDay:v.literal(v.required(o,"maxAttemptsPerAccountDay",p),`${p}.maxAttemptsPerAccountDay`,[kind === "recurring_sessions" ? null : kind === "bounded_scheduled" ? 2 : 1]) as 1 | 2 | null };
   }), "$.entryPolicies");
   const executionPolicies = byId(readPolicies("executionPolicies", 1, (o,p) => ({ id:v.id(v.required(o,"id",p),`${p}.id`), direction:v.literal(v.required(o,"direction",p),`${p}.direction`,["LONG"]) as "LONG", quantity:v.literal(v.required(o,"quantity",p),`${p}.quantity`,[1]) as 1, quantityUnit:v.literal(v.required(o,"quantityUnit",p),`${p}.quantityUnit`,["shares"]) as "shares", orderType:v.literal(v.required(o,"orderType",p),`${p}.orderType`,["LMT"]) as "LMT", timeInForce:v.literal(v.required(o,"timeInForce",p),`${p}.timeInForce`,["DAY"]) as "DAY", outsideRth:v.literal(v.required(o,"outsideRth",p),`${p}.outsideRth`,[false]) as false, protection:v.literal(v.required(o,"protection",p),`${p}.protection`,["bracket"]) as "bracket" })), "$.executionPolicies");
   const riskPolicies = byId(readPolicies("riskPolicies", 1, (o,p) => {
@@ -185,6 +185,11 @@ function parseValue(input: unknown, v: Validator): TradingConfigurationV1 {
   v.unique(instruments.map((x)=>x.contract.symbol),instruments.map((_,i)=>`$.instruments[${i}].contract.symbol`),true);
   v.unique(instruments.map((x)=>`${x.contract.broker}:${x.contract.conId}`),instruments.map((_,i)=>`$.instruments[${i}].contract.conId`),true);
   v.unique(instruments.map((x)=>`${x.contract.broker}:${x.contract.primaryExchange}:${x.contract.currency}:${x.contract.symbol}`),instruments.map((_,i)=>`$.instruments[${i}].contract`),true);
+  for (const account of accountPolicies) {
+    const participants = instruments.filter(i => i.entryEnabled && i.accountPolicyId === account.id);
+    if (account.maxOpenPositions === 2 && (!participants.length || participants.some(i => entryPolicies.find(p => p.id === i.entryPolicyId)?.kind !== "recurring_sessions")))
+      v.add("$.accountPolicies", "CONTRADICTORY_POLICY");
+  }
   return { schemaVersion:1, strategyInstances, instruments, accountPolicies, entryPolicies, executionPolicies, riskPolicies, researchPolicies, issuerMappings } as TradingConfigurationV1;
 }
 

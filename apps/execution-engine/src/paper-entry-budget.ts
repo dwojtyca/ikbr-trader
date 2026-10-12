@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { canonicalJson } from '@ikbr/shared/trading-config';
-import { paperLocalDate, type PaperRunPolicy, type PaperRunWindow } from './paper-run-policy.js';
+import { paperPolicyInstruments, paperLocalDate, type PaperRunPolicy, type PaperRunWindow } from './paper-run-policy.js';
 import { unavailableSessionEntryGuard, type SessionEntryGuard, type SessionEntryOrder } from './session-entry-guard.js';
 type Db = Pick<Pool | PoolClient, 'query'>;
 type Entry = SessionEntryOrder & { id?: number };
@@ -9,6 +10,26 @@ const deny = (reason: string): PaperBudgetResult => ({ ok: false, reason: `paper
 export function paperWindowForOrder(policy: PaperRunPolicy, order: Entry, nowMs?: number): PaperRunWindow | undefined {
   if (order.positionEffect === 'CLOSE_OR_REDUCE') return undefined;
   return policy.windows.find(w => w.instrumentId === order.instrumentId && String(w.conId) === order.conid && w.instrument === order.instrument && (nowMs === undefined || (nowMs >= Date.parse(w.startsAt) && nowMs < Date.parse(w.endsAt))));
+}
+async function resolveRecurringWindow(db: Db, policy: PaperRunPolicy, order: Entry, guard: SessionEntryGuard, binding?: Record<string, unknown>): Promise<PaperBudgetResult> {
+  const scope = paperPolicyInstruments(policy).find(w => w.instrumentId === order.instrumentId && String(w.conId) === order.conid && w.instrument === order.instrument);
+  if (!scope) return deny('instrument_mismatch');
+  const current = await guard(db, order);
+  if (!current.ok) return deny(current.reason);
+  if (!current.evidence || !current.session) return deny('session_evidence_unavailable');
+  const margin = policy.exitBeforeCloseMinutes!;
+  const start = current.session.start, end = new Date(Date.parse(current.session.end)-margin*60000).toISOString();
+  if (Date.parse(end) <= Date.parse(start) || paperLocalDate(Date.parse(start),'Europe/Warsaw') !== paperLocalDate(Date.parse(current.session.end)-1,'Europe/Warsaw') || paperLocalDate(Date.parse(start),scope.sessionTimeZone) !== current.session.date) return deny('session_interval_invalid');
+  const canonical = canonicalJson(current.evidence);
+  const session = { evidence: current.evidence, sessionDate: current.session.date, sessionStart: start, sessionEnd: current.session.end, exitBeforeCloseMinutes: margin, canonical, hash: createHash('sha256').update(canonical).digest('hex') };
+  let window: PaperRunWindow = { ...scope, startsAt: start, endsAt: end, accountDate: paperLocalDate(Date.parse(start),'Europe/Warsaw'), sessionDate: current.session.date, session };
+  if (binding) {
+    const original = binding.session_binding as PaperRunWindow['session'];
+    if (!original || original.sessionDate !== current.session.date || original.sessionStart !== start || original.exitBeforeCloseMinutes !== margin || original.canonical !== canonicalJson(original.evidence) || original.hash !== createHash('sha256').update(original.canonical).digest('hex')) return deny('proposal_binding_mismatch');
+    window = { ...window, startsAt: new Date(binding.starts_at as string).toISOString(), endsAt: new Date(binding.ends_at as string).toISOString(), session: original };
+    if (window.startsAt !== start || window.endsAt !== new Date(Date.parse(original.sessionEnd)-margin*60000).toISOString()) return deny('proposal_binding_mismatch');
+  }
+  return { ok: true, window, endsAtMs: Math.min(Date.parse(window.endsAt),Date.parse(end),current.endsAtMs) };
 }
 async function persistPaperRun(client: PoolClient, policy: PaperRunPolicy): Promise<void> {
   await client.query(`INSERT INTO paper_runs(run_id,account_id,effective_config_hash,manifest_hash,canonical_manifest,manifest)
@@ -43,17 +64,20 @@ export async function checkPaperEntryBudget(db: Db, policy: PaperRunPolicy | und
   if (!status.rows[0]?.adopted) return deny('adoption_required');
   if (status.rows[0].held) return deny('migration_hold');
   const now = new Date(status.rows[0].now).getTime();
-  const identityWindow = paperWindowForOrder(policy, order);
-  if (!identityWindow) return deny('instrument_mismatch');
   const binding = options.proposalId === undefined ? undefined : (await db.query('SELECT * FROM paper_run_proposals WHERE proposed_order_id=$1', [options.proposalId])).rows[0];
+  const recurring = policy.version === 3 ? await resolveRecurringWindow(db, policy, order, sessionGuard, binding) : undefined;
+  if (recurring && !recurring.ok) return recurring;
+  const identityWindow = recurring?.ok ? recurring.window : paperWindowForOrder(policy, order);
+  if (!identityWindow) return deny('instrument_mismatch');
   const pinnedStart = binding ? new Date(binding.starts_at).toISOString() : options.windowStartsAt;
-  const window = pinnedStart ? policy.windows.find(w => w.instrumentId === order.instrumentId && String(w.conId) === order.conid && w.instrument === order.instrument && w.startsAt === pinnedStart) : paperWindowForOrder(policy, order, now) ?? identityWindow;
+  const window = recurring?.ok ? recurring.window : pinnedStart ? policy.windows.find(w => w.instrumentId === order.instrumentId && String(w.conId) === order.conid && w.instrument === order.instrument && w.startsAt === pinnedStart) : paperWindowForOrder(policy, order, now) ?? identityWindow;
   if (!window) return deny('proposal_binding_mismatch');
   const authority = (await db.query(`SELECT a.*,a.effective_date::text AS effective_day,r.manifest_hash FROM paper_policy_authorities a JOIN paper_runs r ON r.run_id=a.active_run_id WHERE a.account_id=$1`, [accountId])).rows[0];
   const today = paperLocalDate(now, 'Europe/Warsaw');
   if (!authority && policy.version !== 1) return deny('policy_adoption_required');
   if (authority && (authority.active_run_id !== policy.runId || authority.manifest_hash !== policy.manifestHash ||
     (authority.pending_run_id && today >= authority.effective_day))) return deny('policy_authority_mismatch');
+  if (policy.version === 3 && today < policy.effectiveAccountDate!) return deny('policy_not_effective');
   if (policy.version === 2 && (today < policy.effectiveAccountDate! || today > policy.expiresAfterAccountDate!)) return deny('policy_expired');
   if (now < Date.parse(window.startsAt) || now >= Date.parse(window.endsAt)) return deny('outside_window');
   const run = await db.query('SELECT manifest_hash,canonical_manifest,account_id,effective_config_hash FROM paper_runs WHERE run_id=$1', [policy.runId]);
@@ -62,9 +86,9 @@ export async function checkPaperEntryBudget(db: Db, policy: PaperRunPolicy | und
     const row = binding;
     if (!row || row.run_id !== policy.runId || row.instrument_id !== window.instrumentId || row.conid !== String(window.conId) || row.session_timezone !== window.sessionTimeZone || new Date(row.starts_at).toISOString() !== window.startsAt || new Date(row.ends_at).toISOString() !== window.endsAt) return deny('proposal_binding_mismatch');
   }
-  const margin = options.exitMarginMinutes ?? 15;
+  const margin = policy.version === 3 ? policy.exitBeforeCloseMinutes! : options.exitMarginMinutes ?? 15;
   if (!Number.isInteger(margin) || margin < 15 || margin > 60) return deny('exit_margin_invalid');
-  const session = await sessionGuard(db, order, { startsAt: window.startsAt, endsAt: new Date(Date.parse(window.endsAt) + margin * 60000).toISOString() });
+  const session = recurring?.ok ? { ok: true as const, endsAtMs: recurring.endsAtMs } : await sessionGuard(db, order, { startsAt: window.startsAt, endsAt: new Date(Date.parse(window.endsAt) + margin * 60000).toISOString() });
   if (!session.ok) return deny(session.reason);
   const fresh = new Date((await db.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
   if (!Number.isFinite(session.endsAtMs) || fresh < Date.parse(window.startsAt) || fresh >= Math.min(Date.parse(window.endsAt), session.endsAtMs)) return deny('outside_window');
@@ -79,25 +103,28 @@ export async function checkPaperEntryBudget(db: Db, policy: PaperRunPolicy | und
   if (options.dispatch) {
     const own = attempts.rows.find(row => Number(row.proposed_order_id) === options.proposalId);
     if (!own || own.account_date !== accountDate || own.session_date !== sessionDate || own.run_id !== policy.runId || own.source !== 'generic' ||
-      accountAttempts.length > policy.maxAttemptsPerAccountDay || instrumentAttempts.length !== 1 || debts.rows.length) return deny('claim_missing');
-  } else if (accountAttempts.length >= policy.maxAttemptsPerAccountDay || instrumentAttempts.length || debts.rows.length) return deny('consumed');
-  if (policy.version === 2) {
+      (policy.version !== 3 && (accountAttempts.length > policy.maxAttemptsPerAccountDay! || instrumentAttempts.length !== 1)) || debts.rows.length) return deny('claim_missing');
+  } else if ((policy.version !== 3 && (accountAttempts.length >= policy.maxAttemptsPerAccountDay! || instrumentAttempts.length)) || debts.rows.length) return deny('consumed');
+  if (policy.version === 2 || policy.version === 3) {
     const active = await db.query(`SELECT 1 FROM paper_entry_attempts a LEFT JOIN lifecycle_supervision s ON s.original_proposal_id=a.proposed_order_id
       WHERE a.account_id=$1 AND ($2::bigint IS NULL OR a.proposed_order_id<>$2) AND
-      (s.original_proposal_id IS NULL OR s.status NOT IN ('FLAT','TERMINAL_UNFILLED') OR s.terminal_proof IS NULL) LIMIT 1`, [accountId, options.dispatch ? options.proposalId : null]);
+      ($3::text IS NULL OR a.conid=$3 OR s.status IS DISTINCT FROM 'PROTECTED' OR s.observed_at IS NULL OR s.observed_at > clock_timestamp() OR s.observed_at < clock_timestamp()-interval '10 seconds') AND
+      (s.original_proposal_id IS NULL OR s.status NOT IN ('FLAT','TERMINAL_UNFILLED') OR s.terminal_proof IS NULL) LIMIT 1`, [accountId, options.dispatch ? options.proposalId : null, policy.version === 3 ? order.conid : null]);
     if (active.rowCount) return deny('active_attempt');
   }
   return { ok: true, endsAtMs: Math.min(Date.parse(window.endsAt), session.endsAtMs), window };
 }
-export async function bindPaperProposal(client: PoolClient, policy: PaperRunPolicy, proposalId: number, order: Entry): Promise<void> {
+export async function bindPaperProposal(client: PoolClient, policy: PaperRunPolicy, proposalId: number, order: Entry, sessionGuard: SessionEntryGuard = unavailableSessionEntryGuard): Promise<void> {
   const now = new Date((await client.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
-  const window = paperWindowForOrder(policy, order, now);
+  const recurring = policy.version === 3 ? await resolveRecurringWindow(client, policy, order, sessionGuard) : undefined;
+  if (recurring && !recurring.ok) throw new Error(recurring.reason);
+  const window = recurring?.ok ? recurring.window : paperWindowForOrder(policy, order, now);
   if (!window) throw new Error('PAPER_BUDGET_INSTRUMENT_MISMATCH');
   await persistPaperRun(client, policy);
   const zone = await client.query('SELECT DISTINCT session_timezone FROM paper_entry_attempts WHERE account_id=$1 AND broker=$2 AND conid=$3', [policy.accountId, 'ibkr', String(window.conId)]);
   if (zone.rows.some(row => row.session_timezone !== window.sessionTimeZone)) throw new Error('PAPER_BUDGET_TIMEZONE_CHANGED');
-  await client.query(`INSERT INTO paper_run_proposals(proposed_order_id,run_id,instrument_id,conid,session_timezone,starts_at,ends_at)
-    VALUES($1,$2,$3,$4,$5,$6,$7)`, [proposalId, policy.runId, window.instrumentId, String(window.conId), window.sessionTimeZone, window.startsAt, window.endsAt]);
+  await client.query(`INSERT INTO paper_run_proposals(proposed_order_id,run_id,instrument_id,conid,session_timezone,starts_at,ends_at,session_binding)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [proposalId, policy.runId, window.instrumentId, String(window.conId), window.sessionTimeZone, window.startsAt, window.endsAt, window.session ?? null]);
 }
 export async function reservePaperEntryAttempt(client: PoolClient, policy: PaperRunPolicy, accountId: string, order: Entry,
   sessionGuard: SessionEntryGuard = unavailableSessionEntryGuard, exitMarginMinutes = 15): Promise<PaperBudgetResult> {
@@ -112,7 +139,7 @@ export async function reservePaperEntryAttempt(client: PoolClient, policy: Paper
   return result;
 }
 export async function readPaperEntryEvidence(db: Db, proposalId: number) {
-  const result = await db.query(`SELECT a.*,a.account_date::text AS account_date,a.session_date::text AS session_date,b.instrument_id,b.starts_at,b.ends_at,r.manifest_hash,r.effective_config_hash,r.manifest,
+  const result = await db.query(`SELECT a.*,a.account_date::text AS account_date,a.session_date::text AS session_date,b.instrument_id,b.starts_at,b.ends_at,b.session_binding,r.manifest_hash,r.effective_config_hash,r.manifest,
       EXISTS(SELECT 1 FROM paper_policy_events e WHERE e.account_id=a.account_id AND e.active_run_id=a.run_id AND e.action='ADOPT' AND e.created_at<=a.attempted_at) AS policy_adopted
     FROM paper_entry_attempts a LEFT JOIN paper_run_proposals b USING(proposed_order_id) LEFT JOIN paper_runs r ON r.run_id=a.run_id
     WHERE a.proposed_order_id=$1`, [proposalId]);
@@ -121,11 +148,13 @@ export async function readPaperEntryEvidence(db: Db, proposalId: number) {
 export async function readPaperRoundTripWindow(db: Db, proposalId: number) {
   const row = await readPaperEntryEvidence(db, proposalId);
   if (!row || row.source !== 'generic' || !row.run_id || !row.instrument_id) return null;
+  const version = row.manifest?.version, kind = row.manifest?.kind;
+  if (!((version === 1 && kind === 'supervised_one_attempt') || (version === 2 && kind === 'bounded_scheduled') || (version === 3 && kind === 'recurring_sessions' && row.session_binding))) return null;
   const date = (value: Date | string): string => value instanceof Date ? value.toISOString().slice(0, 10) : value.slice(0, 10);
   return {
     source: 'paper' as const, instrumentId: String(row.instrument_id), conid: String(row.conid),
     effectiveConfigHash: String(row.effective_config_hash), runPolicyHash: String(row.manifest_hash),
-    policyKind: row.manifest?.kind as PaperRunPolicy['kind'], policyVersion: row.manifest?.version as 1 | 2, policyAdopted: row.policy_adopted === true, attemptId: String(row.proposed_order_id),
+    policyKind: kind as PaperRunPolicy['kind'], policyVersion: version as 1 | 2 | 3, sessionBinding: row.session_binding ?? undefined, policyAdopted: row.policy_adopted === true, attemptId: String(row.proposed_order_id),
     accountDate: date(row.account_date), instrumentSessionDate: date(row.session_date),
     runId: String(row.run_id), accountId: String(row.account_id), startsAt: row.starts_at as Date,
     endsAt: row.ends_at as Date, consumedProposalId: Number(row.proposed_order_id), consumedAt: row.attempted_at as Date,

@@ -1,5 +1,11 @@
 # Current project state
 
+Owner direction 2026-10-12: continuous Paper for PKO and AAPL, one share/open
+position per instrument, no daily attempt quota, USD5/day AI. The
+[continuous-operation package](phase3/CONTINUOUS_PAPER_OPERATION_REPORT.md) tracks
+this newer scope and its implementation/release/deployment evidence separately
+from the historical bounded-run observations below.
+
 Owner correction 2026-10-07: [WSH context implementation](phase3/PP7_WSH_CONTEXT_IMPLEMENTATION_REPORT.md) removes event-proximity vetoes and supplies available calendar/news/forecast context to AI for existing technical proposals. Its report distinguishes source validation from operational readiness; this note does not certify a Paper entry.
 
 Source update: 2026-10-06; PP7 reviewed source published with successful exact-commit CI. [PP0 delivery evidence](phase3/PP0_IMPLEMENTATION_REPORT.md)

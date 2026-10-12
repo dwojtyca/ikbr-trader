@@ -30,14 +30,14 @@ export interface TradingStrategyInstanceV1 {
 
 export interface TradingAccountPolicyV1 {
   readonly id: string;
-  readonly maxOpenPositions: 1;
+  readonly maxOpenPositions: 1 | 2;
   readonly accountDayTimeZone: "Europe/Warsaw";
 }
 
 export interface TradingEntryPolicyV1 {
   readonly id: string;
-  readonly kind: "supervised_one_attempt" | "bounded_scheduled";
-  readonly maxAttemptsPerAccountDay: 1 | 2;
+  readonly kind: "supervised_one_attempt" | "bounded_scheduled" | "recurring_sessions";
+  readonly maxAttemptsPerAccountDay: 1 | 2 | null;
 }
 
 export interface TradingExecutionPolicyV1 {

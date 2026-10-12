@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { buildInstrumentSessionIdentity, checkSessionWindow, requireSessionSchedule, type BoundInstrument, type SessionScheduleEvidence } from '@ikbr/shared';
 export interface SessionEntryOrder { instrumentId?: string | null; instrument: string; conid?: string | null; positionEffect?: string | null }
-export type SessionEntryResult = { ok: true; endsAtMs: number; generation: number } | { ok: false; reason: string };
+export type SessionEntryResult = { ok: true; endsAtMs: number; generation: number; evidence?: SessionScheduleEvidence; session?: { date: string; start: string; end: string } } | { ok: false; reason: string };
 export type SessionEntryGuard = (db: Pick<Pool | PoolClient, 'query'>, order: SessionEntryOrder, window?: { startsAt: string; endsAt: string }) => Promise<SessionEntryResult>;
 export const unavailableSessionEntryGuard: SessionEntryGuard = async () => ({ ok: false, reason: 'session_entry_guard_unavailable' });
 export function createSessionEntryGuard(resolve: (id: string) => BoundInstrument | null | undefined): SessionEntryGuard {
@@ -21,7 +21,7 @@ export function createSessionEntryGuard(resolve: (id: string) => BoundInstrument
       checkSessionWindow(evidence, identity, now, window ? Date.parse(window.startsAt) : now, window ? Date.parse(window.endsAt) : now + 1);
       const active = schedule.sessions.find(s => Date.parse(s.start) <= now && now < Date.parse(s.end));
       if (!active) return { ok: false, reason: 'session_entry_closed' };
-      return { ok: true, generation: evidence!.generation, endsAtMs: Math.min(Date.parse(active.end), Date.parse(schedule.coverageEnd), Date.parse(schedule.receivedAt) + 6 * 3600000, Date.parse(evidence!.updatedAt) + 6 * 3600000, window ? Date.parse(window.endsAt) : Infinity) };
+      return { ok: true, generation: evidence!.generation, evidence: evidence!, session: active, endsAtMs: Math.min(Date.parse(active.end), Date.parse(schedule.coverageEnd), Date.parse(schedule.receivedAt) + 6 * 3600000, Date.parse(evidence!.updatedAt) + 6 * 3600000, window ? Date.parse(window.endsAt) : Infinity) };
     } catch (error) { return { ok: false, reason: error instanceof Error && /^(session_|instrument_session_)/.test(error.message) ? error.message : 'session_entry_evidence_unavailable' }; }
   };
 }

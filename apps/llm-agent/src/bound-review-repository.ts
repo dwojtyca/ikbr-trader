@@ -65,7 +65,14 @@ export class BoundReviewRepository implements BoundReviewStore {
           AND po.broker_order_id IS NULL AND po.instrument_id IS NOT NULL
           AND r.status = 'PENDING' AND r.expires_at > clock_timestamp()
           AND r.delivery_started_at IS NULL
+          AND r.delivery_outcome IS NULL AND r.decision_json IS NULL AND r.decided_at IS NULL
           AND (r.claim_until IS NULL OR r.claim_until <= clock_timestamp())
+          AND NOT EXISTS (SELECT 1 FROM proposal_research_waits w
+            LEFT JOIN research_snapshot_heads h ON h.config_hash=w.config_hash AND h.manifest_hash=w.manifest_hash AND h.instrument_id=w.instrument_id
+            WHERE w.proposed_order_id=po.id AND w.next_check_at>clock_timestamp() AND h.snapshot_id IS NOT DISTINCT FROM w.snapshot_id)
+          AND (NOT EXISTS (SELECT 1 FROM proposal_research_waits w WHERE w.proposed_order_id=po.id)
+            OR (NOT EXISTS (SELECT 1 FROM research_bindings b WHERE b.proposed_order_id=po.id)
+              AND NOT EXISTS (SELECT 1 FROM proposal_ai_model_calls c WHERE c.proposed_order_id=po.id)))
         ORDER BY po.id LIMIT 1 FOR UPDATE OF po SKIP LOCKED`);
       if (!selected.rows[0]) return null;
       const row = selected.rows[0];
@@ -76,6 +83,7 @@ export class BoundReviewRepository implements BoundReviewStore {
           claim_until = clock_timestamp() + interval '30 seconds'
         WHERE proposed_order_id = $1 AND status = 'PENDING'
           AND expires_at > clock_timestamp() AND delivery_started_at IS NULL
+          AND delivery_outcome IS NULL AND decision_json IS NULL AND decided_at IS NULL
           AND (claim_until IS NULL OR claim_until <= clock_timestamp())
           AND client_order_hash = $3 AND instrument_id = $4 AND conid = $5
           AND client_order_hash_version = $6 AND strategy_attribution IS NOT DISTINCT FROM $7::jsonb
@@ -115,6 +123,7 @@ export class BoundReviewRepository implements BoundReviewStore {
           delivery_started_at = CASE WHEN $3 = 'APPROVED' THEN clock_timestamp() ELSE NULL END
         WHERE proposed_order_id = $1 AND claim_token = $2::uuid
           AND status = 'PENDING' AND decision_json IS NULL
+          AND decided_at IS NULL AND delivery_outcome IS NULL
           AND claim_until > clock_timestamp() AND expires_at > clock_timestamp()
           AND delivery_started_at IS NULL AND client_order_hash = $5 AND instrument_id = $6
           AND conid = $7 AND account_id = $8 AND session_id = $9

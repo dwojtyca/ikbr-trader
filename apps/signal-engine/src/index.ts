@@ -1,6 +1,7 @@
 import { BrokerStateContextProvider } from "./runtime/broker-state-provider.js";
 import { createMutationAuth, logSafeResponse, operatorSafeLogger, SIGNAL_MUTATING_READS } from "@ikbr/shared/http-auth";
 import { HttpWseStrategyMetadataReader } from "./runtime/trading-loop/wse-metadata-reader.js";
+import { HttpResearchPreparationClient } from "./runtime/trading-loop/research-preparation-client.js";
 import Fastify from "fastify";
 import { unavailableLegacySignalRoutes } from "./runtime/legacy-signal-routes.js";
 import { Pool } from "pg";
@@ -344,6 +345,7 @@ if (config.runtimeEnabled) {
     tradingLoopService = new TradingLoopService({
       configuredStrategyRuntime,
       configuredSubmissionEnabled: config.executionRuntime.enabled,
+      researchPreparation: new HttpResearchPreparationClient({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),
       stockMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs, stock: true }),
       assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
       wseMetadataReader: new HttpWseStrategyMetadataReader({ engineUrl, bearerToken, requestTimeoutMs: config.executionRuntime.requestTimeoutMs }),

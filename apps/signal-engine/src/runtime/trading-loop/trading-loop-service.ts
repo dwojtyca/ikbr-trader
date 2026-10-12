@@ -1,6 +1,7 @@
 import type { ConfiguredStrategyRuntime } from "../strategy/configured-strategy-runtime.js";
 import type { StockStrategyPriceEvidence, WseStrategyPriceEvidence } from "@ikbr/shared";
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
+import type { ResearchPreparationClient } from "./research-preparation-client.js";
 /**
  * Trading Loop — core service.
  *
@@ -92,6 +93,7 @@ export interface StrategyRuntimeStateRepository
 }
 
 export interface TradingLoopServiceOptions {
+  readonly researchPreparation?: ResearchPreparationClient;
   readonly configuredSubmissionEnabled?: boolean;
   readonly stockMetadataReader?: WseStrategyMetadataReader;
   readonly configuredStrategyRuntime?: Pick<ConfiguredStrategyRuntime, "evaluate" | "listInstrumentIds">;
@@ -196,6 +198,7 @@ function mapAssetClassToSecType(
 
 export class TradingLoopService {
   readonly #configuredSubmissionEnabled: boolean;
+  readonly #researchPreparation?: ResearchPreparationClient;
   readonly #stockMetadataReader?: WseStrategyMetadataReader;
   readonly #configuredStrategyRuntime?: TradingLoopServiceOptions["configuredStrategyRuntime"];
   readonly #assertEntryAllowed?: () => Promise<void>;
@@ -254,6 +257,7 @@ export class TradingLoopService {
     if (!options.logger)
       throw new Error("TradingLoopService: logger is required");
     this.#configuredSubmissionEnabled = options.configuredSubmissionEnabled === true;
+    this.#researchPreparation = options.researchPreparation;
     this.#stockMetadataReader = options.stockMetadataReader;
     this.#configuredStrategyRuntime = options.configuredStrategyRuntime;
     this.#assertEntryAllowed = options.assertEntryAllowed;
@@ -598,6 +602,11 @@ export class TradingLoopService {
         signal.strategyId !== resolution.executionPolicy.strategyId ||
         signal.strategyAttribution !== evaluation.strategyAttribution || signal.strategyTrigger !== evaluation.strategyTrigger)
       return skip('STRATEGY_POLICY_MISMATCH');
+    if (!this.#researchPreparation) return skip('RESEARCH_HOLD', 'RESEARCH_PREPARATION_UNAVAILABLE');
+    try {
+      const research = await this.#researchPreparation.prepare({ instrumentId, conid: String(bound.conId), effectiveConfigHash: evaluation.strategyAttribution.effectiveConfigHash });
+      if (research.state !== 'READY') return skip(research.state === 'WAITING' ? 'WAITING_FOR_RESEARCH' : 'RESEARCH_HOLD', research.reasons.join(','));
+    } catch { return skip('RESEARCH_HOLD', 'RESEARCH_PREPARATION_UNAVAILABLE'); }
     let prices: StockStrategyPriceEvidence;
     try {
       if (!this.#stockMetadataReader) throw new Error('stock_metadata_unavailable');

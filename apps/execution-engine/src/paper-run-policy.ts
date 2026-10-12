@@ -1,3 +1,4 @@
+import type { SessionScheduleEvidence } from '@ikbr/shared';
 import { createHash } from 'node:crypto';
 import { canonicalJson, type LoadedTradingConfiguration } from '@ikbr/shared/trading-config';
 
@@ -7,7 +8,19 @@ export interface PaperCurrencyCaps {
   readonly feeReserve: number;
   readonly maxDailyLoss: number;
 }
+export interface PaperRunInstrument {
+  readonly instrumentId: string; readonly conId: number; readonly instrument: string;
+  readonly currency: 'PLN' | 'USD'; readonly sessionTimeZone: 'Europe/Warsaw' | 'America/New_York';
+}
+export function paperPolicyInstruments(policy: PaperRunPolicy): readonly PaperRunInstrument[] {
+  return policy.version === 3 ? policy.instruments! : policy.windows;
+}
+export interface PaperSessionBinding {
+  evidence: SessionScheduleEvidence; sessionDate: string; sessionStart: string; sessionEnd: string;
+  exitBeforeCloseMinutes: number; canonical: string; hash: string;
+}
 export interface PaperRunWindow {
+  readonly session?: PaperSessionBinding;
   readonly instrumentId: string;
   readonly conId: number;
   readonly startsAt: string;
@@ -19,16 +32,19 @@ export interface PaperRunWindow {
   readonly sessionDate: string;
 }
 export interface PaperRunPolicy {
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3;
   readonly runId: string;
   readonly accountId: string;
   readonly effectiveConfigHash: string;
   readonly accountDayTimeZone: 'Europe/Warsaw';
-  readonly kind: 'supervised_one_attempt' | 'bounded_scheduled';
-  readonly maxAttemptsPerAccountDay: 1 | 2;
+  readonly kind: 'supervised_one_attempt' | 'bounded_scheduled' | 'recurring_sessions';
+  readonly maxAttemptsPerAccountDay: 1 | 2 | null;
   readonly effectiveAccountDate?: string;
   readonly expiresAfterAccountDate?: string;
-  readonly maxAttemptsPerInstrumentDay: 1;
+  readonly maxAttemptsPerInstrumentDay: 1 | null;
+  readonly instruments?: readonly PaperRunInstrument[];
+  readonly adoptionDeadlineAccountDate?: string;
+  readonly exitBeforeCloseMinutes?: number;
   readonly windows: readonly PaperRunWindow[];
   readonly currencyCaps: Readonly<Partial<Record<'PLN' | 'USD', PaperCurrencyCaps>>>;
   readonly manifestHash: string;
@@ -63,6 +79,7 @@ export function parsePaperRunPolicy(env: Record<string, unknown>, loaded: Loaded
     if (Buffer.byteLength(raw) > 1024 * 1024) return fail('TOO_LARGE');
     try { decoded = JSON.parse(raw); } catch { return fail('INVALID_JSON'); }
   }
+  if ((decoded as Record<string, unknown> | null)?.version === 3) return parseRecurringPolicy(decoded, loaded);
   const scheduled = (decoded as Record<string, unknown> | null)?.version === 2;
   const row = object(decoded, ['version', 'runId', 'accountId', 'effectiveConfigHash', 'accountDayTimeZone', 'kind', 'maxAttemptsPerAccountDay', 'maxAttemptsPerInstrumentDay', 'windows', 'currencyCaps', ...(scheduled ? ['effectiveAccountDate', 'expiresAfterAccountDate'] : [])]);
   if (row.version !== (scheduled ? 2 : 1) || row.kind !== (scheduled ? 'bounded_scheduled' : 'supervised_one_attempt') || row.accountDayTimeZone !== 'Europe/Warsaw' || row.maxAttemptsPerAccountDay !== (scheduled ? 2 : 1) || row.maxAttemptsPerInstrumentDay !== 1) return fail('UNSUPPORTED_POLICY');
@@ -133,4 +150,40 @@ export function validatePaperPolicyTransition(input: PaperPolicyTransition): { o
     return { ok: true, retainedAttempts: input.consumedAttempts };
   }
   return { ok: true, retainedAttempts: input.consumedAttempts };
+}
+
+function parseRecurringPolicy(decoded: unknown, loaded: Extract<LoadedTradingConfiguration, { mode: 'bundle' }>): PaperRunPolicy {
+  const row = object(decoded, ['version','runId','accountId','effectiveConfigHash','accountDayTimeZone','kind','maxAttemptsPerAccountDay','maxAttemptsPerInstrumentDay','instruments','currencyCaps','effectiveAccountDate','adoptionDeadlineAccountDate','exitBeforeCloseMinutes']);
+  if (row.kind !== 'recurring_sessions' || row.accountDayTimeZone !== 'Europe/Warsaw' || row.maxAttemptsPerAccountDay !== null || row.maxAttemptsPerInstrumentDay !== null) return fail('UNSUPPORTED_POLICY');
+  if (row.effectiveConfigHash !== loaded.effectiveHash) return fail('CONFIG_HASH_MISMATCH');
+  const effectiveAccountDate = paperPolicyDate(row.effectiveAccountDate), adoptionDeadlineAccountDate = paperPolicyDate(row.adoptionDeadlineAccountDate);
+  if (adoptionDeadlineAccountDate < effectiveAccountDate) return fail('INVALID_DATE_BOUNDS');
+  if (!Number.isInteger(row.exitBeforeCloseMinutes) || Number(row.exitBeforeCloseMinutes) < 15 || Number(row.exitBeforeCloseMinutes) > 60) return fail('EXIT_MARGIN_INVALID');
+  if (!Array.isArray(row.instruments) || !row.instruments.length || row.instruments.length > 2) return fail('INVALID_INSTRUMENTS');
+  const scopeSize = row.instruments.length;
+  if (loaded.configuration.instruments.filter(i => i.entryEnabled).some(i => (loaded.configuration.accountPolicies.find(p => p.id === i.accountPolicyId)?.maxOpenPositions ?? 0) < scopeSize)) return fail('ACCOUNT_POSITION_CAP_INCOMPATIBLE');
+  const seen = new Set<number>();
+  const instruments = row.instruments.map(value => {
+    const scope = object(value, ['instrumentId','conId']);
+    const instrument = loaded.configuration.instruments.find(i => i.id === scope.instrumentId && i.contract.conId === scope.conId);
+    if (!instrument || !instrument.entryEnabled || seen.has(instrument.contract.conId)) return fail('INVALID_INSTRUMENT');
+    seen.add(instrument.contract.conId);
+    const entry = loaded.configuration.entryPolicies.find(p => p.id === instrument.entryPolicyId);
+    if (entry?.kind !== 'recurring_sessions' || entry.maxAttemptsPerAccountDay !== null) return fail('CONFIGURATION_POLICY_INCOMPATIBLE');
+    return Object.freeze({ instrumentId: instrument.id, conId: instrument.contract.conId, instrument: instrument.contract.symbol, currency: instrument.contract.currency, sessionTimeZone: instrument.session.timeZone });
+  }).sort((a,b) => a.conId-b.conId);
+  if (loaded.configuration.instruments.some(i => i.entryEnabled && !seen.has(i.contract.conId))) return fail('CONFIGURATION_SCOPE_MISMATCH');
+  const currencies = [...new Set(instruments.map(i => i.currency))].sort();
+  const caps = object(row.currencyCaps, currencies), currencyCaps: Partial<Record<'PLN' | 'USD', PaperCurrencyCaps>> = {};
+  for (const currency of currencies) {
+    const cap = object(caps[currency], ['maxNotional','maxStopRisk','feeReserve','maxDailyLoss']);
+    if (Object.values(cap).some(v => typeof v !== 'number' || !Number.isFinite(v) || v <= 0)) return fail('INVALID_CAP');
+    currencyCaps[currency] = Object.freeze(cap as unknown as PaperCurrencyCaps);
+  }
+  const manifest = { version: 3 as const, runId: id(row.runId), accountId: id(row.accountId), effectiveConfigHash: loaded.effectiveHash,
+    accountDayTimeZone: 'Europe/Warsaw' as const, kind: 'recurring_sessions' as const, maxAttemptsPerAccountDay: null, maxAttemptsPerInstrumentDay: null,
+    instruments: instruments.map(({instrumentId,conId}) => ({instrumentId,conId})), effectiveAccountDate, adoptionDeadlineAccountDate,
+    exitBeforeCloseMinutes: Number(row.exitBeforeCloseMinutes), currencyCaps };
+  const canonicalManifest = canonicalJson(manifest);
+  return Object.freeze({ ...manifest, instruments: Object.freeze(instruments), windows: Object.freeze([]), currencyCaps: Object.freeze(currencyCaps), canonicalManifest, manifestHash: createHash('sha256').update(canonicalManifest).digest('hex') });
 }

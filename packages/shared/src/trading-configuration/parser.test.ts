@@ -216,3 +216,14 @@ test("scheduled entry capability is exact max2 and leaves supervised documents u
   input.entryPolicies[0].maxAttemptsPerAccountDay = 2;
   assert.equal(parseTradingConfiguration(input).ok, false);
 });
+
+test("unlimited quota and two positions require explicit recurring capability", () => {
+  const input=clone(); input.accountPolicies[0].maxOpenPositions=2;
+  assert.ok(issueCodes(input).includes('CONTRADICTORY_POLICY'));
+  input.entryPolicies[0].kind='recurring_sessions'; input.entryPolicies[0].maxAttemptsPerAccountDay=null;
+  assert.equal(parseTradingConfiguration(input).ok,true);
+  for (const quota of [undefined,0,1,2,Number.MAX_SAFE_INTEGER,'null']) {
+    input.entryPolicies[0].maxAttemptsPerAccountDay=quota;
+    assert.equal(parseTradingConfiguration(input).ok,false);
+  }
+});

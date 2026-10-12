@@ -1,3 +1,6 @@
+import { computeClientOrderHash } from '@ikbr/shared/client-order-hash';
+import { parsePaperRunPolicy, paperLocalDate } from './paper-run-policy.js';
+import { PaperPolicyAuthority } from './paper-policy-authority.js';
 import { evaluateRoundTrip } from './lifecycle/round-trip-evidence.js';
 import { controlledPlan, lifecycleHarness } from './pp7-scheduler-lifecycle-harness.js';
 import assert from 'node:assert/strict';
@@ -5,14 +8,15 @@ import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import Fastify from 'fastify';
 import { Pool, type PoolClient } from 'pg';
-import { buildTradingConfigurationProjection, createTradingConfigurationRuntime, TradingConfigurationStore } from '@ikbr/shared/trading-config';
-import { ResearchStore } from '@ikbr/shared/instrument-research';
+import { buildStrategyAttribution, buildTradingConfigurationProjection, createTradingConfigurationRuntime, TradingConfigurationStore } from '@ikbr/shared/trading-config';
+import { ResearchStore, researchHash } from '@ikbr/shared/instrument-research';
+import { registerResearchPrepareRoute } from './research-prepare-route.js';
 import { researchFixture } from '@ikbr/shared/instrument-research-testfixture';
-import type { ProposedOrder } from '@ikbr/shared';
+import { strategyTriggerId, type ProposedOrder } from '@ikbr/shared';
 import { runMigrations } from './migrations.js';
 import { ExecutionRepository } from './repository.js';
 import { createSessionEntryGuard } from './session-entry-guard.js';
-import { paperPolicyFixture } from './paper-run-policy.fixture.js';
+import { paperPolicyFixture, recurringPolicyFixture } from './paper-run-policy.fixture.js';
 import { adoptPaperEntryBudget } from './paper-entry-budget.js';
 import { readPaperDailyLoss } from './paper-daily-loss.js';
 import { createResearchEntryValidator } from './research-entry-guard.js';
@@ -44,6 +48,8 @@ finally {
     db.release();
 } }
 interface Faults {
+    recurring?: boolean;
+    missingResearch?: boolean;
     decision?: 'REJECT' | 'MALFORMED';
     lostAcknowledgement?: boolean;
     brokerUnknown?: boolean;
@@ -82,8 +88,16 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
     const [{ ConfiguredStrategyRuntime }, { StrategyContextLoader }, { fixtureSessionSchedule }, { TradingLoopService }, { MarketDataRuntime }, { PriceContextProvider }, { BrokerStateContextProvider }, { ExecutionRuntime }, { HttpExecutionTicketSubmitter }, { PaperGuard }, { StrategyPortfolioManager }, { createStrategy }] = modules;
     // Controlled external calendar/history observations are synthetic, never operational evidence.
     let observed = new Date();
-    const p = paperPolicyFixture(new Date(observed.getTime() - 60000).toISOString(), new Date(observed.getTime() + 120000).toISOString());
-    const accountId = p.policy.accountId, r = researchFixture(observed.getTime(), instrumentId), projection = buildTradingConfigurationProjection(r.config), bound = projection.authority.getBoundInstrument(instrumentId)!;
+    const legacyFixture = paperPolicyFixture(new Date(observed.getTime() - 60000).toISOString(), new Date(observed.getTime() + 120000).toISOString());
+    const p = faults.recurring ? recurringPolicyFixture(paperLocalDate(observed.getTime(),'Europe/Warsaw')) : legacyFixture;
+    const accountId = p.policy.accountId, r = researchFixture(observed.getTime(), instrumentId);
+    if(faults.recurring) { r.config=r.configuration=p.loaded.configuration; r.configHash=p.loaded.effectiveHash; r.manifest.configHash=r.configHash;r.manifest.instruments=r.manifest.instruments.filter(i=>p.loaded.configuration.instruments.some(c=>c.id===i.instrumentId));r.manifest.model.maxRequestsPerDay=5;r.manifest.model.maxCostMicrosPerDay=500;r.manifestHash=researchHash(r.manifest);r.snapshot.configHash=r.configHash;r.snapshot.manifestHash=r.manifestHash; }
+    const projection = buildTradingConfigurationProjection(r.config), bound = projection.authority.getBoundInstrument(instrumentId)!;
+    if (faults.missingResearch) {
+        r.manifest.refreshEnabled = true;
+        r.policy.sources[0].parserConfig = { kind: 'sec-json' };
+        r.manifestHash = researchHash(r.manifest); r.snapshot.manifestHash = r.manifestHash; r.snapshot.mappingHash = researchHash(r.policy);
+    }
     const candles = await nativeBreakoutCandles(bound, observed);
     observed = new Date();
     const configStore = new TradingConfigurationStore(pool);
@@ -92,12 +106,21 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
         await runtime.initialize();
     await pool.query('SELECT capture_strategy_binding_inheritance($1)', [r.configHash]);
     await pool.query('INSERT INTO strategy_runtime_conversion(source_hash,v2_not_before_bucket_ms) VALUES($1,$2)', [r.configHash, Math.floor(observed.getTime() / 60000) * 60000]);
-    await transaction(pool, async (db) => { assert.deepEqual(await adoptPaperEntryBudget(db, p.policy, { tradingEnabled: false }), { ok: true }); });
+    if(faults.recurring) { const prior=parsePaperRunPolicy({IBKR_ENVIRONMENT:'paper',PAPER_RUN_POLICY_JSON:{...legacyFixture.manifest,effectiveConfigHash:r.configHash,windows:legacyFixture.manifest.windows.filter(i=>p.loaded.configuration.instruments.some(c=>c.id===i.instrumentId))}},p.loaded)!;
+      await transaction(pool,db=>adoptPaperEntryBudget(db,prior,{tradingEnabled:false}));
+      await transaction(pool,db=>adoptPaperEntryBudget(db,p.policy,{tradingEnabled:false}));
+      const authority=new PaperPolicyAuthority(pool,{policy:()=>p.policy,assertDisabledPaused:async()=>{},readiness:async()=>({evidence:{fixture:true},validUntilMs:Date.now()+10000,assertCurrent(){}})});
+      await authority.change(accountId,'SCHEDULE',{requestId:randomUUID(),expectedRevision:0,manifestHash:p.policy.manifestHash,priorManifestHash:prior.manifestHash,reason:'isolated continuous fixture'},'fixture');
+      await authority.change(accountId,'ADOPT',{requestId:randomUUID(),expectedRevision:1,manifestHash:p.policy.manifestHash,reason:'isolated continuous fixture'},'fixture');
+    } else await transaction(pool, async (db) => { assert.deepEqual(await adoptPaperEntryBudget(db, p.policy, { tradingEnabled: false }), { ok: true }); });
     const research = new ResearchStore(pool);
     await research.registerManifest({ manifest: r.manifest, configuration: r.config, tradingEnabled: false, adopt: true });
     for (const service of ['execution-engine', 'llm-agent'] as const)
         await research.observe({ configHash: r.configHash, manifestHash: r.manifestHash, service, processId: service, tradingEnabled: false });
-    await research.storeSnapshot(r.snapshot);
+    const initialResearch = structuredClone(r.snapshot);
+    if (faults.missingResearch) { initialResearch.coverage = initialResearch.coverage.filter(c => c.role !== 'reports'); initialResearch.evidence = []; initialResearch.reports = []; initialResearch.facts = []; }
+    await research.storeSnapshot(initialResearch);
+    if(faults.recurring) for(const instrument of r.config.instruments.filter(i=>i.id!==instrumentId)){const other=researchFixture(observed.getTime(),instrument.id).snapshot;other.configHash=r.configHash;other.manifestHash=r.manifestHash;other.mappingHash=researchHash(r.manifest.instruments.find(i=>i.instrumentId===instrument.id)!);await research.storeSnapshot(other);const b=projection.authority.getBoundInstrument(instrument.id)!;const m=stockMetadataFixture(b,accountId,observed.getTime());await pool.query(`INSERT INTO instrument_session_schedules(instrument_id,conid,use_rth,generation,status,evidence,updated_at) VALUES($1,$2,true,1,'READY',$3,$4)`,[instrument.id,String(b.conId),m.sessionEvidence.schedule,observed]);}
     const metadata = stockMetadataFixture(bound, accountId, observed.getTime());
     await pool.query(`INSERT INTO instrument_session_schedules(instrument_id,conid,use_rth,generation,status,evidence,updated_at) VALUES($1,$2,true,1,'READY',$3,$4)`, [instrumentId, String(bound.conId), metadata.sessionEvidence.schedule, observed]);
     const context = () => ({ accountId, sessionId, connectionGeneration: 1, nowMs: Date.now(), lastBrokerFillObservedAt: 0 });
@@ -113,16 +136,18 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
     const repo = new ExecutionRepository(pool, undefined, undefined, createSessionEntryGuard(id => projection.authority.getBoundInstrument(id)), () => r.configHash, {
         policy: p.policy, exitMarginMinutes: 15, context, resolveManagement: async (order) => projection.authority.getBoundInstrument(order.instrumentId!)
     }, createResearchEntryValidator({ store: research, loadedIdentity: () => ({ configHash: r.configHash, manifestHash: r.manifestHash }) }), {
-        permit: db => controls.permit(db, entryContext, permitDeps), pin: (db, order, a) => pinLifecycleEntryPolicy(db, order, bound, a, new Date(), 15), deadline: assertLifecycleEntryDeadline
+        permit: db => controls.permit(db, entryContext, permitDeps), pin: async (db, order, a) => { const stamp=(await db.query('SELECT attempted_at FROM paper_entry_attempts WHERE proposed_order_id=$1',[order.id])).rows[0].attempted_at;await pinLifecycleEntryPolicy(db, order, projection.authority.getBoundInstrument(order.instrumentId!)!, a, new Date(stamp), 15); }, deadline: assertLifecycleEntryDeadline
     });
-    const lifecycle = await lifecycleHarness({ pool, repo, bound, accountId, sessionId, alerts, assertCurrent: permitDeps.assertCurrent, metadata });
+    const lifecycle = await lifecycleHarness({ pool, repo, bound, accountId, sessionId, alerts, assertCurrent: permitDeps.assertCurrent, metadata, resolveBound:id=>projection.authority.getBoundInstrument(id) });
     await controls.setPaused(accountId, false, 'fixture', 'authorized synthetic test', db => controls.permit(db, entryContext, permitDeps, { resuming: true }));
     const riskCalls: number[] = [];
     const risk = async (order: ProposedOrder) => {
+        const bound=projection.authority.getBoundInstrument(order.instrumentId!)!, instrumentId=bound.instrumentId;
+        const metadata=stockMetadataFixture(bound,accountId,Date.now());
         const now = Date.now(), stamp = new Date(now - 1).toISOString();
         const account: AccountSnapshot = {
-            accountId, retrievedAt: stamp, metrics: {}, positions: [], totals: { positionsCount: 0, longExposure: 0, shortExposure: 0, grossExposure: 0, netExposure: 0, unrealizedPnL: 0, realizedPnL: 0 }, riskEvidence: {
-                requestStartedAt: stamp, completedAt: stamp, complete: true, connectionGeneration: 1, configuredBaseCurrency: 'USD', cashByCurrency: { USD: 10000, PLN: 10000 }, exchangeRatesToBase: { USD: 1, PLN: .25 }, usdMetrics: { netLiquidation: 100000, availableFunds: 50000, grossPositionValue: 0 }
+            accountId, retrievedAt: stamp, metrics: {}, positions: lifecycle.state.position?[{symbol:lifecycle.state.entry!.contract.symbol!,conid:String(lifecycle.state.entry!.contract.conId),secType:'STK',currency:lifecycle.state.entry!.contract.currency,position:1,marketValue:100.2}]:[], totals: { positionsCount: lifecycle.state.position, longExposure: lifecycle.state.position*100.2, shortExposure: 0, grossExposure: lifecycle.state.position*100.2, netExposure: lifecycle.state.position*100.2, unrealizedPnL: 0, realizedPnL: 0 }, riskEvidence: {
+                requestStartedAt: stamp, completedAt: stamp, complete: true, connectionGeneration: 1, configuredBaseCurrency: 'USD', cashByCurrency: { USD: 10000, PLN: 10000 }, exchangeRatesToBase: { USD: 1, PLN: .25 }, usdMetrics: { netLiquidation: 100000, availableFunds: 50000, grossPositionValue: lifecycle.state.position*100.2 }
             }
         };
         const daily = await readPaperDailyLoss(pool, context());
@@ -147,28 +172,33 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
         return { ...assessed, snapshot: account };
     };
     const dispatches: PreparedBrokerOrder[] = [];
+    const submissionErrors: unknown[]=[];
     const service = buildSubmissionApplicationService({
         repo, assertEntryAllowed, strategyPreflight: async () => ({ effectiveConfigHash: r.configHash, observedAt: observed.toISOString() }), assessAiRisk: risk,
         ensureBrokerSession: async () => { permitDeps.assertCurrent(); return { accountId }; }, buildPositionGuard: () => ({ kind: 'available', accountId, sessionId, maxSnapshotAgeMs: 10000 }), reconciliationGate: () => buildReconciliationSubmissionGate({ maxAgeSeconds: 10 }),
-        prepareBrokerPlan: async ({ order, clientOrderId }) => controlledPlan(order, bound, accountId, clientOrderId),
+        prepareBrokerPlan: async ({ order, clientOrderId }) => controlledPlan(order, projection.authority.getBoundInstrument(order.instrumentId!)!, accountId, clientOrderId, false, dispatches.length*1000),
         dispatcher: {
             dispatch: async (payload) => { assert.ok(payload.sendWithEntryPermit); await payload.sendWithEntryPermit(() => dispatches.push(payload.prepared)); if (faults.brokerUnknown)
-                throw Error('synthetic lost broker acknowledgement'); return { brokerOrderId: '101', status: 'SUBMITTED' }; }
+                throw Error('synthetic lost broker acknowledgement'); return { brokerOrderId: payload.prepared.legs[0].brokerOrderId, status: 'SUBMITTED' }; }
         },
-        assertKillSwitchOk: () => permitDeps.assertCurrent(), recordAlert: input => repo.insertSystemAlert(input).then(() => { }), triggerReconciliation: lifecycle.refresh, ownerId: sessionId, allowMarketOrder: false, allowCrossContractExposure: false, bindingAuthority: projection.authority, defaultTif: 'DAY'
+        assertKillSwitchOk: () => permitDeps.assertCurrent(), recordAlert: input => repo.insertSystemAlert(input).then(() => { }), triggerReconciliation: lifecycle.refresh, ownerId: sessionId, allowMarketOrder: false, allowCrossContractExposure: !!faults.recurring, bindingAuthority: projection.authority, defaultTif: 'DAY'
     });
     const app = Fastify();
     registerExecutionAuth(app, {
         token, publicPaths: new Set(), writeAudit: input => repo.insertExecutionAuditLog(input), burstTracker: new AuthFailureBurstTracker(() => { }), logger: app.log
     });
     registerExecuteTicketRoute(app, { service, directTicketRefused: () => { throw Error('raw fixture ticket prohibited'); } });
+    registerResearchPrepareRoute(app, { store: research, authorize: async input => {
+        await assertEntryAllowed(); assert.equal(input.instrumentId, instrumentId); assert.equal(input.conid, String(bound.conId)); assert.equal(input.effectiveConfigHash, r.configHash);
+        return { accountId, instrumentId, configHash: r.configHash, manifestHash: r.manifestHash };
+    } });
     const http: {
         status: number;
         body: unknown;
     }[] = [];
     const fetchImpl = (async (input: unknown, init: RequestInit) => { const response = await app.inject({
         method: 'POST', url: new URL(String(input)).pathname, headers: init.headers as Record<string, string>, payload: init.body as string
-    }); http.push({ status: response.statusCode, body: response.json() }); if (faults.lostAcknowledgement)
+    }); http.push({ status: response.statusCode, body: response.json() }); if (faults.lostAcknowledgement && new URL(String(input)).pathname === '/execution/execute-ticket')
         throw Error('synthetic lost HTTP acknowledgement'); return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } }); }) as typeof fetch;
     const exposure = {
         readExposure: async () => ({ hasOpenPosition: false, hasActiveOrder: false, hasPendingProposal: false, hasAmbiguousSubmission: false, quantity: 0 })
@@ -202,9 +232,11 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
     const configured = new ConfiguredStrategyRuntime({
         configuration: r.config, effectiveConfigHash: r.configHash, accountId, authority: projection.authority, registry: projection.registry, contextLoader: loader, state, assertEvaluationAllowed: assertEntryAllowed, clock: () => observed
     });
+    const { HttpResearchPreparationClient } = await signalModule('runtime/trading-loop/research-preparation-client.ts');
     const makeLoop = () => {
         const timers = capturedSchedulerTimers();
         const loop = new TradingLoopService({
+            researchPreparation: new HttpResearchPreparationClient({ engineUrl: 'http://fixture', bearerToken: faults.unauthorized ? 'invalid' : token, requestTimeoutMs: 10000, fetchFn: fetchImpl }),
             config: {
                 enabled: true, intervalMs: 30000, startupDelayMs: 0, maxConcurrentInstruments: 1, instrumentIds: [instrumentId], shutdownTimeoutMs: 10000, exposureTimeoutMs: 3000
             }, configuredStrategyRuntime: configured, configuredSubmissionEnabled: true, stockMetadataReader: { read: async () => ({ accountId, metadata }) }, assertEntryAllowed, registry: projection.registry, bindingAuthority: projection.authority, marketDataRuntime: market, executionRuntime: runtime, exposureReader: exposure, reconciliationReader: { checkInstrument: async () => ({ kind: 'pass' }) }, portfolioManager: new StrategyPortfolioManager([createStrategy('momentum_breakout_long_v1')]), repo: {}, strategyCooldownMs: 0, maxMarketStateAgeMs: 90000, logger: { info() { }, warn() { }, error() { }, debug() { } }, clock: () => observed, ...timers
@@ -219,7 +251,7 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
         assertEntryAllowed, repository: reviewRepo, execution: {
             getAiContext: async (id: number) => { const record = await repo.getExecutableProposedById(id); assert.ok(record); const assessed = await risk(record.order); assert.ok(assessed.ok); return buildResearchOrderContext({
                 order: record.order, clientOrderHash: record.clientOrderHash!, effectiveConfigHash: r.configHash, accountId, sessionId, connectionGeneration: 1, requestedAt: new Date().toISOString(), nowMs: Date.now(), snapshot: assessed.snapshot, risk: assessed.evidence!, reconciliation: await readContextReconciliation(pool, accountId)
-            }); }, executeBoundProposed: async (id: number) => { const out = await service.executeProposed({ proposedOrderId: id, overrideRejected: false }); if (out.kind === 'submitted')
+            }); }, executeBoundProposed: async (id: number) => { const out = await service.executeProposed({ proposedOrderId: id, overrideRejected: false }).catch(error=>{submissionErrors.push(String(error));throw error;});submissionErrors.push(out.kind==='submitted'||out.kind==='resumed'?null:out); if (out.kind === 'submitted' || out.kind === 'resumed')
                 return 'SUBMITTED'; if (faults.brokerUnknown && out.kind === 'execution_error')
                 return 'UNKNOWN'; throw Error(JSON.stringify(out)); }
         }, researchDecider: {
@@ -231,7 +263,7 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
                         };
                     };
                 };
-            }) => { calls++; /* Allow the host clock to pass the disposable Docker DB reservation timestamp. */ /* Allow the host clock to pass the disposable Docker DB reservation timestamp. */ await new Promise(resolve => setTimeout(resolve, 150)); if (faults.researchChanged) {
+            }) => { calls++; /* Allow the host clock to pass the disposable Docker DB reservation timestamp. */ await new Promise(resolve => setTimeout(resolve, 150)); if (faults.researchChanged) {
                 const negative = structuredClone(r.snapshot);
                 negative.coverage[1].status = 'ERROR';
                 negative.coverage[1].complete = false;
@@ -245,9 +277,25 @@ async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {
         }, model: r.manifest.model.model, promptVersion: r.manifest.model.promptVersion
     });
     return {
+        submissionErrors, service, projection, research, r, async freshObservation() { observed=new Date();for(const runtime of runtimes) await runtime.heartbeat();for(const service of ['execution-engine','llm-agent'] as const) await research.observe({configHash:r.configHash,manifestHash:r.manifestHash,service,processId:service,tradingEnabled:false});await lifecycle.observer.triggerNow(); },
+        repairResearch: () => research.storeSnapshot(r.snapshot),
         makeLoop, lifecycle, pool, loop, timers, worker, repo, app, alertsWorker, dispatches, http, riskCalls, bound, calls: () => calls, controls, accountId, entryContext
     };
 }
+test('PP7 research wait reserves no account intent; repaired evidence requires a new natural evaluation before one AI call', { skip: !connection }, () => flow('aapl_smart', async f => {
+    await scheduled(f);
+    assert.equal(f.loop.status().lastOutcomes.aapl_smart.outcome.reason, 'WAITING_FOR_RESEARCH');
+    assert.deepEqual(await counts(f), { proposals: 0, models: 0, attempts: 0 });
+    assert.equal(f.calls(), 0);
+    assert.ok((await f.pool.query("SELECT 1 FROM research_repair_requests WHERE state='WAITING'")).rowCount);
+    await f.repairResearch();
+    assert.deepEqual(await counts(f), { proposals: 0, models: 0, attempts: 0 });
+    f.timers.callbacks.tick!(); await awaitScheduler(f.loop, 2);
+    assert.deepEqual(await counts(f), { proposals: 1, models: 0, attempts: 0 });
+    await f.lifecycle.observer.triggerNow(); await f.worker.pollOnce();
+    assert.deepEqual(await counts(f), { proposals: 1, models: 1, attempts: 1 });
+    assert.equal(await f.worker.pollOnce(), false);
+}, { missingResearch: true }));
 for (const id of ['pko_wse', 'aapl_smart', 'xyz_nyse'])
     test(`PP7 scheduled ${id} completes research, fresh-risk bracket and supervised full close`, { skip: !connection }, () => flow(id, async (f) => {
         f.loop.start();
@@ -287,7 +335,7 @@ for (const id of ['pko_wse', 'aapl_smart', 'xyz_nyse'])
         await f.lifecycle.observer.triggerNow();
         assert.equal(f.lifecycle.observer.status().healthy, true, JSON.stringify((await f.pool.query('SELECT observation FROM lifecycle_supervision')).rows));
         await f.lifecycle.deadline();
-        assert.equal(f.lifecycle.state.closeDispatches, 1, JSON.stringify((await f.pool.query('SELECT * FROM lifecycle_supervision')).rows));
+        assert.equal(f.lifecycle.state.closeDispatches, 1, JSON.stringify({health:f.lifecycle.observer.status(),rows:(await f.pool.query('SELECT original_proposal_id,status,observation FROM lifecycle_supervision')).rows,alerts:(await f.pool.query('SELECT code,evidence FROM lifecycle_faults')).rows}));
         await f.lifecycle.fillClose();
         const close = await f.lifecycle.close.get(Number(row.id));
         assert.equal(close?.state, 'COMPLETED', JSON.stringify(close));
@@ -409,3 +457,42 @@ for (const source of ['session', 'configuration peers'] as const)
         assert.equal(f.calls(), 0);
         assert.equal(f.dispatches.length, 0);
     }));
+
+test('v3 production repository and observer retain three same-contract cycles and reject changed terminal commissions', {skip:!connection},()=>flow('aapl_smart',async f=>{
+ await scheduled(f);
+ const ids:number[]=[];
+ for(let cycle=0;cycle<3;cycle++){
+  if(cycle){ await new Promise(resolve=>setTimeout(resolve,60000-Date.now()%60000+50));await f.freshObservation();const now=Date.now()-1; const ticket={...f.dispatches[0].normalizedTicket,reason:`new independent synthetic signal ${cycle}`,strategyTrigger:{...f.dispatches[0].normalizedTicket.strategyTrigger!,observedAt:new Date(now).toISOString(),bucketStartMs:Math.floor(now/60000)*60000}};await f.freshObservation();const result=await f.service.submitTicket({ticket,strategy:'momentum_breakout_long_v1',clientOrderId:`loop:v4:aapl_smart:momentum_breakout_long_v1:${strategyTriggerId(ticket.strategyTrigger)}`,clientOrderHash:computeClientOrderHash(ticket)});assert.equal(result.kind,'awaiting_ai',JSON.stringify(result)); }
+  await f.lifecycle.observer.triggerNow();await f.worker.pollOnce();assert.equal(f.dispatches.length,cycle+1,JSON.stringify(f.submissionErrors));
+  const id=Number((await f.pool.query("SELECT id FROM proposed_orders WHERE position_effect IS DISTINCT FROM 'CLOSE_OR_REDUCE' ORDER BY id DESC LIMIT 1")).rows[0].id);ids.push(id);
+  await f.lifecycle.fillEntry(f.dispatches[cycle]);await f.lifecycle.observer.triggerNow();
+  assert.equal((await f.pool.query('SELECT status FROM lifecycle_supervision WHERE original_proposal_id=$1',[id])).rows[0].status,'PROTECTED',JSON.stringify({health:f.lifecycle.observer.status(),rows:(await f.pool.query('SELECT original_proposal_id,status,observation FROM lifecycle_supervision')).rows,alerts:(await f.pool.query('SELECT code,evidence FROM lifecycle_faults')).rows}));
+  for(const previous of ids.slice(0,-1)){const e=await f.repo.getRoundTripEvidence(previous,f.accountId);assert.ok(e);assert.equal(evaluateRoundTrip(e,f.lifecycle.context()).status,'COMPLETED');}
+  const close=await f.lifecycle.close.request(id,randomUUID(),100.19,'fixture');assert.equal(close.state,'SUBMITTED',JSON.stringify(close));await f.lifecycle.fillClose();
+  assert.equal((await f.pool.query('SELECT status FROM lifecycle_supervision WHERE original_proposal_id=$1',[id])).rows[0].status,'FLAT');
+  const e=await f.repo.getRoundTripEvidence(id,f.accountId);assert.ok(e);assert.equal(e.fills.length,2);assert.equal(evaluateRoundTrip(e,f.lifecycle.context()).status,'COMPLETED');
+ }
+ assert.deepEqual(await counts(f),{proposals:3,models:3,attempts:3});
+ const before=(await f.pool.query('SELECT terminal_proof FROM lifecycle_supervision WHERE original_proposal_id=$1',[ids[0]])).rows[0].terminal_proof;
+ f.lifecycle.commissions.set('pp7-entry-101',.2);await f.lifecycle.observer.triggerNow();assert.equal(f.lifecycle.observer.status().healthy,false);
+ await assert.rejects(f.freshObservation().then(()=>f.worker.pollOnce()));
+ const old=await f.repo.getRoundTripEvidence(ids[0],f.accountId);assert.ok(old);assert.notEqual(evaluateRoundTrip(old,f.lifecycle.context()).status,'COMPLETED');
+ assert.deepEqual((await f.pool.query('SELECT terminal_proof FROM lifecycle_supervision WHERE original_proposal_id=$1',[ids[0]])).rows[0].terminal_proof,before);
+}, {recurring:true}));
+
+test('v3 production admission permits the other instrument only after fresh protected ownership', {skip:!connection},()=>flow('aapl_smart',async f=>{
+ await scheduled(f);await f.lifecycle.observer.triggerNow();await f.worker.pollOnce();assert.equal(f.dispatches.length,1,JSON.stringify(f.submissionErrors));await f.lifecycle.fillEntry(f.dispatches[0]);await f.lifecycle.observer.triggerNow();
+ const bound=f.projection.authority.getBoundInstrument('pko_wse')!;const ticket={...f.dispatches[0].normalizedTicket,instrument:bound.brokerSymbol,instrumentId:bound.instrumentId,conid:String(bound.conId),strategyAttribution:buildStrategyAttribution(f.r.config,bound.instrumentId,'momentum_default')};
+ const result=await f.service.submitTicket({ticket,strategy:'momentum_breakout_long_v1',clientOrderId:`loop:v4:pko_wse:momentum_breakout_long_v1:${strategyTriggerId(ticket.strategyTrigger!)}`,clientOrderHash:computeClientOrderHash(ticket)});
+ assert.equal(result.kind,'awaiting_ai',JSON.stringify(result));assert.equal(f.dispatches.length,1);assert.deepEqual(await counts(f),{proposals:2,models:1,attempts:1});
+ await f.lifecycle.observer.triggerNow();await f.worker.pollOnce();assert.equal(f.dispatches.length,2,JSON.stringify(f.submissionErrors));await f.lifecycle.fillOther(f.dispatches[1],bound);await f.lifecycle.observer.triggerNow();assert.deepEqual((await f.pool.query('SELECT status FROM lifecycle_supervision ORDER BY original_proposal_id')).rows.map(r=>r.status),['PROTECTED','PROTECTED'],JSON.stringify({health:f.lifecycle.observer.status(),faults:(await f.pool.query('SELECT code,evidence FROM lifecycle_faults')).rows}));
+}, {recurring:true}));
+
+test('v3 observer preserves terminal proof and holds a newly observed fill on an old order', {skip:!connection},()=>flow('aapl_smart',async f=>{
+ await scheduled(f);await f.lifecycle.observer.triggerNow();await f.worker.pollOnce();assert.equal(f.dispatches.length,1,JSON.stringify(f.submissionErrors));await f.lifecycle.fillEntry(f.dispatches[0]);await f.lifecycle.observer.triggerNow();
+ const id=Number((await f.pool.query("SELECT id FROM proposed_orders WHERE position_effect IS DISTINCT FROM 'CLOSE_OR_REDUCE'")).rows[0].id);await f.lifecycle.close.request(id,randomUUID(),100.19,'fixture');await f.lifecycle.fillClose();
+ const proof=(await f.pool.query('SELECT terminal_proof FROM lifecycle_supervision WHERE original_proposal_id=$1',[id])).rows[0].terminal_proof;assert.ok(proof);
+ const snapshot=(await f.pool.query('SELECT broker_snapshot FROM reconciliation_runs ORDER BY id DESC LIMIT 1')).rows[0].broker_snapshot;f.lifecycle.extraExecutions.push({...snapshot.executions[0],execId:'late-old-entry',executedAt:new Date()});await f.lifecycle.observer.triggerNow();
+ assert.equal(f.lifecycle.observer.status().healthy,false);assert.deepEqual((await f.pool.query('SELECT terminal_proof FROM lifecycle_supervision WHERE original_proposal_id=$1',[id])).rows[0].terminal_proof,proof);
+ const evidence=await f.repo.getRoundTripEvidence(id,f.accountId);assert.ok(evidence);assert.notEqual(evaluateRoundTrip(evidence,f.lifecycle.context()).status,'COMPLETED');
+}, {recurring:true}));

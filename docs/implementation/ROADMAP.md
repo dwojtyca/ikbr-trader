@@ -1,5 +1,12 @@
 # AI Trading Platform roadmap
 
+Owner direction 2026-10-12: implement and prepare continuous Paper for PKO and
+AAPL, one share/open position per instrument, no daily attempt quota and USD5/day
+AI. Follow the [accepted continuous-operation plan](phase3/CONTINUOUS_PAPER_OPERATION_PLAN.md)
+and its [evidence report](phase3/CONTINUOUS_PAPER_OPERATION_REPORT.md). This explicit
+scope replaces the earlier bounded-window delivery sequence for the new mode;
+real broker round-trip and soak acceptance remain separate evidence.
+
 Owner correction 2026-10-07: calendar events inform AI adjudication of existing technical proposals; no automatic event-proximity blackout or new signal logic. The [WSH context package](phase3/PP7_WSH_CONTEXT_IMPLEMENTATION_REPORT.md) records implementation and validation separately from deployment and Paper trade evidence.
 
 Updated: 2026-10-06 (PP7 reviewed source published with successful CI; operational Gates A–D remain unaccepted).
