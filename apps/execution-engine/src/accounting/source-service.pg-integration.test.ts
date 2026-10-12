@@ -105,7 +105,12 @@ test("F1 durable production source, qualification, capture and admission", { ski
     });
     await t.test("filled day waits for post-end fees and exact late duplicates on either socket remain positive", async () => {
       const f = await fixture(); f.socket.feesAfterEnd = true; f.socket.fills = [f.socket.fill()];
-      await f.qualify(); await delay(25); await f.drained(); f.socket.feesAfterEnd = false;
+      await f.service.inspect(); await f.drained();
+      const observations = (await pool.query(`SELECT kind FROM broker_accounting_observations WHERE source_id=$1
+        AND kind IN ('replay_end','commission') ORDER BY sequence`, [f.store.sourceId])).rows.map(row => row.kind);
+      assert.deepEqual(observations, ["replay_end", "commission"]);
+      f.socket.feesAfterEnd = false;
+      await f.qualify();
       const { joined, context } = await f.capture();
       const day = await readPaperDailyLoss(pool, { ...context, nowMs: Date.now() }); assert.equal(day.ok, true, JSON.stringify(day));
       if (day.ok) assert.deepEqual(day.evidence.debits, { USD: 3, PLN: 0 });
@@ -117,6 +122,23 @@ test("F1 durable production source, qualification, capture and admission", { ski
       f.service.observeCommission({ execId: String(fill.exec.execId), commission: 1, currency: "USD", realizedPnL: -2 }, async () => {});
       assert.throws(() => f.service.assertCurrent(joined.accounting), /PERSISTENCE_PENDING/); await f.drained(); f.service.assertCurrent(joined.accounting);
       await f.service.close();
+    });
+    for (const fence of [1, 2]) await t.test(`late duplicate commission at qualification fence ${fence} rejects and rolls back`, async () => {
+      const f = await fixture(); f.socket.fills = [f.socket.fill()];
+      const recordQualification = f.store.recordQualification.bind(f.store);
+      let checks = 0;
+      f.store.recordQualification = (record, assertCurrent) => recordQualification(record, () => {
+        assertCurrent();
+        if (++checks === fence) f.socket.emit("commissionReport", f.socket.fills[0].fee);
+        assertCurrent();
+      });
+      try {
+        await assert.rejects(f.qualify(), /ACCOUNTING_INSPECTION_INVALID/);
+        assert.equal(checks, fence);
+        await f.drained();
+        assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_qualifications WHERE source_id=$1", [f.store.sourceId])).rows[0].count, "0");
+        assert.equal((await f.store.control()).qualification_id, null);
+      } finally { await f.service.close(); }
     });
     await t.test("missing or unset fees cannot qualify a filled current day", async () => {
       for (const mode of ["missing", "unset"]) {

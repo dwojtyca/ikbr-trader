@@ -102,3 +102,33 @@ files, excluding ignored private backups and secrets. Runtime remains on the
 previous pinned image with trading disabled while release work proceeds.
 No actual new Paper entry, fill, round trip, soak or profitable strategy result
 is established by this report.
+
+## Exact-commit CI fixture repair
+
+The first published source commit `c8b9aea723f035dcfcb1bcf0ea29a26794c8b935`
+failed [GitHub integration checks](https://github.com/dwojtyca/ikbr-trader/actions/runs/38244005064)
+in the accounting qualification fixture. Both the host and exact clean Docker
+image passed all2531 integration tests, so no failure was guessed from those runs.
+The owner supplied the unavailable authenticated CI log: an89ms filled-day test
+raised `ACCOUNTING_INSPECTION_INVALID` at the qualification transaction fence.
+
+The fixture scheduled a delayed duplicate commission during each of two
+inspections. The second inspection already had the fee cached, so the duplicate
+could arrive after its barrier was captured and before qualification committed.
+Production correctly rejected that changed barrier. The repair explicitly proves
+that the initial inspection persists replay end before the first delayed fee,
+then uses synchronous replay for positive filled-account qualification. Existing
+debit and both-socket late-duplicate assertions remain. New deterministic cases
+inject the duplicate at both qualification transaction fences and require rejection
+with no committed qualification or control pointer. No production code, timeout,
+accounting requirement or trading guard changes.
+
+The independent Astra/high implementation reviewer accepted this narrow fixture
+repair and report. Targeted PostgreSQL checks passed23/23 on the host,23/23 in
+each of five clean-image repetitions, and23/23 in the independent review. The
+worker requested Astra/high; actual model telemetry and token usage are unavailable.
+This was one fixture repair, with no model escalation. Final full repair checks
+passed: lint, typecheck, unit tests (3307 total,3129 passed,178 skipped), isolated
+PostgreSQL integration tests (2533 passed,0 skipped) and build, all exit0.
+Publication, exact-commit CI and an updated clean image are the remaining release
+gates at this report freeze; private deployment receipts record their outcome.
