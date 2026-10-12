@@ -100,3 +100,87 @@ test("a final send permit expires with alert worker health even when broker and 
     await assert.rejects(store.permit(db, context, deps), /ALERT_WORKER_STALE/);
   } finally { db.release(); }
 }));
+
+const startReason = `paper-start:${randomUUID()}`;
+test("explicit startup requires its audited pause; stale CAS cannot run gates or undo newer pauses", { skip: !url }, () => fixture(async (_pool, store) => {
+  await store.adopt(accountId, false);
+  await assert.rejects(store.withStartupPause(accountId, 1, async () => null), /ENTRY_START_INTENT_REQUIRED/);
+  await store.setPaused(accountId, true, "operator", startReason, undefined, 1);
+  assert.equal(await store.withStartupPause(accountId, 2, async () => "prepared"), "prepared");
+  await store.setPaused(accountId, true, "operator", "newer stop", undefined, 2);
+  let gateCalls = 0;
+  const gate = async () => { gateCalls++; return { validUntilMs: Date.now() + 10000, assertCurrent() {} }; };
+  await assert.rejects(store.setPaused(accountId, false, "operator", startReason, gate, 2), /REVISION_CHANGED/);
+  await assert.rejects(store.withStartupPause(accountId, 2, async () => assert.fail("must not prepare")), /REVISION_CHANGED/);
+  assert.equal(gateCalls, 0);
+  assert.equal((await store.read(accountId)).control.paused, true);
+  assert.equal((await store.read(accountId)).events.length, 3);
+}));
+
+test("startup preparation serializes with pause and rolls queue work back on a failed final fence", { skip: !url }, () => fixture(async (pool, store) => {
+  await store.adopt(accountId, false);
+  await store.setPaused(accountId, true, "operator", startReason);
+  await pool.query("CREATE TABLE startup_queue_fixture(id integer PRIMARY KEY)");
+  await assert.rejects(store.withStartupPause(accountId, 2, async db => {
+    await db.query("INSERT INTO startup_queue_fixture VALUES(1)");
+    throw Error("connection changed");
+  }), /connection changed/);
+  assert.equal((await pool.query("SELECT * FROM startup_queue_fixture")).rowCount, 0);
+  let entered!: () => void, release!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const prepare = store.withStartupPause(accountId, 2, async db => {
+    await db.query("INSERT INTO startup_queue_fixture VALUES(1)"); entered(); await pending;
+  });
+  await ready;
+  let paused = false;
+  const pause = store.setPaused(accountId, true, "operator", "stop during preparation").then(() => { paused = true; });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(paused, false);
+  release(); await prepare; await pause;
+  await assert.rejects(store.withStartupPause(accountId, 2, async () => null), /REVISION_CHANGED/);
+  assert.equal((await store.read(accountId)).control.paused, true);
+}));
+
+test("concurrent resumed startup commits only one CAS event and cannot prepare after resume", { skip: !url }, () => fixture(async (_pool, store) => {
+  await store.adopt(accountId, false);
+  await store.setPaused(accountId, true, "operator", startReason);
+  const gate = async () => ({ validUntilMs: Date.now() + 10000, assertCurrent() {} });
+  const outcomes = await Promise.allSettled([1, 2].map(() => store.setPaused(accountId, false, "operator", startReason, gate, 2)));
+  assert.equal(outcomes.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(result => result.status === "rejected").length, 1);
+  const state = await store.read(accountId);
+  assert.equal(Number(state.control.revision), 3); assert.equal(state.control.paused, false);
+  assert.equal(state.events[0].reason, startReason);
+  await assert.rejects(store.withStartupPause(accountId, 3, async () => null), /ENTRY_START_PAUSE_REQUIRED/);
+}));
+
+test("paused explicit startup queues missing research through the real store without reservations and rolls back failed preparation", { skip: !url }, () => fixture(async (pool, controls) => {
+  const { researchFixture } = await import("@ikbr/shared/instrument-research-testfixture");
+  const { ResearchStore, researchHash } = await import("@ikbr/shared/instrument-research");
+  const { canonicalizeTradingConfiguration } = await import("@ikbr/shared/trading-config");
+  const f = researchFixture(), research = new ResearchStore(pool);
+  f.manifest.refreshEnabled = true; f.policy.sources[0].parserConfig = { kind: "sec-json" };
+  f.manifestHash = researchHash(f.manifest); f.snapshot.manifestHash = f.manifestHash; f.snapshot.mappingHash = researchHash(f.policy);
+  await pool.query("INSERT INTO trading_configuration_snapshots(effective_hash,schema_version,canonical_version,canonical_json) VALUES($1,1,1,$2)", [f.configHash, canonicalizeTradingConfiguration(f.config)]);
+  await research.registerManifest({ manifest: f.manifest, configuration: f.config, tradingEnabled: false, adopt: true });
+  for (const service of ["execution-engine", "llm-agent"] as const)
+    await research.observe({ configHash: f.configHash, manifestHash: f.manifestHash, service, processId: service, tradingEnabled: true });
+  const missing = structuredClone(f.snapshot);
+  missing.coverage = missing.coverage.filter(c => c.role !== "reports"); missing.evidence = []; missing.reports = []; missing.facts = [];
+  await research.storeSnapshot(missing);
+  const identity = { accountId, instrumentId: f.policy.instrumentId, configHash: f.configHash, manifestHash: f.manifestHash };
+  await controls.adopt(accountId, false);
+  await controls.setPaused(accountId, true, "operator", startReason);
+  await assert.rejects(controls.withStartupPause(accountId, 2, async db => {
+    assert.equal((await research.prepareRepair(identity, db)).state, "WAITING"); throw Error("final connection fence");
+  }), /final connection fence/);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM research_repair_requests")).rows[0].n, 0);
+  for (let i = 0; i < 2; i++) assert.equal((await controls.withStartupPause(accountId, 2, db => research.prepareRepair(identity, db))).state, "WAITING");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM research_repair_requests WHERE state='WAITING'")).rows[0].n, 1);
+  await research.storeSnapshot(f.snapshot);
+  assert.equal((await controls.withStartupPause(accountId, 2, db => research.prepareRepair(identity, db))).state, "READY");
+  assert.equal((await pool.query("SELECT count(*)::int n FROM research_call_reservations")).rows[0].n, 0);
+  assert.equal((await pool.query("SELECT count(*)::int n FROM proposed_orders")).rows[0].n, 0);
+  assert.equal((await controls.read(accountId)).control.paused, true);
+}));

@@ -83,9 +83,9 @@ export default [
   // dedicated transport module.
   {
     files: ["tools/paper-verify-stack/src/**/*.ts"],
-    // PP6 operator-client has its own fixed-origin/authenticated control contract.
+    // PP6 operator-client and the explicit Paper runtime CLI have fixed-origin authenticated control contracts.
     // The original infrastructure verifier remains GET-only in http.ts.
-    ignores: ["tools/paper-verify-stack/src/http.ts", "tools/paper-verify-stack/src/operator-client.ts"],
+    ignores: ["tools/paper-verify-stack/src/http.ts", "tools/paper-verify-stack/src/operator-client.ts", "tools/paper-verify-stack/src/paper-runtime-cli.ts"],
     rules: {
       "no-restricted-globals": [
         "error",

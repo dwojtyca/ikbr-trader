@@ -82,6 +82,28 @@ hipotetycznego rozszerzenia, a nie wynik pomiaru ani obietnica obsługi 20 walor
 
 ## Zatrzymanie i codzienny odczyt
 
+Zatwierdzony profil lokalny udostępnia krótkie polecenia operatora:
+
+```sh
+pnpm paper:runtime check
+pnpm start
+pnpm logs
+pnpm status
+pnpm stop
+```
+
+`start` sprawdza prywatny profil i obraz, utrwala audytowaną pauzę wejść,
+uruchamia przygotowanie danych i badań, a wejścia wznawia dopiero po przejściu
+istniejących bramek. Przerwanie uruchamiania zleca nową pauzę; jej brak
+potwierdzenia jest zgłaszany jako nieznany wynik. Błąd odpowiedzi nie dowodzi, że
+operacja nie została wykonana: nie ponawiaj nieznanego wznowienia, sprawdź stan
+operatora. `stop` najpierw anuluje oczekujące lokalne starty, następnie utrwala
+pauzę i zatrzymuje tylko sygnały oraz agenta AI. Gdy API jest niedostępne,
+zatrzymuje te usługi i zgłasza niepotwierdzoną pauzę, zamiast ogłaszać pełny sukces. Execution i ingestion
+pozostają dostępne dla nadzoru i automatycznych wyjść; sprawdź stan pozycji przed
+ich ręcznym wyłączeniem. Profil lokalny i dowód wydania są prywatne, ignorowane
+przez Git i pomijane w kontekście obrazu Docker.
+
 Zatrzymanie nowych wejść przez istniejący interfejs:
 
 ```sh

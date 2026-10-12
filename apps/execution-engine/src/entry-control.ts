@@ -48,10 +48,12 @@ export class EntryControlStore {
   }
 
   async setPaused(accountId: string, paused: boolean, actor: string, reason: string,
-    resumeGate?: (db: PoolClient) => Promise<EntryControlPermit>): Promise<void> {
+    resumeGate?: (db: PoolClient) => Promise<EntryControlPermit>, expectedRevision?: number): Promise<void> {
     await this.locked(accountId, async db => {
       const row = await db.query("SELECT revision FROM execution_entry_controls WHERE account_id=$1 FOR UPDATE", [accountId]);
       if (!row.rowCount) throw new EntryControlError("ENTRY_CONTROL_UNADOPTED");
+      if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1 ||
+        Number(row.rows[0].revision) !== expectedRevision)) throw new EntryControlError("ENTRY_CONTROL_REVISION_CHANGED");
       if (!paused && !resumeGate) throw new EntryControlError("ENTRY_RESUME_GATE_REQUIRED");
       const permit = !paused ? await resumeGate!(db) : null;
       permit?.assertCurrent();
@@ -63,6 +65,22 @@ export class EntryControlStore {
       // A failed final fence rolls back both the state change and its audit.
       permit?.assertCurrent();
       if (permit && Date.now() >= permit.validUntilMs) throw new EntryControlError("ENTRY_RESUME_EVIDENCE_EXPIRED");
+    });
+  }
+
+  async withStartupPause<T>(accountId: string, expectedRevision: number, work: (db: PoolClient) => Promise<T>): Promise<T> {
+    return this.locked(accountId, async db => {
+      const result = await db.query(`SELECT c.revision,c.paused,e.reason FROM execution_entry_controls c
+        LEFT JOIN execution_entry_control_events e ON e.account_id=c.account_id AND e.revision=c.revision
+        WHERE c.account_id=$1 FOR UPDATE OF c`, [accountId]);
+      const row = result.rows[0];
+      if (!row) throw new EntryControlError("ENTRY_CONTROL_UNADOPTED");
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1 || Number(row.revision) !== expectedRevision)
+        throw new EntryControlError("ENTRY_CONTROL_REVISION_CHANGED");
+      if (row.paused !== true) throw new EntryControlError("ENTRY_START_PAUSE_REQUIRED");
+      if (typeof row.reason !== "string" || !/^paper-start:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(row.reason))
+        throw new EntryControlError("ENTRY_START_INTENT_REQUIRED");
+      return work(db);
     });
   }
 
@@ -141,11 +159,11 @@ export function registerEntryControlRoutes(app: FastifyInstance, deps: {
   assertAccount(): void;
   resumeGate(db: PoolClient): Promise<EntryControlPermit>;
 }) {
-  const body = z.object({ reason: z.string().trim().min(1).max(240) }).strict();
+  const body = z.object({ reason: z.string().trim().min(1).max(240), expectedRevision: z.number().int().positive().safe().optional() }).strict();
   app.get("/execution/entry-control", async () => {
     deps.assertAccount();
     const context = deps.context();
-    return { configuredPause: context.entriesPaused, automationEnabled: context.automationEnabled,
+    return { startupProtocolVersion: 1, configuredPause: context.entriesPaused, automationEnabled: context.automationEnabled,
       ...await deps.store.read(context.accountId) };
   });
   for (const action of ["pause", "resume"] as const) {
@@ -155,7 +173,7 @@ export function registerEntryControlRoutes(app: FastifyInstance, deps: {
       if (!parsed.success) return reply.code(400).send({ error: "invalid_entry_control_request" });
       const context = deps.context();
       await deps.store.setPaused(context.accountId, action === "pause",
-        `operator:${getExecutionAuthContext(request)?.tokenFingerprint ?? "unknown"}`, parsed.data.reason, deps.resumeGate);
+        `operator:${getExecutionAuthContext(request)?.tokenFingerprint ?? "unknown"}`, parsed.data.reason, deps.resumeGate, parsed.data.expectedRevision);
       return deps.store.read(context.accountId);
     });
   }

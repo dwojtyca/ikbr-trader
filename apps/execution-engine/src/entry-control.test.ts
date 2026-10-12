@@ -47,3 +47,23 @@ test("pause remains authenticated/account-scoped with writes off, resume remains
     assert.equal(pauses, 1);
   } finally { await app.close(); }
 });
+
+test("startup protocol advertises support and pause/resume pass only valid CAS revisions", async () => {
+  const app = Fastify(); const seen: (number | undefined)[] = [];
+  const store = { read: async () => ({ control: { paused: true, revision: "2" } }),
+    setPaused: async (...args: unknown[]) => { seen.push(args[5] as number | undefined); } } as unknown as EntryControlStore;
+  registerEntryControlRoutes(app, { store, context: () => ({ accountId: "DU_TEST", sessionId: "fixture", entriesPaused: false, automationEnabled: true }),
+    assertAccount() {}, resumeGate: async () => ({ validUntilMs: Date.now() + 1000, assertCurrent() {} }) });
+  try {
+    assert.equal((await app.inject({ url: "/execution/entry-control" })).json().startupProtocolVersion, 1);
+    for (const action of ["pause", "resume"]) {
+      const url = `/execution/entry-control/${action}`;
+      for (const expectedRevision of [0, -1, 1.1, "2", Number.MAX_SAFE_INTEGER + 1, null])
+        assert.equal((await app.inject({ method: "POST", url, payload: { reason: "fixture", expectedRevision } })).statusCode, 400);
+      assert.equal((await app.inject({ method: "POST", url, payload: { reason: "fixture", expectedRevision: 2, extra: true } })).statusCode, 400);
+      assert.equal((await app.inject({ method: "POST", url, payload: { reason: "fixture", expectedRevision: 2 } })).statusCode, 200);
+      assert.equal((await app.inject({ method: "POST", url, payload: { reason: "fixture" } })).statusCode, 200);
+    }
+    assert.deepEqual(seen, [2, undefined, 2, undefined]);
+  } finally { await app.close(); }
+});

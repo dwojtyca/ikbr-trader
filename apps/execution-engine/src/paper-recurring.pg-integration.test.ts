@@ -57,14 +57,19 @@ test('v3 allows only the other protected contract and preserves account-wide unk
  assert.deepEqual(await checkPaperEntryBudget(f.pool,f.policy,f.account,second,{proposalId:second.id,dispatch:true},f.guard),{ok:false,reason:'paper_budget_active_attempt'});
 }));
 test('v3 binds actual session proof and a calendar revision only tightens the original cutoff', {skip:!url},()=>fixture(async f=>{
- await f.adopt();const order=await f.proposal();const binding=(await f.pool.query('SELECT * FROM paper_run_proposals WHERE proposed_order_id=$1',[order.id])).rows[0];assert.ok(binding.ends_at-binding.starts_at>3600000);assert.match(binding.session_binding.hash,/^[a-f0-9]{64}$/);
+ await f.adopt();
+ const instrumentId=f.policy.instruments![0].instrumentId;
+ const stored=(await f.pool.query('SELECT evidence FROM instrument_session_schedules WHERE instrument_id=$1',[instrumentId])).rows[0].evidence;
+ const fixtureSessionEnd=stored.sessions[0].end;
+ stored.sessions[0].end=new Date(Date.parse(fixtureSessionEnd)-15*60000).toISOString();
+ await f.pool.query('UPDATE instrument_session_schedules SET generation=generation+1,evidence=$2 WHERE instrument_id=$1',[instrumentId,stored]);
+ const order=await f.proposal();const binding=(await f.pool.query('SELECT * FROM paper_run_proposals WHERE proposed_order_id=$1',[order.id])).rows[0];assert.ok(binding.ends_at-binding.starts_at>3600000);assert.match(binding.session_binding.hash,/^[a-f0-9]{64}$/);
  const check=()=>checkPaperEntryBudget(f.pool,f.policy,f.account,order,{proposalId:order.id},f.guard);
- const original=await check();assert.ok(original.ok);
- const stored=(await f.pool.query('SELECT evidence FROM instrument_session_schedules WHERE instrument_id=$1',[order.instrumentId])).rows[0].evidence;
- stored.sessions[0].end=new Date(Date.now()+30*60000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET generation=generation+1,evidence=$2 WHERE instrument_id=$1',[order.instrumentId,stored]);
- const shortened=await check();assert.ok(shortened.ok);assert.ok(shortened.endsAtMs<original.endsAtMs);
- stored.sessions[0].end=new Date(Date.now()+2*3600000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET generation=generation+1,evidence=$2 WHERE instrument_id=$1',[order.instrumentId,stored]);
- const extended=await check();assert.ok(extended.ok);assert.equal(extended.endsAtMs,original.endsAtMs);
+ const original=await check();assert.ok(original.ok,JSON.stringify(original));
+ stored.sessions[0].end=new Date(Date.parse(fixtureSessionEnd)-30*60000).toISOString();await f.pool.query('UPDATE instrument_session_schedules SET generation=generation+1,evidence=$2 WHERE instrument_id=$1',[order.instrumentId,stored]);
+ const shortened=await check();assert.ok(shortened.ok,JSON.stringify(shortened));assert.ok(shortened.endsAtMs<original.endsAtMs);
+ stored.sessions[0].end=fixtureSessionEnd;await f.pool.query('UPDATE instrument_session_schedules SET generation=generation+1,evidence=$2 WHERE instrument_id=$1',[order.instrumentId,stored]);
+ const extended=await check();assert.ok(extended.ok,JSON.stringify(extended));assert.equal(extended.endsAtMs,original.endsAtMs);
  await f.pool.query("UPDATE instrument_session_schedules SET status='FAILED' WHERE instrument_id=$1",[order.instrumentId]);assert.equal((await check()).ok,false);
 }));
 test('SQL explicit null capability rejects missing or malformed quotas and forged session binding', {skip:!url},()=>fixture(async f=>{

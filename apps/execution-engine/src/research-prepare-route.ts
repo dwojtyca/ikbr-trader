@@ -1,8 +1,36 @@
 import type { FastifyInstance } from "fastify";
 import type { ResearchRepairIdentity, ResearchStore } from "@ikbr/shared/instrument-research";
+import type { EntryControlStore } from "./entry-control.js";
 import { getExecutionAuthContext } from "./auth.js";
 
 export interface ResearchPrepareRequest { instrumentId: string; conid: string; effectiveConfigHash: string }
+
+export function registerStartupResearchPrepareRoute(app: FastifyInstance, deps: {
+  store: Pick<ResearchStore, "prepareRepair">;
+  controls: Pick<EntryControlStore, "withStartupPause">;
+  authorize(): Promise<{ accountId: string; instruments: ResearchRepairIdentity[]; assertCurrent(): Promise<void> }>;
+}): void {
+  app.post("/execution/entry-control/start/prepare", async (request, reply) => {
+    if (!getExecutionAuthContext(request)?.tokenFingerprint) return reply.code(401).send({ error: "unauthorized" });
+    const raw = request.body;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).join(",") !== "expectedRevision")
+      return reply.code(400).send({ error: "invalid_entry_start_request" });
+    const revision = (raw as { expectedRevision: unknown }).expectedRevision;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1)
+      return reply.code(400).send({ error: "invalid_entry_start_request" });
+    const authority = await deps.authorize();
+    return deps.controls.withStartupPause(authority.accountId, revision, async db => {
+      await authority.assertCurrent();
+      const instruments = [];
+      for (const identity of authority.instruments) {
+        instruments.push({ instrumentId: identity.instrumentId, ...await deps.store.prepareRepair(identity, db) });
+      }
+      await authority.assertCurrent();
+      return { revision, instruments };
+    });
+  });
+}
+
 export function registerResearchPrepareRoute(app: FastifyInstance, deps: {
   store: Pick<ResearchStore, "prepareRepair">;
   /** Derives the current allowed account and manifest; rejects paused/drifted or foreign instruments. */

@@ -23,7 +23,12 @@
     "dev:llm": "pnpm --filter @ikbr/llm-agent dev",
     "dev:backtest": "pnpm --filter @ikbr/backtest-engine dev",
     "dev:ui": "pnpm --filter @ikbr/ui dev",
-    "paper:ops": "pnpm --filter @ikbr/paper-verify-stack ops"
+    "paper:ops": "pnpm --filter @ikbr/paper-verify-stack ops",
+    "start": "pnpm --filter @ikbr/paper-verify-stack runtime start",
+    "stop": "pnpm --filter @ikbr/paper-verify-stack runtime stop",
+    "logs": "pnpm --filter @ikbr/paper-verify-stack runtime logs",
+    "status": "pnpm --filter @ikbr/paper-verify-stack runtime status",
+    "paper:runtime": "pnpm --filter @ikbr/paper-verify-stack runtime"
   },
   "packageManager": "pnpm@9.5.0",
   "engines": {

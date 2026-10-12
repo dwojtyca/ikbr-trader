@@ -1,4 +1,4 @@
-import { registerResearchPrepareRoute } from './research-prepare-route.js';
+import { registerResearchPrepareRoute, registerStartupResearchPrepareRoute } from './research-prepare-route.js';
 import { PaperPolicyAuthority, PaperPolicyConflict } from "./paper-policy-authority.js";
 import { registerPaperPolicyControl } from "./paper-policy-control.js";
 import { registerStockMarketRoutes } from "./stock-market-routes.js";
@@ -1014,6 +1014,36 @@ async function ensureBrokerSession(): Promise<{
  * counts / ids appear in the boot log.
  */
 const instrumentBindingAuthority = tradingConfiguration.authority;
+registerStartupResearchPrepareRoute(app, { store: researchStore, controls: entryControls, authorize: async () => {
+  assertLifecycleManagement();
+  const accountId = entryControlContext().accountId, generation = tws.getConnectionGeneration();
+  const loaded = tradingConfiguration.loaded, identity = researchIdentity();
+  if (loaded.mode !== 'bundle' || !identity || identity.configHash !== loaded.effectiveHash)
+    throw new EntryControlError('ENTRY_START_RESEARCH_IDENTITY_INVALID');
+  if (!loadedResearch?.manifest.refreshEnabled) throw new EntryControlError('RESEARCH_REFRESH_DISABLED');
+  if (process.env.RESEARCH_BUDGET_ACCOUNT_ID?.trim() !== accountId)
+    throw new EntryControlError('RESEARCH_PREPARATION_BUDGET_ACCOUNT_MISMATCH');
+  const instruments = loaded.configuration.instruments.filter(instrument => instrument.entryEnabled).map(instrument => {
+    const bound = instrumentBindingAuthority.getBoundInstrument(instrument.id);
+    if (!bound || !getSupportedStockCapability(bound) || String(bound.conId) !== String(instrument.contract.conId))
+      throw new EntryControlError('ENTRY_START_INSTRUMENT_UNSUPPORTED');
+    return { accountId, ...identity, instrumentId: instrument.id };
+  });
+  if (!instruments.length) throw new EntryControlError('ENTRY_START_INSTRUMENTS_UNAVAILABLE');
+  const assertConnectionCurrent = () => {
+    assertLifecycleManagement();
+    if (accountId !== lastActiveAccountId || generation !== tws.getConnectionGeneration())
+      throw new EntryControlError('ENTRY_START_CONNECTION_CHANGED');
+  };
+  const assertCurrent = async () => {
+    assertConnectionCurrent();
+    try { await configurationRuntime.assertEntryAllowed(); }
+    catch { throw new EntryControlError('ENTRY_START_CONFIGURATION_UNAVAILABLE'); }
+    assertConnectionCurrent();
+  };
+  await assertCurrent();
+  return { accountId, instruments, assertCurrent };
+} });
 registerResearchPrepareRoute(app, { store: researchStore, authorize: async input => {
   await assertNewEntryAllowed();
   const loaded = tradingConfiguration.loaded, identity = researchIdentity();

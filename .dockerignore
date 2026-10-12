@@ -12,3 +12,6 @@ README.md
 .env
 .env.*
 !.env.example
+/backups/
+/.local/
+**/private-config/
