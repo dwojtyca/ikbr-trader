@@ -8,7 +8,7 @@ class Fake extends EventEmitter {
   contract: Record<string, unknown> = { conId: 1234567, symbol: 'XYZ', localSymbol: 'XYZ', tradingClass: 'NMS', secType: 'STK', exchange: 'SMART', primaryExch: 'NASDAQ', currency: 'USD' };
   requests: unknown[][] = []; disconnected = false; cancelled: number[] = [];
   hours: Record<string,unknown> = { timeZoneId: 'US/Eastern', liquidHours: '20260924:0930-20260924:1600', tradingHours: '20260924:0400-20260924:2000' };
-  hang = false; duplicate = false; wrongTimezone = false; error = false;
+  hang = false; duplicate = false; wrongTimezone = false; error = false; throwOnSend = false;
   connect() { queueMicrotask(() => this.emit('nextValidId', 1)); }
   disconnect() { this.disconnected = true; this.emit('disconnected'); }
   reqContractDetails(id: number) { queueMicrotask(() => {
@@ -17,7 +17,7 @@ class Fake extends EventEmitter {
     if (this.duplicate) this.emit('contractDetails', id, { contract: this.contract, ...this.hours });
     this.emit('contractDetailsEnd', id);
   }); }
-  reqHistoricalData(...args: unknown[]) { this.requests.push(args); queueMicrotask(() => {
+  reqHistoricalData(...args: unknown[]) { this.requests.push(args); if (this.throwOnSend) throw new Error('send failed'); queueMicrotask(() => {
     if (this.hang) return;
     if (this.error) { this.emit('error', new Error('fixture'), 162, args[0]); return; }
     const session = { refDate: '20260924', startDateTime: '20260924-09:30:00', endDateTime: '20260924-16:00:00' };
@@ -35,7 +35,7 @@ test('schedule production adapter waits for pacing, exact contract completion an
   assert.equal(result.identity.conId, 1234567); assert.equal(result.identity.timeZone, 'America/New_York');
   assert.deepEqual(ib.requests[0].slice(2), ['', '14 D', '1 day', 'SCHEDULE', true, 1, false]);
   ib.emit("error", new Error("late retired socket error"));
-  assert.equal(ib.disconnected, true); assert.deepEqual(ib.eventNames(), ["error"]); assert.equal(ib.listenerCount("error"), 1); assert.deepEqual(ib.cancelled, [91002]);
+  assert.equal(ib.disconnected, true); assert.deepEqual(ib.eventNames(), ["error"]); assert.equal(ib.listenerCount("error"), 1); assert.deepEqual(ib.cancelled, []);
 });
 for (const failure of ['server', 'missing-server', 'identity', 'duplicate', 'timezone', 'error', 'timeout'] as const)
   test(`schedule adapter fails closed and removes listeners: ${failure}`, async () => {
@@ -50,9 +50,19 @@ for (const failure of ['server', 'missing-server', 'identity', 'duplicate', 'tim
     const adapter = new SessionScheduleAdapter({ ...options, socket: () => ib, acquirePacing: async () => {}, timeoutMs: 20 });
     await assert.rejects(adapter.fetch(sessionIdentityFixture()), /session_schedule/);
     ib.emit("error", new Error("late retired socket error"));
-  assert.equal(ib.disconnected, true); assert.deepEqual(ib.eventNames(), ["error"]); assert.equal(ib.listenerCount("error"), 1);
+    assert.equal(ib.disconnected, true); assert.deepEqual(ib.eventNames(), ["error"]); assert.equal(ib.listenerCount("error"), 1);
     if (['server', 'missing-server', 'identity', 'duplicate'].includes(failure)) assert.equal(ib.requests.length, 0);
+    assert.deepEqual(ib.cancelled, ['error', 'timeout'].includes(failure) ? [91002] : []);
   });
+test('synchronous schedule send failure cancels unfinished history once and retires socket', async () => {
+  const ib = new Fake(); ib.throwOnSend = true;
+  const adapter = new SessionScheduleAdapter({ ...options, socket: () => ib, acquirePacing: async () => {} });
+  await assert.rejects(adapter.fetch(sessionIdentityFixture()), /session_schedule_request_failed/);
+  assert.deepEqual(ib.cancelled, [91002]); assert.equal(ib.disconnected, true);
+  assert.deepEqual(ib.eventNames(), ['error']);
+  ib.emit('historicalSchedule', 91002, 'late', 'late', 'late', []);
+  assert.deepEqual(ib.cancelled, [91002]);
+});
 
 test('generic schedule preserves full-session mode and exact arbitrary futures identity', async () => {
   const identity = sessionIdentityFixture({ instrumentId: 'future', conId: 888, symbol: 'GC', secType: 'FUT', exchange: 'COMEX',

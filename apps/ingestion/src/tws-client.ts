@@ -927,8 +927,12 @@ export class TwsClient {
 
     return new Promise<Candle[]>((resolve, reject) => {
       const bars: Candle[] = [];
+      let settled = false;
+      let brokerCompleted = false;
 
       const timeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         cleanup();
         reject(
           new Error(
@@ -941,10 +945,13 @@ export class TwsClient {
         clearTimeout(timeout);
         this.ib.off("historicalData", onHistoricalData);
         this.ib.off("error", onError);
-        if (options.sessionIdentity) { try { this.ib.cancelHistoricalData?.(reqId); } catch { /* broker may already be disconnected */ } }
+        if (options.sessionIdentity && !brokerCompleted) { try { this.ib.cancelHistoricalData?.(reqId); } catch { /* broker may already be disconnected */ } }
       };
 
       const finalize = () => {
+        if (settled) return;
+        brokerCompleted = true;
+        settled = true;
         cleanup();
         if (options.sessionIdentity && bars.length === 0) { reject(new Error('session_native_history_empty')); return; }
         const uniqueByTs = new Map<number, Candle>();
@@ -1033,7 +1040,8 @@ export class TwsClient {
 
       const onError = (err: Error, codeOrMeta?: unknown, incomingReqId?: number) => {
         const meta = options.sessionIdentity || isAaplSubscription(sub) ? ibErrorMeta(codeOrMeta, incomingReqId) : { code: toNum(codeOrMeta), reqId: incomingReqId };
-        if (meta.reqId !== reqId) return;
+        if (meta.reqId !== reqId || settled) return;
+        settled = true;
         const message = err?.message ?? "unknown historical data error";
         cleanup();
         reject(
@@ -1045,17 +1053,25 @@ export class TwsClient {
 
       this.ib.on("historicalData", onHistoricalData);
       this.ib.on("error", onError);
-      this.ib.reqHistoricalData(
-        reqId,
-        contract,
-        "",
-        durationStr,
-        barSize,
-        options.sessionIdentity?.secType === "CASH" ? "MIDPOINT" : "TRADES",
-        options.sessionIdentity ? (options.sessionIdentity.useRTH ? 1 : 0) : isWseSubscription(sub) || isAaplSubscription(sub) ? 1 : 0,
-        2,
-        false,
-      );
+      try {
+        this.ib.reqHistoricalData(
+          reqId,
+          contract,
+          "",
+          durationStr,
+          barSize,
+          options.sessionIdentity?.secType === "CASH" ? "MIDPOINT" : "TRADES",
+          options.sessionIdentity ? (options.sessionIdentity.useRTH ? 1 : 0) : isWseSubscription(sub) || isAaplSubscription(sub) ? 1 : 0,
+          2,
+          false,
+        );
+      } catch (error) {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(error);
+        }
+      }
     });
   }
 

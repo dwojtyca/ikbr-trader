@@ -298,6 +298,11 @@ export class TwsExecutionClient {
   private readonly brokerOrderWarnings = new Map<number, string[]>();
   private nextRequestId = 1_000_000;
   private accountSnapshotInFlight = false;
+  private accountTraceSequence = 0;
+  private accountTraceGeneration = -1;
+  private accountTraceContext?: { sequence: number; startedAt: number; phase: string };
+  private accountLastSubscribeSentAt?: number;
+  private accountLastUnsubscribeSentAt?: number;
 
   constructor(
     private readonly config: TwsExecutionConfig,
@@ -1133,6 +1138,12 @@ export class TwsExecutionClient {
     if (this.accountSnapshotInFlight) throw new Error("Account snapshot request already in flight");
     this.accountSnapshotInFlight = true;
     const accountConnectionGeneration = this.getConnectionGeneration();
+    if (this.accountTraceGeneration !== accountConnectionGeneration) {
+      this.accountLastSubscribeSentAt = undefined;
+      this.accountLastUnsubscribeSentAt = undefined;
+    }
+    this.accountTraceContext = { sequence: ++this.accountTraceSequence, startedAt: performance.now(), phase: "starting" };
+    this.accountTraceGeneration = accountConnectionGeneration;
 
     return new Promise<AccountSnapshot>((resolve, reject) => {
       const requestStartedAt = new Date().toISOString();
@@ -1141,11 +1152,11 @@ export class TwsExecutionClient {
       let accountTime: string | undefined;
 
       const timeout = setTimeout(() => {
-        cleanup();
+        cleanup("timeout");
         reject(new Error(`Timed out waiting account updates for ${accountId}`));
       }, 10_000);
 
-      const cleanup = () => {
+      const cleanup = (reason: "download_end" | "timeout" | "broker_error" | "send_error") => {
         clearTimeout(timeout);
         this.ib.off("updateAccountValue", onUpdateAccountValue);
         this.ib.off("updatePortfolio", onUpdatePortfolio);
@@ -1154,6 +1165,7 @@ export class TwsExecutionClient {
         this.ib.off("error", onError);
         this.accountSnapshotInFlight = false;
         try {
+          this.traceAccountUpdates("unsubscribe_invoked", reason);
           this.ib.reqAccountUpdates(false, accountId);
         } catch {
           // no-op
@@ -1222,7 +1234,8 @@ export class TwsExecutionClient {
 
       const onAccountDownloadEnd = (accountName: string) => {
         if (accountName !== accountId) return;
-        cleanup();
+        this.traceAccountUpdates("download_end");
+        cleanup("download_end");
         if (accountConnectionGeneration !== this.getConnectionGeneration() || !this.isConnected()) { reject(new Error("Account session changed during download")); return; }
         const explicitUsdMetric = (key: string): number | undefined => {
           const raw = valuesByKey.get(key)?.get("USD");
@@ -1270,7 +1283,7 @@ export class TwsExecutionClient {
         const fatal = new Set([200, 201, 321, 322, 323, 502, 503, 504]);
         if (!fatal.has(code)) return;
 
-        cleanup();
+        cleanup("broker_error");
         reject(
           new Error(
             `Failed to fetch account snapshot: ${parsed.message} (code=${parsed.code ?? "n/a"})`,
@@ -1284,9 +1297,10 @@ export class TwsExecutionClient {
       this.ib.on("accountDownloadEnd", onAccountDownloadEnd);
       this.ib.on("error", onError);
       try {
+        this.traceAccountUpdates("subscribe_invoked");
         this.ib.reqAccountUpdates(true, accountId);
       } catch (error) {
-        cleanup();
+        cleanup("send_error");
         reject(error);
       }
     });
@@ -2415,7 +2429,42 @@ export class TwsExecutionClient {
     return toNum(candidate);
   }
 
+  private traceAccountUpdates(
+    event: "subscribe_invoked" | "unsubscribe_invoked" | "download_end" | "subscribe_sent" | "unsubscribe_sent" | "broker_2100" | "broker_2101",
+    cleanupReason?: "download_end" | "timeout" | "broker_error" | "send_error",
+  ): void {
+    try {
+      const generation = this.getConnectionGeneration();
+      if (this.accountTraceGeneration !== generation) {
+        this.accountTraceGeneration = generation;
+        this.accountTraceContext = undefined;
+        this.accountLastSubscribeSentAt = undefined;
+        this.accountLastUnsubscribeSentAt = undefined;
+      }
+      const now = performance.now();
+      const context = this.accountTraceContext;
+      if (event === "subscribe_sent") this.accountLastSubscribeSentAt = now;
+      if (event === "unsubscribe_sent") this.accountLastUnsubscribeSentAt = now;
+      if (context && !event.startsWith("broker_")) context.phase = event;
+      const elapsed = (at?: number) => at === undefined ? undefined : Math.round((now - at) * 1000) / 1000;
+      this.onLog(`execution account-update trace ${JSON.stringify({
+        event, generation, observedDuringSequence: context?.sequence,
+        phase: context?.phase, snapshotElapsedMs: elapsed(context?.startedAt), cleanupReason,
+        sinceSubscribeSentMs: elapsed(this.accountLastSubscribeSentAt),
+        sinceUnsubscribeSentMs: elapsed(this.accountLastUnsubscribeSentAt),
+      })}`);
+    } catch {
+      // Observability must not change account snapshot acquisition or broker handling.
+    }
+  }
+
   private bindCoreListeners(): void {
+    this.ib.on("sent", (tokens: unknown) => {
+      // ib@0.2.9 emits after socket.write; this is not a broker acknowledgement.
+      if (!Array.isArray(tokens) || tokens.length !== 4 || tokens[0] !== 6 || tokens[1] !== 2) return;
+      if (tokens[2] === 1) this.traceAccountUpdates("subscribe_sent");
+      else if (tokens[2] === 0) this.traceAccountUpdates("unsubscribe_sent");
+    });
     this.ib.on("connected", () => {
       this.connectionGeneration += 1;
       this.onLog("execution socket connected event received");
@@ -2439,6 +2488,8 @@ export class TwsExecutionClient {
 
       const reqId = Number(parsed.reqId);
       const code = Number(parsed.code);
+      if (code === 2100) this.traceAccountUpdates("broker_2100");
+      else if (code === 2101) this.traceAccountUpdates("broker_2101");
       if (!Number.isFinite(reqId) || !Number.isFinite(code)) return;
       if (code === 399) {
         const warning = parsed.message.trim();

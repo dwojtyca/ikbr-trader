@@ -37,7 +37,7 @@ export class SessionScheduleAdapter {
     const requestedAt = new Date(this.options.now?.() ?? Date.now()).toISOString();
     return new Promise((resolve, reject) => {
       const detailsId = 91001, historyId = 91002;
-      let done = false, requested = false, detailsRequested = false;
+      let done = false, requested = false, brokerCompleted = false, detailsRequested = false;
       const details: any[] = [];
       let currentHours: ContractSessionHours | undefined;
       const listeners: Array<[string, (...args: any[]) => void]> = [];
@@ -46,7 +46,7 @@ export class SessionScheduleAdapter {
         if (done) return;
         done = true; clearTimeout(timer);
         for (const [event, handler] of listeners) ib.off(event, handler);
-        if (requested) { try { ib.cancelHistoricalData(historyId); } catch { /* disconnected */ } }
+        if (requested && !brokerCompleted) { try { ib.cancelHistoricalData(historyId); } catch { /* disconnected */ } }
         try { ib.disconnect(); } catch { /* disconnected */ }
         if (error) reject(error); else resolve(schedule!);
       };
@@ -78,7 +78,8 @@ export class SessionScheduleAdapter {
         catch { finish(new Error("session_schedule_request_failed")); }
       });
       listen("historicalSchedule", (id, startDateTime, endDateTime, timeZone, sessions) => {
-        if (id !== historyId || !requested) return;
+        if (id !== historyId || !requested || done) return;
+        brokerCompleted = true;
         try {
           const schedule = parseBrokerSessionSchedule({ startDateTime, endDateTime, timeZone, sessions }, identity, requestedAt, new Date(this.options.now?.() ?? Date.now()).toISOString());
           if (currentHours) schedule.currentHours = currentHours;
