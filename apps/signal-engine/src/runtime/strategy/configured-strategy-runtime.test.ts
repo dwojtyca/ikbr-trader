@@ -7,7 +7,7 @@ import type { Strategy,StrategyContext } from "../../strategies/strategy.types.j
 import { ConfiguredStrategyRuntime, type ConfiguredStrategyRuntimeOptions } from "./configured-strategy-runtime.js";
 import { configuredStrategyRoutes } from "./configured-strategy-routes.js";
 const now=new Date("2026-09-28T12:00:30.000Z");
-function setup(options:{priority?:boolean;disabled?:boolean;exception?:boolean;directionConflict?:boolean;checkSession?:ConfiguredStrategyRuntimeOptions["contextLoader"]["checkSession"];loadError?:string}={}){
+function setup(options:{priority?:boolean;disabled?:boolean;exception?:boolean;directionConflict?:boolean;checkSession?:ConfiguredStrategyRuntimeOptions["contextLoader"]["checkSession"];loadError?:string;diagnosticSecrets?:readonly string[]}={}){
  const raw=JSON.parse(readFileSync(new URL("../../../../../packages/shared/src/trading-configuration/fixtures/valid-generic.json",import.meta.url),"utf8"));
  raw.instruments[0].entryEnabled=true;raw.instruments[0].monitoringEnabled=true;
  const first=raw.strategyInstances[0].id;
@@ -17,7 +17,7 @@ function setup(options:{priority?:boolean;disabled?:boolean;exception?:boolean;d
  const projection=buildTradingConfigurationProjection(parsed.configuration),calls:string[]=[],objects:Strategy[]=[];
  const row=parsed.configuration.instruments[0];
  const counts={state:0,load:0};
- const runtime=new ConfiguredStrategyRuntime({configuration:parsed.configuration,effectiveConfigHash:computeTradingConfigurationHash(parsed.configuration),accountId:"DU_TEST",authority:projection.authority,registry:projection.registry,
+ const runtime=new ConfiguredStrategyRuntime({configuration:parsed.configuration,effectiveConfigHash:computeTradingConfigurationHash(parsed.configuration),accountId:"DU_TEST",diagnosticSecrets:options.diagnosticSecrets,authority:projection.authority,registry:projection.registry,
  state:{sync:async()=>{counts.state++;return {enabled:true,permanentlyDisabled:false};}},assertEvaluationAllowed:async()=>{},clock:()=>now,
  contextLoader:{checkSession:options.checkSession??(async()=>({kind:"OPEN",reason:"MARKET_SESSION_OPEN",evidenceKey:"fixture",checkedAt:100,activeIntervalEnd:200})),load:async(input)=>{counts.load++;if(options.loadError)return {kind:"error",code:"STRATEGY_CONTEXT_UNAVAILABLE",message:options.loadError};assert.ok(!input.timeframes.includes("12h"));return {kind:"ok",context:{symbol:input.instrument.brokerSymbol,secType:"STK",directionalRegime:"bull_trend",volatilityRegime:"normal_volatility",marketState:{lastPrice:10,ts:now}} as StrategyContext};}},
  factory:(instance)=>{const strategy:Strategy={id:instance.implementationId,secTypes:["STK"],supportedDirections:["LONG","SHORT"],allowedDirectionalRegimes:["bull_trend"],allowedVolatilityRegimes:["normal_volatility"],requiredTimeframes:["1m"],generateSignal:(context)=>{
@@ -108,4 +108,40 @@ test("same broker evidence and backwards clock into preopen is not a close race"
   return classifySessionAvailability(evidence,identity,Date.parse(reads++===0?"2026-09-28T08:00:00Z":"2026-09-28T06:30:00Z"));
  }});
  const result=await f.runtime.evaluate(f.row.id);assert.equal(result.kind,"error");assert.equal(f.calls.length,0);
+});
+
+
+test("context errors retain their primary code and sanitized loader detail before raw logging", async () => {
+ const secret = "private/value+credential";
+ const f = setup({diagnosticSecrets:[secret], loadError:`session_expected_candle_missing ${secret} ${encodeURIComponent(secret)} DU_TEST\n\u001b[31m`});
+ const result = await f.runtime.evaluate(f.row.id);
+ assert.equal(result.kind, "error");
+ assert.equal(result.signal, undefined);
+ assert.equal(f.calls.length, 0);
+ assert.equal(result.reasons[0], "STRATEGY_CONTEXT_UNAVAILABLE");
+ assert.match(result.reasons[1], /^session_expected_candle_missing /);
+ assert.doesNotMatch(JSON.stringify(result.reasons), /private|credential|DU_TEST/);
+ assert.ok(!result.reasons[1].includes("\n"));
+ assert.ok(!result.reasons[1].includes("\u001b"));
+ assert.match(result.reasons[1], /\\u000a/);
+});
+
+test("initial and rechecked unavailable sessions retain their specific reason", async () => {
+ for (const failAt of [1,2,3]) {
+  let checks=0;
+  const f=setup({checkSession:async()=>++checks===failAt
+   ? {kind:"UNKNOWN",reason:"session_schedule_stale"}
+   : {kind:"OPEN",reason:"MARKET_SESSION_OPEN",evidenceKey:"stable",checkedAt:100,activeIntervalEnd:200}});
+  const result=await f.runtime.evaluate(f.row.id);
+  assert.equal(result.kind,"error");assert.equal(result.signal,undefined);
+  assert.deepEqual(result.reasons,["STRATEGY_CONTEXT_UNAVAILABLE","session_schedule_stale"]);
+ }
+});
+
+test("changed session evidence has an explicit diagnostic without permitting a signal",async()=>{
+ let checks=0;
+ const f=setup({checkSession:async()=>({kind:"OPEN",reason:"MARKET_SESSION_OPEN",evidenceKey:++checks===1?"before":"after",checkedAt:100,activeIntervalEnd:200})});
+ const result=await f.runtime.evaluate(f.row.id);
+ assert.deepEqual(result.reasons,["STRATEGY_CONTEXT_UNAVAILABLE","session_evidence_changed_during_evaluation"]);
+ assert.equal(result.signal,undefined);assert.equal(f.calls.length,0);
 });

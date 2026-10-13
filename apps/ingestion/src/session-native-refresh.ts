@@ -9,9 +9,15 @@ export interface SessionWarmupStatus {
   expectedStart?: string; expectedEnd?: string; generation?: number; scheduleStatus?: string; scheduleReceivedAt?: string;
   coverageStart?: string; coverageEnd?: string; sessionDate?: string; checkedAt: string; error?: string;
 }
+interface RefreshAttempt {
+  attemptedAt: number;
+  completedAt?: number;
+  expectedEnd?: number;
+  success: boolean;
+}
 export class SessionNativeRefresh {
   private running: Promise<void> | undefined;
-  private checked = new Map<string, number>();
+  private attempts = new Map<string, RefreshAttempt>();
   private rotation = 0;
   readonly status = new Map<string, SessionWarmupStatus>();
   constructor(private readonly deps: {
@@ -31,9 +37,10 @@ export class SessionNativeRefresh {
   }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
   private blocked(sub: InstrumentSubscription, error: string, identity?: InstrumentSessionIdentity): void {
+    const now = this.now();
     for (const tf of Object.keys(SESSION_REQUIRED_CANDLES) as SessionTimeframe[]) this.status.set(`${sub.instrumentId ?? 'unbound'}:${sub.conid}:${identity?.useRTH ? 'rth' : 'full'}:${tf}`, {
       identity, instrumentId: sub.instrumentId, conid: sub.conid, timeframe: tf, required: SESSION_REQUIRED_CANDLES[tf], available: 0,
-      nativeClosed: 0, latest: null, latestEnd: null, checkedAt: new Date(this.now()).toISOString(), error });
+      nativeClosed: 0, latest: null, latestEnd: null, checkedAt: new Date(Number.isFinite(now) ? now : Date.now()).toISOString(), error });
   }
   private async refresh(subscriptions: readonly InstrumentSubscription[]): Promise<void> {
     const entries: Array<{ sub: InstrumentSubscription; identity: InstrumentSessionIdentity }> = [];
@@ -70,27 +77,52 @@ export class SessionNativeRefresh {
   private async refreshTimeframe(sub: InstrumentSubscription, identity: InstrumentSessionIdentity, tf: SessionTimeframe): Promise<void> {
     const key = `${sessionKey(identity)}:${tf}`, required = SESSION_REQUIRED_CANDLES[tf];
     let evidence: SessionScheduleEvidence | null = null;
+    let observedAt = NaN;
     try {
       evidence = await this.deps.schedule(identity);
-      const now = this.now(), schedule = requireSessionHistorySchedule(evidence, identity, now);
+      observedAt = this.now();
+      if (!Number.isFinite(observedAt)) throw new Error('session_timestamp_invalid');
+      requireSessionHistorySchedule(evidence, identity, observedAt);
       const current = await this.deps.read(identity, tf, required + 10);
+      const now = this.now();
+      if (!Number.isFinite(now) || now < observedAt) throw new Error('session_timestamp_invalid');
+      const schedule = requireSessionHistorySchedule(evidence, identity, now);
       const closed = filterClosedSessionCandles(current, tf, schedule, now);
       const expected = expectedSessionSlot(tf, schedule, now);
       const missing = expected !== undefined && !matchesSessionSlot(closed.at(-1)?.ts.toISOString(), expected);
-      const previous = this.checked.get(key);
-      if ((closed.length < required || missing) && (previous === undefined || now - previous >= 60000)) {
-        this.checked.set(key, now);
+      const previous = this.attempts.get(key);
+      const sinceAttempt = previous === undefined ? Infinity : now - previous.attemptedAt;
+      const sinceCompletion = previous?.completedAt === undefined ? Infinity : now - previous.completedAt;
+      const newerSlot = previous?.success === true && previous.expectedEnd !== undefined && expected !== undefined
+        && Date.parse(expected.end) > previous.expectedEnd;
+      const eligible = previous === undefined || (sinceAttempt >= 0 && sinceCompletion >= 0
+        && (!previous.success ? sinceAttempt >= 60000
+          : sinceCompletion >= 15000 && (sinceAttempt >= 60000 || newerSlot)));
+      let attempted = false;
+      let fetchedTarget = false;
+      if ((closed.length < required || missing) && eligible) {
+        attempted = true;
+        this.attempts.set(key, { attemptedAt: now, success: false });
         const fetched = await this.deps.fetch(sub, identity, tf, required + 10);
         const freshEvidence = await this.deps.readSchedule(identity);
         requireSessionHistorySchedule(freshEvidence, identity, this.now());
         if (freshEvidence?.generation !== evidence?.generation) throw new Error('session_schedule_generation_changed');
-        for (const candle of filterClosedSessionCandles(fetched, tf, schedule, this.now())) await this.deps.write(candle);
+        const fetchedClosed = filterClosedSessionCandles(fetched, tf, schedule, this.now());
+        fetchedTarget = expected !== undefined && fetchedClosed.some(candle => matchesSessionSlot(candle.ts.toISOString(), expected));
+        for (const candle of fetchedClosed) await this.deps.write(candle);
       }
       const rows = await this.deps.read(identity, tf, required + 10), finalEvidence = await this.deps.readSchedule(identity), checkedAt = this.now();
       requireSessionHistorySchedule(finalEvidence, identity, checkedAt);
       if (finalEvidence?.generation !== evidence?.generation) throw new Error('session_schedule_generation_changed');
       const result = evaluateSessionCandles(rows, tf, finalEvidence, identity, checkedAt);
       const finalClosed = filterClosedSessionCandles(rows, tf, schedule, checkedAt), finalExpected = expectedSessionSlot(tf, schedule, checkedAt);
+      if (attempted) {
+        const success = Number.isFinite(checkedAt) && checkedAt >= now && fetchedTarget && expected !== undefined
+          && finalClosed.length >= required && !result.reason
+          && finalClosed.some(candle => matchesSessionSlot(candle.ts.toISOString(), expected));
+        this.attempts.set(key, { attemptedAt: now, success,
+          ...(success ? { completedAt: checkedAt, expectedEnd: Date.parse(expected!.end) } : {}) });
+      }
       const latest = finalClosed.at(-1)?.ts.toISOString();
       this.status.set(key, { identity, instrumentId: identity.instrumentId, conid: String(identity.conId), timeframe: tf, required,
         available: rows.length, nativeClosed: finalClosed.length, latest: latest ?? null, latestEnd: result.latestEnd ?? (matchesSessionSlot(latest, finalExpected) ? finalExpected?.end ?? null : null),
@@ -99,10 +131,15 @@ export class SessionNativeRefresh {
         sessionDate: schedule.sessions.find(x => Date.parse(x.start) <= checkedAt && checkedAt < Date.parse(x.end))?.date,
         checkedAt: new Date(checkedAt).toISOString(), ...(finalClosed.length < required ? { error: 'insufficient_native_closed_candles' } : result.reason ? { error: result.reason } : {}) });
     } catch (error) {
-      this.checked.set(key, this.now());
+      const current = this.now(), prior = this.attempts.get(key);
+      const attemptedAt = Math.max(Number.isFinite(prior?.attemptedAt) ? prior!.attemptedAt : -Infinity,
+        Number.isFinite(prior?.completedAt) ? prior!.completedAt! : -Infinity,
+        Number.isFinite(observedAt) ? observedAt : -Infinity,
+        Number.isFinite(current) ? current : -Infinity);
+      if (Number.isFinite(attemptedAt)) this.attempts.set(key, { attemptedAt, success: false });
       this.status.set(key, { identity, instrumentId: identity.instrumentId, conid: String(identity.conId), timeframe: tf, required, available: 0,
         nativeClosed: 0, latest: null, latestEnd: null, generation: evidence?.generation, scheduleStatus: evidence?.status ?? 'FAILED',
-        checkedAt: new Date(this.now()).toISOString(), error: error instanceof Error ? error.message : 'session_native_refresh_failed' });
+        checkedAt: new Date(Number.isFinite(current) ? current : Date.now()).toISOString(), error: error instanceof Error ? error.message : 'session_native_refresh_failed' });
     }
   }
 }

@@ -221,6 +221,9 @@ if (config.runtimeEnabled) {
       configuration: tradingConfiguration.loaded.configuration,
       effectiveConfigHash: tradingConfiguration.loaded.effectiveHash,
       accountId: tradingConfiguration.configuredAccount?.ok ? tradingConfiguration.configuredAccount.accountId : "",
+      diagnosticSecrets: Object.entries(process.env).filter(([key, value]) =>
+        /TOKEN|SECRET|PASSWORD|API_KEY|CHAT_ID/i.test(key) && typeof value === "string" && value.length > 0)
+        .map(([, value]) => value!),
       authority: bindingAuthority, registry: defaultInstrumentRegistry,
       contextLoader: new StrategyContextLoader({ repo, maxMarketStateAgeMs: config.SIGNAL_MAX_MARKET_STATE_AGE_MS }),
       state: new ConfiguredStrategyStateRepository({

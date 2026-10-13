@@ -1,4 +1,5 @@
 import type { IndicatorSnapshot, CandleTimeframe, InstrumentBindingAuthority, InstrumentRegistry, StrategyInstanceAttributionV1, StrategyTriggerV1, TradingConfigurationV1, TradingStrategyInstanceV1 } from "@ikbr/shared";
+import { safeDiagnosticText } from "@ikbr/shared/diagnostics";
 import { buildStrategyAttribution } from "@ikbr/shared/trading-config";
 import { createConfiguredStrategy } from "../../strategies/strategy-registry.js";
 import type { Strategy, StrategySignal } from "../../strategies/strategy.types.js";
@@ -25,6 +26,7 @@ export interface ConfiguredStrategyRuntimeOptions {
   configuration: TradingConfigurationV1;
   effectiveConfigHash: string;
   accountId: string;
+  diagnosticSecrets?: readonly string[];
   authority: InstrumentBindingAuthority;
   registry: InstrumentRegistry;
   contextLoader: Pick<StrategyContextLoader, "load" | "checkSession">;
@@ -50,6 +52,13 @@ export class ConfiguredStrategyRuntime {
   async evaluate(instrumentId: string): Promise<ConfiguredStrategyEvaluation> {
     const result = (kind: ConfiguredStrategyEvaluation["kind"], reasons: string[], rest: Partial<ConfiguredStrategyEvaluation> = {}): ConfiguredStrategyEvaluation =>
       Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(kind === "skipped" ? [] : ["RESEARCH_PER_PROPOSAL_REQUIRED"]) });
+    const contextError = (detail: string, code = "STRATEGY_CONTEXT_UNAVAILABLE") => result("error", [code,
+      safeDiagnosticText(detail.replace(/https?:\/\/[^\s]+/gi, "[ADRES UKRYTY]"), {
+        accountIds: [this.options.accountId],
+        secrets: [...(this.options.diagnosticSecrets ?? []), this.options.accountId]
+          .flatMap(value => [value, encodeURIComponent(value)]),
+      }),
+    ]);
     const row = this.options.configuration.instruments.find(i => i.id === instrumentId);
     if (!row) return result("error", ["INSTRUMENT_NOT_CONFIGURED"]);
     if (!row.entryEnabled || !row.monitoringEnabled) return result("disabled", ["ENTRY_DISABLED"]);
@@ -71,20 +80,22 @@ export class ConfiguredStrategyRuntime {
       if (!bound || bound.conId !== row.contract.conId || bound.brokerSymbol !== row.contract.symbol) return result("error", ["STRATEGY_CONTRACT_MISMATCH"]);
       const initialSession = await this.options.contextLoader.checkSession({ instrument, bound });
       if (initialSession.kind === "CLOSED") return result("skipped", ["MARKET_SESSION_CLOSED"]);
-      if (initialSession.kind !== "OPEN") return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+      if (initialSession.kind !== "OPEN") return contextError(initialSession.reason);
       if (!Number.isFinite(initialSession.checkedAt) || !Number.isFinite(initialSession.activeIntervalEnd)
-        || initialSession.activeIntervalEnd! <= initialSession.checkedAt!) return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+        || initialSession.activeIntervalEnd! <= initialSession.checkedAt!) return contextError("session_initial_time_invalid");
       let lastCheckedAt = initialSession.checkedAt!, activeIntervalEnd = initialSession.activeIntervalEnd!;
       const recheckSession = async (afterEvaluation = false) => {
         const current = await this.options.contextLoader.checkSession({ instrument, bound });
-        if (!initialSession.evidenceKey || current.evidenceKey !== initialSession.evidenceKey || current.kind === "UNKNOWN"
-          || !Number.isFinite(current.checkedAt) || current.checkedAt! < lastCheckedAt)
-          return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+        if (current.kind === "UNKNOWN") return contextError(current.reason);
+        if (!initialSession.evidenceKey || current.evidenceKey !== initialSession.evidenceKey)
+          return contextError("session_evidence_changed_during_evaluation");
+        if (!Number.isFinite(current.checkedAt) || current.checkedAt! < lastCheckedAt)
+          return contextError("session_recheck_time_invalid");
         if (current.kind === "CLOSED") return current.checkedAt! >= activeIntervalEnd
           ? result("skipped", [afterEvaluation ? "MARKET_SESSION_CLOSED_AFTER_EVALUATION" : "MARKET_SESSION_CLOSED"])
-          : result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+          : contextError("session_closed_before_verified_interval_end");
         if (!Number.isFinite(current.activeIntervalEnd) || current.activeIntervalEnd! <= current.checkedAt!)
-          return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+          return contextError("session_recheck_interval_invalid");
         lastCheckedAt = current.checkedAt!;
         activeIntervalEnd = current.activeIntervalEnd!;
         return undefined;
@@ -115,7 +126,7 @@ export class ConfiguredStrategyRuntime {
           const sessionOutcome = await recheckSession();
           if (sessionOutcome) return sessionOutcome;
         }
-        return result("error", [loaded.code]);
+        return contextError(loaded.message, loaded.code);
       }
       await this.options.assertEvaluationAllowed();
       const sessionOutcome = await recheckSession();

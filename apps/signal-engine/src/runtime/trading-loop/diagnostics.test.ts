@@ -125,3 +125,21 @@ it('retains the precise execution denial in stored and terminal reasons', async 
   assert.match(logs[0].message,/danych brokera/);
   assert.equal(logs[0].fields.find(field=>field.key==='reasons')?.value,'paper_daily_loss_coverage_unavailable');
 });
+
+
+it('persists and prints original context detail below the stable primary reason', async () => {
+ const stored: {reason:string;reasons?:readonly string[]}[]=[];
+ const logs: DiagnosticEvent[]=[];
+ const recorder=new DiagnosticLoopRecorder({
+  sink:{recordEvaluation:async input=>{stored.push(input);return {id:'context-detail',recordedAt:now};},heartbeat:async()=>{}},
+  accountId:()=> 'paper-fixture',identity,intervalMs:30000,enabled:true,
+  logger:{error:fields=>logs.push((fields as {diagnostic:DiagnosticEvent}).diagnostic),info:()=>{}},
+ });
+ const source=cycle();
+ await recorder.capture({...source,reports:[{...source.reports[0],outcome:{kind:'CONFIGURED_EVALUATION',instrumentId:'aapl_nasdaq',
+  evaluation:{kind:'error',instrumentId:'aapl_nasdaq',reasons:['STRATEGY_CONTEXT_UNAVAILABLE','session_expected_candle_missing'],entryAllowed:false,entryBlockers:['RESEARCH_PER_PROPOSAL_REQUIRED']}}}]});
+ assert.equal(stored[0].reason,'STRATEGY_CONTEXT_UNAVAILABLE');
+ assert.deepEqual(stored[0].reasons,['STRATEGY_CONTEXT_UNAVAILABLE','session_expected_candle_missing']);
+ assert.equal(logs[0].severity,'CRITICAL');
+ assert.match(String(logs[0].fields.find(field=>field.key==='reasons')?.value),/session_expected_candle_missing/);
+});
