@@ -574,3 +574,29 @@ test('calendar hold displays provider code/message below failure, masks secrets,
     } finally { await h.f.cleanup(); }
   }
 });
+
+test('news recovery prints original and next check once across repeated WAITING then resumes through readiness', async () => {
+  const h = await runScenario(), messages: string[] = [];
+  const original = h.adapters.http; let prepares = 0;
+  h.adapters.log = text => messages.push(text);
+  h.adapters.http = async (path, body, ...rest) => {
+    if(path !== '/execution/entry-control/start/prepare' || ++prepares > 2) return original(path,body,...rest);
+    return {revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'WAITING',reasons:['RESEARCH_SOURCE_TRANSIENT_FAILURE'],sources:[{
+      sourceId:'marketaux_news',role:'news',state:'WAITING',reasons:['RESEARCH_SOURCE_TRANSIENT_FAILURE'],failureReason:'RESEARCH_SOURCE_TIMEOUT',nextCheckAt:'2026-10-13T15:00:00.000Z',
+      sourceError:{name:'AbortError',code:'ABORT_ERR',message:'The operation was aborted fixture DU123456'},
+    }]}))};
+  };
+  try {
+    await h.runtime.start(); assert.equal(h.resumeCalls,1);
+    const output=messages.join('\n');assert.match(output,/RESEARCH_SOURCE_TIMEOUT/);assert.match(output,/ABORT_ERR/);assert.match(output,/Najwcześniejsze kolejne sprawdzenie: 2026-10-13T15:00/);
+    assert.equal(messages.filter(m=>m.includes('pko_wse / marketaux_news')).length,1);assert.doesNotMatch(output,/fixture|DU123456/);
+  } finally {await h.f.cleanup();}
+});
+
+test('hard and legacy news failures show original details or truthful unavailability without resuming', async () => {
+  for(const sourceError of [{name:'Error',code:401,message:'Unauthorized',httpStatus:401,providerCode:'invalid_api_token',providerMessage:'Invalid fixture'},undefined]) {
+    const h=await runScenario(), messages:string[]=[];const original=h.adapters.http;h.adapters.log=text=>messages.push(text);
+    h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],sources:[{sourceId:'marketaux_news',role:'news',state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],failureReason:'RESEARCH_SOURCE_HTTP_401',...(sourceError?{sourceError}:{})}]}))});
+    try {await assert.rejects(h.runtime.start(),/RESEARCH_NEWS_ERROR/);assert.equal(h.resumeCalls,0);const output=messages.join('\n');assert.match(output,sourceError?/invalid_api_token/:/Oryginalny opis błędu niedostępny/);assert.doesNotMatch(output,/fixture/);}finally{await h.f.cleanup();}
+  }
+});

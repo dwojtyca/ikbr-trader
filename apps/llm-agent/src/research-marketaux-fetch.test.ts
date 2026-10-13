@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { request } from "node:https";
 import { createMarketauxFetch, sanitizeMarketauxError } from "./research-marketaux-fetch.js";
+import { ResearchSourceFailure } from "@ikbr/shared/instrument-research";
 import { marketauxFixture } from "./research-marketaux.testfixture.js";
 
 test("Marketaux authenticates only transport URL and pins public DNS with no redirects", async () => {
@@ -25,7 +26,11 @@ test("missing keys, altered authority and raw token-bearing errors never leak or
   const f = marketauxFixture(), secret = "synthetic-token"; let connections = 0;
   const fetch = createMarketauxFetch(secret, { resolveAddress: async () => ({ address: "8.8.8.8", family: 4 }), httpsRequest: (() => { connections++; throw new Error(`request https://api.marketaux.com?api_token=${secret}`); }) as unknown as typeof request });
   const deadline = () => new Date(Date.now() + 9000).toISOString();
-  await assert.rejects(fetch(f.source, f.descriptor, deadline()), error => error instanceof Error && error.message === "RESEARCH_MARKETAUX_ACQUISITION_FAILED");
+  await assert.rejects(fetch(f.source, f.descriptor, deadline()), error => {
+    assert.ok(error instanceof ResearchSourceFailure); assert.equal(error.message, "RESEARCH_MARKETAUX_ACQUISITION_FAILED");
+    assert.match(error.sourceError.message, /request/); assert.ok(!JSON.stringify(error).includes(secret));
+    assert.ok(!String(error.cause).includes(secret)); return true;
+  });
   assert.equal(connections, 1);
   await assert.rejects(createMarketauxFetch(undefined)(f.source, f.descriptor, deadline()), /KEY_MISSING/);
   for (const sourceUrl of [f.source.urls[0] + "&api_token=x", "https://127.0.0.1/", "https://api.marketaux.com/v1/entity/search"])
@@ -42,7 +47,7 @@ test("authenticated transport rejects redirect, HTTP quota and non-JSON content 
       req.end = () => {
         const res = new EventEmitter() as any; res.statusCode = mode === "quota" ? 429 : 200;
         res.headers = mode === "redirect" ? { location: "https://127.0.0.1/private" } : { "content-type": mode === "content" ? "text/html" : "application/json" }; res.destroy = () => {};
-        callback(res); if (mode === "content") { res.emit("data", Buffer.from("private provider error body")); res.emit("end"); }
+        callback(res); if (mode === "quota") { res.emit("data", Buffer.from(JSON.stringify({error:{code:"rate_limit_reached",message:"Too many requests"}}))); res.emit("end"); } if (mode === "content") { res.emit("data", Buffer.from("private provider error body")); res.emit("end"); }
       }; return req;
     }) as typeof request;
     await assert.rejects(createMarketauxFetch("synthetic-secret", { resolveAddress: async () => ({ address: "8.8.8.8", family: 4 }), httpsRequest: fake })(f.source, f.descriptor, new Date(Date.now() + 9000).toISOString()),

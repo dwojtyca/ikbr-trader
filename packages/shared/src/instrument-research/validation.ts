@@ -1,3 +1,4 @@
+import { isResearchSourceError } from "./source-error.js";
 import { parseWshConfig, validateWshEvidence, validateWshEvent, validateWshCoverage } from "./wsh.js";
 import { isResearchProviderError } from "./provider-error.js";
 import { parseMarketauxNewsConfig, validateMarketauxAcquisition } from "./marketaux.js";
@@ -155,10 +156,12 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifest):
     const hasOccurrenceRange = value !== null && typeof value === "object" &&
       (Object.hasOwn(value, "occurrenceWindowStart") || Object.hasOwn(value, "occurrenceWindowEnd"));
     const hasAcquisition = value !== null && typeof value === "object" && Object.hasOwn(value, "acquisition");
+    const hasSourceError = value !== null && typeof value === "object" && Object.hasOwn(value, "sourceError");
     const hasProviderError = value !== null && typeof value === "object" && Object.hasOwn(value, "providerError");
     const c = obj(value, "sourceId role status checkedAt windowStart windowEnd complete evidenceRefs reason" +
-      (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : "") + (hasAcquisition ? " acquisition" : "") + (hasProviderError ? " providerError" : ""));
+      (hasOccurrenceRange ? " occurrenceWindowStart occurrenceWindowEnd" : "") + (hasAcquisition ? " acquisition" : "") + (hasProviderError ? " providerError" : "") + (hasSourceError ? " sourceError" : ""));
     const source = policy.sources.find(x => x.id === c.sourceId); researchAssert(source && (source.adapter !== "ibkr-wsh" || c.complete === false && !["AVAILABLE", "EMPTY"].includes(String(c.status))) && source.roles.includes(c.role as "reports"), "RESEARCH_COVERAGE_SOURCE_INVALID");
+    if (hasSourceError) researchAssert(["marketaux-news", "sec-json", "issuer-document"].includes(source.adapter) && c.status === "ERROR" && c.complete === false && isResearchSourceError(c.sourceError), "RESEARCH_SOURCE_ERROR_INVALID");
     if (hasProviderError) researchAssert(s.schemaVersion === 2 && source.adapter === "ibkr-wsh" && c.role === "calendar" && c.status === "ERROR" && isResearchProviderError(c.providerError), "RESEARCH_PROVIDER_ERROR_INVALID");
     const key = `${c.sourceId}:${c.role}`; researchAssert(!coverageKeys.has(key), "RESEARCH_DUPLICATE_COVERAGE"); coverageKeys.add(key);
     choice(c.status, "AVAILABLE EMPTY MISSING STALE UNVERIFIED ERROR NOT_APPLICABLE"); researchTime(c.checkedAt); const start = researchTime(c.windowStart), end = researchTime(c.windowEnd); researchAssert(start <= end && typeof c.complete === "boolean");

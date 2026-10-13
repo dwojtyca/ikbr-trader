@@ -64,7 +64,12 @@ export interface ResearchEvidence {
   retention: ResearchSource["retention"];
 }
 export interface ResearchProviderError { code: number | null; message: string }
+export interface ResearchSourceHttpDetails {
+  httpStatus?: number; httpStatusMessage?: string; providerCode?: string | number | null; providerMessage?: string;
+}
+export interface ResearchSourceError extends ResearchSourceHttpDetails { name: string | null; code: string | number | null; message: string }
 export interface ResearchSourceResult {
+  sourceError?: ResearchSourceError;
   providerError?: ResearchProviderError;
   acquisition?: import("./marketaux.js").MarketauxAcquisition;
   sourceId: string;

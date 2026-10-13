@@ -294,3 +294,43 @@ test("real HTTPS stream uses remaining acquisition bytes and stops before buffer
     } else { assert.equal(calls, 2); assert.equal(s.state.reservations.length, 2); assert.equal(s.coverage().reason, "RESEARCH_MARKETAUX_BYTES_EXCEEDED"); }
   }
 });
+
+test('transient on-demand failure retains original diagnostics and recovers only in a fresh slot after restart',async()=>{
+ const {ResearchSourceFailure}=await import('@ikbr/shared/instrument-research');
+ const s=setup(), repairs=enableRepairs(s);await repairs.enqueue();
+ s.state.response=()=>{throw new ResearchSourceFailure('RESEARCH_SOURCE_TIMEOUT',Object.assign(new Error('The operation was aborted synthetic-secret'),{name:'AbortError',code:'ABORT_ERR'}));};
+ await s.make(undefined,undefined,true).tickRepairs();
+
+ const failed=s.coverage(), initialCalls=s.state.reservations.map(r=>r.callKey);
+ assert.equal(failed.sourceError?.code,'ABORT_ERR');assert.ok(!failed.sourceError?.message.includes('synthetic-secret'));
+ const waiting=await repairs.enqueue();assert.equal(waiting.state,'WAITING');assert.equal(waiting.sources.find(r=>r.sourceId===s.f.source.id)?.failureReason,'RESEARCH_SOURCE_TIMEOUT');
+ assert.ok(Date.parse(waiting.nextCheckAt!)>s.state.now);
+ await s.make(undefined,undefined,true).tickRepairs();assert.equal(s.state.reservations.length,1);
+ s.state.now=(s.f.slot+1)*900000+1000;s.state.response=r=>marketauxResponse([],r.page,0);
+ await s.make(undefined,undefined,true).tickRepairs();
+ assert.equal(s.coverage().status,'EMPTY');assert.equal(s.coverage().sourceError,undefined);assert.equal(s.state.reservations.length,3);
+ assert.equal(new Set(s.state.reservations.map(r=>r.callKey)).size,3);assert.ok(s.state.outcomes.some(row=>row===initialCalls[0]+':UNKNOWN'));
+ assert.equal((await repairs.enqueue()).state,'READY');
+});
+test('hard provider status and semantic failures remain holds even when diagnostics contain retry wording',async()=>{
+ const {ResearchSourceFailure}=await import('@ikbr/shared/instrument-research');
+ for(const [reason,httpStatus] of [['RESEARCH_SOURCE_HTTP_401',401],['RESEARCH_MARKETAUX_PAYLOAD_INVALID',undefined],['RESEARCH_SOURCE_TIMEOUT',403]] as const){
+  const s=setup(),repairs=enableRepairs(s);await repairs.enqueue();
+  s.state.response=()=>{throw new ResearchSourceFailure(reason,Object.assign(new Error('please retry timeout'),{code:'TLS_CERT_INVALID'}),{},httpStatus===undefined?undefined:{httpStatus});};
+  await s.make(undefined,undefined,true).tickRepairs();assert.equal((await repairs.enqueue()).state,'HOLD');
+  s.state.now+=900000;await s.make(undefined,undefined,true).tickRepairs();assert.equal(s.state.reservations.length,1);
+ }
+});
+
+test('another due source never makes a future Marketaux repair run early',async()=>{
+ const s=setup();
+ Object.assign(s.store,{dueRepairs:async()=>[{instrumentId:s.f.policy.instrumentId,sourceId:s.f.source.id,role:'news'}],prepareRepair:async()=>({state:'WAITING',reasons:['RESEARCH_SOURCE_TRANSIENT_FAILURE'],sources:[{sourceId:s.f.source.id,role:'news',state:'WAITING',reasons:['RESEARCH_SOURCE_TRANSIENT_FAILURE'],nextCheckAt:new Date(s.state.now+900000).toISOString()}]})});
+ await s.make(undefined,undefined,true).tickRepairs();assert.equal(s.state.reservations.length,0);
+});
+
+test('JSON syntax diagnostics preserve error identity without storing payload excerpts',async()=>{
+ const s=setup();s.state.response=()=>({payload:Buffer.from('CONFIDENTIAL EARNINGS TEXT'),contentHash:'a'.repeat(64),contentType:'application/json'});
+ await s.make().tick();assert.equal(s.coverage().sourceError?.name,'SyntaxError');
+ assert.ok(!JSON.stringify(s.state.snapshots).includes('CONFIDENTIAL EARNINGS TEXT'));
+ assert.match(s.coverage().sourceError!.message,/source excerpt omitted/);assert.equal(inspectResearch(s.f.manifest,s.f.policy.instrumentId,s.state.prior,s.state.now).state,'HOLD');
+});

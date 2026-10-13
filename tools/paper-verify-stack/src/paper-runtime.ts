@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
-import { formatResearchProviderError } from '@ikbr/shared/instrument-research';
+import { formatResearchProviderError, formatResearchSourceError } from '@ikbr/shared/instrument-research';
 import { safeDiagnosticText } from '@ikbr/shared/diagnostics';
 
 export const PAPER_SERVICES = ['postgres', 'redis', 'execution-engine', 'ingestion', 'llm-agent', 'signal-engine'] as const;
@@ -441,22 +441,35 @@ export class PaperRuntime {
       const states = results.map(v => obj(v)?.state);
       if (states.every(s => s === 'READY')) return;
       const reasons = results.flatMap(v => Array.isArray(obj(v)?.reasons) ? obj(v)!.reasons as unknown[] : []).filter((x): x is string => typeof x === 'string' && /^[A-Z][A-Z0-9_]*$/.test(x));
+      const privacy = { secrets: [this.options.token], accountIds: [accountId] };
+      const details: string[] = [];
+      for (const result of results) {
+        const item = obj(result);
+        for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
+          const row = obj(source);
+          if (!row) continue;
+          const calendar = row.role === 'calendar' && row.sourceError === undefined && Array.isArray(row.reasons) && row.reasons.includes('RESEARCH_CALENDAR_ERROR');
+          const sourceFailure = row.sourceError !== undefined || typeof row.failureReason === 'string' ||
+            Array.isArray(row.reasons) && row.reasons.some(reason => /^RESEARCH_(NEWS|REPORTS)_ERROR$/.test(String(reason)));
+          if (!calendar && !sourceFailure) continue;
+          const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'źródło';
+          const ownReason = typeof row.failureReason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(row.failureReason) ? `${row.failureReason}; ` : '';
+          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}`);
+          if (row.state === 'WAITING' && typeof row.nextCheckAt === 'string' && Number.isFinite(Date.parse(row.nextCheckAt)))
+            details.push(`  Dane nadal niedostępne. Najwcześniejsze kolejne sprawdzenie: ${new Date(row.nextCheckAt).toISOString()}.`);
+        }
+      }
       if (states.some(s => s === 'HOLD')) {
         if (reasons.length) this.options.adapters.log?.(`Wstrzymano przygotowanie: ${[...new Set(reasons)].join(', ')}`);
-        const privacy = { secrets: [this.options.token], accountIds: [accountId] };
-        for (const result of results) {
-          const item = obj(result);
-          for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
-            const row = obj(source);
-            if (row?.role !== 'calendar' || !Array.isArray(row.reasons) || !row.reasons.includes('RESEARCH_CALENDAR_ERROR')) continue;
-            const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'calendar';
-            this.options.adapters.log?.(`  ${String(item?.instrumentId)} / ${label}: ${formatResearchProviderError(row.providerError, privacy)}`);
-          }
-        }
+        for (const detail of details) this.options.adapters.log?.(detail);
         throw new PaperRuntimeError(reasons[0] ?? 'PAPER_RESEARCH_HOLD');
       }
-      const description = `WAITING:${[...new Set(reasons)].join(',')}`;
-      if (description !== lastStatus) { this.options.adapters.log?.(`WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`); lastStatus = description; }
+      const description = JSON.stringify({ reasons: [...new Set(reasons)], details });
+      if (description !== lastStatus) {
+        this.options.adapters.log?.(`WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`);
+        for (const detail of details) this.options.adapters.log?.(detail);
+        lastStatus = description;
+      }
       await this.sleep(5000);
     }
   }

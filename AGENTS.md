@@ -127,6 +127,9 @@ See [STRATEGIES.md](STRATEGIES.md) for strategy specifications.
 - Do not add new strategies unless asked.
 - Do not add error handling for cases that cannot happen. Validate at
   boundaries.
+- When mapping an external error to an internal code, preserve its sanitized
+  original name, code and message as diagnostic cause. Never log credentials or
+  raw provider payloads; unavailable original details must remain unavailable.
 - Do not add docstrings/comments to code you didn't change.
 - Use existing helpers; don't introduce new abstractions for one-time
   operations.

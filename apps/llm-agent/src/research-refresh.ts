@@ -1,4 +1,4 @@
-import { parseResearchSnapshot, researchHash, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
+import { ResearchSourceFailure, captureResearchSourceError, type ResearchSourceError, parseResearchSnapshot, researchHash, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
 import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
 import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
@@ -38,7 +38,12 @@ function compatible(source: ResearchSource, role: Role): boolean {
 }
 
 function parsePayload(result: ResearchFetchResult): unknown {
-  return JSON.parse(result.payload.toString("utf8")) as unknown;
+  try { return JSON.parse(result.payload.toString("utf8")) as unknown; }
+  catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    const location = /(?:position \d+|line \d+ column \d+)/.exec(error.message)?.[0];
+    throw new ResearchSourceFailure("RESEARCH_SOURCE_PAYLOAD_INVALID", new SyntaxError(`Invalid JSON${location ? ` at ${location}` : ""}; source excerpt omitted`));
+  }
 }
 
 async function parsePdfPayload(source: ResearchSource, result: ResearchFetchResult): Promise<unknown> {
@@ -123,7 +128,8 @@ export class ResearchRefreshScheduler {
             if (inspected.state !== "WAITING") return;
             const policy = manifest.instruments.find(p => p.instrumentId === instrumentId)!;
             for (const requested of inspected.sources) {
-              if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE"].includes(reason))) continue;
+              if (requested.nextCheckAt && Date.parse(requested.nextCheckAt) > (this.options.now ?? Date.now)()) continue;
+              if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE", "RESEARCH_SOURCE_TRANSIENT_FAILURE", "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION"].includes(reason))) continue;
               const source = policy.sources.find(s => s.id === requested.sourceId)!;
               await this.refreshSlot(policy, source, requested.role);
             }
@@ -161,6 +167,7 @@ export class ResearchRefreshScheduler {
     };
     removePriorSourceRole(snapshot, source.id, role);
     const baseline = structuredClone(snapshot);
+    let sourceError: ResearchSourceError | undefined;
     let status: "AVAILABLE" | "EMPTY" | "MISSING" | "UNVERIFIED" | "ERROR" = "UNVERIFIED";
     let reason = "source automation, retention or parser unsupported";
     let complete = false;
@@ -224,7 +231,8 @@ export class ResearchRefreshScheduler {
       } catch (error) {
         Object.assign(snapshot, baseline);
         refs = []; complete = false; coveredWindow = null; occurrenceWindow = null; sourceCheckedAt = null;
-        status = "ERROR"; reason = error instanceof Error ? error.message.slice(0, 1000) : "source refresh failed";
+        status = "ERROR"; reason = error instanceof Error && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(error.message) ? error.message : "RESEARCH_SOURCE_ACQUISITION_FAILED";
+        sourceError = captureResearchSourceError(error, { secrets: this.options.secrets, accountIds: [accountId] });
       }
     }
     const completedAt = new Date((this.options.now ?? Date.now)()).toISOString();
@@ -233,7 +241,7 @@ export class ResearchRefreshScheduler {
     snapshot.coverage.push({ sourceId: source.id, role, status, checkedAt,
       windowStart: coveredWindow?.start ?? new Date(Date.parse(checkedAt) - 86400000).toISOString(), windowEnd: coveredWindow?.end ?? checkedAt,
       ...occurrenceWindow,
-      complete, evidenceRefs: refs, reason });
+      complete, evidenceRefs: refs, reason, ...(sourceError ? {sourceError} : {}) });
     await store.storeSnapshot(snapshot, slotKey);
   }
 
@@ -247,11 +255,11 @@ export class ResearchRefreshScheduler {
     };
     removePriorSourceRole(snapshot, source.id, "news");
     const baseline = structuredClone(snapshot);
-    const failure = (status: "ERROR" | "UNVERIFIED", reason: string) => {
+    const failure = (status: "ERROR" | "UNVERIFIED", reason: string, original?: unknown) => {
       Object.assign(snapshot, structuredClone(baseline));
       snapshot.createdAt = new Date(now()).toISOString();
       snapshot.coverage.push({ sourceId: source.id, role: "news", status, checkedAt: window.asOf, windowStart: window.windowStart, windowEnd: window.asOf,
-        complete: false, evidenceRefs: [], reason });
+        complete: false, evidenceRefs: [], reason, ...(status === "ERROR" ? {sourceError:captureResearchSourceError(original,{secrets:[...(this.options.secrets??[]),this.options.marketauxApiKey??""],accountIds:[accountId]})} : {}) });
       parseResearchSnapshot(snapshot, manifest);
     };
     const config = parseMarketauxNewsConfig(source, policy);
@@ -305,7 +313,7 @@ export class ResearchRefreshScheduler {
           if (result.contentType.split(";")[0].trim().toLowerCase() !== "application/json") throw new Error("RESEARCH_MARKETAUX_CONTENT_TYPE_INVALID");
           bytes += result.payload.length;
           if (result.payload.length > 10 * 1024 * 1024 || bytes > MARKETAUX_MAX_ACQUISITION_BYTES) throw new Error("RESEARCH_MARKETAUX_BYTES_EXCEEDED");
-          const parsed = parseMarketauxPage(JSON.parse(result.payload.toString("utf8")) as unknown, config, descriptor, manifest.schemaVersion);
+          const parsed = parseMarketauxPage(parsePayload(result), config, descriptor, manifest.schemaVersion);
           if ((found >= 0 && parsed.found !== found) || (pass === 2 && parsed.found !== firstFound)) throw new Error("RESEARCH_MARKETAUX_RESULT_CHANGED");
           found = parsed.found; pageCount = Math.max(1, Math.ceil(found / config.pageSize));
           const receipt: MarketauxPageReceipt = { ...identity, pass, page, fetchedAt: new Date(now()).toISOString(), contentHash: createHash("sha256").update(result.payload).digest("hex"), found, returned: parsed.returned, limit: parsed.limit };
@@ -345,7 +353,7 @@ export class ResearchRefreshScheduler {
           found: firstFound, emitted: refs.length, recordSetHash, pages: receipts } });
       parseResearchSnapshot(snapshot, manifest);
       checkpoint();
-    } catch (error) { failure("ERROR", sanitizeMarketauxError(error)); }
+    } catch (error) { failure("ERROR", sanitizeMarketauxError(error), error); }
     const complete = snapshot.coverage.find(row => row.sourceId === source.id && row.role === "news")!.complete;
     try { await store.storeSnapshot(snapshot, slotKey, complete ? new Date(admissionDeadline).toISOString() : undefined); }
     catch (error) {

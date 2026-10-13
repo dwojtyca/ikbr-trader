@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { resolve4, resolve6 } from "node:dns/promises";
 import { request, type RequestOptions } from "node:https";
 import { isIP } from "node:net";
-import { safeResearchUrl, type ResearchSource } from "@ikbr/shared/instrument-research";
+import { safeResearchUrl, ResearchSourceFailure, type ResearchSourceHttpDetails, type ResearchSource } from "@ikbr/shared/instrument-research";
+
+import type { DiagnosticPrivacy } from "@ikbr/shared/diagnostics";
 
 export const RESEARCH_SOURCE_TIMEOUT_MS = 10_000;
 export const RESEARCH_SOURCE_MAX_BYTES = 10 * 1024 * 1024;
@@ -36,7 +38,12 @@ export function assertResearchSourceUrl(source: ResearchSource, value: string): 
 export async function resolvePublicResearchAddress(hostname: string): Promise<{ address: string; family: 4 | 6 }> {
   const results = await Promise.allSettled([resolve4(hostname), resolve6(hostname)]);
   const records = results.flatMap((result, index) => result.status === "fulfilled" ? result.value.map(address => ({ address, family: (index === 0 ? 4 : 6) as 4 | 6 })) : []);
-  if (!records.length || records.some(record => !isPublicResearchAddress(record.address))) throw new Error("RESEARCH_SOURCE_DNS_NOT_PUBLIC");
+  if (!records.length) {
+    const failed = results.find(result => result.status === "rejected");
+    const original = failed?.status === "rejected" ? failed.reason : undefined;
+    throw new ResearchSourceFailure(transientCode(original) ? "RESEARCH_SOURCE_TRANSPORT_TRANSIENT" : "RESEARCH_SOURCE_DNS_NOT_PUBLIC", original);
+  }
+  if (records.some(record => !isPublicResearchAddress(record.address))) throw new ResearchSourceFailure("RESEARCH_SOURCE_DNS_NOT_PUBLIC", undefined);
   return records[0];
 }
 
@@ -54,50 +61,118 @@ export async function fetchResearchSource(source: ResearchSource, sourceUrl: str
   return result;
 }
 
+const TRANSIENT_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH"]);
+function transientCode(error: unknown): boolean {
+  return error instanceof Error && "code" in error && typeof error.code === "string" && TRANSIENT_CODES.has(error.code);
+}
+type ResearchFetchDeps = {
+  resolveAddress?: typeof resolvePublicResearchAddress;
+  httpsRequest?: typeof request;
+  readJsonError?: boolean;
+  privacy?: DiagnosticPrivacy;
+};
+
 export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, accept: string,
-  deps: { resolveAddress?: typeof resolvePublicResearchAddress; httpsRequest?: typeof request } = {}, maxBytes = RESEARCH_SOURCE_MAX_BYTES): Promise<ResearchFetchResult> {
+  deps: ResearchFetchDeps = {}, maxBytes = RESEARCH_SOURCE_MAX_BYTES): Promise<ResearchFetchResult> {
   if (!safeResearchUrl(url.href)) throw new Error("RESEARCH_SOURCE_URL_NOT_ALLOWED");
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > RESEARCH_SOURCE_MAX_BYTES) throw new Error("RESEARCH_SOURCE_TOO_LARGE");
   const remaining = Date.parse(deadlineAt) - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > RESEARCH_SOURCE_TIMEOUT_MS) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), remaining);
-  let selected: { address: string; family: 4 | 6 };
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, remaining);
+  const failure = (error: unknown) => new ResearchSourceFailure(timedOut ? "RESEARCH_SOURCE_TIMEOUT" :
+    error instanceof ResearchSourceFailure ? error.message : transientCode(error) ? "RESEARCH_SOURCE_TRANSPORT_TRANSIENT" : "RESEARCH_SOURCE_ACQUISITION_FAILED", error, deps.privacy);
   try {
-    selected = await Promise.race([
+    const selected = await Promise.race([
       (deps.resolveAddress ?? resolvePublicResearchAddress)(url.hostname),
-      new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(new Error("RESEARCH_SOURCE_TIMEOUT")), { once: true })),
+      new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true })),
     ]);
-  } catch (error) { clearTimeout(timeout); throw error; }
-  if (controller.signal.aborted) { clearTimeout(timeout); throw new Error("RESEARCH_SOURCE_TIMEOUT"); }
-  return new Promise<ResearchFetchResult>((resolve, reject) => {
-    const options = {
-      method: "GET", signal: controller.signal, agent: false, autoSelectFamily: false, maxHeaderSize: 16 * 1024,
-      headers: { "Accept": accept, "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
-      lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
-    } satisfies RequestOptions & { autoSelectFamily: boolean };
-    const req = (deps.httpsRequest ?? request)(url, options, response => {
-      if (response.statusCode !== 200) { response.destroy(); req.destroy(); reject(new Error(`RESEARCH_SOURCE_HTTP_${response.statusCode ?? "UNKNOWN"}`)); return; }
-      if (response.headers.location) { response.destroy(); req.destroy(); reject(new Error("RESEARCH_SOURCE_REDIRECT")); return; }
-      const declared = Number(response.headers["content-length"] ?? 0);
-      if (declared > maxBytes) { response.destroy(); req.destroy(); reject(new Error("RESEARCH_SOURCE_TOO_LARGE")); return; }
-      const chunks: Buffer[] = []; let size = 0;
-      response.on("data", (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > maxBytes) { response.destroy(new Error("RESEARCH_SOURCE_TOO_LARGE")); req.destroy(); return; }
-        chunks.push(chunk);
-      });
-      response.on("error", reject);
-      response.on("end", () => {
-        const payload = Buffer.concat(chunks);
-        const contentType = String(response.headers["content-type"] ?? "");
-        try {
-          resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType });
-        } catch (error) { reject(error); }
-      });
+    if (controller.signal.aborted) throw controller.signal.reason;
+    return await new Promise<ResearchFetchResult>((resolve, reject) => {
+      let settled = false;
+      let req: ReturnType<typeof request> | undefined;
+      let httpDetails: ResearchSourceHttpDetails | undefined;
+      const finishError = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        const wrapped = httpDetails ? new ResearchSourceFailure(`RESEARCH_SOURCE_HTTP_${httpDetails.httpStatus}`, undefined, deps.privacy, httpDetails) : failure(error);
+        req?.destroy();
+        reject(wrapped);
+      };
+      const options = {
+        method: "GET", signal: controller.signal, agent: false, autoSelectFamily: false, maxHeaderSize: 16 * 1024,
+        headers: { "Accept": accept, "User-Agent": "ikbr-trader-research/1.0 (contact: operator)" },
+        lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
+      } satisfies RequestOptions & { autoSelectFamily: boolean };
+      try {
+        req = (deps.httpsRequest ?? request)(url, options, response => {
+          if (settled) { response.destroy(); return; }
+          if (timedOut) { finishError(controller.signal.reason); response.destroy(); return; }
+          if (response.statusCode !== 200) {
+            const status = response.statusCode;
+            if (!status || status < 100 || status > 599) { finishError(new Error("HTTP status unavailable")); response.destroy(); return; }
+            httpDetails = { httpStatus: status, ...(response.statusMessage ? { httpStatusMessage: response.statusMessage } : {}) };
+            const limit = Math.min(16 * 1024, maxBytes);
+            if (!deps.readJsonError || String(response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() !== "application/json" ||
+                Number(response.headers["content-length"] ?? 0) > limit || response.headers.location) {
+              finishError(undefined); response.destroy(); return;
+            }
+            const chunks: Buffer[] = []; let size = 0;
+            response.on("data", (chunk: Buffer) => {
+              if (settled) return;
+              size += chunk.length;
+              if (size > limit) { finishError(undefined); response.destroy(); return; }
+              chunks.push(chunk);
+            });
+            response.on("error", finishError);
+            response.on("aborted", () => finishError(undefined));
+            response.on("end", () => {
+              if (settled) return;
+              try {
+                const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+                const value = parsed && typeof parsed === "object" && "error" in parsed ? parsed.error : null;
+                if (value && typeof value === "object" && !Array.isArray(value)) {
+                  if ("code" in value && (typeof value.code === "string" || typeof value.code === "number" && Number.isFinite(value.code) || value.code === null)) httpDetails!.providerCode = value.code;
+                  if ("message" in value && typeof value.message === "string") httpDetails!.providerMessage = value.message;
+                }
+              } catch { /* A body that cannot be decoded does not replace the known HTTP status. */ }
+              finishError(undefined);
+            });
+            response.on("close", () => { if (!settled) finishError(undefined); });
+            return;
+          }
+          if (response.headers.location) { finishError(new ResearchSourceFailure("RESEARCH_SOURCE_REDIRECT", undefined)); response.destroy(); return; }
+          const declared = Number(response.headers["content-length"] ?? 0);
+          if (declared > maxBytes) { finishError(new ResearchSourceFailure("RESEARCH_SOURCE_TOO_LARGE", undefined)); response.destroy(); return; }
+          const chunks: Buffer[] = []; let size = 0;
+          response.on("data", (chunk: Buffer) => {
+            if (settled) return;
+            size += chunk.length;
+            if (size > maxBytes) { finishError(new ResearchSourceFailure("RESEARCH_SOURCE_TOO_LARGE", undefined)); response.destroy(); return; }
+            chunks.push(chunk);
+          });
+          response.on("error", finishError);
+          response.on("aborted", () => finishError(new ResearchSourceFailure("RESEARCH_SOURCE_TRANSPORT_TRANSIENT", undefined)));
+          response.on("end", () => {
+            if (settled) return;
+            if (timedOut) { finishError(controller.signal.reason); return; }
+            const payload = Buffer.concat(chunks);
+            settled = true;
+            resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType: String(response.headers["content-type"] ?? "") });
+          });
+          response.on("close", () => { if (!settled) finishError(new ResearchSourceFailure("RESEARCH_SOURCE_TRANSPORT_TRANSIENT", undefined)); });
+        });
+        req.on("error", finishError);
+        controller.signal.addEventListener("abort", () => {
+          // Native request errors run first; the fallback also terminates silent transports.
+          queueMicrotask(() => { if (!settled) finishError(controller.signal.reason); });
+        }, { once: true });
+        req.end();
+      } catch (error) { finishError(error); }
     });
-    req.on("error", reject);
-    controller.signal.addEventListener("abort", () => req.destroy(new Error("RESEARCH_SOURCE_TIMEOUT")), { once: true });
-    req.end();
-  }).finally(() => clearTimeout(timeout));
+  } catch (error) {
+    if (error instanceof ResearchSourceFailure) throw error;
+    throw failure(error);
+  } finally { clearTimeout(timeout); }
 }

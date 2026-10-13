@@ -239,3 +239,15 @@ test('calendar status exposes validated original provider error and labels missi
   const legacy = report(); await appendDiagnosticStatus(configured,query,legacy);
   assert.match(String(value(legacy,key)), /Oryginalny opis błędu niedostępny/);
 });
+
+test('news status retains own code and original HTTP provider details separately', async () => {
+  const f=wshSnapshotFixture(Date.parse(now),'pko_wse'), previous=f.snapshot.coverage.find(c=>c.role==='news')!;
+  const failure={...previous,status:'ERROR' as const,complete:false,evidenceRefs:[],reason:'RESEARCH_SOURCE_HTTP_429',sourceError:{name:'Error',code:429,message:'Too Many Requests',httpStatus:429,providerCode:'rate_limit',providerMessage:'Limit DU1234567'}};
+  f.snapshot.coverage=f.snapshot.coverage.map(c=>c===previous?failure:c);
+  const original=deps();
+  const configured=deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority')?{rows:[{manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]}:original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool']});
+  const output=report();await appendDiagnosticStatus(configured,query,output);
+  const prefix=`research:${previous.sourceId}:news`;
+  assert.equal(value(output,`${prefix}:reason`),'RESEARCH_SOURCE_HTTP_429');assert.match(String(value(output,`${prefix}:sourceError`)),/rate_limit/);assert.doesNotMatch(String(value(output,`${prefix}:sourceError`)),/DU1234567/);
+  assert.equal(value(output,'researchCoverage'),'INELIGIBLE_AT_REPORT_TIME');
+});

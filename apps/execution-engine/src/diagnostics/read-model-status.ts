@@ -1,5 +1,5 @@
 import type { DiagnosticCoverage, DiagnosticField, DiagnosticQuery, DiagnosticReport, DiagnosticScalar } from '@ikbr/shared/diagnostics';
-import { evaluateResearchEligibility, formatResearchProviderError, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
+import { evaluateResearchEligibility, formatResearchProviderError, formatResearchSourceError, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
 import { requireSessionSchedule, type SessionScheduleEvidence } from '@ikbr/shared';
 import type { DiagnosticReadModelDeps } from './read-model.js';
 
@@ -215,10 +215,11 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
           }
           const prefix = `research:${source.sourceId}:${source.role}`;
           set(fields, field(`${prefix}:status`, `Źródło ${source.sourceId}, ${source.role}`, source.status));
-          if (source.role === 'calendar' && source.status === 'ERROR') {
+          if (source.status === 'ERROR') {
             set(fields, field(`${prefix}:reason`, `Przyczyna błędu ${source.sourceId}`, source.reason, 'untrusted'));
-            set(fields, field(`${prefix}:providerError`, `Oryginalny błąd ${source.sourceId}`,
-              formatResearchProviderError(source.providerError, { accountIds: [accountId] }), 'untrusted'));
+            set(fields, field(`${prefix}:${source.role === 'calendar' && source.sourceError === undefined ? 'providerError' : 'sourceError'}`, `Oryginalny błąd ${source.sourceId}`,
+              source.role === 'calendar' && source.sourceError === undefined ? formatResearchProviderError(source.providerError, { accountIds: [accountId] }) :
+                formatResearchSourceError(source.sourceError, { accountIds: [accountId] }), 'untrusted'));
           }
           set(fields, field(`${prefix}:checkedAt`, `Sprawdzenie ${source.sourceId}, ${source.role}`, source.checkedAt));
           set(fields, field(`${prefix}:ageMs`, `Wiek źródła ${source.sourceId}, ${source.role} ms`, ageMs(source.checkedAt, now)));

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { canonicalJson, decodeTradingConfigurationSnapshot } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
-import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole } from "./repair.js";
+import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole, type MarketauxLegacyRecoveryAssessment, marketauxTransientFailure } from "./repair.js";
 import { marketauxCallIdentity, marketauxWindow, parseMarketauxNewsConfig } from "./marketaux.js";
 import { isResearchHash, parseResearchManifest, parseResearchSnapshot, researchAssert, researchHash, researchTime } from "./validation.js";
 import type { ResearchSnapshot, InstrumentResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
@@ -34,7 +34,8 @@ export class ResearchStore {
       await this.assertAuthority(identity, db);
       const manifest = await this.readManifest(identity, db), now = await this.now(db);
       const stored = await this.latestSnapshot(identity, db, true);
-      const result = inspectResearch(manifest, identity.instrumentId, stored, now);
+      const legacy = await this.legacyMarketauxRecoveries(identity, manifest, stored, now, db);
+      const result = inspectResearch(manifest, identity.instrumentId, stored, now, legacy);
       const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
       for (const row of result.sources) {
         if (row.state !== "WAITING" || result.state === "HOLD") continue;
@@ -45,7 +46,18 @@ export class ResearchStore {
         if (Number(usage.requests) >= Math.min(...providers.map(s => s.maxRequestsPerDay)) || Number(usage.cost) + Math.max(...providers.map(s => s.costMicrosPerCall)) > Math.min(...providers.map(s => s.maxCostMicrosPerDay))) {
           row.state = "HOLD"; row.reasons = ["RESEARCH_BUDGET_EXHAUSTED"]; row.nextCheckAt = null; continue;
         }
+        if (source.adapter === "marketaux-news" && await this.hasUnresolvedMarketauxFailure(identity,manifest,source.id,now,db)) {
+          row.state="HOLD";row.reasons=["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"];row.nextCheckAt=null;continue;
+        }
+        if (Date.parse(row.nextCheckAt!) > now) continue;
         const slot = researchRefreshSlot(source, row.role, now);
+        if (source.adapter === "marketaux-news") {
+          const config=parseMarketauxNewsConfig(source,policy!), previousWindow=marketauxWindow(slot-1), previousKeys:string[]=[];
+          for (const pass of [1,2] as const) for (let page=1;page<=config.maxPagesPerPass;page++) previousKeys.push(marketauxCallIdentity(identity.manifestHash,identity.instrumentId,source,{sourceUrl:source.urls[0],...previousWindow,pass,page}).callKey);
+          const pending=(await db.query(`SELECT r.deadline_at FROM research_call_reservations r LEFT JOIN research_call_outcomes o USING(call_key)
+            WHERE r.call_key=ANY($1::text[]) AND r.deadline_at>$2 AND (o.outcome IS NULL OR o.outcome='UNKNOWN')`,[previousKeys,new Date(now)])).rows;
+          if (pending.length) {row.reasons=["RESEARCH_WAITING_EXISTING_ACQUISITION"];row.nextCheckAt=new Date(Math.max(...pending.map(call=>researchTime(iso(call.deadline_at))))).toISOString();continue;}
+        }
         const slotKey = researchRefreshSlotKey(identity.manifestHash, identity.instrumentId, source.id, row.role, slot);
         if ((await db.query("SELECT 1 FROM research_refresh_slots WHERE slot_key=$1", [slotKey])).rows.length) {
           row.reasons = ["RESEARCH_WAITING_NEXT_SLOT"];
@@ -72,7 +84,14 @@ export class ResearchStore {
             LEFT JOIN research_call_outcomes o USING(call_key) WHERE r.call_key=ANY($1::text[])`, [keys])).rows;
           if (calls.length) {
             const unknown = calls.some(c => c.outcome === "UNKNOWN" || c.outcome == null && researchTime(iso(c.deadline_at)) <= now) || calls.every(c => researchTime(iso(c.deadline_at)) <= now);
-            if (unknown) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNKNOWN"]; row.nextCheckAt = null; }
+            if (source.adapter === "marketaux-news" && calls.some(c=>c.outcome === "FAILED")) {
+              row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"]; row.nextCheckAt = null;
+            }
+            else if (source.adapter === "marketaux-news" && unknown) {
+              row.reasons = ["RESEARCH_WAITING_NEXT_SLOT"];
+              row.nextCheckAt = new Date(Math.max((slot+1)*researchRefreshInterval(source,row.role), ...calls.map(c=>researchTime(iso(c.deadline_at))))).toISOString();
+            }
+            else if (unknown) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNKNOWN"]; row.nextCheckAt = null; }
             else if (calls.some(c => c.outcome === "FAILED")) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"]; row.nextCheckAt = null; }
             else { row.reasons = ["RESEARCH_WAITING_EXISTING_ACQUISITION"]; row.nextCheckAt = new Date(now + 5_000).toISOString(); }
           }
@@ -101,10 +120,101 @@ export class ResearchStore {
   }
   async dueRepairs(identity: ResearchIdentity & { accountId: string }): Promise<(ResearchRepairIdentity & { sourceId: string; role: ResearchRole })[]> {
     await this.assertAuthority(identity);
-    const rows = (await this.pool.query(`SELECT instrument_id,source_id,role FROM research_repair_requests
-      WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND state='WAITING' AND next_check_at<=clock_timestamp()
-      ORDER BY next_check_at,id LIMIT 100`, [identity.accountId, identity.configHash, identity.manifestHash])).rows;
-    return rows.map(row => ({ ...identity, instrumentId: String(row.instrument_id), sourceId: String(row.source_id), role: row.role as ResearchRole }));
+    const rows = (await this.pool.query(`SELECT instrument_id,source_id,role,state FROM research_repair_requests
+      WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND
+        ((state='WAITING' AND next_check_at<=clock_timestamp()) OR (state='HOLD' AND role='news' AND
+          reasons ?| ARRAY['RESEARCH_MARKETAUX_ACQUISITION_FAILED','RESEARCH_SOURCE_TIMEOUT','RESEARCH_SOURCE_TRANSPORT_TRANSIENT',
+          'RESEARCH_SOURCE_HTTP_429','RESEARCH_SOURCE_HTTP_500','RESEARCH_SOURCE_HTTP_502','RESEARCH_SOURCE_HTTP_503','RESEARCH_SOURCE_HTTP_504']))
+      ORDER BY next_check_at NULLS LAST,id LIMIT 100`, [identity.accountId, identity.configHash, identity.manifestHash])).rows;
+    const manifest = rows.some(row=>row.state==='HOLD') ? await this.readManifest(identity,this.pool) : null;
+    const result: (ResearchRepairIdentity & {sourceId:string;role:ResearchRole})[] = [];
+    for (const row of rows) {
+      const candidate = {...identity,instrumentId:String(row.instrument_id),sourceId:String(row.source_id),role:row.role as ResearchRole};
+      if (row.state==='HOLD') {
+        const source=manifest!.instruments.find(p=>p.instrumentId===candidate.instrumentId)?.sources.find(s=>s.id===candidate.sourceId);
+        if (source?.adapter!=='marketaux-news') continue;
+        const stored=await this.latestSnapshot(candidate);
+        const coverage=stored?.snapshot.coverage.find(c=>c.sourceId===candidate.sourceId&&c.role==='news');
+        if (!coverage || !(marketauxTransientFailure(coverage) || coverage.status==='ERROR'&&!coverage.complete&&coverage.reason==='RESEARCH_MARKETAUX_ACQUISITION_FAILED'&&!Object.hasOwn(coverage,'sourceError'))) continue;
+      }
+      result.push(candidate);
+    }
+    return result;
+  }
+  private async hasUnresolvedMarketauxFailure(identity: ResearchRepairIdentity, manifest: ResearchManifest, sourceId: string, now: number, db: ResearchDb): Promise<boolean> {
+    const policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId)!,source=policy.sources.find(s=>s.id===sourceId)!,config=parseMarketauxNewsConfig(source,policy);
+    const calls=(await db.query(`SELECT r.*,o.recorded_at FROM research_call_reservations r JOIN research_call_outcomes o USING(call_key)
+      WHERE r.account_id=$1 AND r.provider=$2 AND r.kind='source' AND r.config_hash=$3 AND r.manifest_hash=$4 AND o.outcome='FAILED'`,[identity.accountId,source.provider,identity.configHash,identity.manifestHash])).rows;
+    let latestSuccessfulStart:number|undefined;
+    for (const call of calls) {
+      const reserved=researchTime(iso(call.reserved_at)), actualSlot=researchRefreshSlot(source,'news',reserved);
+      let matchedSlot:number|undefined;
+      for (const slot of [actualSlot,actualSlot-1]) {
+        const window=marketauxWindow(slot);
+        for (const pass of [1,2] as const) for (let page=1;page<=config.maxPagesPerPass;page++) {
+          const expected=marketauxCallIdentity(identity.manifestHash,identity.instrumentId,source,{sourceUrl:source.urls[0],...window,pass,page});
+          if (expected.callKey===call.call_key) {if(expected.requestHash!==call.request_hash)return true;matchedSlot=slot;}
+        }
+      }
+      if (matchedSlot===undefined) continue;
+      if (latestSuccessfulStart===undefined) {
+        latestSuccessfulStart=-Infinity;
+        const success=(await db.query(`SELECT s.* FROM research_snapshots s CROSS JOIN LATERAL jsonb_array_elements(s.canonical_json::jsonb->'coverage') c
+          WHERE s.config_hash=$1 AND s.manifest_hash=$2 AND s.instrument_id=$3 AND c->>'sourceId'=$4 AND c->>'role'='news' AND c->>'complete'='true'
+          ORDER BY c->>'checkedAt' DESC,s.sequence DESC LIMIT 1`,[identity.configHash,identity.manifestHash,identity.instrumentId,sourceId])).rows[0];
+        if (success) {
+          const snapshot=this.decode(success,manifest).snapshot,coverage=snapshot.coverage.find(c=>c.sourceId===sourceId&&c.role==='news');
+          if (coverage?.complete && ['AVAILABLE','EMPTY'].includes(coverage.status) && 'acquisition' in coverage && coverage.acquisition?.pages.length) {
+            const times=coverage.acquisition.pages.map(page=>researchTime(page.fetchedAt));
+            if (Math.max(...times)<=now) latestSuccessfulStart=Math.min(researchTime(coverage.acquisition.asOf),...times);
+          }
+        }
+      }
+      if (latestSuccessfulStart>researchTime(iso(call.recorded_at))) continue;
+      const slotKey=researchRefreshSlotKey(identity.manifestHash,identity.instrumentId,sourceId,'news',matchedSlot);
+      const published=(await db.query(`SELECT s.* FROM research_refresh_slots r JOIN research_snapshots s ON s.id=r.snapshot_id WHERE r.slot_key=$1`,[slotKey])).rows[0];
+      if (!published) return true;
+      const snapshot=this.decode(published,manifest).snapshot,coverage=snapshot.coverage.find(c=>c.sourceId===sourceId&&c.role==='news');
+      if (snapshot.configHash!==identity.configHash || snapshot.manifestHash!==identity.manifestHash || snapshot.instrumentId!==identity.instrumentId || !coverage || !marketauxTransientFailure(coverage)
+        || coverage.checkedAt!==marketauxWindow(matchedSlot).asOf || researchTime(snapshot.createdAt)<researchTime(iso(call.recorded_at))) return true;
+    }
+    return false;
+  }
+  private async legacyMarketauxRecoveries(identity: ResearchRepairIdentity, manifest: ResearchManifest, stored: StoredResearchSnapshot | null, now: number, db: ResearchDb): Promise<MarketauxLegacyRecoveryAssessment[]> {
+    const policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId), result:MarketauxLegacyRecoveryAssessment[]=[];
+    if (!stored || !policy) return result;
+    for (const source of policy.sources.filter(s=>s.adapter==='marketaux-news')) {
+      const coverage=stored.snapshot.coverage.find(c=>c.sourceId===source.id&&c.role==='news');
+      if (!coverage || coverage.status!=='ERROR' || coverage.complete || coverage.evidenceRefs.length || coverage.reason!=='RESEARCH_MARKETAUX_ACQUISITION_FAILED' || Object.hasOwn(coverage,'sourceError')) continue;
+      const slot=researchRefreshSlot(source,'news',researchTime(coverage.checkedAt)+1000), window=marketauxWindow(slot);
+      if (window.asOf!==coverage.checkedAt) continue;
+      const slotKey=researchRefreshSlotKey(identity.manifestHash,identity.instrumentId,source.id,'news',slot);
+      const originalRow=(await db.query(`SELECT s.*,r.published_at AS slot_published_at FROM research_refresh_slots r
+        JOIN research_snapshots s ON s.id=r.snapshot_id WHERE r.slot_key=$1`,[slotKey])).rows[0];
+      if (!originalRow) continue;
+      const original=this.decode(originalRow,manifest);
+      if (original.snapshot.configHash!==identity.configHash || original.snapshot.manifestHash!==identity.manifestHash || original.snapshot.instrumentId!==identity.instrumentId || original.snapshot.mappingHash!==stored.snapshot.mappingHash) continue;
+      const originalCoverage=original.snapshot.coverage.find(c=>c.sourceId===source.id&&c.role==='news');
+      if (!originalCoverage || canonicalJson(originalCoverage)!==canonicalJson(coverage)) continue;
+      const config=parseMarketauxNewsConfig(source,policy), expected=new Map<string,string>();
+      for (const pass of [1,2] as const) for (let page=1;page<=config.maxPagesPerPass;page++) {
+        const call=marketauxCallIdentity(identity.manifestHash,identity.instrumentId,source,{sourceUrl:source.urls[0],...window,pass,page});expected.set(call.callKey,call.requestHash);
+      }
+      const calls=(await db.query(`SELECT r.*,o.outcome,o.recorded_at FROM research_call_reservations r LEFT JOIN research_call_outcomes o USING(call_key) WHERE r.call_key=ANY($1::text[])`,[[...expected.keys()]])).rows;
+      const firstKey=marketauxCallIdentity(identity.manifestHash,identity.instrumentId,source,{sourceUrl:source.urls[0],...window,pass:1,page:1}).callKey;
+      const first=calls.find(call=>call.call_key===firstKey);
+      if (!first) continue;
+      const acquisitionStart=researchTime(iso(first.reserved_at));
+      if (acquisitionStart<slot*researchRefreshInterval(source,'news') || acquisitionStart>=(slot+1)*researchRefreshInterval(source,'news')) continue;
+      const publication=Math.min(researchTime(original.snapshot.createdAt),researchTime(iso(originalRow.slot_published_at)));
+      if (!calls.length || publication>now || calls.some(call=>call.account_id!==identity.accountId || call.provider!==source.provider || call.kind!=='source' || call.config_hash!==identity.configHash || call.manifest_hash!==identity.manifestHash || call.request_hash!==expected.get(String(call.call_key))
+        || researchTime(iso(call.reserved_at))<acquisitionStart || researchTime(iso(call.deadline_at))>acquisitionStart+120000 || researchTime(iso(call.reserved_at))>=researchTime(iso(call.deadline_at))
+        || !['SUCCEEDED','UNKNOWN'].includes(String(call.outcome)) || !call.recorded_at || researchTime(iso(call.recorded_at))>publication || researchTime(iso(call.deadline_at))>now
+        || call.outcome==='UNKNOWN'&&researchTime(iso(call.recorded_at))<researchTime(iso(call.deadline_at)))) continue;
+      if (!calls.some(call=>call.outcome==='UNKNOWN')) continue;
+      result.push({snapshotId:stored.id,sourceId:source.id,coverageHash:researchHash(coverage),slot,nextCheckAt:new Date(Math.max((slot+1)*researchRefreshInterval(source,'news'),...calls.map(call=>researchTime(iso(call.deadline_at))))).toISOString()});
+    }
+    return result;
   }
   private async transaction<T>(fn: (db: ResearchDb) => Promise<T>, existing?: ResearchDb): Promise<T> {
     if (existing) return fn(existing);
