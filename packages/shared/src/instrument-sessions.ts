@@ -10,9 +10,14 @@ export interface InstrumentSessionIdentity {
   localSymbol?: string; tradingClass?: string; primaryExchange?: string; useRTH: boolean; timeZone: string;
 }
 export interface SessionInterval { date: string; start: string; end: string }
+export interface ContractSessionHours {
+  source: 'ibkr_contract_hours_v1'; identity: InstrumentSessionIdentity; requestedAt: string; receivedAt: string;
+  days: Array<{ date: string; intervals: Array<{ start: string; end: string }> }>;
+}
 export interface SessionSchedule {
   source: 'ibkr_session_schedule_v1'; identity: InstrumentSessionIdentity;
   coverageStart: string; coverageEnd: string; requestedAt: string; receivedAt: string; sessions: SessionInterval[];
+  currentHours?: ContractSessionHours;
 }
 export interface SessionScheduleEvidence {
   generation: number; status: 'READY' | 'REFRESHING' | 'FAILED'; updatedAt: string; schedule?: SessionSchedule | null;
@@ -256,4 +261,80 @@ export function evaluateSessionCandles(rows: Candle[], timeframe: SessionTimefra
     if (previous && nowMs - isoMs(expected.end) <= 90000 && matchesSessionSlot(result.latestStart, previous)) return result;
     return { ...result, reason: 'session_expected_candle_missing' };
   } catch (error) { return { candles: [], reason: error instanceof Error ? error.message : 'session_schedule_invalid' }; }
+}
+
+export type SessionAvailability = {
+  kind: 'OPEN' | 'CLOSED' | 'UNKNOWN'; reason: string; evidenceKey?: string; historyReady?: boolean; checkedAt?: number; activeIntervalEnd?: number;
+};
+function validateContractSessionHours(hours: ContractSessionHours, identity: InstrumentSessionIdentity): void {
+  if (!hours || hours.source !== 'ibkr_contract_hours_v1' || !identityEqual(hours.identity, identity)
+    || isoMs(hours.requestedAt) > isoMs(hours.receivedAt) || !Array.isArray(hours.days)
+    || hours.days.length === 0 || hours.days.length > 64) fail('session_hours_invalid');
+  const dates = new Set<string>();
+  for (const day of hours.days) {
+    validDate(day.date);
+    if (dates.has(day.date) || !Array.isArray(day.intervals) || day.intervals.length > 24) fail('session_hours_invalid');
+    dates.add(day.date);
+    let previousEnd = -Infinity;
+    for (const interval of day.intervals) {
+      const start = isoMs(interval.start), end = isoMs(interval.end);
+      if (start >= end || start < previousEnd || sessionDateAt(start, identity.timeZone) !== day.date
+        || sessionDateAt(end - 1, identity.timeZone) !== day.date) fail('session_hours_invalid');
+      previousEnd = end;
+    }
+  }
+}
+export function parseBrokerContractSessionHours(raw: { timeZoneId: unknown; liquidHours?: unknown; tradingHours?: unknown },
+  identity: InstrumentSessionIdentity, requestedAt: string, receivedAt: string): ContractSessionHours {
+  validateIdentity(identity);
+  if (typeof raw.timeZoneId !== 'string' || canonicalSessionTimeZone(raw.timeZoneId) !== canonicalSessionTimeZone(identity.timeZone)) fail('session_hours_timezone_invalid');
+  const value = identity.useRTH ? raw.liquidHours : raw.tradingHours;
+  if (typeof value !== 'string' || !value || value.length > 65536) return fail('session_hours_unavailable');
+  const date = (value: string) => `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+  const instant = (day: string, time: string) => new Date(sessionLocalTime(day, Number(time.slice(0, 2)), Number(time.slice(2)), 0, identity.timeZone)).toISOString();
+  const hours: ContractSessionHours = { source: 'ibkr_contract_hours_v1', identity: { ...identity }, requestedAt, receivedAt,
+    days: value.split(';').map(row => {
+      const match = /^(\d{8}):(.*)$/.exec(row);
+      if (!match) return fail('session_hours_invalid');
+      const day = date(match[1]);
+      return { date: day, intervals: match[2] === 'CLOSED' ? [] : match[2].split(',').map(part => {
+        const interval = /^(\d{4})-(?:(\d{8}):)?(\d{4})$/.exec(part);
+        if (!interval || (interval[2] !== undefined && date(interval[2]) !== day)) return fail('session_hours_invalid');
+        return { start: instant(day, interval[1]), end: instant(day, interval[3]) };
+      }) };
+    }) };
+  validateContractSessionHours(hours, identity);
+  return hours;
+}
+export function classifySessionAvailability(evidence: SessionScheduleEvidence | null | undefined, identity: InstrumentSessionIdentity, nowMs: number): SessionAvailability {
+  const evidenceKey = JSON.stringify(evidence ?? null);
+  try {
+    if (!evidence || evidence.status !== 'READY' || !Number.isSafeInteger(evidence.generation) || evidence.generation <= 0 || !evidence.schedule) return fail('session_schedule_unavailable');
+    const schedule = evidence.schedule;
+    validateSessionSchedule(schedule, identity);
+    for (const stamp of [schedule.receivedAt, evidence.updatedAt]) {
+      const ms = isoMs(stamp);
+      if (!Number.isFinite(nowMs) || nowMs < ms || nowMs - ms > 6 * 3600000) fail('session_schedule_stale');
+    }
+    if (isoMs(schedule.receivedAt) > isoMs(evidence.updatedAt)) fail('session_schedule_timestamp_order_invalid');
+    let active: { start: string; end: string } | undefined;
+    if (Object.hasOwn(schedule, 'currentHours')) {
+      const hours = schedule.currentHours!;
+      validateContractSessionHours(hours, identity);
+      const received = isoMs(hours.receivedAt);
+      if (nowMs < received || nowMs - received > 6 * 3600000) fail('session_hours_stale');
+      if (isoMs(hours.requestedAt) < isoMs(schedule.requestedAt) || received > isoMs(schedule.receivedAt)) fail('session_hours_invalid');
+      const day = hours.days.find(day => day.date === sessionDateAt(nowMs, identity.timeZone));
+      if (!day) fail('session_hours_date_unavailable');
+      active = day!.intervals.find(interval => isoMs(interval.start) <= nowMs && nowMs < isoMs(interval.end));
+    } else {
+      const covered = requireSessionSchedule(evidence, identity, nowMs);
+      active = covered.sessions.find(interval => isoMs(interval.start) <= nowMs && nowMs < isoMs(interval.end));
+    }
+    let historyReady = false;
+    try { requireSessionSchedule(evidence, identity, nowMs); historyReady = true; } catch { /* Current hours never repair historical coverage. */ }
+    return { kind: active ? 'OPEN' : 'CLOSED', reason: active ? 'MARKET_SESSION_OPEN' : 'MARKET_SESSION_CLOSED', evidenceKey, historyReady, checkedAt: nowMs, ...(active ? { activeIntervalEnd: isoMs(active.end) } : {}) };
+  } catch {
+    return { kind: 'UNKNOWN', reason: 'STRATEGY_CONTEXT_UNAVAILABLE', evidenceKey };
+  }
 }

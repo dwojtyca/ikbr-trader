@@ -24,6 +24,8 @@ const reasons: Record<string, { message: string; impact: string; action: string 
   AI_REJECT: { message: 'Decyzja AI: odrzuć.', impact: 'Propozycja nie została dopuszczona.', action: 'Sprawdź zapisaną decyzję i jej uzasadnienie.' },
   ENTRY_PAUSED: { message: 'Wejścia są wstrzymane.', impact: 'Nowe wejścia nie są dopuszczane.', action: 'Sprawdź przyczynę i stan trwałej pauzy.' },
   MARKET_CLOSED: { message: 'Rynek jest zamknięty.', impact: 'Ocena nie może teraz doprowadzić do wejścia.', action: 'Sprawdź następne okno sesji.' },
+  MARKET_SESSION_CLOSED: { message: 'Giełda jest zamknięta. Pominięto ocenę strategii i generowanie sygnału.', impact: 'Instrument czeka na otwarcie swojej sesji handlowej.', action: 'Bot automatycznie sprawdzi sesję w kolejnym cyklu.' },
+  MARKET_SESSION_CLOSED_AFTER_EVALUATION: { message: 'Sesja zamknęła się podczas oceny strategii. Odrzucono wynik oceny.', impact: 'Wynik nie trafi do przygotowania propozycji ani zlecenia.', action: 'Bot automatycznie sprawdzi sesję w kolejnym cyklu.' },
   STALE_DATA: { message: 'Dane są nieaktualne.', impact: 'Ocena opiera się na nieświeżych danych.', action: 'Sprawdź źródło danych i czas ostatniej obserwacji.' },
   RESEARCH_REQUIRED_STALE: { message: 'Wymagane dane badawcze są nieaktualne.', impact: 'Wymagany warunek badawczy nie jest spełniony.', action: 'Sprawdź status źródła i czas ostatniej obserwacji.' },
   WAITING_FOR_RESEARCH: { message: 'Trwa uzupełnianie wymaganych danych badawczych.', impact: 'Bot czeka na dane przed utworzeniem propozycji i wywołaniem AI.', action: 'Kolejny cykl ponownie sprawdzi dane i aktualny sygnał; szczegóły źródła są w diagnostyce.' },

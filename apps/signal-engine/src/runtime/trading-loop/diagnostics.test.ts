@@ -14,6 +14,27 @@ const identity=()=>({configHash:'a'.repeat(64),conId:'123',symbol:'PKO',listing:
   instanceId:null,revision:null,assignedInstances:[{implementationId:'momentum_breakout_long_v1',instanceId:'pko_momo',revision:1}]});
 
 describe('diagnostic loop recorder',()=>{
+  it('records closed sessions as informational skips rather than errors or no-signal decisions',async()=>{
+    const logged:DiagnosticEvent[]=[];const stored:{reason:string;evaluationKind?:string|null}[]=[];
+    let errors=0;
+    const recorder=new DiagnosticLoopRecorder({sink:{recordEvaluation:async input=>{stored.push(input);return {id:String(stored.length),recordedAt:now};},heartbeat:async()=>undefined},
+      accountId:()=> 'paper-fixture',identity,intervalMs:30000,enabled:true,
+      logger:{error:()=>{errors++;},info:fields=>logged.push((fields as {diagnostic:DiagnosticEvent}).diagnostic)}});
+    const original=cycle();
+    const closed:TradingLoopCycleReport={...original,reports:[{...original.reports[0],outcome:{kind:'CONFIGURED_EVALUATION',instrumentId:'pko_wse',
+      evaluation:{kind:'skipped',instrumentId:'pko_wse',reasons:['MARKET_SESSION_CLOSED'],entryAllowed:false,entryBlockers:[]}}}]};
+    await recorder.capture(closed);await recorder.capture(closed);recorder.flush();
+    assert.equal(errors,0);assert.equal(stored.length,2);
+    assert.ok(stored.every(row=>row.reason==='MARKET_SESSION_CLOSED'&&row.evaluationKind==='skipped'));
+    assert.ok(logged.every(row=>row.severity==='INFO'&&row.reason==='MARKET_SESSION_CLOSED'));
+    assert.match(logged[0].message,/Pominięto ocenę strategii/);
+    const after=closed.reports[0].outcome;
+    assert.equal(after.kind,'CONFIGURED_EVALUATION');
+    if(after.kind!=='CONFIGURED_EVALUATION')assert.fail('configured fixture required');
+    await recorder.capture({...closed,reports:[{...closed.reports[0],outcome:{...after,evaluation:{...after.evaluation,reasons:['MARKET_SESSION_CLOSED_AFTER_EVALUATION']}}}]});
+    assert.equal(errors,0);assert.equal(logged.at(-1)?.severity,'INFO');
+    assert.match(logged.at(-1)?.message??'',/Odrzucono wynik oceny/);
+  });
   it('preserves no-signal reasons/blockers and writes heartbeat after evaluation',async()=>{
     const order:string[]=[];const seen:unknown[]=[];const logged:object[]=[];
     const sink:DiagnosticLoopSink={recordEvaluation:async input=>{order.push('evaluation');seen.push(input);return {id:'1',recordedAt:now};},

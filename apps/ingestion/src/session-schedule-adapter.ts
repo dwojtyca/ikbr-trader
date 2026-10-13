@@ -1,5 +1,5 @@
 import { IBApi, BarSizeSetting, WhatToShow } from "@stoqey/ib";
-import { parseBrokerSessionSchedule, type SessionSchedule, type InstrumentSessionIdentity } from "@ikbr/shared";
+import { parseBrokerSessionSchedule, parseBrokerContractSessionHours, type ContractSessionHours, type SessionSchedule, type InstrumentSessionIdentity } from "@ikbr/shared";
 
 interface ScheduleSocket {
   serverVersion: number;
@@ -39,6 +39,7 @@ export class SessionScheduleAdapter {
       const detailsId = 91001, historyId = 91002;
       let done = false, requested = false, detailsRequested = false;
       const details: any[] = [];
+      let currentHours: ContractSessionHours | undefined;
       const listeners: Array<[string, (...args: any[]) => void]> = [];
       const listen = (event: string, handler: (...args: any[]) => void) => { listeners.push([event, handler]); ib.on(event, handler); };
       const finish = (error?: Error, schedule?: SessionSchedule) => {
@@ -70,6 +71,8 @@ export class SessionScheduleAdapter {
           || (identity.localSymbol !== undefined && c?.localSymbol !== identity.localSymbol)
           || (identity.tradingClass !== undefined && c?.tradingClass !== identity.tradingClass))
           return finish(new Error("session_schedule_contract_identity_mismatch"));
+        try { currentHours = parseBrokerContractSessionHours(details[0], identity, requestedAt, new Date(this.options.now?.() ?? Date.now()).toISOString()); }
+        catch { /* Unsupported optional hours cannot replace historical coverage. */ }
         requested = true;
         try { ib.reqHistoricalData(historyId, contract, "", "14 D", BarSizeSetting.DAYS_ONE, WhatToShow.SCHEDULE, identity.useRTH, 1, false); }
         catch { finish(new Error("session_schedule_request_failed")); }
@@ -78,6 +81,7 @@ export class SessionScheduleAdapter {
         if (id !== historyId || !requested) return;
         try {
           const schedule = parseBrokerSessionSchedule({ startDateTime, endDateTime, timeZone, sessions }, identity, requestedAt, new Date(this.options.now?.() ?? Date.now()).toISOString());
+          if (currentHours) schedule.currentHours = currentHours;
           finish(undefined, schedule);
         } catch (error) { finish(error instanceof Error ? error : new Error("session_schedule_invalid")); }
       });

@@ -1,4 +1,5 @@
 import type { ConfiguredStrategyRuntime } from "../strategy/configured-strategy-runtime.js";
+import { describeDiagnosticReason } from "@ikbr/shared/diagnostics";
 import type { StockStrategyPriceEvidence, WseStrategyPriceEvidence } from "@ikbr/shared";
 import type { WseStrategyMetadataReader } from "./wse-metadata-reader.js";
 import type { ResearchPreparationClient } from "./research-preparation-client.js";
@@ -1292,7 +1293,9 @@ export class TradingLoopService {
     };
     switch (report.outcome.kind) {
       case "CONFIGURED_EVALUATION":
-        this.#logger.info({ ...base, evaluation: report.outcome.evaluation.kind }, "trading-loop: configured evaluation");
+        this.#logger.info({ ...base, evaluation: report.outcome.evaluation.kind, reasons: report.outcome.evaluation.reasons },
+          ['MARKET_SESSION_CLOSED', 'MARKET_SESSION_CLOSED_AFTER_EVALUATION'].includes(report.outcome.evaluation.reasons[0])
+            ? describeDiagnosticReason(report.outcome.evaluation.reasons[0]).message : "trading-loop: configured evaluation");
         return;
       case "SUBMITTED":
       case "DUPLICATE":

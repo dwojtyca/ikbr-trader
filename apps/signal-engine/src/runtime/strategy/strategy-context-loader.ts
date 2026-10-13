@@ -1,4 +1,4 @@
-import { buildInstrumentSessionIdentity, sessionNativeSource, evaluateSessionCandles, requireSessionSchedule, type SessionScheduleEvidence, type InstrumentSessionIdentity } from '@ikbr/shared';
+import { classifySessionAvailability, type SessionAvailability, buildInstrumentSessionIdentity, sessionNativeSource, evaluateSessionCandles, requireSessionSchedule, type SessionScheduleEvidence, type InstrumentSessionIdentity } from '@ikbr/shared';
 /**
  * PR15.4 — Strategy context loader.
  *
@@ -162,6 +162,14 @@ export class StrategyContextLoader {
     this.#repo = options.repo;
     this.#clock = options.clock ?? (() => new Date());
     this.#maxMarketStateAgeMs = options.maxMarketStateAgeMs;
+  }
+
+  async checkSession(input: { instrument: Instrument; bound: BoundInstrument }): Promise<SessionAvailability> {
+    try {
+      const identity = buildInstrumentSessionIdentity(input.instrument, input.bound);
+      const evidence = await this.#repo.getSessionScheduleEvidence?.(identity) ?? null;
+      return classifySessionAvailability(evidence, identity, this.#clock().getTime());
+    } catch { return { kind: "UNKNOWN", reason: "STRATEGY_CONTEXT_UNAVAILABLE" }; }
   }
 
   async load(input: {

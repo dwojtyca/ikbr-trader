@@ -1,4 +1,4 @@
-import { buildInstrumentSessionIdentity, sessionNativeSource } from '@ikbr/shared';
+import { parseBrokerContractSessionHours, buildInstrumentSessionIdentity, sessionNativeSource } from '@ikbr/shared';
 import { fixtureSessionSchedule, fixtureSessionCandles, SESSION_TIMEFRAMES } from './session-native.fixture.js';
 import { computeIndicatorsForContext } from './indicators.js';
 import { detectRegimeForContext } from './regime.js';
@@ -717,4 +717,18 @@ describe('instrument-independent native session readiness', () => {
   it('before first minute closes prior-session minute cannot satisfy readiness',async()=>{
     const state=await setup(cases[0],{now:new Date('2026-09-24T07:00:59Z')});const result=await state.load();assert.equal(result.kind,'error');if(result.kind==='error')assert.match(result.message,/current_interval_minute_missing/);
   });
+});
+
+it('session precheck proves CLOSED before reading candles, contract or quotes', async () => {
+  const repo = makeRepo({candles:{}}), identity = buildInstrumentSessionIdentity(INSTRUMENT, BOUND);
+  const evidence = fixtureSessionSchedule(identity, NOW);
+  evidence.schedule!.currentHours = parseBrokerContractSessionHours({timeZoneId:identity.timeZone,liquidHours:'20260812:CLOSED'}, identity, evidence.schedule!.requestedAt, evidence.schedule!.receivedAt);
+  repo.getSessionScheduleEvidence = async () => evidence;
+  const result = await makeLoader(repo).checkSession({instrument:INSTRUMENT,bound:BOUND});
+  assert.equal(result.kind,'CLOSED');assert.equal(result.reason,'MARKET_SESSION_CLOSED');
+  assert.deepEqual(repo.candleCalls,[]);assert.deepEqual(repo.contractCalls,[]);assert.deepEqual(repo.marketStateCalls,[]);
+  evidence.generation++;
+  const changed = await makeLoader(repo).checkSession({instrument:INSTRUMENT,bound:BOUND});
+  assert.notEqual(changed.evidenceKey,result.evidenceKey);
+  evidence.status='FAILED';assert.equal((await makeLoader(repo).checkSession({instrument:INSTRUMENT,bound:BOUND})).kind,'UNKNOWN');
 });

@@ -2220,3 +2220,24 @@ it("configured scheduler evaluates with denied entry and never touches legacy or
   portfolioManager:makeFakePortfolioManager(),strategyCooldownMs:0,maxMarketStateAgeMs:0,logger:makeLogger()});
  const report=await svc.runOnce();assert.equal(evaluations,1);assert.equal(report.reports[0].outcome.kind,"CONFIGURED_EVALUATION");
 });
+
+it('closed configured instruments cannot reach research or submission and retain alternating scheduling',async()=>{
+ const evaluated:string[]=[];const logged:{fields:Record<string,unknown>;message:string}[]=[];
+ let sideEffects=0;
+ const forbidden=async()=>{sideEffects++;throw Error('closed instrument reached entry work');};
+ const logger=makeLogger();logger.info=((fields:Record<string,unknown>,message:string)=>{logged.push({fields,message});}) as typeof logger.info;
+ const svc=new TradingLoopService({config:makeConfig({TRADING_LOOP_INTERVAL_MS:'30000',TRADING_LOOP_MAX_CONCURRENT_INSTRUMENTS:'1'}),registry:makeRegistry([makeInstrument('aapl'),makeInstrument('pko')]),
+  configuredSubmissionEnabled:true,
+  configuredStrategyRuntime:{listInstrumentIds:()=>['aapl','pko'],evaluate:async instrumentId=>{evaluated.push(instrumentId);return {kind:instrumentId==='aapl'?'skipped':'no_signal',instrumentId,
+   reasons:instrumentId==='aapl'?['MARKET_SESSION_CLOSED']:[],entryAllowed:false,entryBlockers:[]};}},
+  researchPreparation:{prepare:forbidden},assertEntryAllowed:forbidden,
+  marketDataRuntime:{dryRun:forbidden,prepareConfiguredSignal:forbidden} as unknown as MarketDataRuntime,
+  executionRuntime:{executePrepared:forbidden} as unknown as ExecutionRuntime,exposureReader:{readExposure:forbidden,probeReady:forbidden},
+  reconciliationReader:{checkInstrument:forbidden} as unknown as ReconciliationReader,repo:{syncStrategyRuntimeStates:forbidden} as unknown as StrategyRuntimeStateRepository,
+  portfolioManager:makeFakePortfolioManager(),strategyCooldownMs:0,maxMarketStateAgeMs:0,logger});
+ await svc.runOnce();await svc.runOnce();
+ assert.deepEqual(evaluated,['aapl','pko']);assert.equal(sideEffects,0);
+ const closed=logged.find(row=>row.fields.evaluation==='skipped');
+ assert.deepEqual(closed?.fields.reasons,['MARKET_SESSION_CLOSED']);
+ assert.match(closed?.message??'',/Pominięto ocenę strategii/);
+});

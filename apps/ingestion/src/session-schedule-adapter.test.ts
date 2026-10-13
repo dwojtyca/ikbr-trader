@@ -7,13 +7,14 @@ class Fake extends EventEmitter {
   serverVersion = 180;
   contract: Record<string, unknown> = { conId: 1234567, symbol: 'XYZ', localSymbol: 'XYZ', tradingClass: 'NMS', secType: 'STK', exchange: 'SMART', primaryExch: 'NASDAQ', currency: 'USD' };
   requests: unknown[][] = []; disconnected = false; cancelled: number[] = [];
+  hours: Record<string,unknown> = { timeZoneId: 'US/Eastern', liquidHours: '20260924:0930-20260924:1600', tradingHours: '20260924:0400-20260924:2000' };
   hang = false; duplicate = false; wrongTimezone = false; error = false;
   connect() { queueMicrotask(() => this.emit('nextValidId', 1)); }
   disconnect() { this.disconnected = true; this.emit('disconnected'); }
   reqContractDetails(id: number) { queueMicrotask(() => {
     this.emit('contractDetails', id + 1, { contract: {} });
-    this.emit('contractDetails', id, { contract: this.contract });
-    if (this.duplicate) this.emit('contractDetails', id, { contract: this.contract });
+    this.emit('contractDetails', id, { contract: this.contract, ...this.hours });
+    if (this.duplicate) this.emit('contractDetails', id, { contract: this.contract, ...this.hours });
     this.emit('contractDetailsEnd', id);
   }); }
   reqHistoricalData(...args: unknown[]) { this.requests.push(args); queueMicrotask(() => {
@@ -30,6 +31,7 @@ test('schedule production adapter waits for pacing, exact contract completion an
   const ib = new Fake(); let paced = false;
   const adapter = new SessionScheduleAdapter({ ...options, socket: () => { assert.equal(paced, true); return ib; }, acquirePacing: async () => { paced = true; } });
   const result = await adapter.fetch(sessionIdentityFixture());
+  assert.equal(result.currentHours?.source, 'ibkr_contract_hours_v1'); assert.equal(result.currentHours?.days[0].intervals[0].start, '2026-09-24T13:30:00.000Z');
   assert.equal(result.identity.conId, 1234567); assert.equal(result.identity.timeZone, 'America/New_York');
   assert.deepEqual(ib.requests[0].slice(2), ['', '14 D', '1 day', 'SCHEDULE', true, 1, false]);
   ib.emit("error", new Error("late retired socket error"));
@@ -68,4 +70,19 @@ test('shared SDK client id is serialized even when callers submit two contracts 
   }, acquirePacing: async () => {} });
   await Promise.all([adapter.fetch(sessionIdentityFixture()), adapter.fetch(sessionIdentityFixture())]);
   assert.equal(maximum, 1); assert.equal(active, 0);
+});
+
+for (const hours of [{}, { timeZoneId: 'US/Eastern', tradingHours: '20260924:CLOSED' }, { timeZoneId: 'Europe/Warsaw', liquidHours: '20260924:CLOSED' }, { timeZoneId: 'US/Eastern', liquidHours: '20260924:2300-20260925:0400' }])
+  test(`unusable optional contract hours do not alter historical coverage: ${JSON.stringify(hours)}`, async () => {
+    const ib = new Fake(); ib.hours = hours;
+    const adapter = new SessionScheduleAdapter({ ...options, socket: () => ib, acquirePacing: async () => {} });
+    const schedule = await adapter.fetch(sessionIdentityFixture());
+    assert.equal(schedule.currentHours, undefined); assert.equal(schedule.coverageEnd, '2026-09-24T20:00:00.000Z');
+    assert.equal(ib.requests.length, 1);
+  });
+test('contract hours extend no historical envelope even when they include later dates', async () => {
+  const ib = new Fake(); ib.hours.liquidHours = '20260924:0930-1600;20260925:CLOSED';
+  const schedule = await new SessionScheduleAdapter({ ...options, socket: () => ib, acquirePacing: async () => {} }).fetch(sessionIdentityFixture());
+  assert.equal(schedule.currentHours?.days[1].date, '2026-09-25');
+  assert.equal(schedule.coverageEnd, '2026-09-24T20:00:00.000Z'); assert.equal(schedule.sessions.length, 1);
 });

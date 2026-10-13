@@ -11,7 +11,7 @@ export interface ConfiguredStrategyState {
   }>;
 }
 export interface ConfiguredStrategyEvaluation {
-  readonly kind: "signal" | "no_signal" | "disabled" | "error";
+  readonly kind: "signal" | "no_signal" | "disabled" | "skipped" | "error";
   readonly instrumentId: string;
   readonly strategyAttribution?: StrategyInstanceAttributionV1;
   readonly strategyTrigger?: StrategyTriggerV1;
@@ -27,7 +27,7 @@ export interface ConfiguredStrategyRuntimeOptions {
   accountId: string;
   authority: InstrumentBindingAuthority;
   registry: InstrumentRegistry;
-  contextLoader: Pick<StrategyContextLoader, "load">;
+  contextLoader: Pick<StrategyContextLoader, "load" | "checkSession">;
   state: ConfiguredStrategyState;
   assertEvaluationAllowed(): Promise<void>;
   clock?: () => Date;
@@ -49,7 +49,7 @@ export class ConfiguredStrategyRuntime {
   listInstrumentIds(): readonly string[] { return this.options.configuration.instruments.map(row => row.id); }
   async evaluate(instrumentId: string): Promise<ConfiguredStrategyEvaluation> {
     const result = (kind: ConfiguredStrategyEvaluation["kind"], reasons: string[], rest: Partial<ConfiguredStrategyEvaluation> = {}): ConfiguredStrategyEvaluation =>
-      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(["RESEARCH_PER_PROPOSAL_REQUIRED"]) });
+      Object.freeze({ ...rest, kind, instrumentId, reasons: Object.freeze(reasons), entryAllowed: false, entryBlockers: Object.freeze(kind === "skipped" ? [] : ["RESEARCH_PER_PROPOSAL_REQUIRED"]) });
     const row = this.options.configuration.instruments.find(i => i.id === instrumentId);
     if (!row) return result("error", ["INSTRUMENT_NOT_CONFIGURED"]);
     if (!row.entryEnabled || !row.monitoringEnabled) return result("disabled", ["ENTRY_DISABLED"]);
@@ -69,6 +69,26 @@ export class ConfiguredStrategyRuntime {
       const bound = this.options.authority.getBoundInstrument(instrumentId);
       const instrument = this.options.registry.getInstrumentOrThrow(instrumentId);
       if (!bound || bound.conId !== row.contract.conId || bound.brokerSymbol !== row.contract.symbol) return result("error", ["STRATEGY_CONTRACT_MISMATCH"]);
+      const initialSession = await this.options.contextLoader.checkSession({ instrument, bound });
+      if (initialSession.kind === "CLOSED") return result("skipped", ["MARKET_SESSION_CLOSED"]);
+      if (initialSession.kind !== "OPEN") return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+      if (!Number.isFinite(initialSession.checkedAt) || !Number.isFinite(initialSession.activeIntervalEnd)
+        || initialSession.activeIntervalEnd! <= initialSession.checkedAt!) return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+      let lastCheckedAt = initialSession.checkedAt!, activeIntervalEnd = initialSession.activeIntervalEnd!;
+      const recheckSession = async (afterEvaluation = false) => {
+        const current = await this.options.contextLoader.checkSession({ instrument, bound });
+        if (!initialSession.evidenceKey || current.evidenceKey !== initialSession.evidenceKey || current.kind === "UNKNOWN"
+          || !Number.isFinite(current.checkedAt) || current.checkedAt! < lastCheckedAt)
+          return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+        if (current.kind === "CLOSED") return current.checkedAt! >= activeIntervalEnd
+          ? result("skipped", [afterEvaluation ? "MARKET_SESSION_CLOSED_AFTER_EVALUATION" : "MARKET_SESSION_CLOSED"])
+          : result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+        if (!Number.isFinite(current.activeIntervalEnd) || current.activeIntervalEnd! <= current.checkedAt!)
+          return result("error", ["STRATEGY_CONTEXT_UNAVAILABLE"]);
+        lastCheckedAt = current.checkedAt!;
+        activeIntervalEnd = current.activeIntervalEnd!;
+        return undefined;
+      };
       const states = new Map<string, Awaited<ReturnType<ConfiguredStrategyState["sync"]>>>();
       for (const instance of active) if (!states.has(instance.implementationId)) {
         states.set(instance.implementationId, await this.options.state.sync({ accountId: this.options.accountId, conId: String(bound.conId), implementationId: instance.implementationId }));
@@ -88,8 +108,18 @@ export class ConfiguredStrategyRuntime {
       });
       const timeframes = [...new Set([...required, ...prepared.flatMap(p => [...p.strategy.requiredTimeframes])])];
       const loaded = await this.options.contextLoader.load({ instrument, bound, positionQuantity: 0, timeframes });
-      if (loaded.kind === "error") return result("error", [loaded.code]);
+      if (loaded.kind === "error") {
+        const closedBoundary = /^(?:(?:1m|5m|1h|4h|1d|1w): )?session_(?:closed|interval_closed)$/.test(loaded.message)
+          || (loaded.message === "session_schedule_coverage_missing" && initialSession.historyReady === true);
+        if (closedBoundary) {
+          const sessionOutcome = await recheckSession();
+          if (sessionOutcome) return sessionOutcome;
+        }
+        return result("error", [loaded.code]);
+      }
       await this.options.assertEvaluationAllowed();
+      const sessionOutcome = await recheckSession();
+      if (sessionOutcome) return sessionOutcome;
       const candidates: Array<{ signal: StrategySignal; strategyAttribution: StrategyInstanceAttributionV1; priority: number }> = [];
       const reasons: string[] = [];
       for (const { instance, strategy, attribution } of prepared) {
@@ -101,6 +131,8 @@ export class ConfiguredStrategyRuntime {
           !strategy.supportedDirections.includes(signal.direction) || signal.side !== (signal.direction === "LONG" ? "BUY" : "SELL")) return result("error", ["STRATEGY_ATTRIBUTION_MISMATCH"]);
         candidates.push({ signal, strategyAttribution: attribution, priority: selection.mode === "priority" ? selection.priorities[instance.id] : 0 });
       }
+      const finalSessionOutcome = await recheckSession(true);
+      if (finalSessionOutcome) return finalSessionOutcome;
       if (new Set(candidates.map(c => c.signal.direction)).size > 1) return result("error", ["STRATEGY_CONFLICT"]);
       candidates.sort((a,b) => b.priority-a.priority || a.strategyAttribution.instanceId.localeCompare(b.strategyAttribution.instanceId));
       const winner = candidates[0];

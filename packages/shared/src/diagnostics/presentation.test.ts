@@ -20,6 +20,10 @@ test('reason mapping distinguishes no signal, rejection, pause, closed market, s
   assert.match(describeDiagnosticReason('REJECTED').message, /odrzucona/);
   assert.match(describeDiagnosticReason('ENTRY_PAUSED').message, /wstrzymane/);
   assert.match(describeDiagnosticReason('MARKET_CLOSED').message, /zamknięty/);
+  assert.match(describeDiagnosticReason('MARKET_SESSION_CLOSED').message, /Pominięto ocenę strategii/);
+  assert.match(describeDiagnosticReason('MARKET_SESSION_CLOSED').action, /automatycznie/);
+  assert.match(describeDiagnosticReason('MARKET_SESSION_CLOSED_AFTER_EVALUATION').message, /Odrzucono wynik oceny/);
+  assert.doesNotMatch(describeDiagnosticReason('MARKET_SESSION_CLOSED_AFTER_EVALUATION').message, /Pominięto ocenę/);
   assert.match(describeDiagnosticReason('STALE_DATA').message, /nieaktualne/);
   const unknown = describeDiagnosticReason('FUTURE_REASON');
   assert.match(unknown.message, /FUTURE_REASON/);

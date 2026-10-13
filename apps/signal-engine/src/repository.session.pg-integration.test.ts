@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {Pool} from 'pg';
 import type {Redis} from 'ioredis';
-import {sessionNativeSource,type InstrumentSessionIdentity} from '@ikbr/shared';
+import {parseBrokerContractSessionHours,sessionNativeSource,type InstrumentSessionIdentity} from '@ikbr/shared';
 import {SignalRepository} from './repository.js';
 import {fixtureSessionSchedule} from './runtime/strategy/session-native.fixture.js';
 test('generic schedule identity/mode isolation and source filtering happen before SQL limit',{skip:!process.env.TEST_POSTGRES_URL},async()=>{
@@ -19,6 +19,9 @@ test('generic schedule identity/mode isolation and source filtering happen befor
   const repo=new SignalRepository(pool,{} as Redis);
   assert.equal(await repo.getSessionScheduleEvidence(identity),null);
   await pool.query(`INSERT INTO instrument_session_schedules VALUES($1,$2,$3,$4,$5,$6,$7)`,[identity.instrumentId,String(identity.conId),identity.useRTH,evidence.generation,evidence.status,evidence.schedule,evidence.updatedAt]);
+  assert.deepEqual(await repo.getSessionScheduleEvidence(identity),evidence);
+  evidence.schedule!.currentHours=parseBrokerContractSessionHours({timeZoneId:identity.timeZone,liquidHours:'20260924:0900-1705'},identity,evidence.schedule!.requestedAt,evidence.schedule!.receivedAt);
+  await pool.query('UPDATE instrument_session_schedules SET evidence=$1',[evidence.schedule]);
   assert.deepEqual(await repo.getSessionScheduleEvidence(identity),evidence);
   for(const patch of [{instrumentId:'other'},{conId:778},{useRTH:false}])assert.equal(await repo.getSessionScheduleEvidence({...identity,...patch}),null);
   await pool.query(`CREATE TABLE instrument_contracts(conid text PRIMARY KEY,symbol text,sec_type text,exchange text,primary_exchange text,currency text,local_symbol text,trading_class text,min_tick numeric,display_name text,contract_json jsonb,details_json jsonb,source text,resolved_at timestamptz)`);
