@@ -39,7 +39,9 @@ export function httpClient(token: string, fetchImpl: typeof fetch = fetch): Runt
   return async (path, body, timeoutMs = 5000, parentSignal) => {
     const ingestion = path.startsWith('http://ingestion/');
     const localPath = ingestion ? path.slice('http://ingestion'.length) : path;
-    if (ingestion ? !['/health', '/bootstrap', '/backfill-progress'].includes(localPath) : !/^\/(?:health|execution\/entry-control(?:\/(?:pause|resume|start\/prepare))?)$/.test(localPath)) throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
+    if (ingestion ? !['/health', '/bootstrap', '/backfill-progress'].includes(localPath) :
+      !/^\/(?:health|execution\/(?:configuration|entry-control(?:\/(?:pause|resume|start\/prepare))?))$/.test(localPath) || localPath === '/execution/configuration' && body !== undefined)
+      throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
     const url = `http://127.0.0.1:${ingestion ? 3101 : 3103}${localPath}`;
     const response = await fetchImpl(url, { method: body === undefined ? 'GET' : 'POST', redirect: 'error',
       signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(parentSignal ? [parentSignal] : [])]),

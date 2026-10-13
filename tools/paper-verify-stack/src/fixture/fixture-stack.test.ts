@@ -38,7 +38,7 @@ async function isPortListening(port: number): Promise<boolean> {
 
 function listenOnDefaultPorts(): Promise<NetServer[]> {
   const ports = [3101, 3102, 3103];
-  return Promise.all(
+  return Promise.allSettled(
     ports.map(
       (p) =>
         new Promise<NetServer>((resolve, reject) => {
@@ -47,7 +47,17 @@ function listenOnDefaultPorts(): Promise<NetServer[]> {
           s.listen(p, "127.0.0.1", () => resolve(s));
         }),
     ),
-  );
+  ).then(async (results) => {
+    const servers = results.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    );
+    const failure = results.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") {
+      await closeAll(servers);
+      throw failure.reason;
+    }
+    return servers;
+  });
 }
 
 async function closeAll(servers: NetServer[]): Promise<void> {

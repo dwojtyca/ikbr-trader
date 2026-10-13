@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
 
 export const PAPER_SERVICES = ['postgres', 'redis', 'execution-engine', 'ingestion', 'llm-agent', 'signal-engine'] as const;
 const APP_SERVICES = ['ingestion', 'execution-engine', 'signal-engine', 'llm-agent'] as const;
@@ -62,11 +63,13 @@ function mounts(service: Record<string, unknown>): Array<Record<string, unknown>
 export async function validateRenderedCompose(value: unknown, proof: ReleaseProof, root: string): Promise<{ accountId: string; instrumentIds: string[] }> {
   const config = obj(value), services = obj(config?.services); if (!services) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
   const accountSet = new Set<string>(); let bundlePath = '', bundleHash = '';
+  const appEnvironments: Record<string, Record<string, string>> = {};
   for (const name of APP_SERVICES) {
     const service = obj(services[name]); if (!service || service.image !== proof.imageId || service.entrypoint != null) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const cmd = Array.isArray(service.command) ? service.command : typeof service.command === 'string' ? service.command.split(/\s+/) : [];
     if (canonicalJson(cmd) !== canonicalJson(['pnpm', '--filter', `@ikbr/${name}`, 'start'])) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const e = envMap(service);
+    appEnvironments[name] = e;
     if (e.IBKR_ENVIRONMENT !== 'paper' || e.ALLOWED_LIVE_ACCOUNTS !== '') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     if (name === 'ingestion' || name === 'signal-engine' || name === 'execution-engine' || name === 'llm-agent') {
       const acct = e.IBKR_ACCOUNT_ID || e.RESEARCH_BUDGET_ACCOUNT_ID || '';
@@ -90,7 +93,6 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
           e.RESEARCH_CONFIG_PATH !== '/app/private-config/continuous-research.json') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     }
     if (name === 'llm-agent' && e.RESEARCH_MARKETAUX_ON_DEMAND !== 'true') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
-    if (name === 'signal-engine' && !e.TRADING_LOOP_INSTRUMENT_IDS) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const requiredTargets = name === 'execution-engine' || name === 'llm-agent'
       ? ['/app/private-config/continuous-strategy.json', '/app/private-config/continuous-research.json', ...(name === 'execution-engine' ? ['/app/private-accounting'] : [])]
       : ['/app/private-config/continuous-strategy.json'];
@@ -123,8 +125,28 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
   if (!accountingPath?.startsWith(accountingPrefix) || accountingPath.split('/').includes('..') || accountingPath.includes('\\')) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
   const accountingFile = `.local/paper-runtime/accounting/${accountingPath.slice(accountingPrefix.length)}`;
   if (!proof.files.some(f => f.path === accountingFile && f.sha256 === execEnv.EXECUTION_ACCOUNTING_SOURCE_SHA256)) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
-  const signalEnv = envMap(obj(services['signal-engine'])!);
-  const instrumentIds = (signalEnv.TRADING_LOOP_INSTRUMENT_IDS || '').split(',').map(x => x.trim()).filter(Boolean);
+  const strategyPath = '.local/paper-runtime/strategy.json';
+  const strategyProof = proof.files.find(f => f.path === strategyPath);
+  if (!strategyProof) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
+  let strategyText: string;
+  try {
+    const source = await resolveProofPath(root, strategyPath);
+    const bytes = await readFile(source);
+    if (sha(bytes) !== strategyProof.sha256) throw new Error();
+    strategyText = bytes.toString('utf8');
+  } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
+  let instrumentIds: string[] | undefined;
+  for (const name of APP_SERVICES) {
+    try {
+      const loaded = loadTradingConfiguration(appEnvironments[name], { readFile: path => {
+        if (path !== bundlePath) throw new Error();
+        return strategyText;
+      } });
+      if (loaded.mode !== 'bundle' || loaded.effectiveHash !== bundleHash) throw new Error();
+      instrumentIds ??= loaded.configuration.instruments.filter(row => row.entryEnabled).map(row => row.id);
+    } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
+  }
+  instrumentIds ??= [];
   if (!instrumentIds.length || new Set(instrumentIds).size !== instrumentIds.length || instrumentIds.some(x => !/^[A-Za-z0-9_-]{1,100}$/.test(x))) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
   return { accountId: execEnv.IBKR_ACCOUNT_ID, instrumentIds };
 }
@@ -373,7 +395,7 @@ export class PaperRuntime {
             progress?.phase === 'completed' && Array.isArray(progress.failedTimeframes) && progress.failedTimeframes.length === 0) return;
         const phase = ['connecting', 'one_minute', 'native_tf', 'completed'].includes(String(progress?.phase)) ? String(progress?.phase) : 'unavailable';
         const status = `${outcome.state}:${phase}`;
-        if (status !== lastStatus) { this.options.adapters.log?.(`WAITING: historia cen i subskrypcje (${status.replace(/[^a-z_:]/gi, '')}); wejścia pozostają w pauzie.`); lastStatus = status; }
+        if (status !== lastStatus) { this.options.adapters.log?.(`WAITING: automatyczne przygotowanie: historia cen i subskrypcje (${status.replace(/[^a-z_:]/gi, '')}).`); lastStatus = status; }
         await this.sleep(5000);
       }
     } finally { requestAbort.abort(); }
@@ -388,7 +410,20 @@ export class PaperRuntime {
         await this.assertStart(generation, accountId, expectedRevision);
         if (e instanceof PaperHttpError && e.status === 423) {
           if (['ENTRY_START_CONFIGURATION_UNAVAILABLE', 'ENTRY_START_CONNECTION_CHANGED', 'close_management_context_unavailable', 'ENTRY_CONTROL_ACCOUNT_UNAVAILABLE', 'no_active_account_for_exempt_route'].includes(e.code)) {
-            this.options.adapters.log?.(`WAITING: przygotowanie badań czeka na ${e.code}.`); await this.sleep(5000); continue;
+            let reasons: string[] = [];
+            if (e.code === 'ENTRY_START_CONFIGURATION_UNAVAILABLE') {
+              try {
+                const diagnostic = obj(await this.http('/execution/configuration'));
+                const admission = obj(diagnostic?.admission);
+                const allowed = ['CONFIG_DRIFT', 'CONFIG_SERVICE_UNAVAILABLE', 'CONFIG_STORE_UNAVAILABLE', 'CONFIG_NOT_INITIALIZED', 'CONFIG_MIGRATION_PREPARATION'];
+                if (Array.isArray(admission?.reasons) && admission.reasons.length && admission.reasons.every(reason => typeof reason === 'string' && allowed.includes(reason)))
+                  reasons = [...new Set(admission.reasons as string[])];
+              } catch { /* Diagnostic availability cannot change the preparation gate. */ }
+            }
+            await this.assertStart(generation, accountId, expectedRevision);
+            const status = `WAITING:${e.code}:${reasons.join(',')}`;
+            if (status !== lastStatus) { this.options.adapters.log?.(`WAITING: automatyczne przygotowanie oczekuje na ${e.code}${reasons.length ? ` (${reasons.join(', ')})` : ''}.`); lastStatus = status; }
+            await this.sleep(5000); continue;
           }
           throw new PaperRuntimeError(e.code);
         }
@@ -406,7 +441,7 @@ export class PaperRuntime {
       const reasons = results.flatMap(v => Array.isArray(obj(v)?.reasons) ? obj(v)!.reasons as unknown[] : []).filter((x): x is string => typeof x === 'string' && /^[A-Z][A-Z0-9_]*$/.test(x));
       if (states.some(s => s === 'HOLD')) { if (reasons.length) this.options.adapters.log?.(`Wstrzymano przygotowanie: ${[...new Set(reasons)].join(', ')}`); throw new PaperRuntimeError(reasons[0] ?? 'PAPER_RESEARCH_HOLD'); }
       const description = `WAITING:${[...new Set(reasons)].join(',')}`;
-      if (description !== lastStatus) { this.options.adapters.log?.(`Badania oczekują: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Bot pozostaje w pauzie wejść.`); lastStatus = description; }
+      if (description !== lastStatus) { this.options.adapters.log?.(`WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`); lastStatus = description; }
       await this.sleep(5000);
     }
   }

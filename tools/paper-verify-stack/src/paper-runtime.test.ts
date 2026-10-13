@@ -4,13 +4,14 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { computeTradingConfigurationHash, parseTradingConfiguration } from '@ikbr/shared/trading-config';
 import { canonicalJson, PaperHttpError, PaperRuntime, PaperRuntimeError, validateRenderedCompose, type ReleaseProof, type RuntimeControl, type RuntimeAdapters } from './paper-runtime.js';
 
 const readyHealth = () => ({ connected: true, bootstrapped: true, bootstrapping: false, automaticBootstrap: { initialized: true, manuallyStopped: false, inFlight: false, recoveryNeeded: false, shuttingDown: false, error: null } });
 
 const imageId = `sha256:${'a'.repeat(64)}`;
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
-const bundleHash = 'b'.repeat(64), researchHash = 'c'.repeat(64);
+const researchHash = 'c'.repeat(64);
 
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), 'paper-runtime-'));
@@ -19,7 +20,12 @@ async function fixture() {
   await writeFile(resolve(root, 'docker-compose.yml'), 'services: {}\n');
   await writeFile(resolve(local, 'redis-internal.override.yml'), 'services:\n  redis:\n    ports: !reset []\n');
   await writeFile(resolve(local, 'compose.override.json'), '{}\n');
-  await writeFile(resolve(local, 'strategy.json'), '{}\n'); await writeFile(resolve(local, 'research.json'), '{}\n');
+  const strategy = JSON.parse(await readFile(new URL('../../../packages/shared/src/trading-configuration/fixtures/valid-generic.json', import.meta.url), 'utf8')) as { instruments: Array<{ id: string; entryEnabled: boolean }> };
+  strategy.instruments.find(row => row.id === 'xyz_nyse')!.entryEnabled = false;
+  const parsed = parseTradingConfiguration(JSON.stringify(strategy));
+  if (!parsed.ok) throw new Error('invalid strategy fixture');
+  const bundleHash = computeTradingConfigurationHash(parsed.configuration);
+  await writeFile(resolve(local, 'strategy.json'), JSON.stringify(strategy)); await writeFile(resolve(local, 'research.json'), '{}\n');
   await writeFile(resolve(account, 'record.txt'), 'private accounting fixture');
   const files = ['docker-compose.yml', '.local/paper-runtime/redis-internal.override.yml', '.local/paper-runtime/compose.override.json',
     '.local/paper-runtime/strategy.json', '.local/paper-runtime/research.json', '.local/paper-runtime/accounting/record.txt'];
@@ -30,7 +36,7 @@ async function fixture() {
     const env: Record<string, string> = { IBKR_ENVIRONMENT: 'paper', IBKR_ACCOUNT_ID: 'DU123456', ALLOWED_PAPER_ACCOUNTS: 'DU123456', ALLOWED_LIVE_ACCOUNTS: '',
       TRADING_CONFIG_MODE: 'bundle', TRADING_CONFIG_PATH: '/app/private-config/continuous-strategy.json', TRADING_CONFIG_EXPECTED_HASH: bundleHash,
       TRADING_ENABLED: name === 'ingestion' ? 'false' : 'true', INGESTION_AUTO_BOOTSTRAP_ENABLED: 'true', EXECUTION_ENTRIES_PAUSED: 'false',
-      EXECUTION_LIFECYCLE_AUTOMATION_ENABLED: 'true', TRADING_LOOP_ENABLED: 'true', TRADING_LOOP_INSTRUMENT_IDS: 'pko_wse,aapl_nasdaq', LLM_AGENT_ENABLED: 'true',
+      EXECUTION_LIFECYCLE_AUTOMATION_ENABLED: 'true', TRADING_LOOP_ENABLED: 'true', LLM_AGENT_ENABLED: 'true',
       EXECUTION_ACCOUNTING_SOURCE_PATH: '/app/private-accounting/record.txt', EXECUTION_ACCOUNTING_SOURCE_SHA256: sha('private accounting fixture'),
       RESEARCH_CONFIG_PATH: '/app/private-config/continuous-research.json', RESEARCH_CONFIG_EXPECTED_HASH: researchHash, RESEARCH_BUDGET_ACCOUNT_ID: 'DU123456', RESEARCH_MARKETAUX_ON_DEMAND: 'true' };
     const volumes: Array<Record<string, unknown>> = [{ type: 'bind', source: source('strategy.json'), target: '/app/private-config/continuous-strategy.json', read_only: true }];
@@ -65,11 +71,11 @@ async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lo
     if (path === '/execution/entry-control/start/prepare') {
       preparedCalls++; if (options.waitThenPause && preparedCalls === 1) {
         return { revision: (body as { expectedRevision: number }).expectedRevision,
-          instruments: ['pko_wse', 'aapl_nasdaq'].map(instrumentId => ({ instrumentId, state: 'WAITING', reasons: ['RESEARCH_WAITING'] })) };
+          instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'WAITING', reasons: ['RESEARCH_WAITING'] })) };
       }
       if (options.waitThenPause && preparedCalls === 2) mutate(true, 'owner-pause', Number(control!.revision));
       return { revision: (body as { expectedRevision: number }).expectedRevision,
-        instruments: ['pko_wse', 'aapl_nasdaq'].map(instrumentId => ({ instrumentId, state: 'READY', reasons: [] })) };
+        instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'READY', reasons: [] })) };
     }
     if (path === '/execution/entry-control/resume') {
       resumeCalls++; const v = body as { reason: string; expectedRevision: number };
@@ -90,7 +96,7 @@ async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lo
 
 test('rendered Paper profile validates fixed command, image, account and private readonly mounts', async () => {
   const f = await fixture();
-  try { assert.equal((await validateRenderedCompose(f.rendered, f.proof, f.root)).accountId, 'DU123456'); }
+  try { assert.deepEqual(await validateRenderedCompose(f.rendered, f.proof, f.root), { accountId: 'DU123456', instrumentIds: ['pko_wse', 'aapl_smart'] }); }
   finally { await f.cleanup(); }
 });
 
@@ -106,6 +112,47 @@ test('profile drift in a producer command or Paper environment fails closed', as
   } finally { await f.cleanup(); }
 });
 
+test('legacy instrument authority and every peer loader conflict reject before service or HTTP work', async () => {
+  for (const name of ['signal-engine', 'ingestion', 'execution-engine', 'llm-agent']) {
+    const f = await fixture(); const calls: string[] = [];
+    try {
+      const services = f.rendered.services as Record<string, { environment: Record<string, string> }>;
+      services[name].environment[name === 'signal-engine' ? 'TRADING_LOOP_INSTRUMENT_IDS' : 'WATCHLIST_SYMBOLS'] = 'pko_wse';
+      f.proof.effectiveComposeSha256 = sha(canonicalJson(f.rendered));
+      await writeFile(resolve(f.root, '.local/paper-runtime/release.json'), JSON.stringify(f.proof));
+      const runtime = new PaperRuntime({ root: f.root, token: 'fixture', adapters: {
+        compose: async args => { calls.push(`compose:${args.at(-3)}`); if (!args.includes('config')) throw Error('unexpected compose'); return JSON.stringify(f.rendered); },
+        inspectImage: async id => id, http: async () => { calls.push('http'); throw Error('unexpected HTTP'); },
+      } });
+      await assert.rejects(runtime.start(), (e: unknown) => e instanceof PaperRuntimeError && e.code === 'PAPER_CONFIG_CHANGED');
+      assert.equal(calls.length, 1); assert.equal(calls[0].startsWith('compose:'), true);
+    } finally { await f.cleanup(); }
+  }
+});
+
+test('canonical strategy hash mismatch and empty entry scope fail closed', async () => {
+  for (const kind of ['hash', 'empty']) {
+    const f = await fixture();
+    try {
+      if (kind === 'hash') {
+        const services = f.rendered.services as Record<string, { environment: Record<string, string> }>;
+        for (const service of Object.values(services)) service.environment.TRADING_CONFIG_EXPECTED_HASH = '0'.repeat(64);
+      } else {
+        const path = resolve(f.root, '.local/paper-runtime/strategy.json');
+        const strategy = JSON.parse(await readFile(path, 'utf8')) as { instruments: Array<{ entryEnabled: boolean }> };
+        for (const row of strategy.instruments) row.entryEnabled = false;
+        const content = JSON.stringify(strategy); await writeFile(path, content);
+        f.proof.files.find(row => row.path === '.local/paper-runtime/strategy.json')!.sha256 = sha(content);
+        const parsed = parseTradingConfiguration(content); if (!parsed.ok) throw Error('fixture invalid');
+        const hash = computeTradingConfigurationHash(parsed.configuration);
+        const services = f.rendered.services as Record<string, { environment: Record<string, string> }>;
+        for (const service of Object.values(services)) service.environment.TRADING_CONFIG_EXPECTED_HASH = hash;
+      }
+      await assert.rejects(validateRenderedCompose(f.rendered, f.proof, f.root), (e: unknown) => e instanceof PaperRuntimeError && e.code === 'PAPER_CONFIG_CHANGED');
+    } finally { await f.cleanup(); }
+  }
+});
+
 test('start pauses before producer startup, waits for completed bootstrap and all research before resume', async () => {
   const f = await fixture(); const calls: string[] = []; let state: RuntimeControl['control'] = { account_id: 'DU123456', paused: true, revision: 1 };
   let events: RuntimeControl['events'] = [{ revision: 1, paused: true, reason: 'prior' }];
@@ -119,7 +166,7 @@ test('start pauses before producer startup, waits for completed bootstrap and al
     if (path === '/execution/entry-control/pause') { const v = body as { reason: string; expectedRevision: number }; state = { ...state!, paused: true, revision: v.expectedRevision + 1 }; events = [...events, { revision: state.revision, paused: true, reason: v.reason }]; return {}; }
     if (path === 'http://ingestion/bootstrap') return { accepted: true };
     if (path === '/execution/entry-control/start/prepare') return { revision: (body as { expectedRevision: number }).expectedRevision,
-      instruments: ['pko_wse', 'aapl_nasdaq'].map(instrumentId => ({ instrumentId, state: 'READY', reasons: [] })) };
+      instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'READY', reasons: [] })) };
     if (path === '/execution/entry-control/resume') { const v = body as { reason: string; expectedRevision: number }; state = { ...state!, paused: false, revision: v.expectedRevision + 1 }; events = [...events, { revision: state.revision, paused: false, reason: v.reason }]; return {}; }
     throw new Error('unexpected fixture request');
   };
@@ -391,12 +438,16 @@ test('real HTTP transport maps bootstrap to authenticated ingestion port and rej
   const transport = httpClient('fixture-secret', (async (url, init) => { seen.push({ url: String(url), init }); return new Response('{}'); }) as typeof fetch);
   await transport('http://ingestion/bootstrap', {}, 1000);
   await transport('/execution/entry-control');
+  await transport('/execution/configuration');
   assert.equal(seen[0].url, 'http://127.0.0.1:3101/bootstrap');
   assert.equal(seen[0].init?.method, 'POST'); assert.equal(seen[0].init?.body, '{}');
   assert.equal((seen[0].init?.headers as Record<string, string>).Authorization, 'Bearer fixture-secret');
   assert.equal(seen[1].url, 'http://127.0.0.1:3103/execution/entry-control');
+  assert.equal(seen[2].url, 'http://127.0.0.1:3103/execution/configuration');
+  assert.equal(seen[2].init?.method, 'GET'); assert.equal(seen[2].init?.body, undefined);
+  await assert.rejects(transport('/execution/configuration', {}));
   await assert.rejects(transport('/bootstrap', {}));
-  await assert.rejects(transport('http://attacker/bootstrap', {})); assert.equal(seen.length, 2);
+  await assert.rejects(transport('http://attacker/bootstrap', {})); assert.equal(seen.length, 3);
 });
 
 test('HTTP errors are size bounded and malformed error JSON cannot become a retryable gate denial', async () => {
@@ -455,6 +506,26 @@ test('definitive startup peer readiness waits and stale research during resume r
   };
   try { await h.runtime.start(); assert.equal(preparations, 3); assert.equal(resumes, 2); assert.equal(revisions.size, 1); assert.equal(h.control?.paused, false); }
   finally { await h.f.cleanup(); }
+});
+
+test('configuration wait shows only fixed diagnostic reasons, deduplicates, and remains paused until preparation passes', async () => {
+  for (const diagnostic of [{ admission: { reasons: ['CONFIG_SERVICE_UNAVAILABLE'] } }, { admission: { reasons: ['raw-secret', 'CONFIG_DRIFT'] } }, null]) {
+    const h = await runScenario(); const original = h.adapters.http; const logs: string[] = []; let prepares = 0; let reads = 0;
+    h.adapters.log = message => logs.push(message);
+    h.adapters.http = async (path, ...rest) => {
+      if (path === '/execution/entry-control/start/prepare' && ++prepares <= 2) throw new PaperHttpError('ENTRY_START_CONFIGURATION_UNAVAILABLE', 423);
+      if (path === '/execution/configuration') { reads++; if (diagnostic === null) throw Error('offline'); return diagnostic; }
+      return original(path, ...rest);
+    };
+    try {
+      await h.runtime.start();
+      assert.equal(prepares, 3); assert.equal(reads, 2); assert.equal(h.resumeCalls, 1);
+      const waits = logs.filter(line => line.includes('ENTRY_START_CONFIGURATION_UNAVAILABLE'));
+      assert.equal(waits.length, 1);
+      assert.equal(waits[0].includes('CONFIG_SERVICE_UNAVAILABLE'), diagnostic !== null && 'CONFIG_SERVICE_UNAVAILABLE' === diagnostic.admission.reasons[0]);
+      assert.equal(logs.join(' ').includes('raw-secret'), false);
+    } finally { await h.f.cleanup(); }
+  }
 });
 
 

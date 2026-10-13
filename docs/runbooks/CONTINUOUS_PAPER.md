@@ -104,6 +104,17 @@ pozostają dostępne dla nadzoru i automatycznych wyjść; sprawdź stan pozycji
 ich ręcznym wyłączeniem. Profil lokalny i dowód wydania są prywatne, ignorowane
 przez Git i pomijane w kontekście obrazu Docker.
 
+Profil strategii jest jedynym źródłem listy instrumentów dopuszczonych do wejść.
+W trybie `TRADING_CONFIG_MODE=bundle` pozostaw
+`TRADING_LOOP_INSTRUMENT_IDS` puste lub usuń tę zmienną; jej niepusta wartość
+powoduje odrzucenie profilu przed uruchomieniem usług. `start` sprawdza ten sam
+plik i jego kanoniczny hash dla czterech usług, a następnie sam prowadzi etap
+przygotowania przy utrzymanej pauzie. Komunikat `WAITING` z powodem
+`ENTRY_START_CONFIGURATION_UNAVAILABLE` może zawierać znany kod diagnostyczny,
+na przykład `CONFIG_SERVICE_UNAVAILABLE` albo `CONFIG_DRIFT`. Oznacza oczekiwanie
+na świeże potwierdzenie wspólnej konfiguracji; nie jest poleceniem ręcznego
+wznowienia wejść. Gdy diagnostyka jest niedostępna, komunikat pozostaje ogólny.
+
 Zatrzymanie nowych wejść przez istniejący interfejs:
 
 ```sh
