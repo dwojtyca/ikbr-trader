@@ -1,7 +1,7 @@
 import { evaluateResearchEligibility } from "./eligibility.js";
 import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
 import { parseWshConfig, wshQualificationDeadline } from "./wsh.js";
-import type { ResearchIdentity, ResearchManifest, ResearchSource, StoredResearchSnapshot } from "./types.js";
+import type { ResearchIdentity, ResearchManifest, ResearchSource, StoredResearchSnapshot, ResearchProviderError } from "./types.js";
 import { researchHash } from "./validation.js";
 
 export type ResearchRole = "reports" | "news" | "calendar";
@@ -9,6 +9,7 @@ export type ResearchPreparationState = "READY" | "WAITING" | "HOLD";
 export interface ResearchRepairIdentity extends ResearchIdentity { accountId: string; instrumentId: string }
 export interface ResearchRepairSource {
   sourceId: string; role: ResearchRole; state: ResearchPreparationState; reasons: string[]; nextCheckAt: string | null;
+  providerError?: ResearchProviderError;
 }
 export interface ResearchPreparation {
   state: ResearchPreparationState; reasons: string[]; snapshotId: string | null;
@@ -44,6 +45,8 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         : role === "news" ? source.adapter === "marketaux-news" && kind === "marketaux-news-v1" : source.adapter === "ibkr-wsh" && kind === "ibkr-wsh-v1";
       // Declared evidence remains readable, but is never a demand-fetchable provider.
       const coverage = stored?.snapshot.coverage.find(c => c.sourceId === source.id && c.role === role);
+      if (source.adapter === "ibkr-wsh" && role === "calendar" && coverage?.status === "ERROR" && coverage.providerError)
+        row.providerError = { ...coverage.providerError };
       if (source.adapter === "marketaux-news") {
         try { marketauxQualificationDeadline(parseMarketauxNewsConfig(source, policy), nowMs); }
         catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }

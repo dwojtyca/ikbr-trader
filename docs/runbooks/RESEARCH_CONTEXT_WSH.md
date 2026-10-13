@@ -63,6 +63,33 @@ z treścią oraz aktualność i blokady źródeł. Nie wyświetla surowych odpow
 Nieaktualne dane, błędny emitent, wyczerpany budżet lub niepełna odpowiedź nadal
 mogą uniemożliwić ocenę; sama data wydarzenia nie może tego zrobić.
 
+## Błędy dostawcy i zatrzymanie
+
+`RESEARCH_CALENDAR_ERROR` oznacza nieudane pozyskanie wydarzeń WSH, a nie błędną
+datę ani harmonogram sesji giełdy. Nowe negatywne zapisy zachowują kod i oryginalny
+komunikat dostawcy. Start i raport stanu pokazują ten opis przy źródle kalendarza.
+Sekrety i identyfikatory rachunku są ukrywane, znaki sterujące escapowane, a tekst
+ograniczony do 1000 znaków. Starsze wpisy mogą nie zawierać oryginalnego opisu;
+diagnostyka mówi o jego braku zamiast odtwarzać go z numeru błędu.
+
+Zatrzymanie agenta przerywa pobieranie WSH i przed rozłączeniem zleca anulowanie
+własnych żądań wydarzeń i metadanych. Tą samą drogą sprzątane są zakończone
+pobrania, timeouty i obsługiwalne błędy. Wysłanie anulowania nie jest
+potwierdzeniem jego wykonania przez IBKR. SIGKILL, utrata zasilania lub zerwane
+połączenie uniemożliwiają zagwarantowanie dostarczenia anulowania; zachowane
+nieznane wyniki i limity pobierania pozostają obowiązujące. `10281` nadal wymaga
+odczytania opisu dostawcy, nie resetowania historii lub zmiany clientId w ciemno.
+
+`ACCOUNTING_CLOCK_INVALID` jest osobnym błędem modułu rozliczeń. Odpowiedź czasu
+IBKR musi być poprawną całkowitą liczbą sekund epoki i różnić się od czasu procesu
+w chwili odbioru najwyżej o dwie sekundy. Przekroczenie może wynikać z opóźnienia
+odpowiedzi lub różnicy zegarów; sam kod nie dowodzi źle ustawionego zegara IBKR.
+Kontrola pomaga potwierdzić aktualność historii wykonanych transakcji używanej do
+dziennego wyniku i limitu straty. Próg jest regułą aplikacji, nie wymaganiem API.
+Ten pakiet go nie zmienia. Utrwalony błąd wymaga istniejącej weryfikowanej ścieżki
+[odzyskania rozliczeń](../implementation/phase3/PP7_ACCOUNTING_CLOCK_RECOVERY_REPORT.md),
+a nie usunięcia wpisu lub uznania braku danych za zerową stratę.
+
 Uruchomienie Paper wymaga aktualnego preflight i zwykłego sygnału strategii według
 [runbooka PKO](GPW_PAPER_ROUND_TRIP.md). Testy tej integracji nie dowodzą wykonanej
 transakcji. Wycofanie wdrożenia zatrzymuje odświeżanie i nowe wejścia, zachowując

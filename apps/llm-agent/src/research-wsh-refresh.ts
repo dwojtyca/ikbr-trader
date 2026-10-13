@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  sanitizeResearchProviderError, isResearchProviderError, type ResearchProviderError,
   parseResearchSnapshot, parseWshConfig, researchAssert, researchHash, validateWshValue,
   wshQualificationDeadline, wshRequestDates,
   type InstrumentResearchSnapshotV2, type ResearchCallReservation, type ResearchInstrumentPolicy,
@@ -14,7 +15,7 @@ export type WshRefreshStore = Pick<ResearchStore, "latestSnapshot" | "readSnapsh
 export interface WshRefreshRuntime { runtime: WshRuntimeConfiguration; createTransport?: () => WshTransport }
 interface Options {
   manifest: ResearchManifest; manifestHash: string; accountId: string; policy: ResearchInstrumentPolicy;
-  source: ResearchSource; store: WshRefreshStore; slotKey: string; now?: () => number; wsh?: WshRefreshRuntime;
+  source: ResearchSource; store: WshRefreshStore; slotKey: string; now?: () => number; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[];
 }
 function parseJson(text: string): unknown {
   try { return JSON.parse(text) as unknown; } catch { throw new Error("RESEARCH_WSH_PAYLOAD_INVALID"); }
@@ -30,9 +31,16 @@ function uncertain(error: unknown): boolean {
 export async function refreshWsh(options: Options): Promise<boolean> {
   const { manifest, manifestHash, policy, source, store, slotKey } = options;
   const now = options.now ?? Date.now;
+  const assertActive = () => researchAssert(!options.signal?.aborted, "RESEARCH_WSH_ABORTED");
+  const diagnostic = (error: unknown): ResearchProviderError | undefined => {
+    const detail = error instanceof Error && "providerError" in error ? error.providerError : undefined;
+    return isResearchProviderError(detail) ? sanitizeResearchProviderError(detail.code, detail.message, { accountIds: [options.accountId], secrets: options.secrets }) : undefined;
+  };
+  assertActive();
   researchAssert(manifest.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
   const identity = { configHash: manifest.configHash, manifestHash, instrumentId: policy.instrumentId };
   const previous = await store.latestSnapshot(identity);
+  assertActive();
   researchAssert(!previous || previous.snapshot.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
   const snapshot: InstrumentResearchSnapshotV2 = previous ? structuredClone(previous.snapshot as InstrumentResearchSnapshotV2) : {
     schemaVersion: 2, ...identity, mappingHash: researchHash(policy), createdAt: new Date(now()).toISOString(),
@@ -43,11 +51,11 @@ export async function refreshWsh(options: Options): Promise<boolean> {
   snapshot.events = snapshot.events.filter(e => !oldRefs.has(e.evidenceRef));
   snapshot.coverage = snapshot.coverage.filter(c => c.sourceId !== source.id);
   const baseline = structuredClone(snapshot);
-  const negative = (status: "UNVERIFIED" | "ERROR", reason: string): InstrumentResearchSnapshotV2 => {
+  const negative = (status: "UNVERIFIED" | "ERROR", reason: string, providerError?: ResearchProviderError): InstrumentResearchSnapshotV2 => {
     const result = structuredClone(baseline), checkedAt = new Date(now()).toISOString();
     result.createdAt = checkedAt;
     result.coverage.push({ sourceId: source.id, role: "calendar", status, checkedAt, windowStart: checkedAt, windowEnd: checkedAt,
-      complete: false, evidenceRefs: [], reason });
+      complete: false, evidenceRefs: [], reason, ...(providerError ? { providerError } : {}) });
     parseResearchSnapshot(result, manifest); return result;
   };
   let config: ReturnType<typeof parseWshConfig>;
@@ -61,7 +69,9 @@ export async function refreshWsh(options: Options): Promise<boolean> {
 
   let attempted = true;
   const locked = await store.withWshEndpointLock(config.endpointId, async lease => {
+    assertActive();
     const pending = await store.pendingWshAcquisition(lease);
+    assertActive();
     if (pending) {
       // Recovery never replays either call from an abandoned transport session.
       if (pending.configHash === identity.configHash && pending.manifestHash === identity.manifestHash && pending.instrumentId === identity.instrumentId && pending.sourceId === source.id) {
@@ -71,7 +81,9 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       try { await store.retireWshAcquisition(lease, pending, "UNKNOWN"); }
       catch (error) { if (!await retired(pending)) throw error; }
     }
-    const transport = options.wsh!.createTransport?.() ?? new WshSocketTransport({ ...options.wsh!.runtime, accountId: options.accountId });
+    assertActive();
+    const transport = options.wsh!.createTransport?.() ?? new WshSocketTransport({ ...options.wsh!.runtime, accountId: options.accountId, signal: options.signal, secrets: options.secrets });
+    const cleanup = async () => { try { await transport.close(); } catch { /* Preserve acquisition outcome. */ } };
     let acquisition: WshAcquisition | null = null;
     let publicationAttempted = false;
     try {
@@ -79,9 +91,11 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       const admissionDeadline = Math.min(now() + 30000, wshQualificationDeadline(config, now()));
       const deadline = () => new Date(Math.min(now() + config.timeoutMs, admissionDeadline)).toISOString();
       const checkpoint = async (callDeadline?: string) => {
+        assertActive();
         wshQualificationDeadline(config, now());
         researchAssert(now() < admissionDeadline && (!callDeadline || now() < Date.parse(callDeadline)), "RESEARCH_WSH_TIMEOUT");
         if (acquisition) await store.assertWshAcquisition(lease, acquisition); else await lease.assertHeld();
+        assertActive();
       };
       const providers = manifest.instruments.flatMap(p => p.sources).filter(s => s.provider === source.provider);
       const reservation = (requestId: number, method: string, request: unknown, deadlineAt: string): ResearchCallReservation => {
@@ -93,6 +107,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       };
       await checkpoint();
       await transport.connect(deadline());
+      assertActive();
       researchAssert(transport.serverVersion >= 173 && transport.sdkVersion === "1.6.10", "RESEARCH_WSH_PROTOCOL_UNSUPPORTED");
       const metadataCall = reservation(1, "reqWshMetaData", null, deadline());
       acquisition = await store.beginWshAcquisition(lease, { ...identity, sourceId: source.id, sessionId: transport.sessionId, reservation: metadataCall });
@@ -110,6 +125,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       const dates = wshRequestDates(config, requestAsOf);
       const request: WshEventRequest = { conId: config.conId, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false, ...dates, totalLimit: 100 };
       const eventsCall = reservation(2, "reqWshEventData", request, deadline());
+      assertActive();
       await store.reserveWshCall(lease, acquisition, eventsCall);
       await checkpoint(eventsCall.deadlineAt);
       const rawEvents = await transport.events(2, request, eventsCall.deadlineAt, config.maxEventBytes);
@@ -141,18 +157,18 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       publicationAttempted = true;
       await store.publishWshSnapshot(lease, acquisition, snapshot, slotKey, new Date(admissionDeadline).toISOString());
     } catch (error) {
-      transport.close();
+      await cleanup();
       if (acquisition) {
         if (publicationAttempted && await published(acquisition)) return;
-        await finishFailure(lease, acquisition, negative("ERROR", failureCode(error)), uncertain(error) ? "UNKNOWN" : "FAILED");
+        await finishFailure(lease, acquisition, negative("ERROR", failureCode(error), diagnostic(error)), uncertain(error) ? "UNKNOWN" : "FAILED");
       } else {
         // begin COMMIT may be unknown: rediscover and retire, never send against an unconfirmed reservation.
         const abandoned = await store.pendingWshAcquisition(lease);
-        if (abandoned?.sessionId === transport.sessionId) await finishFailure(lease, abandoned, negative("ERROR", failureCode(error)), "UNKNOWN");
+        if (abandoned?.sessionId === transport.sessionId) await finishFailure(lease, abandoned, negative("ERROR", failureCode(error), diagnostic(error)), "UNKNOWN");
         else if (failureCode(error) === "RESEARCH_WSH_SLOT_TOO_EARLY") attempted = false;
-        else await store.storeSnapshot(negative("ERROR", failureCode(error)), slotKey);
+        else await store.storeSnapshot(negative("ERROR", failureCode(error), diagnostic(error)), slotKey);
       }
-    } finally { transport.close(); }
+    } finally { await cleanup(); }
   });
   return locked && attempted;
 

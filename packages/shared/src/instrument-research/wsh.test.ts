@@ -3,6 +3,8 @@ import { test } from "node:test";
 import { researchFixture, wshSnapshotFixture } from "./research.fixture.js";
 import { parseResearchManifest, parseResearchSnapshot, researchHash } from "./validation.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
+import { inspectResearch } from "./repair.js";
+import { sanitizeResearchProviderError, formatResearchProviderError } from "./provider-error.js";
 import { validateWshValue, wshRequestDates } from "./wsh.js";
 
 const now = Date.parse("2026-10-07T12:00:00Z");
@@ -49,4 +51,46 @@ test("query uses issuer-local dates across DST; no event window is introduced", 
   const empty=structuredClone(f.snapshot);empty.events=[];empty.evidence=empty.evidence.filter(e=>e.published!==null);
   const c=empty.coverage[2];if("wshAcquisition" in c){c.status="EMPTY";c.evidenceRefs=[];c.wshAcquisition.rowCount=0;}
   assert.equal(evaluateResearchEligibility(empty,f.manifest,now).eligible,true);
+});
+
+
+test("WSH provider failures retain diagnostics without changing eligibility or legacy hashes", () => {
+  const f = wshSnapshotFixture(now);
+  f.snapshot.events = [];
+  f.snapshot.evidence = f.snapshot.evidence.filter(e => ("kind" in e ? e.kind !== "wsh-calendar" : true));
+  const old = f.snapshot.coverage.find(c => c.role === "calendar")!;
+  const failure = { sourceId: old.sourceId, role: "calendar" as const, status: "ERROR" as const,
+    checkedAt: f.snapshot.createdAt, windowStart: f.snapshot.createdAt, windowEnd: f.snapshot.createdAt,
+    complete: false, evidenceRefs: [], reason: "RESEARCH_WSH_ERROR_10281" };
+  f.snapshot.coverage = f.snapshot.coverage.map(c => c === old ? failure : c);
+  const legacyHash = researchHash(f.snapshot);
+  assert.equal(researchHash(parseResearchSnapshot(f.snapshot, f.manifest)), legacyHash);
+  const message = "Duplicate WSH event data request";
+  const enhanced = { ...failure, providerError: { code: 10281, message } };
+  f.snapshot.coverage = f.snapshot.coverage.map(c => c === failure ? enhanced : c);
+  parseResearchSnapshot(f.snapshot, f.manifest);
+  assert.equal(evaluateResearchEligibility(f.snapshot, f.manifest, now).eligible, false);
+  const preparation = inspectResearch(f.manifest, f.policy.instrumentId,
+    { id: "fixture", hash: researchHash(f.snapshot), sequence: 1, snapshot: f.snapshot }, now);
+  assert.equal(preparation.state, "HOLD");
+  assert.deepEqual(preparation.sources.find(c => c.role === "calendar")?.providerError, enhanced.providerError);
+  for (const invalid of [{code:1.5,message}, {code:10281,message:"x".repeat(1001)},
+    {code:10281,message:"bad\nline"}, {code:10281,message,stack:"hidden"}, null]) {
+    const copy = structuredClone(f.snapshot);
+    (copy.coverage.find(c => c.role === "calendar") as unknown as Record<string, unknown>).providerError = invalid;
+    assert.throws(() => parseResearchSnapshot(copy, f.manifest), /PROVIDER_ERROR_INVALID/);
+  }
+  const other = structuredClone(f.snapshot);
+  other.coverage[0].providerError = enhanced.providerError;
+  assert.throws(() => parseResearchSnapshot(other, f.manifest), /PROVIDER_ERROR_INVALID/);
+});
+
+test("provider error text retains wording but removes known secrets, account IDs and terminal controls", () => {
+  const error = sanitizeResearchProviderError(502, "connect failed DU1234567 custom-secret\n\x1b[31m", { secrets: ["custom-secret"] });
+  assert.equal(error.code, 502);
+  assert.match(error.message, /connect failed/);
+  assert.doesNotMatch(error.message, /DU1234567|custom-secret|[\n\x1b]/);
+  assert.match(formatResearchProviderError(error), /502/);
+  assert.match(formatResearchProviderError(undefined), /niedostępny/);
+  assert.equal(sanitizeResearchProviderError(undefined, "x".repeat(5000)).message.length, 1000);
 });

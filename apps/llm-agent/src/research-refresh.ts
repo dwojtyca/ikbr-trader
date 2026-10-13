@@ -60,20 +60,40 @@ function removePriorSourceRole(snapshot: ResearchSnapshot, sourceId: string, rol
 }
 
 export class ResearchRefreshScheduler {
+  private stopped = false;
+  private readonly active = new Set<Promise<void>>();
+  private readonly controller = new AbortController();
   private inFlight = false;
   private repairInFlight = false;
   private readonly attemptedSlots = new Map<string, number>();
-  constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; marketauxOnDemand?: boolean; wsh?: WshRefreshRuntime }) {}
+  constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; marketauxOnDemand?: boolean; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[] }) {
+    options.signal?.addEventListener("abort", () => this.stop(), { once: true });
+    if (options.signal?.aborted) this.stop();
+  }
 
-  async tick(): Promise<void> {
+  stop(): void { this.stopped = true; this.controller.abort(); }
+  async drain(): Promise<void> { await Promise.allSettled([...this.active]); }
+  private assertActive(): void { if (this.stopped) throw new Error("RESEARCH_REFRESH_ABORTED"); }
+  private track(work: () => Promise<void>): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    const promise = work(); this.active.add(promise);
+    void promise.finally(() => this.active.delete(promise)).catch(() => undefined);
+    return promise;
+  }
+  tick(): Promise<void> { return this.track(() => this.runTick()); }
+  tickRepairs(): Promise<void> { return this.track(() => this.runRepairs()); }
+
+  private async runTick(): Promise<void> {
     if (!this.options.manifest.refreshEnabled || this.inFlight) return;
     this.inFlight = true;
     try {
       const errors: unknown[] = [];
       for (const policy of this.options.manifest.instruments) {
+        if (this.stopped) break;
         if (policy.assetClass === "etf") continue;
         try {
           await this.options.store.withRefreshLock({ configHash: this.options.manifest.configHash, manifestHash: this.options.manifestHash, instrumentId: policy.instrumentId }, async () => {
+            this.assertActive();
             for (const source of policy.sources) {
               if (this.options.marketauxOnDemand && source.adapter === "marketaux-news") continue;
               for (const role of source.roles) await this.refreshSlot(policy, source, role);
@@ -85,7 +105,7 @@ export class ResearchRefreshScheduler {
     } finally { this.inFlight = false; }
   }
 
-  async tickRepairs(): Promise<void> {
+  private async runRepairs(): Promise<void> {
     const { store, manifest, manifestHash, accountId } = this.options;
     if (!manifest.refreshEnabled || this.repairInFlight || !store.dueRepairs || !store.prepareRepair) return;
     this.repairInFlight = true;
@@ -93,10 +113,13 @@ export class ResearchRefreshScheduler {
       const requests = await store.dueRepairs({ configHash: manifest.configHash, manifestHash, accountId });
       const instruments = [...new Set(requests.map(row => row.instrumentId))], errors: unknown[] = [];
       for (const instrumentId of instruments) {
+        if (this.stopped) break;
         const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId };
         try {
           await store.withRefreshLock(identity, async () => {
+            this.assertActive();
             const inspected = await store.prepareRepair!(identity);
+            this.assertActive();
             if (inspected.state !== "WAITING") return;
             const policy = manifest.instruments.find(p => p.instrumentId === instrumentId)!;
             for (const requested of inspected.sources) {
@@ -105,6 +128,7 @@ export class ResearchRefreshScheduler {
               await this.refreshSlot(policy, source, requested.role);
             }
           });
+          this.assertActive();
           await store.prepareRepair(identity);
         } catch (error) { errors.push(error); }
       }
@@ -113,18 +137,20 @@ export class ResearchRefreshScheduler {
   }
 
   private async refreshSlot(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role): Promise<void> {
+    this.assertActive();
     const slot = researchSourceSlot((this.options.now ?? Date.now)(), source.adapter === "ibkr-wsh" ? "news" : role);
     const key = [this.options.manifestHash, policy.instrumentId, source.id, role].join(":");
     if (this.attemptedSlots.get(key) === slot) return;
     const slotKey = researchRefreshSlotKey(this.options.manifestHash, policy.instrumentId, source.id, role, slot);
     if (await this.options.store.hasRefreshSlot(slotKey)) { this.attemptedSlots.set(key, slot); return; }
+    this.assertActive();
     this.attemptedSlots.set(key, slot);
     try { if (await this.refreshRole(policy, source, role, slot, slotKey) === false) this.attemptedSlots.delete(key); }
     catch (error) { this.attemptedSlots.delete(key); throw error; }
   }
 
   private async refreshRole(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role, slot: number, slotKey: string): Promise<boolean | void> {
-    if (source.adapter === "ibkr-wsh") return refreshWsh({ ...this.options, policy, source, slotKey });
+    if (source.adapter === "ibkr-wsh") return refreshWsh({ ...this.options, signal: this.controller.signal, policy, source, slotKey });
     if (source.adapter === "marketaux-news") return this.refreshMarketaux(policy, source, slot, slotKey);
     const { manifest, manifestHash, store, accountId } = this.options;
     const startedAt = new Date((this.options.now ?? Date.now)()).toISOString();
@@ -240,6 +266,7 @@ export class ResearchRefreshScheduler {
       if (!this.options.marketauxApiKey?.trim()) throw new Error("RESEARCH_MARKETAUX_KEY_MISSING");
       admissionDeadline = Math.min(startedAt + MARKETAUX_MAX_ACQUISITION_MS, marketauxQualificationDeadline(config, now()));
       const checkpoint = () => {
+        this.assertActive();
         marketauxQualificationDeadline(config, now());
         if (now() >= admissionDeadline) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
       };
@@ -335,6 +362,7 @@ export class ResearchRefreshScheduler {
     const maxCostMicrosPerDay = Math.min(...providerSources.map(candidate => candidate.maxCostMicrosPerDay));
     const reservedCostMicros = Math.max(...providerSources.map(candidate => candidate.costMicrosPerCall));
     for (const attempt of [1, 2] as const) {
+      this.assertActive();
       const callKey = researchCallKey(manifestHash, policy, source, role, slot, url, attempt);
       const requestHash = researchHash({ method: "GET", url, callKey });
       const deadlineAt = new Date(Date.now() + 10000).toISOString();
@@ -342,6 +370,7 @@ export class ResearchRefreshScheduler {
         callKey, requestHash, reservedCostMicros,
         maxRequestsPerDay, maxCostMicrosPerDay, deadlineAt });
       try {
+        this.assertActive();
         const result = await (this.options.fetch ?? fetchResearchSource)(source, url, deadlineAt);
         await store.recordCallOutcome(callKey, "SUCCEEDED");
         return result;

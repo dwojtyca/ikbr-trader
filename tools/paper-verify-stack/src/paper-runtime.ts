@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
+import { formatResearchProviderError } from '@ikbr/shared/instrument-research';
+import { safeDiagnosticText } from '@ikbr/shared/diagnostics';
 
 export const PAPER_SERVICES = ['postgres', 'redis', 'execution-engine', 'ingestion', 'llm-agent', 'signal-engine'] as const;
 const APP_SERVICES = ['ingestion', 'execution-engine', 'signal-engine', 'llm-agent'] as const;
@@ -439,7 +441,20 @@ export class PaperRuntime {
       const states = results.map(v => obj(v)?.state);
       if (states.every(s => s === 'READY')) return;
       const reasons = results.flatMap(v => Array.isArray(obj(v)?.reasons) ? obj(v)!.reasons as unknown[] : []).filter((x): x is string => typeof x === 'string' && /^[A-Z][A-Z0-9_]*$/.test(x));
-      if (states.some(s => s === 'HOLD')) { if (reasons.length) this.options.adapters.log?.(`Wstrzymano przygotowanie: ${[...new Set(reasons)].join(', ')}`); throw new PaperRuntimeError(reasons[0] ?? 'PAPER_RESEARCH_HOLD'); }
+      if (states.some(s => s === 'HOLD')) {
+        if (reasons.length) this.options.adapters.log?.(`Wstrzymano przygotowanie: ${[...new Set(reasons)].join(', ')}`);
+        const privacy = { secrets: [this.options.token], accountIds: [accountId] };
+        for (const result of results) {
+          const item = obj(result);
+          for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
+            const row = obj(source);
+            if (row?.role !== 'calendar' || !Array.isArray(row.reasons) || !row.reasons.includes('RESEARCH_CALENDAR_ERROR')) continue;
+            const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'calendar';
+            this.options.adapters.log?.(`  ${String(item?.instrumentId)} / ${label}: ${formatResearchProviderError(row.providerError, privacy)}`);
+          }
+        }
+        throw new PaperRuntimeError(reasons[0] ?? 'PAPER_RESEARCH_HOLD');
+      }
       const description = `WAITING:${[...new Set(reasons)].join(',')}`;
       if (description !== lastStatus) { this.options.adapters.log?.(`WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`); lastStatus = description; }
       await this.sleep(5000);

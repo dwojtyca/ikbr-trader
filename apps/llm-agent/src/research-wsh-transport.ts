@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { type DiagnosticPrivacy } from "@ikbr/shared/diagnostics";
+import { sanitizeResearchProviderError, type ResearchProviderError } from "@ikbr/shared/instrument-research";
 import { IBApi } from "@stoqey/ib";
 import { inspectWshRequest } from "./research-wsh-inspection.js";
 
@@ -12,6 +14,8 @@ export interface WshSocket {
   removeListener(event: string, listener: (...args: any[]) => void): unknown;
   connect(clientId: number): unknown;
   disconnect(): unknown;
+  reqCancelWshMetaData(requestId: number): unknown;
+  reqCancelWshEventData(requestId: number): unknown;
   reqWshMetaData(requestId: number): unknown;
   reqWshEventData(requestId: number, request: WshEventRequest): unknown;
 }
@@ -34,7 +38,13 @@ export interface WshTransport {
   connect(deadlineAt: string): Promise<void>;
   metadata(requestId: number, deadlineAt: string, maximumBytes: number): Promise<string>;
   events(requestId: number, request: WshEventRequest, deadlineAt: string, maximumBytes: number): Promise<string>;
-  close(): void;
+  close(): void | Promise<void>;
+}
+export function wshProviderError(error: unknown, code: unknown, privacy: DiagnosticPrivacy = {}): Error & { providerError?: ResearchProviderError } {
+  const number = typeof code === "number" && Number.isSafeInteger(code) ? code : null;
+  const result = new Error(`RESEARCH_WSH_ERROR_${number ?? "UNKNOWN"}`);
+  const text = error instanceof Error ? error.message : typeof error === "string" ? error : null;
+  return text === null ? result : Object.assign(result, { providerError: sanitizeResearchProviderError(number, text, privacy) });
 }
 const INFO_CODES = new Set([2104, 2106, 2107, 2108, 2158]);
 
@@ -43,23 +53,31 @@ export class WshSocketTransport implements WshTransport {
   readonly sdkVersion = "1.6.10";
   private readonly socket: WshSocket;
   private closed = false;
+  private terminalError: Error | null = null;
   private connected = false;
   private pending: ((error: Error) => void) | null = null;
   private metadataReady = false;
   private readonly usedRequestIds = new Set<number>();
-  private readonly disconnected = () => this.closeWith(new Error("RESEARCH_WSH_DISCONNECTED"));
+  private readonly owned = new Map<number, string>();
+  private closing: Promise<void> | null = null;
+  private readonly aborted = () => { void this.closeWith(new Error("RESEARCH_WSH_ABORTED")); };
+  private readonly disconnected = () => { void this.closeWith(new Error("RESEARCH_WSH_DISCONNECTED")); };
   private readonly errored = (_error: unknown, code: number, requestId: number) => {
-    if (INFO_CODES.has(code)) return;
-    if (requestId === -1 || requestId === undefined) this.closeWith(new Error(`RESEARCH_WSH_ERROR_${Number.isInteger(code) ? code : "UNKNOWN"}`));
+    if (this.closed || INFO_CODES.has(code)) return;
+    if (requestId === -1 || requestId === undefined) void this.closeWith(wshProviderError(_error, code, this.privacy));
   };
-  constructor(private readonly options: WshRuntimeConfiguration & { accountId: string }, factory?: () => WshSocket) {
+  constructor(private readonly options: WshRuntimeConfiguration & { accountId: string; signal?: AbortSignal; secrets?: readonly string[] }, factory?: () => WshSocket) {
     this.socket = factory ? factory() : new IBApi({ host: options.host, port: options.port }) as unknown as WshSocket;
     this.socket.on("disconnected", this.disconnected);
     this.socket.on("error", this.errored);
+    options.signal?.addEventListener("abort", this.aborted, { once: true });
+    if (options.signal?.aborted) this.aborted();
   }
+  private get privacy(): DiagnosticPrivacy { return { accountIds: [this.options.accountId], secrets: this.options.secrets }; }
   get serverVersion(): number { return this.socket.serverVersion; }
 
   async connect(deadlineAt: string): Promise<void> {
+    if (this.terminalError) throw this.terminalError;
     if (!this.options.enabled || this.closed || this.connected || this.pending) throw new Error("RESEARCH_WSH_TRANSPORT_UNAVAILABLE");
     let nextIdSeen = false, accountSeen = false;
     await this.bounded(deadlineAt, (resolve, reject) => {
@@ -77,18 +95,20 @@ export class WshSocketTransport implements WshTransport {
       };
       this.socket.on("nextValidId", next); this.socket.on("managedAccounts", accounts);
       const cleanup = () => { this.socket.removeListener("nextValidId", next); this.socket.removeListener("managedAccounts", accounts); };
-      try { this.socket.connect(this.options.clientId); } catch { cleanup(); throw new Error("RESEARCH_WSH_CONNECT_FAILED"); }
+      try { this.socket.connect(this.options.clientId); } catch (error) { cleanup(); throw Object.assign(new Error("RESEARCH_WSH_CONNECT_FAILED"), { providerError: wshProviderError(error, null, this.privacy).providerError }); }
       return cleanup;
     });
   }
 
   async metadata(requestId: number, deadlineAt: string, maximumBytes: number): Promise<string> {
+    if (this.terminalError) throw this.terminalError;
     if (this.metadataReady) throw new Error("RESEARCH_WSH_METADATA_ALREADY_RECEIVED");
     const result = await this.query("wshMetaData", requestId, deadlineAt, maximumBytes, () => this.socket.reqWshMetaData(requestId));
     this.metadataReady = true;
     return result;
   }
   events(requestId: number, request: WshEventRequest, deadlineAt: string, maximumBytes: number): Promise<string> {
+    if (this.terminalError) return Promise.reject(this.terminalError);
     if (!this.metadataReady || !inspectWshRequest(request).shapeValid) return Promise.reject(new Error("RESEARCH_WSH_REQUEST_INVALID"));
     return this.query("wshEventData", requestId, deadlineAt, maximumBytes, () => this.socket.reqWshEventData(requestId, request));
   }
@@ -96,7 +116,6 @@ export class WshSocketTransport implements WshTransport {
     if (!this.connected || this.closed || this.pending || !Number.isSafeInteger(requestId) || requestId <= 0 || this.usedRequestIds.has(requestId))
       return Promise.reject(new Error("RESEARCH_WSH_TRANSPORT_UNAVAILABLE"));
     if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0) return Promise.reject(new Error("RESEARCH_WSH_BYTES_INVALID"));
-    this.usedRequestIds.add(requestId);
     return this.bounded(deadlineAt, (resolve, reject) => {
       const received = (id: unknown, json: unknown) => {
         if (id !== requestId) return;
@@ -104,11 +123,11 @@ export class WshSocketTransport implements WshTransport {
         else resolve(json);
       };
       const error = (_error: unknown, code: number, id: number) => {
-        if (id === requestId && !INFO_CODES.has(code)) reject(new Error(`RESEARCH_WSH_ERROR_${Number.isInteger(code) ? code : "UNKNOWN"}`));
+        if (id === requestId && !INFO_CODES.has(code)) reject(wshProviderError(_error, code, this.privacy));
       };
       this.socket.on(event, received); this.socket.on("error", error);
       const cleanup = () => { this.socket.removeListener(event, received); this.socket.removeListener("error", error); };
-      try { send(); } catch { cleanup(); throw new Error("RESEARCH_WSH_SEND_FAILED"); }
+      try { this.usedRequestIds.add(requestId); this.owned.set(requestId, event); send(); } catch (error) { cleanup(); throw Object.assign(new Error("RESEARCH_WSH_SEND_FAILED"), { providerError: wshProviderError(error, null, this.privacy).providerError }); }
       return cleanup;
     });
   }
@@ -120,7 +139,7 @@ export class WshSocketTransport implements WshTransport {
       const finish = (error: Error | null, json = "") => {
         if (settled) return;
         settled = true; clearTimeout(timer); cleanup(); this.pending = null;
-        if (error) { this.closeWith(error); reject(error); } else resolve(json);
+        if (error) { void this.closeWith(error); reject(error); } else resolve(json);
       };
       const timer = setTimeout(() => finish(new Error("RESEARCH_WSH_TIMEOUT")), remaining);
       this.pending = error => finish(error);
@@ -130,12 +149,43 @@ export class WshSocketTransport implements WshTransport {
       } catch (error) { finish(error instanceof Error ? error : new Error("RESEARCH_WSH_TRANSPORT_FAILED")); }
     });
   }
-  private closeWith(error: Error): void {
-    if (this.closed) return;
+  private closeWith(error: Error): Promise<void> {
+    if (this.closing) return this.closing;
+    this.terminalError = error;
     this.closed = true; this.connected = false;
+    this.options.signal?.removeEventListener("abort", this.aborted);
+    // Defer cleanup one microtask so synchronous SDK callbacks see the same close promise.
+    this.closing = Promise.resolve().then(async () => {
+      const expected = new Set([...this.owned].map(([id, event]) => `${event === "wshEventData" ? 103 : 101}:${id}`));
+      let finish!: () => void;
+      const sent = new Promise<void>(resolve => { finish = resolve; });
+      const observed = (tokens: unknown) => {
+        if (!Array.isArray(tokens)) return;
+        expected.delete(`${tokens[0]}:${tokens[1]}`);
+        if (!expected.size) finish();
+      };
+      this.socket.on("sent", observed);
+      const timeout = setTimeout(finish, 750);
+      try {
+        for (const event of ["wshEventData", "wshMetaData"]) for (const [id, kind] of this.owned) {
+          if (kind !== event) continue;
+          try {
+            if (event === "wshEventData") this.socket.reqCancelWshEventData(id);
+            else this.socket.reqCancelWshMetaData(id);
+          } catch { /* Cancellation failure cannot replace the acquisition outcome. */ }
+        }
+        if (expected.size) await sent;
+        // The SDK's sent event follows socket.write, not its flush callback.
+        if (this.owned.size) await new Promise<void>(resolve => setTimeout(resolve, 25));
+      } finally {
+        clearTimeout(timeout); this.socket.removeListener("sent", observed);
+        this.socket.removeListener("disconnected", this.disconnected);
+        // Keep the closed error listener to absorb delayed SDK/network errors.
+        try { this.socket.disconnect(); } catch { /* Cleanup is best effort. */ }
+      }
+    });
     const pending = this.pending; this.pending = null; pending?.(error);
-    this.socket.removeListener("disconnected", this.disconnected); this.socket.removeListener("error", this.errored);
-    this.socket.disconnect();
+    return this.closing;
   }
-  close(): void { this.closeWith(new Error("RESEARCH_WSH_CLOSED")); }
+  close(): Promise<void> { return this.closeWith(new Error("RESEARCH_WSH_CLOSED")); }
 }

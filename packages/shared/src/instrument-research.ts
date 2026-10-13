@@ -8,3 +8,4 @@ export * from "./instrument-research/marketaux.js";
 export * from "./instrument-research/wsh.js";
 export * from "./instrument-research/ai-contract.js";
 export * from "./instrument-research/repair.js";
+export * from "./instrument-research/provider-error.js";

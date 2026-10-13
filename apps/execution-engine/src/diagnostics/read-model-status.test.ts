@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { DiagnosticQuery, DiagnosticReport } from '@ikbr/shared/diagnostics';
 import { researchHash } from '@ikbr/shared/instrument-research';
-import { researchFixture } from '@ikbr/shared/instrument-research-testfixture';
+import { researchFixture, wshSnapshotFixture } from '@ikbr/shared/instrument-research-testfixture';
 import { appendDiagnosticStatus } from './read-model-status.js';
 import type { DiagnosticReadModelDeps } from './read-model.js';
 import { roundTrip as roundTripFixture } from '../lifecycle/round-trip-test-fixture.js';
@@ -213,4 +213,29 @@ test('foreign evaluator result cannot populate an account lifecycle section', as
   assert.equal(section.fields.find(item => item.key === 'accounting')?.value, null);
   assert.ok(output.coverage.some(item => item.source === 'round_trip:41' && item.status === 'UNAVAILABLE' &&
     item.reasons.includes('ROUND_TRIP_IDENTITY_MISMATCH')));
+});
+
+
+test('calendar status exposes validated original provider error and labels missing historical descriptions', async () => {
+  const f = wshSnapshotFixture(Date.parse(now), 'pko_wse');
+  f.snapshot.events = []; f.snapshot.evidence = f.snapshot.evidence.filter(e => ('kind' in e ? e.kind !== 'wsh-calendar' : true));
+  const previous = f.snapshot.coverage.find(c => c.role === 'calendar')!;
+  const failure = {sourceId:previous.sourceId, role:'calendar' as const, status:'ERROR' as const,
+    checkedAt:f.snapshot.createdAt, windowStart:f.snapshot.createdAt, windowEnd:f.snapshot.createdAt,
+    complete:false,evidenceRefs:[],reason:'RESEARCH_WSH_ERROR_10281',
+    providerError:{code:10281,message:'Duplicate WSH event data request DU1234567'}};
+  f.snapshot.coverage = f.snapshot.coverage.map(c => c === previous ? failure : c);
+  const original = deps();
+  const configured = deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),
+    pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority') ? {rows:[{
+      manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',
+      snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]} : original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool']});
+  const output = report(); await appendDiagnosticStatus(configured, query, output);
+  const key = `research:${previous.sourceId}:calendar:providerError`;
+  assert.match(String(value(output,key)), /10281; komunikat: Duplicate WSH event data request/);
+  assert.doesNotMatch(String(value(output,key)), /DU1234567/);
+  assert.equal(value(output,'researchCoverage'),'INELIGIBLE_AT_REPORT_TIME');
+  delete (failure as {providerError?:unknown}).providerError;
+  const legacy = report(); await appendDiagnosticStatus(configured,query,legacy);
+  assert.match(String(value(legacy,key)), /Oryginalny opis błędu niedostępny/);
 });

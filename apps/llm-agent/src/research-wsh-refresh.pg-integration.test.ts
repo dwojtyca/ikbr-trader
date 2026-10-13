@@ -7,7 +7,7 @@ import { ResearchStore, researchHash } from "@ikbr/shared/instrument-research";
 import { wshResearchFixture } from "@ikbr/shared/instrument-research-testfixture";
 import { loadTradingConfiguration, TradingConfigurationStore } from "@ikbr/shared/trading-config";
 import { refreshWsh } from "./research-wsh-refresh.js";
-import type { WshTransport } from "./research-wsh-transport.js";
+import { wshProviderError, type WshTransport } from "./research-wsh-transport.js";
 
 const connection = process.env.TEST_POSTGRES_URL;
 async function isolated(run: (pool: Pool) => Promise<void>) {
@@ -32,6 +32,7 @@ async function seed(pool: Pool) {
   for (const service of ["execution-engine", "llm-agent"] as const) await store.observe({ configHash: f.configHash, manifestHash, service, processId: service, tradingEnabled: false });
   const prior = await store.storeSnapshot(f.snapshot);
   const identity = { configHash: f.configHash, manifestHash, instrumentId: f.policy.instrumentId };
+  let providerFailure: Error | undefined;
   let calls = 0, failEvent = false, rows: unknown[] = [];
   const createTransport = (): WshTransport => ({ sessionId: randomUUID(), serverVersion: 180, sdkVersion: "1.6.10", connect: async () => {}, close: () => {},
     metadata: async () => {
@@ -44,13 +45,14 @@ async function seed(pool: Pool) {
       assert.equal((await pool.query("SELECT count(*) FROM research_call_reservations")).rows[0].count, "2");
       assert.deepEqual((await pool.query("SELECT outcome FROM research_call_outcomes")).rows.map(r => r.outcome), ["SUCCEEDED"]);
       assert.equal((await store.latestSnapshot(identity))?.id, prior.id);
+      if (providerFailure) throw providerFailure;
       if (failEvent) throw new Error("RESEARCH_WSH_TIMEOUT");
       return JSON.stringify(rows);
     },
   });
   const options = { manifest: f.manifest, manifestHash, accountId: "DU_TEST", policy: f.policy, source: f.source, store, slotKey: "wsh-fixture-slot",
     wsh: { runtime: { enabled: true, endpointId: "fixture-endpoint", host: "127.0.0.1", port: 4002, clientId: 77 }, createTransport } };
-  return { f, store, prior, identity, options, get calls() { return calls; }, fail: () => { failEvent = true; }, available: () => {
+  return { f, store, prior, identity, options, get calls() { return calls; }, providerFail: (error: Error) => { providerFailure = error; }, fail: () => { failEvent = true; }, available: () => {
     rows = [{ event_key: "new-type-1", event_type: "fixture-new-type", conids: [String(f.policy.listing.conId)], data: { company: { isin: f.source.issuerIdentifier.value }, forecast: "NOT_PROVIDED" } }];
   } };
 }
@@ -87,4 +89,19 @@ test("WSH failed negative persistence preserves original head; restart retires t
   assert.deepEqual((await pool.query("SELECT outcome FROM research_call_outcomes ORDER BY outcome")).rows.map(r => r.outcome), ["SUCCEEDED", "UNKNOWN"]);
   assert.equal((await pool.query("SELECT state FROM research_wsh_acquisitions")).rows[0].state, "UNKNOWN");
   assert.equal((await pool.query("SELECT count(*) FROM research_call_reservations")).rows[0].count, "2");
+}));
+
+
+test("original WSH provider error survives immutable PostgreSQL snapshot readback sanitized", { skip: !connection }, () => isolated(async pool => {
+  const h = await seed(pool);
+  h.providerFail(wshProviderError(new Error("Duplicate WSH request DU_TEST known-secret\n\u001b[31m"), 10281));
+  await h.store.withRefreshLock(h.identity, () => refreshWsh({ ...h.options, secrets: ["known-secret"] }).then(() => {}));
+  const head = await h.store.latestSnapshot(h.identity); assert.ok(head);
+  const readback = await h.store.readSnapshot(head.id); assert.ok(readback);
+  const coverage = readback.snapshot.coverage.find(c => c.sourceId === h.f.source.id)!;
+  assert.equal(coverage.reason, "RESEARCH_WSH_ERROR_10281");
+  assert.equal(coverage.status, "ERROR"); assert.equal(coverage.complete, false);
+  assert.deepEqual(coverage.providerError, { code: 10281, message: "Duplicate WSH request [UKRYTO] [UKRYTO]\\u000a\\u001b[31m" });
+  assert.deepEqual((await pool.query("SELECT outcome FROM research_call_outcomes ORDER BY outcome")).rows.map(r => r.outcome), ["FAILED", "SUCCEEDED"]);
+  assert.equal(researchHash(readback.snapshot), head.hash);
 }));

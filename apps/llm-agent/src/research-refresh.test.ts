@@ -30,12 +30,15 @@ test("source URL and DNS policy excludes private, link-local and redirect target
   assert.equal(isPublicResearchAddress("2606:4700:4700::1111"), true);
 });
 
-test("absolute deadline stops a hanging DNS lookup before any HTTPS request", async () => {
+test("absolute deadline stops a hanging DNS lookup before any HTTPS request", async context => {
+  context.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-13T12:00:00Z") });
   const source = researchFixture().policy.sources[0]; let requests = 0;
-  await assert.rejects(fetchResearchSource(source, source.urls[0], new Date(Date.now() + 25).toISOString(), {
+  const rejected = assert.rejects(fetchResearchSource(source, source.urls[0], new Date(Date.now() + 25).toISOString(), {
     resolveAddress: async () => new Promise(() => {}),
     httpsRequest: ((..._args: unknown[]) => { requests++; throw new Error("must not connect"); }) as unknown as typeof request,
   }), /RESEARCH_SOURCE_TIMEOUT/);
+  context.mock.timers.tick(25);
+  await rejected;
   assert.equal(requests, 0);
 });
 

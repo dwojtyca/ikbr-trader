@@ -218,3 +218,75 @@ test("lost endpoint lease cannot send or publish from a stale generation", async
   await assert.rejects(h.run(), /RESEARCH_WSH_LOCK_LOST/);
   assert.equal(h.trace.includes("metadata"), false); assert.equal(h.trace.includes("publish"), false);
 });
+
+for (const boundary of ["lock", "begin", "reserve", "checkpoint"] as const) {
+  test(`abort after awaited ${boundary} prevents the next WSH request`, async () => {
+    const h = harness(), controller = new AbortController();
+    if (boundary === "lock") {
+      const original = h.store.withWshEndpointLock;
+      h.store.withWshEndpointLock = async (...args: any[]) => { controller.abort(); return original(...args); };
+    } else {
+      const name = boundary === "begin" ? "beginWshAcquisition" : boundary === "reserve" ? "reserveWshCall" : "assertWshAcquisition";
+      const original = h.store[name];
+      h.store[name] = async (...args: any[]) => { const result = await original(...args); controller.abort(); return result; };
+    }
+    if (boundary === "lock") await assert.rejects(refreshWsh({ ...h.options, signal: controller.signal }), /ABORTED/);
+    else await refreshWsh({ ...h.options, signal: controller.signal });
+    assert.equal(h.trace.includes("events"), false);
+    if (boundary !== "reserve") assert.equal(h.trace.includes("metadata"), false);
+    assert.equal(h.trace.includes("publish"), false);
+  });
+}
+
+test("failure publication waits for async cleanup and retains original provider diagnostics", async () => {
+  const h = harness();
+  h.faults({ eventError: Object.assign(new Error("RESEARCH_WSH_ERROR_10281"), { providerError: { code: 10281, message: "Duplicate WSH DU1 private-key" } }) });
+  const create = h.wsh.createTransport;
+  let release!: () => void;
+  const cleanup = new Promise<void>(resolve => { release = resolve; });
+  h.wsh.createTransport = () => ({ ...create(), close: () => cleanup });
+  const pending = refreshWsh({ ...h.options, secrets: ["private-key"] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.trace.some(t => t.startsWith("negative")), false);
+  release(); await pending;
+  assert.deepEqual(calendar(h).providerError, { code: 10281, message: "Duplicate WSH [UKRYTO] [UKRYTO]" });
+  assert.deepEqual([...h.outcomes.values()], ["SUCCEEDED", "FAILED"]);
+});
+
+test("scheduler stop drains refresh and repair, fences a held lock and never starts later instruments", async () => {
+  const h = harness();
+  let release!: () => void;
+  const hold = new Promise<void>(resolve => { release = resolve; });
+  let locks = 0, prepared = 0;
+  h.store.withRefreshLock = async (_identity: unknown, work: () => Promise<void>) => { locks++; await hold; await work(); };
+  h.store.dueRepairs = async () => [{ instrumentId: h.f.policy.instrumentId }];
+  h.store.prepareRepair = async () => { prepared++; return { state: "WAITING", sources: [] }; };
+  const scheduler = new ResearchRefreshScheduler(h.options);
+  const refresh = scheduler.tick().catch(() => {}), repair = scheduler.tickRepairs().catch(() => {});
+  await new Promise(resolve => setImmediate(resolve));
+  scheduler.stop();
+  let drained = false;
+  const draining = scheduler.drain().then(() => { drained = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(drained, false);
+  release(); await Promise.all([refresh, repair, draining]);
+  assert.equal(drained, true); assert.equal(locks, 2); assert.equal(prepared, 0);
+  assert.equal(h.trace.includes("connect"), false);
+  await scheduler.tick(); await scheduler.tickRepairs(); assert.equal(locks, 2);
+});
+
+test("scheduler shutdown aborts an in-flight WSH response, waits for cleanup and suppresses later sources", async () => {
+  const h = harness();
+  h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  let release!: () => void, received!: () => void;
+  const events = new Promise<string>(resolve => { release = () => resolve("[]"); });
+  const seen = new Promise<void>(resolve => { received = resolve; });
+  const create = h.wsh.createTransport;
+  h.wsh.createTransport = () => ({ ...create(), events: () => { received(); return events; } });
+  const scheduler = new ResearchRefreshScheduler(h.options);
+  const pending = scheduler.tick(); await seen; scheduler.stop(); release(); await pending; await scheduler.drain();
+  assert.equal(h.trace.includes("publish"), false);
+  assert.equal(calendar(h).reason, "RESEARCH_WSH_ABORTED");
+  assert.deepEqual([...h.outcomes.values()], ["SUCCEEDED", "UNKNOWN"]);
+});

@@ -1,5 +1,5 @@
 import type { DiagnosticCoverage, DiagnosticField, DiagnosticQuery, DiagnosticReport, DiagnosticScalar } from '@ikbr/shared/diagnostics';
-import { evaluateResearchEligibility, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
+import { evaluateResearchEligibility, formatResearchProviderError, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
 import { requireSessionSchedule, type SessionScheduleEvidence } from '@ikbr/shared';
 import type { DiagnosticReadModelDeps } from './read-model.js';
 
@@ -208,13 +208,18 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
         set(fields, field('newsNarrativeCount', 'Newsy z opisem lub fragmentem', snapshot.schemaVersion === 2 ? snapshot.news.filter(n => n.description || n.snippet).length : 0));
         set(fields, field('researchRequiredEvidenceRefs', 'Wymagane odsyłacze dowodów', eligibility.requiredEvidenceRefs.join(', ') || null, 'identifier'));
         for (const source of snapshot.coverage) {
-          if (fields.length + 7 > 200) {
+          if (fields.length + 8 > 200) {
             report.truncated = true;
             report.omissions.push(`research:${item.id}:FIELD_LIMIT`);
             break;
           }
           const prefix = `research:${source.sourceId}:${source.role}`;
           set(fields, field(`${prefix}:status`, `Źródło ${source.sourceId}, ${source.role}`, source.status));
+          if (source.role === 'calendar' && source.status === 'ERROR') {
+            set(fields, field(`${prefix}:reason`, `Przyczyna błędu ${source.sourceId}`, source.reason, 'untrusted'));
+            set(fields, field(`${prefix}:providerError`, `Oryginalny błąd ${source.sourceId}`,
+              formatResearchProviderError(source.providerError, { accountIds: [accountId] }), 'untrusted'));
+          }
           set(fields, field(`${prefix}:checkedAt`, `Sprawdzenie ${source.sourceId}, ${source.role}`, source.checkedAt));
           set(fields, field(`${prefix}:ageMs`, `Wiek źródła ${source.sourceId}, ${source.role} ms`, ageMs(source.checkedAt, now)));
           set(fields, field(`${prefix}:complete`, `Kompletność źródła ${source.sourceId}, ${source.role}`, source.complete));

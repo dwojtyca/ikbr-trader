@@ -63,7 +63,9 @@ export interface ResearchEvidence {
   automation: ResearchSource["automation"];
   retention: ResearchSource["retention"];
 }
+export interface ResearchProviderError { code: number | null; message: string }
 export interface ResearchSourceResult {
+  providerError?: ResearchProviderError;
   acquisition?: import("./marketaux.js").MarketauxAcquisition;
   sourceId: string;
   role: "reports" | "news" | "calendar";

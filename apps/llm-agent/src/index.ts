@@ -10,6 +10,16 @@ import { LlmAgentRepository } from "./repository.js";
 import { ResearchRefreshScheduler, researchBudgetAccountId } from "./research-refresh.js";
 import { loadWshRuntimeConfiguration } from "./research-wsh-transport.js";
 
+import { assertProcessActive, installShutdown, whileProcessActive } from "./shutdown.js";
+
+const shutdownController = new AbortController();
+const signal = shutdownController.signal;
+const active = new Set<Promise<unknown>>();
+function track<T>(promise: Promise<T>): Promise<T> {
+  active.add(promise);
+  void promise.finally(() => active.delete(promise)).catch(() => undefined);
+  return promise;
+}
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const configurationStore = new TradingConfigurationStore(pool);
 const configurationRuntime = createTradingConfigurationRuntime({
@@ -26,7 +36,7 @@ const research = loadResearchManifest(process.env, tradingConfiguration.loaded);
 const researchStore = new ResearchStore(pool);
 const researchDecider = new ResearchOpenAiDecider({ apiKey: config.LLM_AGENT_OPENAI_API_KEY, baseUrl: config.LLM_AGENT_OPENAI_BASE_URL });
 const boundWorker = new BoundReviewWorker({
-  assertEntryAllowed: () => configurationRuntime.assertEntryAllowed(),
+  assertEntryAllowed: () => whileProcessActive(signal, () => configurationRuntime.assertEntryAllowed()),
   repository: new ResearchBoundReviewRepository(pool, research), execution: executionApi,
   researchDecider, model: research?.manifest.model.model ?? config.LLM_AGENT_MODEL,
   promptVersion: research?.manifest.model.promptVersion ?? config.LLM_AGENT_PROMPT_VERSION,
@@ -39,6 +49,7 @@ const wshRuntime = loadWshRuntimeConfiguration(process.env);
 const refreshScheduler = research && refreshAccountId ? new ResearchRefreshScheduler({ manifest: research.manifest,
   manifestHash: research.hash, accountId: refreshAccountId, store: researchStore, marketauxApiKey: config.LLM_AGENT_MARKETAUX_API_KEY,
   marketauxOnDemand: config.RESEARCH_MARKETAUX_ON_DEMAND,
+  signal, secrets: [config.LLM_AGENT_OPENAI_API_KEY, config.LLM_AGENT_MARKETAUX_API_KEY, config.EXECUTION_API_TOKEN].filter((value): value is string => !!value),
   wsh: { runtime: wshRuntime } }) : null;
 
 const workerId = `llm-agent-${process.pid}`;
@@ -72,7 +83,7 @@ async function pollOnce(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
-  if (!config.llmAgentEnabled) return;
+  if (signal.aborted || !config.llmAgentEnabled) return;
   if (inFlight) return;
 
   inFlight = true;
@@ -86,18 +97,20 @@ async function tick(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await configurationRuntime.initialize();
+  await whileProcessActive(signal, () => configurationRuntime.initialize());
   configurationRuntime.startHeartbeat();
-  await repo.init();
+  await whileProcessActive(signal, () => repo.init());
   if (research && tradingConfiguration.loaded.mode === "bundle") {
     await researchStore.registerManifest({ manifest: research.manifest, configuration: tradingConfiguration.loaded.configuration,
       tradingEnabled: process.env.TRADING_ENABLED === "true", adopt: process.env.RESEARCH_ADOPT_MANIFEST === "true" });
-    const observe = () => researchStore.observe({ configHash: research.manifest.configHash, manifestHash: research.hash,
-      service: "llm-agent", processId: configurationRuntime.processId, tradingEnabled: process.env.TRADING_ENABLED === "true" });
+    assertProcessActive(signal);
+    const observe = () => whileProcessActive(signal, () => researchStore.observe({ configHash: research.manifest.configHash, manifestHash: research.hash,
+      service: "llm-agent", processId: configurationRuntime.processId, tradingEnabled: process.env.TRADING_ENABLED === "true" }));
     await observe();
-    researchHeartbeat = setInterval(() => { void observe().catch(() => log("error", "research heartbeat unavailable")); }, 10000);
+    researchHeartbeat = setInterval(() => { void track(observe()).catch(() => log("error", "research heartbeat unavailable")); }, 10000);
     researchHeartbeat.unref();
   }
+  assertProcessActive(signal);
   if (refreshScheduler) {
     const refresh = () => void refreshScheduler.tick().catch(error => log("error", "research refresh failed", { message: (error as Error).message }));
     refreshTimer = setInterval(refresh, 60_000);
@@ -124,28 +137,24 @@ async function main(): Promise<void> {
   }
 
   timer = setInterval(() => {
-    void tick();
+    void track(tick());
   }, config.LLM_AGENT_POLL_MS);
 
-  void tick();
+  void track(tick());
 }
 
-main().catch((error) => {
-  log("error", "llm-agent fatal error", { message: (error as Error).message });
-  process.exit(1);
-});
-
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, async () => {
+const shutdown = installShutdown({
+  controller: shutdownController,
+  stop: () => {
     configurationRuntime.stopHeartbeat();
-    try {
-      if (timer) clearInterval(timer);
-      if (researchHeartbeat) clearInterval(researchHeartbeat);
-      if (refreshTimer) clearInterval(refreshTimer);
-      if (repairTimer) clearInterval(repairTimer);
-      await pool.end();
-    } finally {
-      process.exit(0);
-    }
-  });
-}
+    if (timer) clearInterval(timer);
+    if (researchHeartbeat) clearInterval(researchHeartbeat);
+    if (refreshTimer) clearInterval(refreshTimer);
+    if (repairTimer) clearInterval(repairTimer);
+    refreshScheduler?.stop();
+  },
+  drain: async () => { await refreshScheduler?.drain(); await Promise.allSettled([...active]); },
+  close: () => pool.end(),
+  report: fatal => log(fatal ? "error" : "info", fatal ? "llm-agent fatal shutdown" : "llm-agent shutdown"),
+});
+void track(main()).catch(() => { void shutdown(true); });

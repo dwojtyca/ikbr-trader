@@ -547,3 +547,30 @@ test('pending bootstrap tolerates the prior durable stop and old failure until i
   try { await h.runtime.start(); assert.ok(polls >= 3); assert.equal(requests, 1); assert.equal(h.resumeCalls, 1); }
   finally { await h.f.cleanup(); }
 });
+
+
+test('calendar hold displays provider code/message below failure, masks secrets, and never resumes', async () => {
+  for (const providerError of [{ code: 10281, message: 'Duplicate WSH event data request fixture DU123456' }, undefined,
+    { code: 502, message: 'unsafe\nterminal' }]) {
+    const h = await runScenario(); const messages: string[] = [];
+    const original = h.adapters.http;
+    h.adapters.log = text => messages.push(text);
+    h.adapters.http = async (path, body, ...rest) => {
+      if (path !== '/execution/entry-control/start/prepare') return original(path, body, ...rest);
+      return { revision: (body as {expectedRevision:number}).expectedRevision,
+        instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD',
+          reasons: ['RESEARCH_CALENDAR_ERROR', 'RESEARCH_WSH_ERROR_10281'], sources: [{sourceId:'wsh_calendar',
+            role:'calendar', reasons:['RESEARCH_CALENDAR_ERROR'], ...(providerError ? {providerError} : {})}] })) };
+    };
+    try {
+      await assert.rejects(h.runtime.start(), /RESEARCH_CALENDAR_ERROR/);
+      assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
+      const output = messages.join('\n');
+      assert.match(output, /Wstrzymano przygotowanie: RESEARCH_CALENDAR_ERROR/);
+      assert.match(output, /pko_wse \/ wsh_calendar/);
+      if (providerError?.code === 10281) assert.match(output, /10281; komunikat: Duplicate WSH event data request/);
+      else assert.match(output, /Oryginalny opis błędu niedostępny/);
+      assert.doesNotMatch(output, /fixture|DU123456|unsafe/);
+    } finally { await h.f.cleanup(); }
+  }
+});
