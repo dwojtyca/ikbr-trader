@@ -1,13 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { WshSocketTransport, loadWshRuntimeConfiguration, type WshEventRequest } from "./research-wsh-transport.js";
+import { WshSocketTransport, loadWshRuntimeConfiguration, type WshEventRequest, type WshLocalSocket } from "./research-wsh-transport.js";
 
 const options = { enabled: true, endpointId: "fixture", host: "127.0.0.1", port: 7497, clientId: 97, accountId: "DU_FIXTURE" };
 const request: WshEventRequest = { conId: 123, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false,
   startDate: "20261001", endDate: "20261125", totalLimit: 100 };
 const deadline = () => new Date(Date.now() + 1000).toISOString();
+class LocalSocket extends EventEmitter implements WshLocalSocket {
+  closed = false; destroyed = false; destroys = 0;
+  destroy() { this.destroys++; this.destroyed = true; this.close(); }
+  close() { this.closed = true; this.emit('close'); }
+}
 class Socket extends EventEmitter {
+  local = new LocalSocket();
+  localSocket = (): WshLocalSocket | null => this.local;
   serverVersion = 193;
   disconnected = 0;
   requests: number[] = [];
@@ -17,7 +24,7 @@ class Socket extends EventEmitter {
   autoReply = true;
   account = "DU_FIXTURE";
   connect() { this.emit("managedAccounts", this.account); this.emit("nextValidId", 1); }
-  disconnect() { this.disconnected++; this.emit("disconnected"); }
+  disconnect() { this.disconnected++; this.emit("disconnected"); this.local.destroy(); }
   reqWshMetaData(id: number) { this.requests.push(id); if (this.autoReply) this.emit("wshMetaData", id, '{"meta_data":{}}'); }
   reqWshEventData(id: number) { this.requests.push(id); if (this.autoReply) this.emit("wshEventData", id, "[]"); }
 }
@@ -55,7 +62,12 @@ test("wrong IDs cannot satisfy a call; timeout retires local client and late cal
   await transport.connect(deadline()); socket.autoReply = false;
   const promise = transport.metadata(1, new Date(Date.now() + 30).toISOString(), 100);
   socket.emit("wshMetaData", 8, "{}");
-  await assert.rejects(promise, /TIMEOUT/); await transport.close(); assert.equal(socket.disconnected, 1);
+  await assert.rejects(promise, error => {
+    assert.equal((error as Error).message, 'RESEARCH_WSH_TIMEOUT');
+    assert.deepEqual((error as any).sourceError, { name: 'WshTimeoutError', code: 'RESEARCH_WSH_TIMEOUT', message: 'Local WSH metadata deadline expired' });
+    assert.equal((error as any).providerError, undefined);
+    return true;
+  }); await transport.close(); assert.equal(socket.disconnected, 1);
   socket.emit("wshMetaData", 1, "{}");
   await assert.rejects(transport.metadata(2, deadline(), 100), /TIMEOUT/);
   const next = new WshSocketTransport(options, () => new Socket());
@@ -117,10 +129,11 @@ test("provider diagnostics retain original code/text with explicit account/secre
     const socket = new Socket(), transport = new WshSocketTransport({ ...options, secrets: ["private-key"] }, () => socket);
     await transport.connect(deadline()); socket.autoReply = false;
     const pending = transport.metadata(7, deadline(), 100);
-    socket.emit("error", new Error("Duplicate WSH DU_FIXTURE private-key\n\u001b[31m"), code, code === 502 ? -1 : 7);
+    socket.emit("error", Object.assign(new Error("Duplicate WSH DU_FIXTURE private-key\n\u001b[31m"), { name: 'ProviderSocketError' }), code, code === 502 ? -1 : 7);
     await assert.rejects(pending, error => {
       assert.equal((error as Error).message, `RESEARCH_WSH_ERROR_${code}`);
       assert.deepEqual((error as any).providerError, { code, message: "Duplicate WSH [UKRYTO] [UKRYTO]\\u000a\\u001b[31m" });
+      assert.deepEqual((error as any).sourceError, { name: 'ProviderSocketError', code: null, message: "Duplicate WSH [UKRYTO] [UKRYTO]\\u000a\\u001b[31m" });
       return true;
     });
     await transport.close();
@@ -143,12 +156,13 @@ test("a cancellation exception cannot replace original failure or skip the remai
 test("synchronous SDK exceptions retain original description without inventing a provider code", async () => {
   for (const phase of ["connect", "send"] as const) {
     const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
-    const fail = () => { throw new Error("SDK refused DU_FIXTURE"); };
+    const fail = () => { throw Object.assign(new Error("SDK refused DU_FIXTURE"), { name: 'SdkSocketError', ...(phase === 'send' ? { code: 502 } : {}) }); };
     if (phase === "connect") socket.connect = fail;
     else { await transport.connect(deadline()); socket.reqWshMetaData = fail; }
     await assert.rejects(phase === "connect" ? transport.connect(deadline()) : transport.metadata(41, deadline(), 100), error => {
       assert.equal((error as Error).message, phase === "connect" ? "RESEARCH_WSH_CONNECT_FAILED" : "RESEARCH_WSH_SEND_FAILED");
       assert.deepEqual((error as any).providerError, { code: null, message: "SDK refused [UKRYTO]" });
+      assert.deepEqual((error as any).sourceError, { name: 'SdkSocketError', code: phase === 'send' ? 502 : null, message: 'SDK refused [UKRYTO]' });
       return true;
     });
     await transport.close();
@@ -171,5 +185,68 @@ test("global provider failure between awaits survives the next request and dupli
     });
     assert.deepEqual(socket.requests, stage === "metadata" ? [] : [1]);
     assert.deepEqual(socket.cancellations, stage === "metadata" ? [] : ["metadata:1"]);
+  }
+});
+
+for (const mode of ['peer-end', 'destroyed', 'disconnect-throw', 'identity-change', 'missing-capability'] as const) {
+  test(`local cleanup cannot be confirmed from ${mode} without exact owned close proof`, async () => {
+    const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+    await transport.connect(deadline());
+    socket.disconnect = () => { socket.disconnected++; socket.emit('disconnected'); if (mode === 'disconnect-throw') throw new Error('private cleanup DU_FIXTURE'); };
+    socket.local.destroy = () => { socket.local.destroyed = true; };
+    if (mode === 'destroyed') socket.local.destroyed = true;
+    if (mode === 'identity-change') socket.localSocket = () => new LocalSocket();
+    if (mode === 'missing-capability') Object.assign(socket, { localSocket: undefined });
+    const closing = transport.close();
+    let settled = false; void closing.then(() => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(settled, false);
+    const result = await closing;
+    assert.equal(result.state, 'UNKNOWN'); assert.equal(result.localClosedAt, null);
+    assert.equal(result.sessionId, transport.sessionId);
+    assert.equal(result.verifiedLocalClosure, false);
+    assert.equal(socket.disconnected, 1); assert.equal(socket.local.listenerCount('close'), 0);
+    socket.local.close();
+    assert.deepEqual(await transport.close(), result);
+    assert.doesNotMatch(JSON.stringify(result), /DU_FIXTURE/);
+  });
+}
+test('actual delayed local close gates cleanup, peer end does not; duplicate close calls share receipt', async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline());
+  socket.disconnect = () => { socket.disconnected++; socket.emit('disconnected'); };
+  socket.local.destroy = () => { socket.local.destroyed = true; };
+  const a = transport.close(), b = transport.close(); assert.equal(a, b);
+  let settled = false; void a.then(() => { settled = true; });
+  await new Promise(resolve => setTimeout(resolve, 10)); assert.equal(settled, false);
+  socket.local.close(); const result = await a;
+  assert.equal(result.state, 'CONFIRMED'); assert.ok(result.localClosedAt); assert.equal(socket.disconnected, 1);
+  assert.equal(result.sessionId, transport.sessionId);
+  assert.equal(result.verifiedLocalClosure, true);
+});
+test('already closed exact socket qualifies, while verified no socket is NOT_NEEDED', async () => {
+  for (const allocated of [true, false]) {
+    const socket = new Socket(); if (allocated) socket.local.close(); else socket.localSocket = () => null;
+    const transport = new WshSocketTransport(options, () => socket);
+    const result = await transport.close(); assert.equal(result.state, allocated ? 'CONFIRMED' : 'NOT_NEEDED');
+    assert.equal(result.sessionId, transport.sessionId);
+    assert.equal(result.verifiedLocalClosure, allocated);
+  }
+});
+test('cancellation throw retains original failure and makes cleanup UNKNOWN despite real local close', async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+  socket.reqCancelWshMetaData = () => { throw new Error('cancel DU_FIXTURE failed'); };
+  const result = await transport.close(); assert.equal(result.state, 'UNKNOWN'); assert.ok(result.localClosedAt);
+  assert.equal(result.verifiedLocalClosure, true);
+  assert.match(result.sourceError!.message!, /cancel/); assert.doesNotMatch(JSON.stringify(result), /DU_FIXTURE/);
+});
+test('a close timestamp from the original socket cannot prove stable closure after identity or capability loss', async () => {
+  for (const mode of ['pointer', 'capability'] as const) {
+    const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+    await transport.connect(deadline()); socket.local.close();
+    if (mode === 'pointer') socket.localSocket = () => new LocalSocket();
+    else Object.assign(socket, { localSocket: undefined });
+    const result = await transport.close(); assert.ok(result.localClosedAt);
+    assert.equal(result.state, 'UNKNOWN'); assert.equal(result.verifiedLocalClosure, false);
   }
 });

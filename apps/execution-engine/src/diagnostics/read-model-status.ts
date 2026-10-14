@@ -1,5 +1,5 @@
 import type { DiagnosticCoverage, DiagnosticField, DiagnosticQuery, DiagnosticReport, DiagnosticScalar } from '@ikbr/shared/diagnostics';
-import { evaluateResearchEligibility, formatResearchProviderError, formatResearchSourceError, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
+import { evaluateResearchEligibility, isResearchProviderError, formatResearchProviderError, formatResearchSourceError, researchHash, validateResearchManifest, type ResearchSnapshot } from '@ikbr/shared/instrument-research';
 import { requireSessionSchedule, type SessionScheduleEvidence } from '@ikbr/shared';
 import type { DiagnosticReadModelDeps } from './read-model.js';
 
@@ -229,6 +229,39 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
           set(fields, field(`${prefix}:ageMs`, `Wiek źródła ${source.sourceId}, ${source.role} ms`, ageMs(source.checkedAt, now)));
           set(fields, field(`${prefix}:complete`, `Kompletność źródła ${source.sourceId}, ${source.role}`, source.complete));
           set(fields, field(`${prefix}:refs`, `Odsyłacze źródła ${source.sourceId}, ${source.role}`, source.evidenceRefs.join(', ') || null, 'identifier'));
+          const policySource = manifest.instruments.find(p => p.instrumentId === item.id)?.sources.find(s => s.id === source.sourceId);
+          if (policySource?.adapter === 'ibkr-wsh' && deps.readWshRefreshState) {
+            if (fields.length + 13 > 200) { report.truncated = true; report.omissions.push(`wshRefresh:${item.id}:FIELD_LIMIT`); continue; }
+            try {
+              const refresh = await deps.readWshRefreshState({ accountId, configHash: config.configHash,
+                manifestHash: String(researchRow.manifest_hash), instrumentId: item.id, sourceId: source.sourceId });
+              if (refresh.sourceId !== source.sourceId) throw Error('WSH_DIAGNOSTIC_IDENTITY');
+              set(fields, field(`${prefix}:lastSuccessfulAt`, 'Ostatnie poprawne pobranie kalendarza', refresh.lastSuccessfulAt));
+              set(fields, field(`${prefix}:expiresAt`, 'Ważność poprawnego kalendarza do', refresh.expiresAt));
+              set(fields, field(`${prefix}:retained`, 'Korzystanie z ważnego kalendarza mimo błędu odświeżenia', refresh.retained));
+              set(fields, field(`${prefix}:refreshBlocked`, 'Niepewność odświeżenia blokuje kalendarz', refresh.blocksCachedEvidence));
+              set(fields, field(`${prefix}:attemptState`, 'Stan ostatniej próby odświeżenia', refresh.latestAttempt?.state ?? null));
+              set(fields, field(`${prefix}:nextRetryAt`, 'Najbliższe ograniczone ponowienie', refresh.nextRetryAt));
+              set(fields, field(`${prefix}:nextRegularAt`, 'Najbliższe zwykłe odświeżenie', refresh.nextRegularAt));
+              set(fields, field(`${prefix}:acquisitionBlockedReason`, 'Blokada kolejnego odświeżenia', refresh.acquisitionBlockedReason ?? null));
+              const failure = refresh.latestFailure;
+              set(fields, field(`${prefix}:lastFailureAt`, 'Ostatni błąd odświeżenia', failure?.finishedAt ?? null));
+              set(fields, field(`${prefix}:lastFailureReason`, 'Przyczyna ostatniego błędu odświeżenia', failure?.failureReason ?? null, 'untrusted'));
+              set(fields, field(`${prefix}:lastFailureStage`, 'Etap ostatniego błędu odświeżenia', failure?.stage ?? null));
+              set(fields, field(`${prefix}:cleanupState`, 'Zamknięcie lokalnej sesji poprzedniej próby', failure?.cleanup ?? refresh.latestAttempt?.cleanup ?? null));
+              set(fields, field(`${prefix}:lastFailureDetail`, 'Zapisany opis ostatniego błędu odświeżenia', failure ?
+                failure.sourceError !== undefined ? formatResearchSourceError(failure.sourceError, { accountIds: [accountId] }) +
+                  (isResearchProviderError(failure.providerError) ? `; ${formatResearchProviderError(failure.providerError, { accountIds: [accountId] })}` : '') :
+                  formatResearchProviderError(failure.providerError, { accountIds: [accountId] }) : null, 'untrusted'));
+              if (refresh.blocksCachedEvidence) {
+                set(fields, field('researchCoverage', 'Pokrycie badań', 'INELIGIBLE_AT_REPORT_TIME'));
+                set(fields, field('researchBlockers', 'Blokady badań', [...eligibility.reasons, 'RESEARCH_WSH_RECOVERY_REQUIRED'].join(', ')));
+              }
+            } catch {
+              set(fields, field('researchCoverage', 'Pokrycie badań', 'UNAVAILABLE_AT_REPORT_TIME'));
+              report.coverage.push(coverage(`wshRefresh:${item.id}:${source.sourceId}`, 'UNAVAILABLE', 'RESEARCH_REFRESH_DIAGNOSTIC_UNAVAILABLE'));
+            }
+          }
         }
       } catch {
         report.coverage.push(coverage(`research:${item.id}`, 'UNAVAILABLE', 'RESEARCH_STORED_EVIDENCE_INVALID'));

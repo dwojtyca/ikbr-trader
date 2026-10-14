@@ -43,7 +43,7 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
       }
       const c = s.coverage.find(x => x.sourceId === source.id && x.role === role);
       if (!c) { deny(`RESEARCH_${role.toUpperCase()}_MISSING`); continue; }
-      const maxAge = source.adapter === "ibkr-wsh" ? 900000 : role === "news" ? 1800000 : DAY;
+      const maxAge = source.adapter === "ibkr-wsh" ? parseWshConfig(source, policy).maxAgeMs : role === "news" ? 1800000 : DAY;
       const checked = researchTime(c.checkedAt), start = researchTime(c.windowStart), end = researchTime(c.windowEnd);
       deadlines.push(checked + maxAge);
       if (checked > nowMs || checked > researchTime(s.createdAt) || end > checked || nowMs - checked >= maxAge) deny("RESEARCH_SOURCE_STALE_OR_FUTURE");

@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import type { WshAttemptIdentity, WshRefreshState } from '@ikbr/shared/instrument-research';
 import type { InstrumentSessionIdentity } from '@ikbr/shared';
 import type { DiagnosticCoverage, DiagnosticEvent, DiagnosticField, DiagnosticQuery, DiagnosticReport, DiagnosticSection } from '@ikbr/shared/diagnostics';
 import { projectDiagnosticEvent, type StoredDiagnosticRow } from './source-projections.js';
@@ -22,6 +23,7 @@ export interface DiagnosticReadModelDeps {
   runtimeControls?(): { tradingEnabled:boolean; entriesPaused:boolean; automationEnabled:boolean };
   readWatchlist?(): Promise<unknown>;
   roundTrip?(proposalId: number): Promise<RoundTripReport | null>;
+  readWshRefreshState?(identity: WshAttemptIdentity): Promise<WshRefreshState>;
 }
 
 type Raw = Record<string, unknown>;

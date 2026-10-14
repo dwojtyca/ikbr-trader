@@ -112,11 +112,30 @@ export class ResearchRefreshScheduler {
 
   private async runRepairs(): Promise<void> {
     const { store, manifest, manifestHash, accountId } = this.options;
-    if (!manifest.refreshEnabled || this.repairInFlight || !store.dueRepairs || !store.prepareRepair) return;
+    if (!manifest.refreshEnabled || this.repairInFlight) return;
     this.repairInFlight = true;
     try {
+      const errors: unknown[] = [];
+      if (manifest.instruments.some(policy => policy.sources.some(source => source.adapter === 'ibkr-wsh'))) {
+        const due = await store.dueWshAttempts({ configHash: manifest.configHash, manifestHash, accountId });
+        for (const attempt of due) {
+          if (this.stopped) break;
+          const policy = manifest.instruments.find(row => row.instrumentId === attempt.identity.instrumentId);
+          const source = policy?.sources.find(row => row.id === attempt.identity.sourceId && row.adapter === 'ibkr-wsh');
+          if (!policy || !source) continue;
+          try {
+            await store.withRefreshLock(attempt.identity, async () => {
+              this.assertActive();
+              if (attempt.kind === 'regular') await this.refreshSlot(policy, source, 'calendar');
+              else await refreshWsh({ ...this.options, policy, source, kind: 'retry', signal: this.controller.signal,
+                slotKey: researchRefreshSlotKey(manifestHash, policy.instrumentId, source.id, 'calendar', researchSourceSlot((this.options.now ?? Date.now)(), 'news')) });
+            });
+          } catch (error) { errors.push(error); }
+        }
+      }
+      if (!store.dueRepairs || !store.prepareRepair) { if (errors.length) throw errors[0]; return; }
       const requests = await store.dueRepairs({ configHash: manifest.configHash, manifestHash, accountId });
-      const instruments = [...new Set(requests.map(row => row.instrumentId))], errors: unknown[] = [];
+      const instruments = [...new Set(requests.map(row => row.instrumentId))];
       for (const instrumentId of instruments) {
         if (this.stopped) break;
         const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId };

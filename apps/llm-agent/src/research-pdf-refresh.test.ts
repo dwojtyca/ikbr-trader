@@ -52,6 +52,7 @@ function refreshHarness(malformed = false) {
   const store: ConstructorParameters<typeof ResearchRefreshScheduler>[0]["store"] = {
     readSnapshot: unsupportedWshCall,
     withWshEndpointLock: unsupportedWshCall,
+    claimWshAttempt: unsupportedWshCall, confirmWshPreflight: unsupportedWshCall, finishWshAttempt: unsupportedWshCall, readWshAttempt: unsupportedWshCall, dueWshAttempts: unsupportedWshCall,
     pendingWshAcquisition: unsupportedWshCall,
     beginWshAcquisition: unsupportedWshCall,
     reserveWshCall: unsupportedWshCall,

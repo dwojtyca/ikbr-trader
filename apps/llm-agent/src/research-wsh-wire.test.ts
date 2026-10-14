@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { IBApi } from "@stoqey/ib";
 import { createServer, type Socket } from "node:net";
 import { once } from "node:events";
-import { WshSocketTransport, type WshEventRequest, type WshSocket } from "./research-wsh-transport.js";
+import { WshSocketTransport, adaptWshSdkSocket, type WshEventRequest } from "./research-wsh-transport.js";
 
 function frame(tokens: (string | number)[]): Buffer {
   const body = Buffer.from(tokens.join("\0") + "\0"), header = Buffer.alloc(4);
@@ -12,8 +12,8 @@ function frame(tokens: (string | number)[]): Buffer {
 const request: WshEventRequest = { conId: 123, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false,
   startDate: "20261001", endDate: "20261125", totalLimit: 100 };
 
-for (const stage of ["metadata", "events", "success", "timeout", "error"] as const) {
-  test(`installed SDK writes owned cancel frames before disconnect: ${stage}`, { timeout: 5000 }, async () => {
+for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-end"] as const) {
+  test(`installed SDK bounded owned cleanup: ${stage}`, { timeout: 5000 }, async () => {
     const trace: string[] = [];
     let peer: Socket | undefined;
     let requested!: () => void;
@@ -44,9 +44,10 @@ for (const stage of ["metadata", "events", "success", "timeout", "error"] as con
           } else {
             trace.push(`${code}:${id}`);
             if (code === 100) {
-              if (stage === "metadata" || stage === "timeout" || stage === "error") requested();
+              if (stage === "metadata" || stage === "timeout" || stage === "error" || stage === "peer-end") requested();
               else socket.write(frame([104, id, '{"meta_data":{}}']));
               if (stage === "error") socket.write(frame([4, 2, id, 10281, "Duplicate WSH metadata request"]));
+              if (stage === "peer-end") socket.end();
             }
             if (code === 102) {
               requested();
@@ -61,8 +62,11 @@ for (const stage of ["metadata", "events", "success", "timeout", "error"] as con
     server.listen(0, "127.0.0.1"); await once(server, "listening");
     const port = (server.address() as { port: number }).port;
     const controller = new AbortController();
+    const sdk = adaptWshSdkSocket(new IBApi({ host: "127.0.0.1", port, maxReqPerSec: 10 }));
+    const disconnectProof: boolean[] = [];
+    sdk.on('disconnected', () => { disconnectProof.push(sdk.localSocket?.()?.closed === true); });
     const transport = new WshSocketTransport({ enabled: true, endpointId: "loopback", host: "127.0.0.1", port,
-      clientId: 97, accountId: "DU_FIXTURE", signal: controller.signal }, () => new IBApi({ host: "127.0.0.1", port, maxReqPerSec: 10 }) as unknown as WshSocket);
+      clientId: 97, accountId: "DU_FIXTURE", signal: controller.signal }, () => sdk);
     const deadline = () => new Date(Date.now() + (stage === "timeout" ? 100 : 1500)).toISOString();
     try {
       await transport.connect(deadline());
@@ -74,8 +78,15 @@ for (const stage of ["metadata", "events", "success", "timeout", "error"] as con
       const settled = await result;
       if (stage === "success") assert.deepEqual(settled, { value: "[]" });
       else assert.ok("error" in settled);
-      await transport.close(); await closed;
-      assert.deepEqual(trace, stage === "events" || stage === "success"
+      const cleanup = await transport.close();
+      assert.equal(cleanup.sessionId, transport.sessionId);
+      assert.equal(cleanup.state, stage === 'peer-end' ? 'UNKNOWN' : 'CONFIRMED');
+      assert.ok(cleanup.localClosedAt); assert.equal(sdk.localSocket?.()?.closed, true); await closed;
+      assert.equal(cleanup.verifiedLocalClosure, true);
+      if (stage === 'peer-end') {
+        assert.equal(disconnectProof[0], false);
+        assert.equal(trace[0], '100:17');
+      } else assert.deepEqual(trace, stage === "events" || stage === "success"
         ? ["100:17", "102:29", "103:29", "101:17", "end"] : ["100:17", "101:17", "end"]);
     } finally { await transport.close(); peer?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });

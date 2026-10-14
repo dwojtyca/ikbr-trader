@@ -1797,6 +1797,7 @@ const diagnosticPool = new Pool({ connectionString: config.POSTGRES_URL, max: 2,
 const diagnosticRepository = new ExecutionRepository(diagnosticPool);
 const diagnosticReadModel = createDiagnosticReadModel({
   pool: diagnosticPool, currentAccountId: () => lastActiveAccountId, currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
+  readWshRefreshState: identity => researchStore.readWshRefreshState(identity, diagnosticPool),
   runtimeControls: () => ({ tradingEnabled: config.tradingEnabled, entriesPaused: config.EXECUTION_ENTRIES_PAUSED === "true", automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true" }),
   configuration: () => {
     const loaded = tradingConfiguration.loaded;

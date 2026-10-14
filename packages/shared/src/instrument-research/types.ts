@@ -131,7 +131,7 @@ export interface ResearchBinding extends ResearchBindingIdentity { snapshotId: s
 export interface ResearchEligibility { eligible: boolean; reasons: string[]; expiresAt: string | null; requiredEvidenceRefs: string[] }
 export interface ValidatedResearchBinding { binding: ResearchBinding; stored: StoredResearchSnapshot; manifest: ResearchManifest; eligibility: ResearchEligibility }
 export interface ResearchDb { query(sql: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }> }
-export interface ResearchConnection extends ResearchDb { release(): void }
+export interface ResearchConnection extends ResearchDb { release(destroy?: boolean): void }
 export interface ResearchPool extends ResearchDb { connect(): Promise<ResearchConnection> }
 export interface ResearchCallReservation extends ResearchIdentity {
   accountId: string;

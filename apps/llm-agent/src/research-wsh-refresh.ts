@@ -1,21 +1,23 @@
 import { createHash } from "node:crypto";
 import {
-  sanitizeResearchProviderError, isResearchProviderError, type ResearchProviderError,
+  captureResearchSourceError, isResearchSourceError, sanitizeResearchProviderError, isResearchProviderError, type ResearchProviderError,
   parseResearchSnapshot, parseWshConfig, researchAssert, researchHash, validateWshValue,
   wshQualificationDeadline, wshRequestDates,
   type InstrumentResearchSnapshotV2, type ResearchCallReservation, type ResearchInstrumentPolicy,
   type ResearchManifest, type ResearchSource, type ResearchStore, type WshAcquisition, type WshEndpointLease,
+  type WshAttemptKind, type WshAttemptTicket, type WshAttemptResult, type WshFailureClass, type WshFailureStage, type WshCleanupResult,
 } from "@ikbr/shared/instrument-research";
 import { normalizeWshEvents } from "./research-wsh-normalization.js";
 import { WshSocketTransport, type WshEventRequest, type WshRuntimeConfiguration, type WshTransport } from "./research-wsh-transport.js";
 
 export type WshRefreshStore = Pick<ResearchStore, "latestSnapshot" | "readSnapshot" | "storeSnapshot" | "recordCallOutcome" |
   "withWshEndpointLock" | "pendingWshAcquisition" | "beginWshAcquisition" | "reserveWshCall" | "assertWshAcquisition" |
-  "publishWshSnapshot" | "finishWshFailure" | "retireWshAcquisition" | "readWshAcquisition">;
+  "publishWshSnapshot" | "finishWshFailure" | "retireWshAcquisition" | "readWshAcquisition" |
+  "claimWshAttempt" | "confirmWshPreflight" | "finishWshAttempt" | "readWshAttempt" | "dueWshAttempts">;
 export interface WshRefreshRuntime { runtime: WshRuntimeConfiguration; createTransport?: () => WshTransport }
 interface Options {
   manifest: ResearchManifest; manifestHash: string; accountId: string; policy: ResearchInstrumentPolicy;
-  source: ResearchSource; store: WshRefreshStore; slotKey: string; now?: () => number; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[];
+  source: ResearchSource; store: WshRefreshStore; slotKey: string; kind?: WshAttemptKind; now?: () => number; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[];
 }
 function parseJson(text: string): unknown {
   try { return JSON.parse(text) as unknown; } catch { throw new Error("RESEARCH_WSH_PAYLOAD_INVALID"); }
@@ -26,6 +28,23 @@ function failureCode(error: unknown): string {
 }
 function uncertain(error: unknown): boolean {
   return !/^RESEARCH_WSH_(?:ERROR_\d+|ROW_|IDENTITY_|DATE_|STATUS_|CONTEXT_|METADATA_|PAYLOAD_|REQUEST_|BOUNDS_|QUALIFICATION_|PROTOCOL_|ACCOUNT_)/.test(failureCode(error));
+}
+const CONNECTION_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ENOTCONN', 'EPIPE', 'ETIMEDOUT']);
+export function classifyWshFailure(error: unknown, stage: WshFailureStage): WshFailureClass {
+  const code = failureCode(error);
+  const provider = error instanceof Error && 'providerError' in error && isResearchProviderError(error.providerError) ? error.providerError : undefined;
+  if (code === 'RESEARCH_WSH_ABORTED') return 'ABORTED';
+  if (['RESEARCH_BUDGET_EXHAUSTED', 'RESEARCH_CALL_BUDGET_EXHAUSTED'].includes(code)) return 'BUDGET';
+  if (code === 'RESEARCH_WSH_ERROR_10281' && provider?.code === 10281) return 'BUSY';
+  if (['connect', 'metadata', 'events'].includes(stage)) {
+    if (code === 'RESEARCH_WSH_TIMEOUT' || code === 'RESEARCH_WSH_DISCONNECTED') return 'TRANSIENT';
+    if (provider?.code === 502 && (['RESEARCH_WSH_ERROR_502', 'RESEARCH_WSH_CONNECT_FAILED'].includes(code)
+      || code === 'RESEARCH_WSH_SEND_FAILED' && stage !== 'connect')) return 'TRANSIENT';
+    if (code === 'RESEARCH_WSH_SEND_FAILED' && stage !== 'connect' && error instanceof Error && 'sourceError' in error
+      && isResearchSourceError(error.sourceError) && (error.sourceError.code === 502
+        || typeof error.sourceError.code === 'string' && CONNECTION_CODES.has(error.sourceError.code))) return 'TRANSIENT';
+  }
+  return 'HARD';
 }
 
 export async function refreshWsh(options: Options): Promise<boolean> {
@@ -58,14 +77,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       complete: false, evidenceRefs: [], reason, ...(providerError ? { providerError } : {}) });
     parseResearchSnapshot(result, manifest); return result;
   };
-  let config: ReturnType<typeof parseWshConfig>;
-  try {
-    config = parseWshConfig(source, policy);
-    researchAssert(options.wsh?.runtime.enabled, "RESEARCH_WSH_DISABLED");
-    researchAssert(options.wsh.runtime.endpointId === config.endpointId, "RESEARCH_WSH_ENDPOINT_MISMATCH");
-    researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && source.maxRequestsPerDay > 0 && source.costMicrosPerCall <= source.maxCostMicrosPerDay, "RESEARCH_WSH_PERMISSION_UNVERIFIED");
-    wshQualificationDeadline(config, now());
-  } catch (error) { await store.storeSnapshot(negative("UNVERIFIED", failureCode(error)), slotKey); return true; }
+  const config = parseWshConfig(source, policy);
 
   let attempted = true;
   const locked = await store.withWshEndpointLock(config.endpointId, async lease => {
@@ -82,18 +94,45 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       catch (error) { if (!await retired(pending)) throw error; }
     }
     assertActive();
-    const transport = options.wsh!.createTransport?.() ?? new WshSocketTransport({ ...options.wsh!.runtime, accountId: options.accountId, signal: options.signal, secrets: options.secrets });
-    const cleanup = async () => { try { await transport.close(); } catch { /* Preserve acquisition outcome. */ } };
-    let acquisition: WshAcquisition | null = null;
-    let publicationAttempted = false;
+    const transport = options.wsh?.createTransport?.() ?? new WshSocketTransport({ ...(options.wsh?.runtime ?? {
+      enabled: false, endpointId: config.endpointId, host: '127.0.0.1', port: 7497, clientId: 0,
+    }), accountId: options.accountId, signal: options.signal, secrets: options.secrets });
+    let cleanupResult: WshCleanupResult | undefined;
+    const cleanup = async (): Promise<WshCleanupResult> => {
+      if (cleanupResult) return cleanupResult;
+      try { cleanupResult = await transport.close(); }
+      catch (error) { cleanupResult = { sessionId: transport.sessionId, state: 'UNKNOWN', completedAt: new Date(now()).toISOString(), cancellationAttemptedAt: null,
+        disconnectRequestedAt: null, localClosedAt: null, verifiedLocalClosure: false, sourceError: captureResearchSourceError(error, { accountIds: [options.accountId], secrets: options.secrets }) }; }
+      return cleanupResult;
+    };
+    let ticket: WshAttemptTicket;
     try {
+      const claim = await store.claimWshAttempt(lease, { ...identity, accountId: options.accountId, sourceId: source.id, sessionId: transport.sessionId }, options.kind ?? 'regular');
+      if (claim.state === 'DEFERRED') { attempted = false; await cleanup(); return; }
+      ticket = claim.ticket;
+    } catch (error) { await cleanup(); throw error; }
+    let acquisition: WshAcquisition | null = null;
+    let publicationAttempted = false, committed = false, acquisitionUnknown = false, preflightComplete = false;
+    let stage: WshFailureStage = 'connect', failure: unknown;
+    const publicationSlot = options.kind === 'retry' ? undefined : slotKey;
+    try {
+      assertActive();
+      researchAssert(options.wsh?.runtime.enabled, "RESEARCH_WSH_DISABLED");
+      researchAssert(options.wsh.runtime.endpointId === config.endpointId, "RESEARCH_WSH_ENDPOINT_MISMATCH");
+      researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && source.maxRequestsPerDay > 0 && source.costMicrosPerCall <= source.maxCostMicrosPerDay, "RESEARCH_WSH_PERMISSION_UNVERIFIED");
+      wshQualificationDeadline(config, now());
+      await store.confirmWshPreflight(lease, ticket);
+      preflightComplete = true;
       const requestAsOf = new Date(now()).toISOString();
-      const admissionDeadline = Math.min(now() + 30000, wshQualificationDeadline(config, now()));
+      const admissionDeadline = Math.min(Date.parse(ticket.startedAt) + 30000, wshQualificationDeadline(config, now()));
       const deadline = () => new Date(Math.min(now() + config.timeoutMs, admissionDeadline)).toISOString();
       const checkpoint = async (callDeadline?: string) => {
         assertActive();
         wshQualificationDeadline(config, now());
-        researchAssert(now() < admissionDeadline && (!callDeadline || now() < Date.parse(callDeadline)), "RESEARCH_WSH_TIMEOUT");
+        if (now() >= admissionDeadline || (callDeadline && now() >= Date.parse(callDeadline))) throw Object.assign(new Error('RESEARCH_WSH_TIMEOUT'), {
+          sourceError: captureResearchSourceError(Object.assign(new Error(`Local WSH ${stage} admission or call deadline expired`),
+            { name: 'WshTimeoutError', code: 'RESEARCH_WSH_TIMEOUT' }), { accountIds: [options.accountId], secrets: options.secrets }),
+        });
         if (acquisition) await store.assertWshAcquisition(lease, acquisition); else await lease.assertHeld();
         assertActive();
       };
@@ -109,8 +148,9 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       await transport.connect(deadline());
       assertActive();
       researchAssert(transport.serverVersion >= 173 && transport.sdkVersion === "1.6.10", "RESEARCH_WSH_PROTOCOL_UNSUPPORTED");
+      stage = 'metadata';
       const metadataCall = reservation(1, "reqWshMetaData", null, deadline());
-      acquisition = await store.beginWshAcquisition(lease, { ...identity, sourceId: source.id, sessionId: transport.sessionId, reservation: metadataCall });
+      acquisition = await store.beginWshAcquisition(lease, { ...identity, sourceId: source.id, sessionId: transport.sessionId, reservation: metadataCall }, ticket);
       await checkpoint(metadataCall.deadlineAt);
       const rawMetadata = await transport.metadata(1, metadataCall.deadlineAt, config.maxMetadataBytes);
       await checkpoint(metadataCall.deadlineAt);
@@ -121,15 +161,17 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       validateWshValue(metadata);
       researchAssert(metadata && typeof metadata === "object" && !Array.isArray(metadata) && "meta_data" in metadata &&
         metadata.meta_data && typeof metadata.meta_data === "object" && !Array.isArray(metadata.meta_data) && "event_types" in metadata.meta_data && Array.isArray(metadata.meta_data.event_types), "RESEARCH_WSH_METADATA_INVALID");
-      await store.recordCallOutcome(metadataCall.callKey, "SUCCEEDED");
+      await store.recordCallOutcome(metadataCall.callKey, "SUCCEEDED", undefined, ticket);
       const dates = wshRequestDates(config, requestAsOf);
       const request: WshEventRequest = { conId: config.conId, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false, ...dates, totalLimit: 100 };
+      stage = 'events';
       const eventsCall = reservation(2, "reqWshEventData", request, deadline());
       assertActive();
       await store.reserveWshCall(lease, acquisition, eventsCall);
       await checkpoint(eventsCall.deadlineAt);
       const rawEvents = await transport.events(2, request, eventsCall.deadlineAt, config.maxEventBytes);
       await checkpoint(eventsCall.deadlineAt);
+      stage = 'normalize';
       researchAssert(Buffer.byteLength(rawEvents) <= config.maxEventBytes, "RESEARCH_WSH_PAYLOAD_LIMIT");
       const normalized = normalizeWshEvents(parseJson(rawEvents), metadata, config);
       const receiptAt = new Date(now()).toISOString(), receiptHash = hashBytes(rawEvents);
@@ -154,21 +196,34 @@ export async function refreshWsh(options: Options): Promise<boolean> {
           entitlementReference: config.entitlement.reference, entitlementExpiresAt: config.entitlement.expiresAt } });
       parseResearchSnapshot(snapshot, manifest);
       await checkpoint(eventsCall.deadlineAt);
+      stage = 'publish';
       publicationAttempted = true;
-      await store.publishWshSnapshot(lease, acquisition, snapshot, slotKey, new Date(admissionDeadline).toISOString());
+      await store.publishWshSnapshot(lease, acquisition, snapshot, publicationSlot, new Date(admissionDeadline).toISOString());
+      committed = true;
     } catch (error) {
-      await cleanup();
+      failure = error;
       if (acquisition) {
-        if (publicationAttempted && await published(acquisition)) return;
-        await finishFailure(lease, acquisition, negative("ERROR", failureCode(error), diagnostic(error)), uncertain(error) ? "UNKNOWN" : "FAILED");
+        if (publicationAttempted) committed = await published(acquisition, ticket);
       } else {
         // begin COMMIT may be unknown: rediscover and retire, never send against an unconfirmed reservation.
         const abandoned = await store.pendingWshAcquisition(lease);
-        if (abandoned?.sessionId === transport.sessionId) await finishFailure(lease, abandoned, negative("ERROR", failureCode(error), diagnostic(error)), "UNKNOWN");
-        else if (failureCode(error) === "RESEARCH_WSH_SLOT_TOO_EARLY") attempted = false;
-        else await store.storeSnapshot(negative("ERROR", failureCode(error), diagnostic(error)), slotKey);
+        if (abandoned?.sessionId === transport.sessionId) { acquisition = abandoned; acquisitionUnknown = true; }
       }
     } finally { await cleanup(); }
+    const result: WshAttemptResult = committed ? { outcome: 'SUCCEEDED', cleanup: cleanupResult!, acquisition: acquisition! }
+      : { outcome: acquisitionUnknown || publicationAttempted ? 'UNKNOWN' : 'FAILED', cleanup: cleanupResult!,
+        acquisitionOutcome: acquisitionUnknown || uncertain(failure) ? 'UNKNOWN' : 'FAILED',
+        ...(acquisition ? { acquisition } : {}), ...(publicationSlot ? { slotKey: publicationSlot } : {}),
+        snapshot: negative(preflightComplete ? 'ERROR' : 'UNVERIFIED', failureCode(failure), diagnostic(failure)),
+        failureClass: acquisitionUnknown || publicationAttempted ? 'UNCERTAIN' : classifyWshFailure(failure, stage),
+        failureReason: failureCode(failure), stage,
+        sourceError: captureResearchSourceError(failure, { accountIds: [options.accountId], secrets: options.secrets }),
+        ...(diagnostic(failure) ? { providerError: diagnostic(failure) } : {}) };
+    try { await store.finishWshAttempt(lease, ticket, result); }
+    catch (error) {
+      const settled = await store.readWshAttempt(ticket);
+      if (!settled || settled.state !== result.outcome || settled.terminalResultHash !== researchHash(result)) throw error;
+    }
   });
   return locked && attempted;
 
@@ -181,11 +236,11 @@ export async function refreshWsh(options: Options): Promise<boolean> {
     const row = await store.readWshAcquisition(acquisition.id);
     return !!row && sameAcquisition(row, acquisition) && row.retired_at != null && ["UNKNOWN", "FAILED", "PUBLISHED"].includes(String(row.state));
   }
-  async function published(acquisition: WshAcquisition): Promise<boolean> {
-    const row = await store.readWshAcquisition(acquisition.id);
+  async function published(acquisition: WshAcquisition, ticket: WshAttemptTicket): Promise<boolean> {
+    const row = await store.readWshAcquisition(acquisition.id, ticket);
     if (!row || row.state !== "PUBLISHED" || typeof row.snapshot_id !== "string") return false;
     researchAssert(sameAcquisition(row, acquisition), "RESEARCH_WSH_COMMIT_UNVERIFIED");
-    const stored = await store.readSnapshot(row.snapshot_id);
+    const stored = await store.readSnapshot(row.snapshot_id, undefined, ticket);
     const receipt = stored?.snapshot.coverage.find(c => c.sourceId === acquisition.sourceId);
     researchAssert(stored && stored.snapshot.configHash === acquisition.configHash && stored.snapshot.manifestHash === acquisition.manifestHash && stored.snapshot.instrumentId === acquisition.instrumentId &&
       receipt && "wshAcquisition" in receipt && receipt.wshAcquisition.acquisitionId === acquisition.id && receipt.wshAcquisition.sessionId === acquisition.sessionId && receipt.wshAcquisition.generation === acquisition.generation, "RESEARCH_WSH_COMMIT_UNVERIFIED");
@@ -194,9 +249,10 @@ export async function refreshWsh(options: Options): Promise<boolean> {
   async function finishFailure(lease: WshEndpointLease, acquisition: WshAcquisition, failure: InstrumentResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN"): Promise<void> {
     try { await store.finishWshFailure(lease, acquisition, failure, outcome, slotKey); }
     catch (error) {
-      const row = await store.readWshAcquisition(acquisition.id);
+      const resolutionDeadline = new Date(Date.now() + 3000).toISOString();
+      const row = await store.readWshAcquisition(acquisition.id, resolutionDeadline);
       if (row && sameAcquisition(row, acquisition) && row.retired_at != null && typeof row.snapshot_id === "string" && ["FAILED", "UNKNOWN"].includes(String(row.state))) {
-        const stored = await store.readSnapshot(row.snapshot_id);
+        const stored = await store.readSnapshot(row.snapshot_id, undefined, resolutionDeadline);
         if (stored && researchHash(stored.snapshot) === researchHash(failure)) return;
       }
       // A failed negative publication cannot refresh the prior head or release an unresolved generation.

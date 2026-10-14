@@ -417,7 +417,7 @@ test('private file changes, symlinks, mismatched research hash and outside accou
       h.f.proof.effectiveComposeSha256 = sha(canonicalJson(h.f.rendered));
       await writeFile(resolve(h.f.root, '.local/paper-runtime/release.json'), JSON.stringify(h.f.proof));
     }
-    try { await assert.rejects(h.runtime.start()); assert.equal(h.calls.some(c => c.startsWith('post:') || c.includes('up') || c.includes('stop')), false); }
+    try { await assert.rejects(h.runtime.start()); assert.equal(h.calls.some(c => c.startsWith('post:') || /(?:^compose:|\s)(?:up|stop)(?=\s|$)/.test(c)), false, JSON.stringify(h.calls)); }
     finally { await h.f.cleanup(); }
   }
 });
@@ -673,4 +673,68 @@ test('hard and legacy news failures show original details or truthful unavailabi
     h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],sources:[{sourceId:'marketaux_news',role:'news',state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],failureReason:'RESEARCH_SOURCE_HTTP_401',...(sourceError?{sourceError}:{})}]}))});
     try {await assert.rejects(h.runtime.start(),/RESEARCH_NEWS_ERROR/);assert.equal(h.resumeCalls,0);const output=messages.join('\n');assert.match(output,sourceError?/invalid_api_token/:/Oryginalny opis błędu niedostępny/);assert.doesNotMatch(output,/fixture/);}finally{await h.f.cleanup();}
   }
+});
+
+test('ready startup reports retained WSH calendar and prior failure during an active retry without blocking resume', async () => {
+  const h=await runScenario(), original=h.adapters.http, messages:string[]=[];
+  h.adapters.log=message=>messages.push(message);
+  h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({
+    revision:(body as {expectedRevision:number}).expectedRevision,
+    instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'READY',reasons:[],sources:[{
+      sourceId:'wsh_calendar',role:'calendar',state:'READY',reasons:[],wshRefresh:{
+        retained:true,blocksCachedEvidence:false,lastSuccessfulAt:'2026-10-14T12:00:00.000Z',expiresAt:'2026-10-15T12:00:00.000Z',
+        nextRetryAt:null,nextRegularAt:'2026-10-14T13:15:00.000Z',latestAttempt:{state:'STARTED'},
+        latestFailure:{state:'UNKNOWN',finishedAt:'2026-10-14T13:00:00.000Z',failureReason:'RESEARCH_WSH_TIMEOUT',stage:'events',
+          sourceError:{name:'TimeoutError',code:'WSH_TIMEOUT',message:'No response fixture DU123456'}}
+      }}]}))});
+  try {await h.runtime.start();assert.equal(h.resumeCalls,1);const output=messages.join('\n');
+    assert.match(output,/zachowane dane pozostają ważne/);assert.match(output,/etap events/);
+    assert.match(output,/2026-10-14T12:00:00.000Z/);assert.match(output,/2026-10-15T12:00:00.000Z/);
+    assert.match(output,/TimeoutError.*WSH_TIMEOUT.*No response/);assert.doesNotMatch(output,/fixture|DU123456/);
+  }finally{await h.f.cleanup();}
+});
+
+test('retained WSH diagnostic cannot override an unresolved preparation hold or inject terminal text', async()=>{
+  const h=await runScenario(),original=h.adapters.http,messages:string[]=[];h.adapters.log=message=>messages.push(message);
+  h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({
+    revision:(body as {expectedRevision:number}).expectedRevision,
+    instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'HOLD',reasons:['RESEARCH_WSH_RECOVERY_REQUIRED'],sources:[{
+      sourceId:'wsh_calendar',role:'calendar',state:'HOLD',reasons:['RESEARCH_WSH_RECOVERY_REQUIRED'],wshRefresh:{
+        retained:true,blocksCachedEvidence:true,lastSuccessfulAt:'unsafe\ntext',expiresAt:'2026-10-15T12:00:00.000Z',
+        latestFailure:{state:'UNKNOWN',finishedAt:'2026-10-14T13:00:00.000Z',failureReason:'unsafe\ntext'}
+      }}]}))});
+  try{await assert.rejects(h.runtime.start(),/RESEARCH_WSH_RECOVERY_REQUIRED/);assert.equal(h.resumeCalls,0);
+    assert.doesNotMatch(messages.join('\n'),/zachowane dane pozostają ważne|unsafe/);
+  }finally{await h.f.cleanup();}
+});
+
+test('WSH provider code and message remain visible beside a legacy unavailable source detail in READY and HOLD', async()=>{
+  for(const code of [502,10281])for(const state of ['READY','HOLD']){
+    const h=await runScenario(),original=h.adapters.http,messages:string[]=[];h.adapters.log=message=>messages.push(message);
+    const sourceError={name:null,code:null,message:'Oryginalny opis błędu niedostępny w zapisanych danych.'};
+    const providerError={code,message:`Original broker ${code} fixture DU123456`};
+    h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({
+      revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state,
+        reasons:state==='HOLD'?['RESEARCH_CALENDAR_ERROR']:[],sources:[{sourceId:'wsh_calendar',role:'calendar',state,
+          reasons:state==='HOLD'?['RESEARCH_CALENDAR_ERROR']:[],failureReason:`RESEARCH_WSH_ERROR_${code}`,sourceError,providerError,
+          wshRefresh:{retained:state==='READY',blocksCachedEvidence:false,lastSuccessfulAt:'2026-10-14T12:00:00.000Z',expiresAt:'2026-10-15T12:00:00.000Z',
+            nextRetryAt:null,nextRegularAt:'2026-10-14T13:15:00.000Z',latestAttempt:{state:'STARTED'},latestFailure:{state:'FAILED',
+              finishedAt:'2026-10-14T13:00:00.000Z',failureReason:`RESEARCH_WSH_ERROR_${code}`,stage:'events',sourceError,providerError}}}]}))});
+    try{if(state==='READY')await h.runtime.start();else await assert.rejects(h.runtime.start(),/RESEARCH_CALENDAR_ERROR/);
+      assert.equal(h.resumeCalls,state==='READY'?1:0);const output=messages.join('\n');
+      assert.match(output,new RegExp(`Original broker ${code}`));assert.doesNotMatch(output,/fixture|DU123456/);
+    }finally{await h.f.cleanup();}
+  }
+});
+
+test('successful cached WSH with fenced cleanup is usable but warns even without a failed acquisition',async()=>{
+  const h=await runScenario(),original=h.adapters.http,messages:string[]=[];h.adapters.log=message=>messages.push(message);
+  h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({
+    revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'READY',reasons:[],sources:[{
+      sourceId:'wsh_calendar',role:'calendar',state:'READY',reasons:[],wshRefresh:{retained:false,blocksCachedEvidence:false,
+        acquisitionBlockedReason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED',lastSuccessfulAt:'2026-10-14T12:00:00.000Z',expiresAt:'2026-10-15T12:00:00.000Z',
+        latestAttempt:{state:'SUCCEEDED',cleanup:'UNKNOWN'},latestFailure:null,nextRetryAt:null,nextRegularAt:null}}]}))});
+  try{await h.runtime.start();assert.equal(h.resumeCalls,1);const output=messages.join('\n');assert.match(output,/RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED/);
+    assert.match(output,/Zachowany kalendarz pozostaje ważny do 2026-10-15T12:00:00.000Z/);assert.doesNotMatch(output,/odświeżenie kalendarza nie powiodło/);
+  }finally{await h.f.cleanup();}
 });

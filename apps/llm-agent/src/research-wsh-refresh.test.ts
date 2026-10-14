@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { wshResearchFixture } from "@ikbr/shared/instrument-research-testfixture";
-import { parseResearchSnapshot, researchHash, type ResearchCallReservation, type StoredResearchSnapshot, type WshAcquisition, type WshEndpointLease } from "@ikbr/shared/instrument-research";
-import { refreshWsh } from "./research-wsh-refresh.js";
+import { ResearchStore, parseResearchSnapshot, researchHash, type ResearchCallReservation, type StoredResearchSnapshot, type WshAcquisition, type WshEndpointLease, type WshAttemptTicket, type WshAttemptResult, type WshCleanupResult } from "@ikbr/shared/instrument-research";
+import { classifyWshFailure, refreshWsh } from "./research-wsh-refresh.js";
 import { ResearchRefreshScheduler } from "./research-refresh.js";
 import type { WshEventRequest, WshTransport } from "./research-wsh-transport.js";
 
@@ -22,6 +22,10 @@ function harness(rows: unknown[] = []) {
   let failNegative = false, publishCommitLost = false, negativeCommitLost = false, beginCommitLost = false, retirementCommitLost = false;
   let advanceOnEvent = 0, refreshLocked = false;
   let readFailure = false;
+  let cycleStart = -Infinity;
+  const attempts: { ticket: WshAttemptTicket; preflightComplete?: boolean; result?: WshAttemptResult }[] = [];
+  const cleanupReceipt = (sessionId = 'session-' + sessions): WshCleanupResult => ({ sessionId, state: 'CONFIRMED', completedAt: new Date(clock).toISOString(),
+    cancellationAttemptedAt: new Date(clock).toISOString(), disconnectRequestedAt: new Date(clock).toISOString(), localClosedAt: new Date(clock).toISOString(), verifiedLocalClosure: true });
   const lease: WshEndpointLease = { endpointId: "fixture-endpoint", assertHeld: async () => { if (fenceLost) throw new Error("RESEARCH_WSH_LOCK_LOST"); } };
   const save = (snapshot: any, slot?: string) => {
     parseResearchSnapshot(snapshot, f.manifest);
@@ -33,6 +37,44 @@ function harness(rows: unknown[] = []) {
     state = outcome; generation++;
   };
   const store: any = {
+    claimWshAttempt: async (_lease: unknown, input: any, kind: string) => {
+      const last = attempts.at(-1), ordinal = kind === 'retry' ? (last?.ticket.ordinal ?? 0) + 1 : 0;
+      if (kind === 'regular' && clock < cycleStart + 900000 || kind === 'retry' && (!last?.result || last.result.outcome !== 'FAILED'
+        || last.result.failureClass !== 'TRANSIENT' || last.result.cleanup.state === 'UNKNOWN' || ordinal > 2
+        || clock < Date.parse(last.result.cleanup.completedAt) + (ordinal === 1 ? 30000 : 120000) || clock >= cycleStart + 900000))
+        return { state: 'DEFERRED', reason: 'not-due', nextCheckAt: null };
+      if (kind === 'regular') cycleStart = clock;
+      const ticket: WshAttemptTicket = { ...input, id: `attempt-${attempts.length + 1}`, cycleId: `cycle-${cycleStart}`, ordinal,
+        endpointId: lease.endpointId, startedAt: new Date(clock).toISOString(), deadlineAt: new Date(clock + 35000).toISOString(), nextRegularAt: new Date(cycleStart + 900000).toISOString() };
+      attempts.push({ ticket }); return { state: 'CLAIMED', ticket };
+    },
+    confirmWshPreflight: async (_lease: unknown, ticket: WshAttemptTicket) => { attempts.find(a => a.ticket.id === ticket.id)!.preflightComplete = true; },
+    dueWshAttempts: async () => {
+      const last = attempts.at(-1);
+      return last?.result?.outcome === 'FAILED' && last.result.failureClass === 'TRANSIENT' && last.result.cleanup.state !== 'UNKNOWN'
+        && last.ticket.ordinal < 2 && clock >= Date.parse(last.result.cleanup.completedAt) + (last.ticket.ordinal === 0 ? 30000 : 120000)
+        ? [{ identity: { ...last.ticket }, kind: 'retry', dueAt: new Date(clock).toISOString() }] : [];
+    },
+    readWshAttempt: async (ticket: WshAttemptTicket) => {
+      if (readFailure) throw new Error('readback unavailable');
+      const attempt = attempts.find(a => a.ticket.id === ticket.id);
+      return attempt && { state: attempt.result?.outcome ?? 'STARTED', terminalResultHash: attempt.result && researchHash(attempt.result) };
+    },
+    finishWshAttempt: async (_lease: unknown, ticket: WshAttemptTicket, result: WshAttemptResult) => {
+      await lease.assertHeld();
+      if (result.outcome !== 'SUCCEEDED') {
+        if (failNegative) throw new Error('negative DB unavailable');
+        const good = head.snapshot.coverage.find(c => c.sourceId === f.source.id && c.complete);
+        const retain = good && ['TRANSIENT', 'BUSY', 'ABORTED', 'BUDGET'].includes(result.failureClass);
+        if (!retain) {
+          trace.push(result.acquisition ? `negative-${result.acquisitionOutcome}` : 'negative-without-acquisition');
+          snapshotId = save(result.snapshot, result.slotKey).id;
+        }
+        if (result.acquisition) retire(result.acquisitionOutcome ?? result.outcome);
+      }
+      attempts.find(a => a.ticket.id === ticket.id)!.result = result;
+      if (negativeCommitLost && result.outcome !== 'SUCCEEDED') throw new Error('lost COMMIT reply');
+    },
     latestSnapshot: async () => head,
     readSnapshot: async (id: string) => snapshots.get(id) ?? null,
     storeSnapshot: async (snapshot: any, slot: string) => { trace.push("negative-without-acquisition"); return save(snapshot, slot); },
@@ -40,8 +82,8 @@ function harness(rows: unknown[] = []) {
     withRefreshLock: async (_id: unknown, work: () => Promise<void>) => { if (refreshLocked) return false; refreshLocked = true; try { await work(); return true; } finally { refreshLocked = false; } },
     withWshEndpointLock: async (_endpoint: string, work: (l: WshEndpointLease) => Promise<void>) => { trace.push("lock"); await work(lease); return true; },
     pendingWshAcquisition: async () => { await lease.assertHeld(); return state === "PENDING" ? acquisition : null; },
-    beginWshAcquisition: async (_lease: unknown, input: any) => {
-      if (clock - lastStart < 900000) throw new Error("RESEARCH_WSH_SLOT_TOO_EARLY");
+    beginWshAcquisition: async (_lease: unknown, input: any, ticket?: WshAttemptTicket) => {
+      if (!ticket && clock - lastStart < 900000) throw new Error("RESEARCH_WSH_SLOT_TOO_EARLY");
       if (calls.length >= f.source.maxRequestsPerDay) throw new Error("RESEARCH_CALL_BUDGET_EXHAUSTED");
       trace.push("reserve-metadata"); calls.push(input.reservation); lastStart = clock; snapshotId = null;
       state = "PENDING"; acquisition = { ...input, id: "00000000-0000-4000-8000-" + String(++generation).padStart(12, "0"), endpointId: lease.endpointId, generation, startedAt: new Date(clock).toISOString() };
@@ -77,15 +119,15 @@ function harness(rows: unknown[] = []) {
     },
   };
   let request: WshEventRequest | null = null;
-  const createTransport = (): WshTransport => ({ sessionId: "session-" + (++sessions), serverVersion: 180, sdkVersion: "1.6.10",
+  const createTransport = (): WshTransport => { const sessionId = "session-" + (++sessions); return { sessionId, serverVersion: 180, sdkVersion: "1.6.10",
     connect: async () => { trace.push("connect"); },
     metadata: async () => { assert.equal(calls.at(-1)?.requestHash.length, 64); trace.push("metadata"); return metadataText; },
     events: async (_id, req) => { assert.equal(calls.length % 2, 0); request = req; trace.push("events"); clock += advanceOnEvent; if (eventError) throw eventError; return eventText ?? JSON.stringify(rows); },
-    close: () => { if (trace.at(-1) !== "close") trace.push("close"); },
-  });
+    close: async () => { if (trace.at(-1) !== "close") trace.push("close"); return cleanupReceipt(sessionId); },
+  }; };
   const wsh = { runtime: { enabled: true, endpointId: "fixture-endpoint", host: "127.0.0.1", port: 4002, clientId: 77 }, createTransport };
   const options = { manifest: f.manifest, manifestHash, policy: f.policy, source: f.source, accountId: "DU1", store, slotKey: "slot", now: () => clock, wsh };
-  return { f, options, trace, outcomes, calls, snapshots, store, wsh, get head() { return head; }, get request() { return request; }, get acquisition() { return acquisition; }, get state() { return state; },
+  return { f, options, trace, outcomes, calls, snapshots, store, wsh, attempts, cleanupReceipt, get head() { return head; }, get request() { return request; }, get acquisition() { return acquisition; }, get state() { return state; },
     run: () => refreshWsh(options), advance: (ms: number) => clock += ms,
     faults: (v: { eventError?: Error; metadataText?: string; eventText?: string; fenceLost?: boolean; failNegative?: boolean; publishCommitLost?: boolean; negativeCommitLost?: boolean; beginCommitLost?: boolean; retirementCommitLost?: boolean; advanceOnEvent?: number; readFailure?: boolean }) => {
       if (v.eventError) eventError = v.eventError; if (v.metadataText !== undefined) metadataText = v.metadataText; if (v.eventText !== undefined) eventText = v.eventText;
@@ -244,7 +286,7 @@ test("failure publication waits for async cleanup and retains original provider 
   const create = h.wsh.createTransport;
   let release!: () => void;
   const cleanup = new Promise<void>(resolve => { release = resolve; });
-  h.wsh.createTransport = () => ({ ...create(), close: () => cleanup });
+  h.wsh.createTransport = () => ({ ...create(), close: async () => { await cleanup; return h.cleanupReceipt(); } });
   const pending = refreshWsh({ ...h.options, secrets: ["private-key"] });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.trace.some(t => t.startsWith("negative")), false);
@@ -289,4 +331,267 @@ test("scheduler shutdown aborts an in-flight WSH response, waits for cleanup and
   assert.equal(h.trace.includes("publish"), false);
   assert.equal(calendar(h).reason, "RESEARCH_WSH_ABORTED");
   assert.deepEqual([...h.outcomes.values()], ["SUCCEEDED", "UNKNOWN"]);
+});
+
+for (const code of ['ECONNRESET', 'ECONNREFUSED', 'ENOTCONN', 'EPIPE', 'ETIMEDOUT']) test(`SEND_FAILED exact typed ${code} is transient only in request phases`, () => {
+  const error = Object.assign(new Error('RESEARCH_WSH_SEND_FAILED'), { sourceError: { name: 'Error', code, message: 'actual connection failure' } });
+  for (const stage of ['metadata', 'events'] as const) assert.equal(classifyWshFailure(error, stage), 'TRANSIENT');
+  for (const stage of ['connect', 'normalize', 'publish', 'cleanup'] as const) assert.equal(classifyWshFailure(error, stage), 'HARD');
+});
+test('generic, message-only, unknown-code and numeric-string connection failures stay hard', () => {
+  for (const error of [new Error('RESEARCH_WSH_SEND_FAILED'),
+    Object.assign(new Error('RESEARCH_WSH_SEND_FAILED'), { sourceError: { name: 'ECONNRESET', code: 'OTHER', message: 'ECONNRESET' } }),
+    Object.assign(new Error('RESEARCH_WSH_CONNECT_FAILED'), { sourceError: { name: 'Error', code: 'ECONNREFUSED', message: 'connection failure' } }),
+    Object.assign(new Error('RESEARCH_WSH_ERROR_502'), { providerError: { code: '502', message: 'failure' } })])
+    assert.equal(classifyWshFailure(error, 'metadata'), 'HARD');
+  assert.equal(classifyWshFailure(Object.assign(new Error('RESEARCH_WSH_CONNECT_FAILED'), { providerError: { code: 502, message: 'failed' } }), 'connect'), 'TRANSIENT');
+  assert.equal(classifyWshFailure(Object.assign(new Error('RESEARCH_WSH_ERROR_10281'), { providerError: { code: 10281, message: 'busy' } }), 'metadata'), 'BUSY');
+});
+test('numeric source/provider cause 502 permits SEND_FAILED only in metadata/events', () => {
+  for (const representation of ['sourceError', 'providerError']) for (const code of [502, '502']) {
+    const detail = representation === 'sourceError' ? { name: 'SocketError', code, message: 'connection failure' } : { code, message: 'connection failure' };
+    const error = Object.assign(new Error('RESEARCH_WSH_SEND_FAILED'), { [representation]: detail });
+    for (const stage of ['connect', 'metadata', 'events', 'normalize', 'publish', 'cleanup'] as const)
+      assert.equal(classifyWshFailure(error, stage), code === 502 && ['metadata', 'events'].includes(stage) ? 'TRANSIENT' : 'HARD');
+  }
+});
+test('READY retained calendar still receives only two due fresh-session retries without moving regular cadence', async () => {
+  const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.f.source.parserConfig.maxAgeMs = 86400000;
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  const scheduler = new ResearchRefreshScheduler(h.options); await scheduler.tick();
+  const good = structuredClone(h.head); h.advance(900000); h.faults({ eventError: new Error('RESEARCH_WSH_TIMEOUT') });
+  await scheduler.tick(); assert.deepEqual(h.head, good);
+  const nextRegular = h.attempts.at(-1)!.ticket.nextRegularAt;
+  h.store.dueRepairs = async () => []; h.store.prepareRepair = async () => ({ state: 'READY', sources: [] });
+  await scheduler.tickRepairs(); assert.equal(h.attempts.length, 2);
+  h.advance(29999); await scheduler.tickRepairs(); assert.equal(h.attempts.length, 2);
+  h.advance(1); await scheduler.tickRepairs(); assert.equal(h.attempts.length, 3);
+  h.advance(119999); await scheduler.tickRepairs(); assert.equal(h.attempts.length, 3);
+  h.advance(1); await new ResearchRefreshScheduler(h.options).tickRepairs(); assert.equal(h.attempts.length, 4);
+  h.advance(120000); await scheduler.tickRepairs(); assert.equal(h.attempts.length, 4);
+  assert.deepEqual(h.attempts.slice(1).map(a => a.ticket.ordinal), [0, 1, 2]);
+  assert.ok(h.attempts.slice(1).every(a => a.ticket.nextRegularAt === nextRegular));
+  assert.equal(new Set(h.attempts.map(a => a.ticket.sessionId)).size, 4);
+  assert.deepEqual(h.head, good); assert.equal(h.calls.length, 8);
+  assert.ok(h.attempts.slice(1).every(a => a.result?.outcome === 'FAILED' && a.result.acquisitionOutcome === 'UNKNOWN'));
+});
+test('durable admission precedes connection and deferred admission makes no socket call', async () => {
+  const h = harness(); let admitted = false;
+  const claim = h.store.claimWshAttempt;
+  h.store.claimWshAttempt = async (...args: any[]) => { const result = await claim(...args); admitted = true; return result; };
+  const create = h.wsh.createTransport;
+  h.wsh.createTransport = () => { const transport = create(); return { ...transport, connect: async deadline => { assert.equal(admitted, true); await transport.connect(deadline); } }; };
+  await h.run(); assert.equal(h.attempts.length, 1);
+  admitted = false; await h.run(); assert.equal(h.trace.filter(t => t === 'connect').length, 1);
+});
+test('hard failure replaces good head and later transient failure cannot resurrect it', async () => {
+  const h = harness(); await h.run(); h.advance(900000);
+  h.faults({ metadataText: '{}' }); await h.run(); const hard = structuredClone(h.head);
+  assert.equal(calendar(h).reason, 'RESEARCH_WSH_METADATA_MISMATCH');
+  h.advance(900000); h.faults({ metadataText: JSON.stringify({ meta_data: { event_types: [{ tag: 'wshe_ed', name: 'Earnings', columns: [] }] } }), eventError: new Error('RESEARCH_WSH_TIMEOUT') });
+  await h.run(); assert.equal(calendar(h).complete, false); assert.notEqual(h.head.id, hard.id);
+});
+
+test('local checkpoint timeout retains actual local cause and phase without provider attribution', async () => {
+  const h = harness(); h.faults({ advanceOnEvent: 10001 }); await h.run();
+  const result = h.attempts[0]!.result!; assert.notEqual(result.outcome, 'SUCCEEDED');
+  if (result.outcome === 'SUCCEEDED') return;
+  assert.equal(result.failureReason, 'RESEARCH_WSH_TIMEOUT'); assert.equal(result.stage, 'events');
+  assert.equal(result.failureClass, 'TRANSIENT'); assert.equal(result.providerError, undefined);
+  assert.deepEqual(result.sourceError, { name: 'WshTimeoutError', code: 'RESEARCH_WSH_TIMEOUT', message: 'Local WSH events admission or call deadline expired' });
+});
+for (const cleanup of ['UNKNOWN', 'throw'] as const) test(`cleanup ${cleanup} preserves proved success and cannot grant a retry`, async () => {
+  const h = harness(), create = h.wsh.createTransport;
+  h.wsh.createTransport = () => ({ ...create(), close: async () => {
+    if (cleanup === 'throw') throw new Error('close failed DU1');
+    return { ...h.cleanupReceipt(), state: 'UNKNOWN' };
+  } });
+  await h.run(); assert.equal(calendar(h).complete, true); assert.equal(h.state, 'PUBLISHED');
+  assert.deepEqual([...h.outcomes.values()], ['SUCCEEDED', 'SUCCEEDED']);
+  assert.equal(h.attempts[0]!.result!.outcome, 'SUCCEEDED'); assert.equal(h.attempts[0]!.result!.cleanup.state, 'UNKNOWN');
+  assert.equal(h.attempts[0]!.result!.cleanup.sessionId, h.attempts[0]!.ticket.sessionId);
+  if (cleanup === 'throw') assert.equal(h.attempts[0]!.result!.cleanup.sourceError?.message, 'close failed [UKRYTO]');
+  h.advance(30000); assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false); assert.equal(h.calls.length, 2);
+});
+test('confirmed connect 502 consumes a durable ordinal but no call budget before each bounded retry', async () => {
+  const h = harness(), create = h.wsh.createTransport;
+  h.wsh.createTransport = () => ({ ...create(), connect: async () => { throw Object.assign(new Error('RESEARCH_WSH_ERROR_502'), { providerError: { code: 502, message: 'connection unavailable' } }); } });
+  await h.run(); h.advance(30000); await refreshWsh({ ...h.options, kind: 'retry' });
+  h.advance(120000); await refreshWsh({ ...h.options, kind: 'retry' });
+  h.advance(120000); assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false);
+  assert.deepEqual(h.attempts.map(a => a.ticket.ordinal), [0, 1, 2]); assert.equal(h.calls.length, 0);
+});
+test('busy and unconfirmed cleanup never schedule an accelerated attempt', async () => {
+  for (const kind of ['busy', 'cleanup'] as const) {
+    const h = harness(), create = h.wsh.createTransport;
+    h.faults({ eventError: kind === 'busy' ? Object.assign(new Error('RESEARCH_WSH_ERROR_10281'), { providerError: { code: 10281, message: 'busy' } }) : new Error('RESEARCH_WSH_TIMEOUT') });
+    if (kind === 'cleanup') h.wsh.createTransport = () => ({ ...create(), close: async () => ({ ...h.cleanupReceipt(), state: 'UNKNOWN' }) });
+    await h.run(); h.advance(120000); assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false);
+    assert.equal(h.attempts.length, 1); assert.equal(h.calls.length, 2);
+  }
+});
+test('terminal commit readback requires the exact result hash and never resends', async () => {
+  const h = harness(), finish = h.store.finishWshAttempt;
+  h.store.finishWshAttempt = async (...args: any[]) => { await finish(...args); throw new Error('lost terminal COMMIT'); };
+  h.store.readWshAttempt = async () => ({ state: 'SUCCEEDED', terminalResultHash: 'wrong' });
+  await assert.rejects(h.run(), /lost terminal COMMIT/); assert.equal(h.calls.length, 2); assert.equal(h.trace.at(-1), 'close');
+});
+test('failed begin readback still cleans up and leaves the attempt unresolved', async () => {
+  const h = harness(); let reads = 0;
+  h.store.beginWshAcquisition = async () => { throw new Error('begin acknowledgement lost'); };
+  h.store.pendingWshAcquisition = async () => { if (++reads > 1) throw new Error('pending readback unavailable'); return null; };
+  await assert.rejects(h.run(), /pending readback unavailable/);
+  assert.equal(h.trace.at(-1), 'close'); assert.equal(h.attempts[0]!.result, undefined); assert.equal(h.calls.length, 0);
+});
+
+test('deferred claim never evaluates local runtime preflight or changes a valid calendar', async () => {
+  const h = harness(); await h.run(); const good = structuredClone(h.head);
+  let checks = 0;
+  Object.defineProperty(h.wsh.runtime, 'enabled', { get() { checks++; return false; } });
+  h.wsh.runtime.endpointId = 'mismatched-runtime';
+  assert.equal(await h.run(), false); assert.equal(checks, 0);
+  assert.deepEqual(h.head, good); assert.equal(h.attempts.length, 1); assert.equal(h.calls.length, 2);
+});
+test('claimed preflight failure with failed negative settlement leaves durable preflight incomplete', async () => {
+  const h = harness(); await h.run(); const good = structuredClone(h.head); h.advance(900000);
+  h.wsh.runtime.endpointId = 'mismatched-runtime'; h.faults({ failNegative: true });
+  await assert.rejects(h.run(), /negative DB unavailable/);
+  assert.deepEqual(h.head, good); assert.equal(h.attempts.length, 2);
+  assert.equal(h.attempts[1]!.preflightComplete, undefined); assert.equal(h.attempts[1]!.result, undefined);
+  assert.equal(h.trace.filter(t => t === 'connect').length, 1); assert.equal(h.calls.length, 2);
+});
+test('preflight confirmation failure cannot reach connection and shutdown still cleans up', async () => {
+  const h = harness(); h.store.confirmWshPreflight = async () => { throw new Error('confirmation unavailable'); };
+  await h.run(); assert.equal(h.trace.includes('connect'), false); assert.equal(h.trace.includes('close'), true);
+  assert.equal(h.attempts[0]!.preflightComplete, undefined);
+});
+
+test('metadata bookkeeping and ambiguous publication readback retain the exact original attempt ticket', async () => {
+  const h = harness(); h.faults({ publishCommitLost: true });
+  const deadlines: unknown[] = [];
+  const outcome = h.store.recordCallOutcome, acquisition = h.store.readWshAcquisition, snapshot = h.store.readSnapshot;
+  h.store.recordCallOutcome = async (...args: any[]) => { deadlines.push(args[3]); return outcome(...args); };
+  h.store.readWshAcquisition = async (...args: any[]) => { deadlines.push(args[1]); return acquisition(...args); };
+  h.store.readSnapshot = async (...args: any[]) => { deadlines.push(args[2]); return snapshot(...args); };
+  await h.run(); assert.equal(deadlines.length, 3);
+  for (const ticket of deadlines) assert.equal(ticket, h.attempts[0]!.ticket);
+});
+
+test('legacy negative commit readback shares one bounded resolution deadline', async () => {
+  const h = harness(); h.faults({ eventError: new Error('RESEARCH_WSH_TIMEOUT'), failNegative: true });
+  await assert.rejects(h.run(), /negative DB unavailable/);
+  h.faults({ failNegative: false, negativeCommitLost: true });
+  const deadlines: string[] = [], acquisition = h.store.readWshAcquisition, snapshot = h.store.readSnapshot;
+  h.store.readWshAcquisition = async (...args: any[]) => { deadlines.push(args[1]); return acquisition(...args); };
+  h.store.readSnapshot = async (...args: any[]) => { deadlines.push(args[2]); return snapshot(...args); };
+  const before = Date.now(); await h.run(); const after = Date.now();
+  assert.equal(deadlines.length, 2); assert.equal(deadlines[0], deadlines[1]);
+  assert.ok(Date.parse(deadlines[0]!) >= before + 3000 && Date.parse(deadlines[0]!) <= after + 3000);
+  assert.equal(h.calls.length, 2);
+});
+
+for (const expired of [false, true]) test(`terminal readback ${expired ? 'expired before connection' : 'blocked connection'} respects original deadline and scheduler drain`, { timeout: 1500 }, async () => {
+  const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  const claim = h.store.claimWshAttempt;
+  h.store.claimWshAttempt = async (...args: any[]) => {
+    const result = await claim(...args);
+    if (result.state === 'CLAIMED') result.ticket.deadlineAt = new Date(Date.now() + 100).toISOString();
+    return result;
+  };
+  let connections = 0;
+  const actualReadback = new ResearchStore({ query: async () => { throw new Error('unexpected unbounded query'); },
+    connect: async () => { connections++; return new Promise(() => {}); } });
+  h.store.readWshAttempt = actualReadback.readWshAttempt.bind(actualReadback);
+  const scheduler = new ResearchRefreshScheduler(h.options);
+  h.store.finishWshAttempt = async () => {
+    assert.equal(h.trace.at(-1), 'close'); scheduler.stop();
+    if (expired) await new Promise(resolve => setTimeout(resolve, 110));
+    throw new Error('RESEARCH_WSH_BOOKKEEPING_TIMEOUT');
+  };
+  const started = performance.now();
+  const pending = scheduler.tick();
+  await Promise.all([assert.rejects(pending, /RESEARCH_WSH_BOOKKEEPING_TIMEOUT/), scheduler.drain()]);
+  assert.ok(performance.now() - started < 1000);
+  assert.equal(connections, expired ? 0 : 1); assert.equal(h.calls.length, 2);
+  assert.equal(h.attempts[0]!.result, undefined); assert.equal(h.trace.at(-1), 'close');
+  await scheduler.tick(); await scheduler.drain(); assert.equal(h.calls.length, 2);
+});
+
+for (const stage of ['acquisition', 'snapshot'] as const) test(`expired monotonic publication ${stage} readback cannot reopen a connection despite future wall deadline`, { timeout: 1500 }, async () => {
+  const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  h.faults({ publishCommitLost: true });
+  let connections = 0;
+  const readback = new ResearchStore({ query: async () => { throw new Error('unexpected unbounded query'); },
+    connect: async () => { connections++; return new Promise(() => {}); } });
+  const claim = h.store.claimWshAttempt;
+  h.store.claimWshAttempt = async (...args: any[]) => {
+    const result = await claim(...args);
+    if (result.state === 'CLAIMED') {
+      result.ticket.deadlineAt = new Date(Date.now() + 60000).toISOString();
+      (readback as unknown as { wshTicketDeadlines: WeakMap<WshAttemptTicket, number> }).wshTicketDeadlines.set(result.ticket, performance.now() - 1);
+    }
+    return result;
+  };
+  if (stage === 'acquisition') h.store.readWshAcquisition = readback.readWshAcquisition.bind(readback);
+  else h.store.readSnapshot = readback.readSnapshot.bind(readback);
+  const scheduler = new ResearchRefreshScheduler(h.options), publish = h.store.publishWshSnapshot;
+  h.store.publishWshSnapshot = async (...args: any[]) => { try { return await publish(...args); } finally { scheduler.stop(); } };
+  const started = performance.now(), pending = scheduler.tick();
+  await Promise.all([assert.rejects(pending, /RESEARCH_WSH_BOOKKEEPING_TIMEOUT/), scheduler.drain()]);
+  assert.ok(performance.now() - started < 1000); assert.equal(connections, 0);
+  assert.equal(h.trace.at(-1), 'close'); assert.equal(h.calls.length, 2);
+  assert.equal(h.attempts[0]!.result, undefined);
+  await scheduler.tick(); await scheduler.drain(); assert.equal(h.calls.length, 2);
+});
+
+for (const handoff of ['connection', 'query'] as const) test(`positive monotonic publication budget survives wall rollback at ${handoff} handoff`, { timeout: 1500 }, async () => {
+  const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  h.faults({ publishCommitLost: true });
+  const originalRead = h.store.readWshAcquisition, realNow = Date.now;
+  let wallReads = 0, rolledBack = false, queries = 0, destroyed = false, slowComplete = false;
+  let finishSlow!: () => void;
+  const slowFinished = new Promise<void>(resolve => { finishSlow = () => { slowComplete = true; resolve(); }; });
+  const raw = { release: (destroy?: boolean) => { destroyed ||= destroy === true; }, query: async (sql: string) => {
+    if (sql.includes('set_config')) return { rows: [] };
+    queries++; rolledBack = true;
+    try { await new Promise(resolve => setTimeout(resolve, 80)); return { rows: [await originalRead()] }; }
+    finally { finishSlow(); }
+  } };
+  const readback = new ResearchStore({ query: async () => { throw new Error('unexpected unbounded query'); }, connect: async () => {
+    if (handoff === 'connection') {
+      rolledBack = true;
+      await new Promise(resolve => setTimeout(resolve, 80)); finishSlow();
+    }
+    return raw;
+  } });
+  h.store.readWshAcquisition = async (id: string, ticket: WshAttemptTicket) => {
+    ticket.deadlineAt = new Date(realNow() + 60000).toISOString();
+    (readback as unknown as { wshTicketDeadlines: WeakMap<WshAttemptTicket, number> }).wshTicketDeadlines.set(ticket, performance.now() + 20);
+    Date.now = () => {
+      if (++wallReads >= (handoff === 'connection' ? 3 : 5)) rolledBack = true;
+      return realNow() - (rolledBack ? 60000 : 0);
+    };
+    return readback.readWshAcquisition(id, ticket);
+  };
+  const scheduler = new ResearchRefreshScheduler(h.options), publish = h.store.publishWshSnapshot;
+  h.store.publishWshSnapshot = async (...args: any[]) => { try { return await publish(...args); } finally { scheduler.stop(); } };
+  try {
+    const started = performance.now(), pending = scheduler.tick();
+    await Promise.all([assert.rejects(pending, /RESEARCH_WSH_BOOKKEEPING_TIMEOUT/), scheduler.drain()]);
+    assert.ok(performance.now() - started < 1000);
+    assert.equal(h.trace.at(-1), 'close'); assert.equal(h.attempts[0]!.result, undefined); assert.equal(h.calls.length, 2);
+    assert.equal(rolledBack, true);
+    assert.equal(slowComplete, false);
+    await slowFinished; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(destroyed, true); assert.equal(queries, handoff === 'connection' ? 0 : 1);
+    await scheduler.tick(); await scheduler.drain(); assert.equal(h.calls.length, 2);
+  } finally { Date.now = realNow; }
 });

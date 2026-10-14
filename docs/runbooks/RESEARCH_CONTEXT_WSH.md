@@ -45,18 +45,48 @@ W lokalnym `.env` ustaw `RESEARCH_WSH_ENABLED`, identyfikator endpointu
 klienta ingestion lub execution. Włączenie WSH nie włącza zleceń.
 
 Przed wdrożeniem zachowaj wyłączone zlecenia i wstrzymane wejścia, wykonaj kopię
-bazy, migrację 28 i kontrolowane przyjęcie manifestu przez obie usługi. Stare
+bazy, aktualny łańcuch migracji aż do 33 (28 jest historyczną podstawą WSH)
+i kontrolowane przyjęcie manifestu przez obie usługi. Migracje i przyjęcie
+manifestu wykonuj przy wyłączonych zapisach oraz wstrzymanych wejściach. Stare
 archiwalne manifesty i decyzje pozostają czytelne; stare zatwierdzenie AI nie może
 wykonać zlecenia według nowego promptu. Zaktualizuj hash prywatnego manifestu.
 Nie usuwaj historii, żeby ominąć nieznane wyniki wcześniejszych operacji.
 
-Odświeżanie WSH odbywa się nie częściej niż co 15 minut. Metadane i wydarzenia
-mają osobne trwałe rezerwacje budżetu; zapytania jednego endpointu są szeregowane.
-Podczas odświeżania poprzedni poprawny zapis zachowuje pierwotną ważność.
-Nowy poprawny lub negatywny zapis unieważnia zgodę AI opartą na poprzednim.
-Błąd zapisu nie przedłuża ważności starych danych. Timeout odczytu nie powoduje
-natychmiastowego ponowienia; następny termin używa nowej sesji. Ta zasada nie
-pozwala ponawiać nieznanego zlecenia brokerskiego ani wywołania modelu.
+Zwykłe odświeżanie WSH odbywa się co 15 minut. Zgodnie z decyzją właściciela
+z 14 października nowy profil może ustawić `maxAgeMs=86400000`: poprawny
+kalendarz, również poprawnie potwierdzony pusty wynik, zachowuje ważność przez
+24 godziny od rzeczywistego pobrania. Dokładnie po 24 godzinach jest już
+nieaktualny. Starsze manifesty z `maxAgeMs=900000` zachowują wcześniejsze
+15 minut; zmiana wymaga przyjęcia nowego manifestu, nie edycji historii.
+Wcześniejsze wygaśnięcie uprawnień lub kwalifikacji nadal ogranicza ważność.
+
+Przejściowy błąd odświeżenia nie zastępuje poprawnego, nadal ważnego kalendarza.
+Bot zachowuje jego pierwotne daty i dowody, a błąd próby zapisuje osobno.
+Nie odświeża wieku danych samym ponowieniem. Błędna tożsamość, uprawnienia,
+metadane lub niepoprawna odpowiedź pozostają blokadą; stary sukces nie maskuje
+takiego błędu. Nowy poprawny wynik aktualizuje kontekst i jego powiązanie z AI.
+
+W jednym cyklu dopuszczalne są najwyżej dwie dodatkowe próby odczytu:
+po 30 sekundach od zapisania potwierdzonego zakończenia pierwszej sesji w bazie
+oraz po 120 sekundach od zapisania zakończenia kolejnej. Liczniki i terminy są trwałe;
+restart ich nie zeruje. Ponowienia nie przesuwają zwykłego cyklu 15 minut.
+Wymagają zakończenia poprzedniego zadania i potwierdzenia zamknięcia jego
+lokalnego połączenia. Kod `10281`, niepewne sprzątanie lub awaria procesu
+nie uprawniają do szybkiego ponowienia. Bez pewnego dowodu zamknięcia dokładnie
+tej lokalnej sesji kolejne żądania na jej połączeniu lub dla tego emitenta
+pozostają zablokowane i wymagają diagnostyki; restart nie usuwa tej blokady.
+Gdy potwierdzono samo zamknięcie, ale anulowanie pozostaje niepewne, możliwy
+jest dopiero kolejny zwykły cykl. Poprawnie pobrany kalendarz zachowuje przy
+tym pierwotną ważność. Każde nowe żądanie zachowuje odrębną
+rezerwację budżetu; poprzednie nieznane wyniki pozostają w audycie.
+Zasady te dotyczą odczytów WSH, nie ponawiania zleceń ani wywołań modelu.
+
+Bez ważnego kalendarza bot czeka na dopuszczoną próbę, a po wyczerpaniu prób
+wstrzymuje wejścia. Z ważnym kalendarzem przejściowy błąd odświeżenia pozostaje
+widoczną informacją i sam nie blokuje pracy. Niepewność zapisu wyniku wymagająca
+odzyskania stanu nadal blokuje użycie danych. Zmiana innej części manifestu
+nie przenosi automatycznie kalendarza między wersjami konfiguracji.
+Szczegóły kontraktu: [ważność i odzyskiwanie WSH](../implementation/phase3/WSH_FRESHNESS_RECOVERY_PLAN.md).
 
 Raport `pnpm paper:ops --env-file .env status --instrument pko_wse` pokazuje rolę kalendarza, liczbę wydarzeń, liczbę newsów
 z treścią oraz aktualność i blokady źródeł. Nie wyświetla surowych odpowiedzi WSH.

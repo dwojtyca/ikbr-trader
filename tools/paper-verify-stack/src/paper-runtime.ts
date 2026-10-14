@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
-import { formatResearchProviderError, formatResearchSourceError } from '@ikbr/shared/instrument-research';
+import { formatResearchProviderError, formatResearchSourceError, isResearchProviderError } from '@ikbr/shared/instrument-research';
 import { safeDiagnosticText } from '@ikbr/shared/diagnostics';
 
 export const PAPER_SERVICES = ['postgres', 'redis', 'execution-engine', 'ingestion', 'llm-agent', 'signal-engine'] as const;
@@ -425,6 +425,7 @@ export class PaperRuntime {
   }
   private async waitPreparation(generation: string, accountId: string, expectedRevision: number, expectedInstruments: string[]): Promise<void> {
     let lastStatus = '';
+    let lastWshDiagnostics = '';
     for (;;) {
       await this.assertStart(generation, accountId, expectedRevision);
       let prepared: Record<string, unknown> | null;
@@ -460,6 +461,32 @@ export class PaperRuntime {
           [...expectedInstruments].sort().join(',') !== (returnedIds as string[]).sort().join(',') ||
           results.some(v => !['READY', 'WAITING', 'HOLD'].includes(String(obj(v)?.state)))) throw new PaperRuntimeError('PAPER_PREPARATION_UNKNOWN');
       const states = results.map(v => obj(v)?.state);
+      const wshDiagnostics: string[] = [];
+      for (const result of results) {
+        const item = obj(result);
+        for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
+          const row = obj(source), refresh = obj(row?.wshRefresh);
+          const failure = obj(refresh?.latestFailure);
+          if (row?.role !== 'calendar' || row.state !== 'READY' || typeof row.sourceId !== 'string' || typeof item?.instrumentId !== 'string' || refresh?.blocksCachedEvidence !== false) continue;
+          const instant = (value: unknown): value is string => typeof value === 'string' &&
+            /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
+          if (!instant(refresh.lastSuccessfulAt) || !instant(refresh.expiresAt)) continue;
+          const privacy = { secrets: [this.options.token], accountIds: [accountId] };
+          const label = safeDiagnosticText(`${String(item?.instrumentId).slice(0, 100)} / ${String(row.sourceId).slice(0, 100)}`, privacy);
+          if (refresh.acquisitionBlockedReason === 'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED')
+            wshDiagnostics.push(`${label}: odświeżanie WSH wstrzymane po niepewnym zakończeniu poprzedniej sesji. Zachowany kalendarz pozostaje ważny do ${refresh.expiresAt}. RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED.`);
+          if (refresh.retained !== true || !failure || !['FAILED', 'UNKNOWN'].includes(String(failure.state)) || !instant(failure.finishedAt)) continue;
+          const reason = typeof failure.failureReason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(failure.failureReason) ? failure.failureReason : 'RESEARCH_WSH_REFRESH_FAILED';
+          const detail = failure.sourceError === undefined ? formatResearchProviderError(failure.providerError, privacy) :
+            formatResearchSourceError(failure.sourceError, privacy) + (isResearchProviderError(failure.providerError) ? `; ${formatResearchProviderError(failure.providerError, privacy)}` : '');
+          const stage = ['connect', 'metadata', 'events', 'normalize', 'publish', 'cleanup'].includes(String(failure.stage)) ? String(failure.stage) : 'nieznany';
+          const next = instant(refresh.nextRetryAt) ? `następne ponowienie: ${refresh.nextRetryAt}` : instant(refresh.nextRegularAt) ? `zwykłe odświeżenie: ${refresh.nextRegularAt}` : 'termin odświeżenia niedostępny';
+          wshDiagnostics.push(`${label}: odświeżenie kalendarza nie powiodło się (${reason}, etap ${stage}), ale zachowane dane pozostają ważne. Ostatnie poprawne pobranie: ${refresh.lastSuccessfulAt}; ważne do: ${refresh.expiresAt}; ostatni błąd: ${failure.finishedAt}; ${next}. ${detail}`);
+        }
+      }
+      const wshStatus = wshDiagnostics.join('\n');
+      if (wshStatus && wshStatus !== lastWshDiagnostics) this.options.adapters.log?.(wshStatus);
+      lastWshDiagnostics = wshStatus;
       if (states.every(s => s === 'READY')) return;
       const reasons = results.flatMap(v => Array.isArray(obj(v)?.reasons) ? obj(v)!.reasons as unknown[] : []).filter((x): x is string => typeof x === 'string' && /^[A-Z][A-Z0-9_]*$/.test(x));
       const privacy = { secrets: [this.options.token], accountIds: [accountId] };
@@ -476,7 +503,7 @@ export class PaperRuntime {
           const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'źródło';
           const ownReason = typeof row.failureReason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(row.failureReason) ? `${row.failureReason}; ` : '';
           const localBudget = row.role === 'news' && row.failureReason === 'RESEARCH_BUDGET_EXHAUSTED' ? formatLocalResearchBudget(row.localBudget) : null;
-          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}`);
+          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}${row.role === 'calendar' && !calendar && isResearchProviderError(row.providerError) ? `; ${formatResearchProviderError(row.providerError, privacy)}` : ''}`);
           if (row.state === 'WAITING' && typeof row.nextCheckAt === 'string' && Number.isFinite(Date.parse(row.nextCheckAt)))
             details.push(`  Dane nadal niedostępne. Najwcześniejsze kolejne sprawdzenie: ${new Date(row.nextCheckAt).toISOString()}.`);
         }

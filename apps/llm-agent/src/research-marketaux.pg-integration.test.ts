@@ -46,6 +46,8 @@ async function seed(pool: Pool, expiryMs = 3_600_000, budget = 1000, twoIssuers 
   const scheduler = () => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash, accountId: "DU_TEST", marketauxApiKey: "synthetic-secret", store: {
     readSnapshot: store.readSnapshot.bind(store),
     withWshEndpointLock: store.withWshEndpointLock.bind(store),
+    claimWshAttempt: store.claimWshAttempt.bind(store), confirmWshPreflight: store.confirmWshPreflight.bind(store), finishWshAttempt: store.finishWshAttempt.bind(store),
+    readWshAttempt: store.readWshAttempt.bind(store), dueWshAttempts: store.dueWshAttempts.bind(store),
     pendingWshAcquisition: store.pendingWshAcquisition.bind(store),
     beginWshAcquisition: store.beginWshAcquisition.bind(store),
     reserveWshCall: store.reserveWshCall.bind(store),

@@ -8,6 +8,7 @@ export type ResearchRole = "reports" | "news" | "calendar";
 export type ResearchPreparationState = "READY" | "WAITING" | "HOLD";
 export interface ResearchRepairIdentity extends ResearchIdentity { accountId: string; instrumentId: string }
 export interface ResearchRepairSource {
+  wshRefresh?: import("./wsh-refresh.js").WshRefreshState;
   sourceId: string; role: ResearchRole; state: ResearchPreparationState; reasons: string[]; nextCheckAt: string | null;
   providerError?: ResearchProviderError;
   sourceError?: ResearchSourceError;
@@ -50,7 +51,7 @@ export function marketauxTransientFailure(coverage: ResearchSourceResult): boole
 }
 
 /** Classification grants no entry permission and never changes source evidence. */
-export function inspectResearch(manifest: ResearchManifest, instrumentId: string, stored: StoredResearchSnapshot | null, nowMs: number, legacyRecoveries: readonly MarketauxLegacyRecoveryAssessment[] = [], budgetRecoveries: readonly MarketauxBudgetRecoveryAssessment[] = []): ResearchPreparation {
+export function inspectResearch(manifest: ResearchManifest, instrumentId: string, stored: StoredResearchSnapshot | null, nowMs: number, legacyRecoveries: readonly MarketauxLegacyRecoveryAssessment[] = [], budgetRecoveries: readonly MarketauxBudgetRecoveryAssessment[] = [], wshStates: readonly import("./wsh-refresh.js").WshRefreshState[] = []): ResearchPreparation {
   const policy = manifest.instruments.find(p => p.instrumentId === instrumentId);
   const sources: ResearchRepairSource[] = [], reasons = new Set<string>();
   const hold = (reason: string) => { reasons.add(reason); };
@@ -63,7 +64,9 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
     const providers = policy.sources.filter(source => source.roles.includes(role));
     if (!providers.length) hold(`RESEARCH_${role.toUpperCase()}_SOURCE_UNCONFIGURED`);
     for (const source of providers) {
+      const wshState=wshStates.find(s=>s.sourceId===source.id);
       const row: ResearchRepairSource = { sourceId: source.id, role, state: "READY", reasons: [], nextCheckAt: null };
+      if(wshState)row.wshRefresh=wshState;
       const deny = (reason: string) => { row.state = "HOLD"; row.reasons.push(reason); hold(reason); };
       if (source.automation !== "PERMITTED" || source.retention !== "FACTS_AND_REFERENCES") deny("RESEARCH_PERMISSION_UNVERIFIED");
       const kind = source.parserConfig.kind;
@@ -75,6 +78,11 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         row.providerError = { ...coverage.providerError };
       if (coverage?.status === "ERROR" && coverage.sourceError) { row.sourceError = { ...coverage.sourceError }; row.failureReason = coverage.reason; }
       if (source.adapter === "marketaux-news" && coverage && marketauxLocalBudgetFailure(coverage)) row.failureReason = coverage.reason;
+      if(wshState?.latestFailure){
+        if(wshState.latestFailure.sourceError)row.sourceError={...wshState.latestFailure.sourceError};
+        if(wshState.latestFailure.providerError)row.providerError={...wshState.latestFailure.providerError};
+        if(wshState.latestFailure.failureReason)row.failureReason=wshState.latestFailure.failureReason;
+      }
       if (source.adapter === "marketaux-news") {
         try { marketauxQualificationDeadline(parseMarketauxNewsConfig(source, policy), nowMs); }
         catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }
@@ -83,7 +91,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         try { wshQualificationDeadline(parseWshConfig(source, policy), nowMs); }
         catch { deny("RESEARCH_WSH_QUALIFICATION_UNAVAILABLE"); }
       }
-      const maxAge = source.adapter === "ibkr-wsh" ? 900_000 : role === "news" ? 1_800_000 : 86_400_000;
+      const maxAge = source.adapter === "ibkr-wsh" ? parseWshConfig(source, policy).maxAgeMs : role === "news" ? 1_800_000 : 86_400_000;
       if (coverage && (Date.parse(coverage.checkedAt) > nowMs || Date.parse(coverage.checkedAt) > Date.parse(stored!.snapshot.createdAt) || Date.parse(coverage.windowEnd) > Date.parse(coverage.checkedAt))) deny("RESEARCH_SOURCE_FUTURE");
       const legacy = coverage && legacyRecoveries.find(item => item.snapshotId === stored?.id && item.sourceId === source.id
         && item.coverageHash === researchHash(coverage) && item.slot === researchRefreshSlot(source,role,Date.parse(coverage.checkedAt)+1000));
@@ -94,7 +102,13 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         && Date.parse(item.failureRecordedAt) >= item.slot * researchRefreshInterval(source, role)
         && Date.parse(item.failureRecordedAt) < (item.slot + 1) * researchRefreshInterval(source, role)
         && Number.isFinite(Date.parse(item.nextCheckAt)) && Date.parse(item.nextCheckAt) >= (item.slot + 1) * researchRefreshInterval(source, role));
-      const recoverable = source.adapter === "marketaux-news" && role === "news" && coverage?.status === "ERROR"
+      const wshRecoverable=source.adapter==='ibkr-wsh' && !!wshState?.latestFailure && !wshState.retained && !wshState.blocksCachedEvidence && (wshState.nextRetryAt!==null || wshState.latestAttempt?.state==='STARTED') && wshState.latestFailure.failureClass==='TRANSIENT';
+      if(wshState?.acquisitionBlockedReason){row.failureReason??=wshState.acquisitionBlockedReason;
+        if(!coverage||!coverage.complete||!['AVAILABLE','EMPTY'].includes(coverage.status)||nowMs-Date.parse(coverage.checkedAt)>=maxAge||wshState.expiresAt!==null&&nowMs>=Date.parse(wshState.expiresAt))deny(wshState.acquisitionBlockedReason);
+      }
+      if(wshState?.blocksCachedEvidence)deny("RESEARCH_WSH_ATTEMPT_UNRESOLVED");
+      if(wshState?.latestFailure?.failureClass==='TRANSIENT' && !wshState.retained && !wshRecoverable && wshState.latestAttempt?.state!=='STARTED')deny("RESEARCH_WSH_RETRY_EXHAUSTED");
+      const recoverable = wshRecoverable || source.adapter === "marketaux-news" && role === "news" && coverage?.status === "ERROR"
         && (marketauxTransientFailure(coverage) || legacy !== undefined || Boolean(budget));
       if (coverage && (!coverage.complete || !["AVAILABLE", ...(role === "reports" ? [] : ["EMPTY"])].includes(coverage.status)) && !recoverable) {
         deny(`RESEARCH_${role.toUpperCase()}_${coverage.status}`);
@@ -107,8 +121,8 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         else {
           row.state = "WAITING";
           row.reasons.push(recoverable ? budget ? "RESEARCH_MARKETAUX_BUDGET_RENEWED" : legacy ? "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION" : "RESEARCH_SOURCE_TRANSIENT_FAILURE" : coverage ? "RESEARCH_SOURCE_STALE" : "RESEARCH_SOURCE_MISSING");
-          if (recoverable) { row.failureReason = coverage!.reason; row.reasons.push(coverage!.reason); }
-          row.nextCheckAt = new Date(recoverable ? Math.max(nowMs, budget ? Date.parse(budget.nextCheckAt) : legacy ? Date.parse(legacy.nextCheckAt) : (researchRefreshSlot(source,role,Date.parse(coverage!.checkedAt)+1000)+1)*researchRefreshInterval(source,role)) : nowMs).toISOString();
+          if (recoverable) { row.failureReason = wshRecoverable ? wshState!.latestFailure!.failureReason ?? "RESEARCH_WSH_REFRESH_FAILED" : coverage!.reason; row.reasons.push(row.failureReason); }
+          row.nextCheckAt = new Date(wshRecoverable ? Math.max(nowMs,Date.parse(wshState!.nextRetryAt??new Date(nowMs+2000).toISOString())) : recoverable ? Math.max(nowMs, budget ? Date.parse(budget.nextCheckAt) : legacy ? Date.parse(legacy.nextCheckAt) : (researchRefreshSlot(source,role,Date.parse(coverage!.checkedAt)+1000)+1)*researchRefreshInterval(source,role)) : nowMs).toISOString();
         }
       }
       sources.push(row);
@@ -118,6 +132,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
     const eligibility = evaluateResearchEligibility(stored.snapshot, manifest, nowMs);
     const missingReports = sources.some(s => s.role === "reports" && s.state === "WAITING" && !stored.snapshot.coverage.some(c => c.sourceId === s.sourceId && c.role === s.role));
     for (const reason of eligibility.reasons) {
+      if(reason==='RESEARCH_CALENDAR_ERROR' && sources.filter(s=>s.role==='calendar').every(s=>s.state==='WAITING'&&s.wshRefresh?.latestFailure?.failureClass==='TRANSIENT'))continue;
       if (reason === "RESEARCH_NEWS_ERROR" && sources.filter(s=>s.role==="news" && stored.snapshot.coverage.some(c=>c.sourceId===s.sourceId&&c.role==='news'&&c.status==='ERROR')).every(s=>s.state==='WAITING'&&s.reasons.some(r=>['RESEARCH_SOURCE_TRANSIENT_FAILURE','RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION','RESEARCH_MARKETAUX_BUDGET_RENEWED'].includes(r)))) continue;
       if (reason === "RESEARCH_SOURCE_STALE_OR_FUTURE" && !reasons.has("RESEARCH_SOURCE_FUTURE")) continue;
       if (/^RESEARCH_(REPORTS|NEWS|CALENDAR)_MISSING$/.test(reason) && sources.some(s => s.state === "WAITING" && `RESEARCH_${s.role.toUpperCase()}_MISSING` === reason)) continue;

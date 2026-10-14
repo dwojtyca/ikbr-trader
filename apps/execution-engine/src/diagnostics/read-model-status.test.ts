@@ -267,3 +267,58 @@ test('coalesced notification remains distinguishable from provider delivery in s
   assert.equal(value(output,'alertCheckpointRunId'),'42');
   assert.equal(output.sections[0]?.fields.find(f=>f.key==='alertCheckpointRunId')?.sensitivity,'identifier');
 });
+
+test('WSH status separates retained calendar evidence from the previous error while a retry is active', async()=>{
+  const f=wshSnapshotFixture(Date.parse(now),'pko_wse'),original=deps(),calendar=f.snapshot.coverage.find(c=>c.role==='calendar')!;
+  const configured=deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),
+    pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority')?{rows:[{
+      manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',
+      snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]}:original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool'],
+    readWshRefreshState:async identity=>{assert.deepEqual(identity,{accountId:'DU1234567',configHash:f.configHash,manifestHash:f.manifestHash,instrumentId:'pko_wse',sourceId:calendar.sourceId});
+      const attempt={terminalResultHash:null,id:'attempt',cycleId:'cycle',ordinal:1 as const,state:'STARTED' as const,startedAt:now,finishedAt:null,cleanup:'UNKNOWN' as const,failureClass:null,failureReason:null,stage:null};
+      return {sourceId:calendar.sourceId,lastSuccessfulAt:calendar.checkedAt,expiresAt:'2026-10-04T12:15:00.000Z',retained:true,blocksCachedEvidence:false,
+        latestAttempt:attempt,latestFailure:{...attempt,id:'previous',ordinal:0,state:'UNKNOWN',finishedAt:now,cleanup:'CONFIRMED',failureClass:'TRANSIENT',failureReason:'RESEARCH_WSH_TIMEOUT',stage:'events',
+          sourceError:{name:'TimeoutError',code:'WSH_TIMEOUT',message:'No response DU1234567'}},nextRetryAt:null,nextRegularAt:'2026-10-04T12:15:00.000Z'};}});
+  const output=report();await appendDiagnosticStatus(configured,query,output);const prefix=`research:${calendar.sourceId}:calendar`;
+  assert.equal(value(output,`${prefix}:status`),calendar.status);assert.equal(value(output,`${prefix}:checkedAt`),calendar.checkedAt);
+  assert.equal(value(output,`${prefix}:retained`),true);assert.equal(value(output,`${prefix}:attemptState`),'STARTED');
+  assert.equal(value(output,`${prefix}:lastFailureReason`),'RESEARCH_WSH_TIMEOUT');assert.equal(value(output,`${prefix}:lastFailureStage`),'events');
+  assert.match(String(value(output,`${prefix}:lastFailureDetail`)),/TimeoutError.*WSH_TIMEOUT/);assert.doesNotMatch(String(value(output,`${prefix}:lastFailureDetail`)),/DU1234567/);
+});
+
+test('WSH unresolved attempt is visible as a blocker even if stored calendar projection is still valid',async()=>{
+  const f=wshSnapshotFixture(Date.parse(now),'pko_wse'),original=deps(),calendar=f.snapshot.coverage.find(c=>c.role==='calendar')!;
+  const configured=deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),
+    pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority')?{rows:[{manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]}:original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool'],
+    readWshRefreshState:async()=>({sourceId:calendar.sourceId,lastSuccessfulAt:calendar.checkedAt,expiresAt:'2026-10-04T12:15:00.000Z',retained:false,blocksCachedEvidence:true,latestAttempt:null,latestFailure:null,nextRetryAt:null,nextRegularAt:now})});
+  const output=report();await appendDiagnosticStatus(configured,query,output);
+  assert.equal(value(output,'researchCoverage'),'INELIGIBLE_AT_REPORT_TIME');assert.match(String(value(output,'researchBlockers')),/RESEARCH_WSH_RECOVERY_REQUIRED/);
+});
+
+test('unavailable WSH attempt state is reported as unavailable rather than proving cached admission',async()=>{
+  const f=wshSnapshotFixture(Date.parse(now),'pko_wse'),original=deps();
+  const configured=deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),
+    pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority')?{rows:[{manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]}:original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool'],
+    readWshRefreshState:async()=>{throw Error('private database error');}});
+  const output=report();await appendDiagnosticStatus(configured,query,output);
+  assert.equal(value(output,'researchCoverage'),'UNAVAILABLE_AT_REPORT_TIME');
+  assert.ok(output.coverage.some(row=>row.reasons.includes('RESEARCH_REFRESH_DIAGNOSTIC_UNAVAILABLE')));
+  assert.doesNotMatch(JSON.stringify(output),/private database error/);
+});
+
+test('WSH durable provider errors survive unavailable source placeholders while retained refresh is active',async()=>{
+  for(const code of [502,10281]){
+    const f=wshSnapshotFixture(Date.parse(now),'pko_wse'),original=deps(),calendar=f.snapshot.coverage.find(c=>c.role==='calendar')!;
+    const configured=deps({configuration:()=>({configHash:f.configHash,instruments:original.configuration().instruments}),
+      pool:{query:async(sql:string,params:unknown[])=>sql.includes('FROM research_authority')?{rows:[{manifest_hash:f.manifestHash,manifest_json:JSON.stringify(f.manifest),instrument_id:'pko_wse',snapshot_id:'fixture',snapshot_hash:researchHash(f.snapshot),snapshot_json:JSON.stringify(f.snapshot),stored_at:now}]}:original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool'],
+      readWshRefreshState:async()=>{const attempt={terminalResultHash:null,id:'attempt',cycleId:'cycle',ordinal:1 as const,state:'STARTED' as const,startedAt:now,finishedAt:null,cleanup:'UNKNOWN' as const,failureClass:null,failureReason:null,stage:null};
+        return {sourceId:calendar.sourceId,lastSuccessfulAt:calendar.checkedAt,expiresAt:'2026-10-04T12:15:00.000Z',retained:true,blocksCachedEvidence:false,acquisitionBlockedReason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED',latestAttempt:attempt,
+          latestFailure:{...attempt,id:'previous',ordinal:0,state:'FAILED',finishedAt:now,failureClass:code===502?'TRANSIENT':'BUSY',failureReason:`RESEARCH_WSH_ERROR_${code}`,stage:'events',
+            sourceError:{name:null,code:null,message:'Oryginalny opis błędu niedostępny w zapisanych danych.'},providerError:{code,message:`Original broker ${code} DU1234567`}},nextRetryAt:null,nextRegularAt:'2026-10-04T12:15:00.000Z'};}});
+    const output=report();await appendDiagnosticStatus(configured,query,output);
+    const detail=String(value(output,`research:${calendar.sourceId}:calendar:lastFailureDetail`));
+    assert.match(detail,new RegExp(`Original broker ${code}`));assert.doesNotMatch(detail,/DU1234567/);
+    assert.equal(value(output,`research:${calendar.sourceId}:calendar:retained`),true);
+    assert.equal(value(output,`research:${calendar.sourceId}:calendar:acquisitionBlockedReason`),'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED');
+  }
+});
