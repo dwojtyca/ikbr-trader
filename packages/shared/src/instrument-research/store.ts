@@ -3,13 +3,14 @@ import { randomUUID } from "node:crypto";
 import { canonicalJson, decodeTradingConfigurationSnapshot } from "../trading-configuration/identity.js";
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
-import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole, type MarketauxLegacyRecoveryAssessment, marketauxTransientFailure } from "./repair.js";
+import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole, type MarketauxLegacyRecoveryAssessment, type MarketauxBudgetRecoveryAssessment, type ResearchLocalBudgetDiagnostic, marketauxLocalBudgetFailure, marketauxTransientFailure } from "./repair.js";
 import { marketauxCallIdentity, marketauxWindow, parseMarketauxNewsConfig } from "./marketaux.js";
 import { isResearchHash, parseResearchManifest, parseResearchSnapshot, researchAssert, researchHash, researchTime } from "./validation.js";
 import type { ResearchSnapshot, InstrumentResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
 
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : String(v);
 export class ResearchStore {
+  private budgetDiscovery: { identity: string; nextScanAt: number; cursor: string } | undefined;
   private readonly wshLeases = new WeakMap<WshEndpointLease, ResearchConnection>();
   constructor(private readonly pool: ResearchPool) {}
   async withRefreshLock(identity: ResearchIdentity & { instrumentId: string }, run: () => Promise<void>): Promise<boolean> {
@@ -35,14 +36,19 @@ export class ResearchStore {
       const manifest = await this.readManifest(identity, db), now = await this.now(db);
       const stored = await this.latestSnapshot(identity, db, true);
       const legacy = await this.legacyMarketauxRecoveries(identity, manifest, stored, now, db);
-      const result = inspectResearch(manifest, identity.instrumentId, stored, now, legacy);
+      const budget = await this.marketauxBudgetRecoveries(identity, manifest, stored, now, db);
+      const result = inspectResearch(manifest, identity.instrumentId, stored, now, legacy, budget.assessments);
+      for (const row of result.sources) {
+        const diagnostic = budget.diagnostics.get(row.sourceId);
+        if (row.role === "news" && diagnostic) row.localBudget = diagnostic;
+      }
       const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
       for (const row of result.sources) {
         if (row.state !== "WAITING" || result.state === "HOLD") continue;
         const source = policy!.sources.find(s => s.id === row.sourceId)!;
         const providers = manifest.instruments.flatMap(p => p.sources).filter(s => s.provider === source.provider);
         const usage = (await db.query(`SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost
-          FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=(clock_timestamp() AT TIME ZONE 'UTC')::date`, [identity.accountId, source.provider])).rows[0];
+          FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=$3`, [identity.accountId, source.provider, new Date(now).toISOString().slice(0, 10)])).rows[0];
         if (Number(usage.requests) >= Math.min(...providers.map(s => s.maxRequestsPerDay)) || Number(usage.cost) + Math.max(...providers.map(s => s.costMicrosPerCall)) > Math.min(...providers.map(s => s.maxCostMicrosPerDay))) {
           row.state = "HOLD"; row.reasons = ["RESEARCH_BUDGET_EXHAUSTED"]; row.nextCheckAt = null; continue;
         }
@@ -120,14 +126,28 @@ export class ResearchStore {
   }
   async dueRepairs(identity: ResearchIdentity & { accountId: string }): Promise<(ResearchRepairIdentity & { sourceId: string; role: ResearchRole })[]> {
     await this.assertAuthority(identity);
-    const rows = (await this.pool.query(`SELECT instrument_id,source_id,role,state FROM research_repair_requests
+    const rows = (await this.pool.query(`SELECT instrument_id,source_id,role,state,FALSE AS budget_candidate FROM research_repair_requests
       WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND
         ((state='WAITING' AND next_check_at<=clock_timestamp()) OR (state='HOLD' AND role='news' AND
           reasons ?| ARRAY['RESEARCH_MARKETAUX_ACQUISITION_FAILED','RESEARCH_SOURCE_TIMEOUT','RESEARCH_SOURCE_TRANSPORT_TRANSIENT',
           'RESEARCH_SOURCE_HTTP_429','RESEARCH_SOURCE_HTTP_500','RESEARCH_SOURCE_HTTP_502','RESEARCH_SOURCE_HTTP_503','RESEARCH_SOURCE_HTTP_504']))
       ORDER BY next_check_at NULLS LAST,id LIMIT 100`, [identity.accountId, identity.configHash, identity.manifestHash])).rows;
+    const now = await this.now(this.pool), discoveryKey = researchHash(identity);
+    const previous = this.budgetDiscovery?.identity === discoveryKey ? this.budgetDiscovery : undefined;
+    const scanBudget = !previous || now >= previous.nextScanAt;
+    let cursor = previous?.cursor ?? "0";
+    if (scanBudget) {
+      const query = `SELECT id,instrument_id,source_id,role,state,TRUE AS budget_candidate FROM research_repair_requests
+        WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND state='HOLD' AND role='news'
+          AND reasons ? 'RESEARCH_BUDGET_EXHAUSTED' AND id>$4::bigint ORDER BY id LIMIT 100`;
+      let candidates = (await this.pool.query(query, [identity.accountId, identity.configHash, identity.manifestHash, cursor])).rows;
+      if (!candidates.length && cursor !== "0") candidates = (await this.pool.query(query, [identity.accountId, identity.configHash, identity.manifestHash, "0"])).rows;
+      cursor = candidates.length ? String(candidates[candidates.length - 1].id) : "0";
+      rows.push(...candidates);
+    }
     const manifest = rows.some(row=>row.state==='HOLD') ? await this.readManifest(identity,this.pool) : null;
     const result: (ResearchRepairIdentity & {sourceId:string;role:ResearchRole})[] = [];
+    const seen = new Set<string>();
     for (const row of rows) {
       const candidate = {...identity,instrumentId:String(row.instrument_id),sourceId:String(row.source_id),role:row.role as ResearchRole};
       if (row.state==='HOLD') {
@@ -135,10 +155,13 @@ export class ResearchStore {
         if (source?.adapter!=='marketaux-news') continue;
         const stored=await this.latestSnapshot(candidate);
         const coverage=stored?.snapshot.coverage.find(c=>c.sourceId===candidate.sourceId&&c.role==='news');
-        if (!coverage || !(marketauxTransientFailure(coverage) || coverage.status==='ERROR'&&!coverage.complete&&coverage.reason==='RESEARCH_MARKETAUX_ACQUISITION_FAILED'&&!Object.hasOwn(coverage,'sourceError'))) continue;
+        if (coverage && marketauxLocalBudgetFailure(coverage) !== (row.budget_candidate === true)) continue;
+        if (!coverage || !(marketauxTransientFailure(coverage) || marketauxLocalBudgetFailure(coverage) || coverage.status==='ERROR'&&!coverage.complete&&coverage.reason==='RESEARCH_MARKETAUX_ACQUISITION_FAILED'&&!Object.hasOwn(coverage,'sourceError'))) continue;
       }
-      result.push(candidate);
+      const key = JSON.stringify([candidate.instrumentId, candidate.sourceId, candidate.role]);
+      if (!seen.has(key)) { result.push(candidate); seen.add(key); }
     }
+    if (scanBudget) this.budgetDiscovery = { identity: discoveryKey, cursor, nextScanAt: Math.min(now + 60_000, Date.parse(new Date(now).toISOString().slice(0, 10)) + 86_400_000) };
     return result;
   }
   private async hasUnresolvedMarketauxFailure(identity: ResearchRepairIdentity, manifest: ResearchManifest, sourceId: string, now: number, db: ResearchDb): Promise<boolean> {
@@ -179,6 +202,75 @@ export class ResearchStore {
         || coverage.checkedAt!==marketauxWindow(matchedSlot).asOf || researchTime(snapshot.createdAt)<researchTime(iso(call.recorded_at))) return true;
     }
     return false;
+  }
+  private async marketauxBudgetRecoveries(identity: ResearchRepairIdentity, manifest: ResearchManifest, stored: StoredResearchSnapshot | null, now: number, db: ResearchDb): Promise<{ assessments: MarketauxBudgetRecoveryAssessment[]; diagnostics: Map<string, ResearchLocalBudgetDiagnostic> }> {
+    const assessments: MarketauxBudgetRecoveryAssessment[] = [], diagnostics = new Map<string, ResearchLocalBudgetDiagnostic>();
+    const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
+    if (!stored || !policy) return { assessments, diagnostics };
+    const day = new Date(now).toISOString().slice(0, 10);
+    for (const source of policy.sources.filter(s => s.adapter === "marketaux-news")) {
+      const coverage = stored.snapshot.coverage.find(c => c.sourceId === source.id && c.role === "news");
+      if (!coverage || !marketauxLocalBudgetFailure(coverage)) continue;
+      const providers = manifest.instruments.flatMap(p => p.sources).filter(s => s.provider === source.provider);
+      const maxRequestsPerDay = Math.min(...providers.map(s => s.maxRequestsPerDay)), maxCostMicrosPerDay = Math.min(...providers.map(s => s.maxCostMicrosPerDay));
+      const nextCallCostMicros = Math.max(...providers.map(s => s.costMicrosPerCall));
+      const usage = (await db.query(`SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost
+        FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=$3`, [identity.accountId, source.provider, day])).rows[0];
+      const requestsUsed = Number(usage.requests), costUsedMicros = Number(usage.cost);
+      researchAssert([maxRequestsPerDay,maxCostMicrosPerDay,nextCallCostMicros,requestsUsed,costUsedMicros].every(n => Number.isSafeInteger(n) && n >= 0), "RESEARCH_BUDGET_INVALID");
+      const diagnostic: ResearchLocalBudgetDiagnostic = { kind: "LOCAL_RESEARCH_BUDGET", failedBudgetDay: null, failureRecordedAt: null,
+        currentBudgetDay: day, requestsUsed, maxRequestsPerDay, costUsedMicros, maxCostMicrosPerDay, nextCallCostMicros,
+        nextBudgetResetAt: new Date(Date.parse(day) + 86_400_000).toISOString(), recoveryProof: "UNAVAILABLE" };
+      diagnostics.set(source.id, diagnostic);
+      if (maxRequestsPerDay === 0 || nextCallCostMicros > maxCostMicrosPerDay) continue;
+      const interval = researchRefreshInterval(source, "news"), slot = researchRefreshSlot(source, "news", researchTime(coverage.checkedAt) + 1000), window = marketauxWindow(slot);
+      if (window.asOf !== coverage.checkedAt || window.windowStart !== coverage.windowStart || window.asOf !== coverage.windowEnd) continue;
+      const slotKey = researchRefreshSlotKey(identity.manifestHash, identity.instrumentId, source.id, "news", slot);
+      const originalRow = (await db.query(`SELECT s.*,r.published_at AS slot_published_at FROM research_refresh_slots r
+        JOIN research_snapshots s ON s.id=r.snapshot_id WHERE r.slot_key=$1`, [slotKey])).rows[0];
+      if (!originalRow) continue;
+      const original = this.decode(originalRow, manifest).snapshot;
+      const originalCoverage = original.coverage.find(c => c.sourceId === source.id && c.role === "news");
+      if (original.configHash !== identity.configHash || original.manifestHash !== identity.manifestHash || original.instrumentId !== identity.instrumentId
+        || original.mappingHash !== stored.snapshot.mappingHash || !originalCoverage || canonicalJson(originalCoverage) !== canonicalJson(coverage)) continue;
+      const recordedAt = researchTime(original.createdAt), publishedAt = researchTime(iso(originalRow.slot_published_at));
+      if (recordedAt < slot * interval || publishedAt < recordedAt || publishedAt >= (slot + 1) * interval || publishedAt > now) continue;
+      const failedDay = new Date(slot * interval).toISOString().slice(0, 10);
+      if (new Date(recordedAt).toISOString().slice(0, 10) !== failedDay || new Date(publishedAt).toISOString().slice(0, 10) !== failedDay) continue;
+      const config = parseMarketauxNewsConfig(source, policy), expected = new Map<string, { requestHash: string; pass: number; page: number }>();
+      for (const pass of [1, 2] as const) for (let page = 1; page <= config.maxPagesPerPass; page++) {
+        const call = marketauxCallIdentity(identity.manifestHash, identity.instrumentId, source, { sourceUrl: source.urls[0], ...window, pass, page });
+        expected.set(call.callKey, { requestHash: call.requestHash, pass, page });
+      }
+      const calls = (await db.query(`SELECT r.*,r.budget_day::text AS budget_day,o.outcome,o.recorded_at FROM research_call_reservations r
+        LEFT JOIN research_call_outcomes o USING(call_key) WHERE r.call_key=ANY($1::text[]) ORDER BY r.reserved_at,r.call_key`, [[...expected.keys()]])).rows;
+      const firstKey = marketauxCallIdentity(identity.manifestHash, identity.instrumentId, source, { sourceUrl: source.urls[0], ...window, pass: 1, page: 1 }).callKey;
+      if (calls.length && calls[0].call_key !== firstKey) continue;
+      const acquisitionStart = calls.length ? researchTime(iso(calls[0].reserved_at)) : recordedAt;
+      if (acquisitionStart < slot * interval || recordedAt - acquisitionStart > 120_000) continue;
+      let invalid = false, previousPass = 1, previousPage = 0, previousOutcome = acquisitionStart;
+      for (const call of calls) {
+        const descriptor = expected.get(String(call.call_key))!;
+        const reservedAt = researchTime(iso(call.reserved_at)), deadlineAt = researchTime(iso(call.deadline_at));
+        const outcomeAt = call.recorded_at ? researchTime(iso(call.recorded_at)) : NaN;
+        const callDay = String(call.budget_day);
+        if (call.account_id !== identity.accountId || call.provider !== source.provider || call.kind !== "source" || call.config_hash !== identity.configHash || call.manifest_hash !== identity.manifestHash
+          || call.request_hash !== descriptor.requestHash || callDay !== failedDay || new Date(reservedAt).toISOString().slice(0, 10) !== failedDay
+          || Number(call.reserved_cost_micros) < nextCallCostMicros || reservedAt < previousOutcome || reservedAt >= deadlineAt || deadlineAt > reservedAt + 10_000 || deadlineAt > acquisitionStart + 120_000
+          || call.outcome !== "SUCCEEDED" || !Number.isFinite(outcomeAt) || outcomeAt < reservedAt || outcomeAt >= deadlineAt || outcomeAt > recordedAt
+          || descriptor.pass < previousPass || descriptor.page !== (descriptor.pass === previousPass ? previousPage + 1 : 1)) { invalid = true; break; }
+        previousPass = descriptor.pass; previousPage = descriptor.page; previousOutcome = outcomeAt;
+      }
+      if (invalid) continue;
+      const historical = (await db.query(`SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost
+        FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=$3 AND reserved_at<=$4`, [identity.accountId, source.provider, failedDay, new Date(recordedAt)])).rows[0];
+      if (Number(historical.requests) < maxRequestsPerDay && Number(historical.cost) + nextCallCostMicros <= maxCostMicrosPerDay) continue;
+      diagnostic.failedBudgetDay = failedDay; diagnostic.failureRecordedAt = original.createdAt; diagnostic.recoveryProof = "VERIFIED";
+      if (failedDay >= day || requestsUsed >= maxRequestsPerDay || costUsedMicros + nextCallCostMicros > maxCostMicrosPerDay) continue;
+      assessments.push({ snapshotId: stored.id, sourceId: source.id, coverageHash: researchHash(coverage), slot, failedBudgetDay: failedDay,
+        failureRecordedAt: original.createdAt, nextCheckAt: new Date(Math.max(now, (slot + 1) * interval)).toISOString() });
+    }
+    return { assessments, diagnostics };
   }
   private async legacyMarketauxRecoveries(identity: ResearchRepairIdentity, manifest: ResearchManifest, stored: StoredResearchSnapshot | null, now: number, db: ResearchDb): Promise<MarketauxLegacyRecoveryAssessment[]> {
     const policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId), result:MarketauxLegacyRecoveryAssessment[]=[];

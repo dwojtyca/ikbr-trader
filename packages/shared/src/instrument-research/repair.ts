@@ -12,6 +12,7 @@ export interface ResearchRepairSource {
   providerError?: ResearchProviderError;
   sourceError?: ResearchSourceError;
   failureReason?: string;
+  localBudget?: ResearchLocalBudgetDiagnostic;
 }
 export interface ResearchPreparation {
   state: ResearchPreparationState; reasons: string[]; snapshotId: string | null;
@@ -25,6 +26,21 @@ export const researchRefreshSlot = (source: ResearchSource, role: ResearchRole, 
 export const researchRefreshSlotKey = (manifestHash: string, instrumentId: string, sourceId: string, role: ResearchRole, slot: number): string =>
   "research_slot_" + researchHash({ manifestHash, instrumentId, sourceId, role, slot });
 
+export interface ResearchLocalBudgetDiagnostic {
+  kind: "LOCAL_RESEARCH_BUDGET";
+  failedBudgetDay: string | null; failureRecordedAt: string | null;
+  currentBudgetDay: string; requestsUsed: number; maxRequestsPerDay: number;
+  costUsedMicros: number; maxCostMicrosPerDay: number; nextCallCostMicros: number;
+  nextBudgetResetAt: string; recoveryProof: "VERIFIED" | "UNAVAILABLE";
+}
+export interface MarketauxBudgetRecoveryAssessment {
+  snapshotId: string; sourceId: string; coverageHash: string; slot: number;
+  failedBudgetDay: string; failureRecordedAt: string; nextCheckAt: string;
+}
+export function marketauxLocalBudgetFailure(coverage: ResearchSourceResult): boolean {
+  return coverage.status === "ERROR" && !coverage.complete && coverage.evidenceRefs.length === 0
+    && coverage.reason === "RESEARCH_BUDGET_EXHAUSTED" && coverage.sourceError?.httpStatus === undefined;
+}
 export interface MarketauxLegacyRecoveryAssessment { snapshotId: string; sourceId: string; coverageHash: string; slot: number; nextCheckAt: string }
 export function marketauxTransientFailure(coverage: ResearchSourceResult): boolean {
   if (coverage.status !== "ERROR" || coverage.complete || coverage.evidenceRefs.length) return false;
@@ -34,7 +50,7 @@ export function marketauxTransientFailure(coverage: ResearchSourceResult): boole
 }
 
 /** Classification grants no entry permission and never changes source evidence. */
-export function inspectResearch(manifest: ResearchManifest, instrumentId: string, stored: StoredResearchSnapshot | null, nowMs: number, legacyRecoveries: readonly MarketauxLegacyRecoveryAssessment[] = []): ResearchPreparation {
+export function inspectResearch(manifest: ResearchManifest, instrumentId: string, stored: StoredResearchSnapshot | null, nowMs: number, legacyRecoveries: readonly MarketauxLegacyRecoveryAssessment[] = [], budgetRecoveries: readonly MarketauxBudgetRecoveryAssessment[] = []): ResearchPreparation {
   const policy = manifest.instruments.find(p => p.instrumentId === instrumentId);
   const sources: ResearchRepairSource[] = [], reasons = new Set<string>();
   const hold = (reason: string) => { reasons.add(reason); };
@@ -58,6 +74,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
       if (source.adapter === "ibkr-wsh" && role === "calendar" && coverage?.status === "ERROR" && coverage.providerError)
         row.providerError = { ...coverage.providerError };
       if (coverage?.status === "ERROR" && coverage.sourceError) { row.sourceError = { ...coverage.sourceError }; row.failureReason = coverage.reason; }
+      if (source.adapter === "marketaux-news" && coverage && marketauxLocalBudgetFailure(coverage)) row.failureReason = coverage.reason;
       if (source.adapter === "marketaux-news") {
         try { marketauxQualificationDeadline(parseMarketauxNewsConfig(source, policy), nowMs); }
         catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }
@@ -70,8 +87,15 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
       if (coverage && (Date.parse(coverage.checkedAt) > nowMs || Date.parse(coverage.checkedAt) > Date.parse(stored!.snapshot.createdAt) || Date.parse(coverage.windowEnd) > Date.parse(coverage.checkedAt))) deny("RESEARCH_SOURCE_FUTURE");
       const legacy = coverage && legacyRecoveries.find(item => item.snapshotId === stored?.id && item.sourceId === source.id
         && item.coverageHash === researchHash(coverage) && item.slot === researchRefreshSlot(source,role,Date.parse(coverage.checkedAt)+1000));
+      const budget = coverage && marketauxLocalBudgetFailure(coverage) && budgetRecoveries.find(item => item.snapshotId === stored?.id && item.sourceId === source.id
+        && item.coverageHash === researchHash(coverage) && item.slot === researchRefreshSlot(source, role, Date.parse(coverage.checkedAt) + 1000)
+        && item.failedBudgetDay === new Date(item.slot * researchRefreshInterval(source, role)).toISOString().slice(0, 10)
+        && item.failedBudgetDay < new Date(nowMs).toISOString().slice(0, 10)
+        && Date.parse(item.failureRecordedAt) >= item.slot * researchRefreshInterval(source, role)
+        && Date.parse(item.failureRecordedAt) < (item.slot + 1) * researchRefreshInterval(source, role)
+        && Number.isFinite(Date.parse(item.nextCheckAt)) && Date.parse(item.nextCheckAt) >= (item.slot + 1) * researchRefreshInterval(source, role));
       const recoverable = source.adapter === "marketaux-news" && role === "news" && coverage?.status === "ERROR"
-        && (marketauxTransientFailure(coverage) || legacy !== undefined);
+        && (marketauxTransientFailure(coverage) || legacy !== undefined || Boolean(budget));
       if (coverage && (!coverage.complete || !["AVAILABLE", ...(role === "reports" ? [] : ["EMPTY"])].includes(coverage.status)) && !recoverable) {
         deny(`RESEARCH_${role.toUpperCase()}_${coverage.status}`);
         if (/^RESEARCH_[A-Z0-9_]{1,100}$/.test(coverage.reason)) deny(coverage.reason);
@@ -82,9 +106,9 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         else if (source.maxRequestsPerDay <= 0 || source.costMicrosPerCall > source.maxCostMicrosPerDay) deny("RESEARCH_BUDGET_EXHAUSTED");
         else {
           row.state = "WAITING";
-          row.reasons.push(recoverable ? legacy ? "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION" : "RESEARCH_SOURCE_TRANSIENT_FAILURE" : coverage ? "RESEARCH_SOURCE_STALE" : "RESEARCH_SOURCE_MISSING");
+          row.reasons.push(recoverable ? budget ? "RESEARCH_MARKETAUX_BUDGET_RENEWED" : legacy ? "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION" : "RESEARCH_SOURCE_TRANSIENT_FAILURE" : coverage ? "RESEARCH_SOURCE_STALE" : "RESEARCH_SOURCE_MISSING");
           if (recoverable) { row.failureReason = coverage!.reason; row.reasons.push(coverage!.reason); }
-          row.nextCheckAt = new Date(recoverable ? Math.max(nowMs, legacy ? Date.parse(legacy.nextCheckAt) : (researchRefreshSlot(source,role,Date.parse(coverage!.checkedAt)+1000)+1)*researchRefreshInterval(source,role)) : nowMs).toISOString();
+          row.nextCheckAt = new Date(recoverable ? Math.max(nowMs, budget ? Date.parse(budget.nextCheckAt) : legacy ? Date.parse(legacy.nextCheckAt) : (researchRefreshSlot(source,role,Date.parse(coverage!.checkedAt)+1000)+1)*researchRefreshInterval(source,role)) : nowMs).toISOString();
         }
       }
       sources.push(row);
@@ -94,7 +118,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
     const eligibility = evaluateResearchEligibility(stored.snapshot, manifest, nowMs);
     const missingReports = sources.some(s => s.role === "reports" && s.state === "WAITING" && !stored.snapshot.coverage.some(c => c.sourceId === s.sourceId && c.role === s.role));
     for (const reason of eligibility.reasons) {
-      if (reason === "RESEARCH_NEWS_ERROR" && sources.filter(s=>s.role==="news" && stored.snapshot.coverage.some(c=>c.sourceId===s.sourceId&&c.role==='news'&&c.status==='ERROR')).every(s=>s.state==='WAITING'&&s.reasons.some(r=>['RESEARCH_SOURCE_TRANSIENT_FAILURE','RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION'].includes(r)))) continue;
+      if (reason === "RESEARCH_NEWS_ERROR" && sources.filter(s=>s.role==="news" && stored.snapshot.coverage.some(c=>c.sourceId===s.sourceId&&c.role==='news'&&c.status==='ERROR')).every(s=>s.state==='WAITING'&&s.reasons.some(r=>['RESEARCH_SOURCE_TRANSIENT_FAILURE','RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION','RESEARCH_MARKETAUX_BUDGET_RENEWED'].includes(r)))) continue;
       if (reason === "RESEARCH_SOURCE_STALE_OR_FUTURE" && !reasons.has("RESEARCH_SOURCE_FUTURE")) continue;
       if (/^RESEARCH_(REPORTS|NEWS|CALENDAR)_MISSING$/.test(reason) && sources.some(s => s.state === "WAITING" && `RESEARCH_${s.role.toUpperCase()}_MISSING` === reason)) continue;
       // Only absent financial content is repairable; conflicting existing values remain a hold.

@@ -8,10 +8,10 @@ import { marketauxFixture, marketauxResponse } from "./research-marketaux.testfi
 import type { ResearchFetchResult } from "./research-fetch.js";
 import { createMarketauxFetch, type MarketauxFetch } from "./research-marketaux-fetch.js";
 
-function setup() {
-  const f = marketauxFixture(); f.manifest.instruments = [f.policy]; f.manifestHash = researchHash(f.manifest);
+function setup(now?: number) {
+  const f = marketauxFixture(now); f.manifest.instruments = [f.policy]; f.manifestHash = researchHash(f.manifest);
   f.snapshot.manifestHash = f.manifestHash;
-  const state = { now: f.now, requests: [] as MarketauxRequest[], reservations: [] as ResearchCallReservation[], outcomes: [] as string[], snapshots: [] as InstrumentResearchSnapshotV1[], slots: new Set<string>(),
+  const state = { now: f.now, requests: [] as MarketauxRequest[], reservations: [] as ResearchCallReservation[], reservationDays: new Map<string, string>(), outcomes: [] as string[], snapshots: [] as InstrumentResearchSnapshotV1[], slots: new Set<string>(),
     prior: { id: "prior", hash: researchHash(f.snapshot), sequence: 1, snapshot: f.snapshot } as StoredResearchSnapshot,
     onReserve: (_reservation: ResearchCallReservation) => {},
     onStore: (_snapshot: InstrumentResearchSnapshotV1, _deadline: string | undefined) => {},
@@ -34,9 +34,12 @@ function setup() {
     hasRefreshSlot: async (slotKey: string) => state.slots.has(slotKey) || ["reports", "calendar"].some(role => slotKey === "research_slot_" + researchHash({ manifestHash: f.manifestHash, instrumentId: f.policy.instrumentId, sourceId: "official", role, slot: researchSourceSlot(state.now, role as "reports" | "calendar") })),
     reserveCall: async (r: ResearchCallReservation) => {
       if (state.reservations.some(prior => prior.callKey === r.callKey)) throw new Error("RESEARCH_CALL_ALREADY_RESERVED");
-      if (state.reservations.length >= r.maxRequestsPerDay || state.reservations.reduce((sum, row) => sum + row.reservedCostMicros, 0) + r.reservedCostMicros > r.maxCostMicrosPerDay) throw new Error("RESEARCH_BUDGET_EXHAUSTED");
+      const budgetDay = new Date(state.now).toISOString().slice(0, 10);
+      const used = state.reservations.filter(prior => prior.accountId === r.accountId && prior.provider === r.provider && state.reservationDays.get(prior.callKey) === budgetDay);
+      if (used.length >= r.maxRequestsPerDay || used.reduce((sum, row) => sum + row.reservedCostMicros, 0) + r.reservedCostMicros > r.maxCostMicrosPerDay) throw new Error("RESEARCH_BUDGET_EXHAUSTED");
       state.reservations.push(r); state.onReserve(r);
-      return { callKey: r.callKey, reservedAt: new Date(state.now).toISOString(), budgetDay: new Date(state.now).toISOString().slice(0, 10) };
+      state.reservationDays.set(r.callKey, budgetDay);
+      return { callKey: r.callKey, reservedAt: new Date(state.now).toISOString(), budgetDay };
     },
     recordCallOutcome: async (callKey: string, outcome: string) => { state.outcomes.push(callKey + ":" + outcome); },
     storeSnapshot: async (snapshot: ResearchSnapshot, slotKey?: string, deadline?: string) => {
@@ -90,7 +93,8 @@ test("on-demand queued repair completes both passes, becomes READY and does not 
   assert.equal((await repairs.enqueue()).state, "WAITING");
   await s.make(undefined, undefined, true).tickRepairs();
   assert.equal(s.coverage().complete, true); assert.equal(s.state.requests.length, 4);
-  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "READY");
+  const final = inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now);
+  assert.equal(final.state, "READY", JSON.stringify(final));
   const inspections = repairs.inspections;
   s.state.now += 1800001;
   assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "WAITING");
@@ -129,6 +133,47 @@ test("on-demand repair retains budget exhaustion and unknown outcome holds witho
     await s.make(undefined, undefined, true).tickRepairs();
     assert.equal(s.state.requests.length, calls);
   }
+});
+
+test("renewed local budget repairs in a fresh slot with two passes before news becomes READY", async () => {
+  const day = Date.parse("2026-10-13T17:45:10.000Z");
+  const s = setup(day);
+  s.f.source.maxRequestsPerDay = 4;
+  s.f.newsConfig.qualification.expiresAt = new Date(day + 2 * 86400000).toISOString();
+  s.f.newsConfig.entitlement.expiresAt = new Date(day + 2 * 86400000).toISOString();
+  s.rehash();
+  const earlier = { accountId: "DU_TEST", provider: s.f.source.provider, callKey: "other-instrument-earlier-call", reservedCostMicros: 1 } as ResearchCallReservation;
+  s.state.reservations.push(earlier);
+  s.state.reservationDays.set(earlier.callKey, new Date(day).toISOString().slice(0, 10));
+  await s.make().tick();
+  assert.equal(s.coverage().reason, "RESEARCH_BUDGET_EXHAUSTED");
+  assert.equal(s.state.requests.length, 3);
+  const original = structuredClone(s.state.snapshots[0]);
+  const originalKeys = s.state.reservations.map(row => row.callKey);
+  const renewedDay = day + 86400000;
+  Object.assign(s.store, {
+    dueRepairs: async () => [{ instrumentId: s.f.policy.instrumentId, sourceId: s.f.source.id, role: "news" }],
+    prepareRepair: async () => s.state.now < renewedDay ? { state: "HOLD", reasons: ["RESEARCH_NEWS_ERROR"], sources: [] }
+      : s.state.snapshots.length === 1 ? { state: "WAITING", reasons: ["RESEARCH_MARKETAUX_BUDGET_RENEWED"], sources: [{
+        sourceId: s.f.source.id, role: "news", state: "WAITING", reasons: ["RESEARCH_MARKETAUX_BUDGET_RENEWED"], nextCheckAt: new Date(s.state.now).toISOString(),
+      }] } : inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now),
+  });
+  await s.make(undefined, undefined, true).tickRepairs();
+  assert.equal(s.state.requests.length, 3);
+  s.state.now = renewedDay;
+  s.state.response = request => marketauxResponse([1, 2, 3].map(n => s.f.article(n, new Date(Date.parse(request.asOf) - 60000).toISOString()))
+    .slice((request.page - 1) * 2, request.page * 2), request.page, 3);
+  await s.make(undefined, undefined, true).tickRepairs();
+  assert.equal(s.state.requests.length, 7);
+  assert.deepEqual(s.state.snapshots[0], original);
+  assert.deepEqual(s.state.reservations.slice(0, originalKeys.length).map(row => row.callKey), originalKeys);
+  assert.equal(new Set(s.state.reservations.map(row => row.callKey)).size, s.state.reservations.length);
+  assert.deepEqual(s.state.reservations.slice(originalKeys.length).map(row => s.state.reservationDays.get(row.callKey)), Array(4).fill("2026-10-14"));
+  assert.equal(s.coverage().complete, true);
+  const final = inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now);
+  assert.equal(final.sources.find(row => row.sourceId === s.f.source.id)?.state, "READY");
+  assert.equal(final.state, "HOLD");
+  assert.ok(final.reasons.includes("RESEARCH_SOURCE_MAPPING_UNSUPPORTED"));
 });
 
 test("production refresh publishes complete multi-page acquisition, preserves reports, and never repeats completed slot", async () => {

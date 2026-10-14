@@ -19,6 +19,27 @@ export type RuntimeOptions = { root: string; token: string; envFile?: string; re
 export class PaperRuntimeError extends Error { constructor(readonly code: string) { super(code); } }
 export class PaperHttpError extends PaperRuntimeError { constructor(code: string, readonly status: number) { super(code); } }
 const obj = (v: unknown): Record<string, unknown> | null => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : null;
+function formatLocalResearchBudget(value: unknown): string | null {
+  const row = obj(value);
+  if (!row || Object.keys(row).some(key => !['kind', 'failedBudgetDay', 'failureRecordedAt', 'currentBudgetDay', 'requestsUsed', 'maxRequestsPerDay', 'costUsedMicros', 'maxCostMicrosPerDay', 'nextCallCostMicros', 'nextBudgetResetAt', 'recoveryProof'].includes(key)) ||
+      row.kind !== 'LOCAL_RESEARCH_BUDGET' || (row.recoveryProof !== 'VERIFIED' && row.recoveryProof !== 'UNAVAILABLE')) return null;
+  const day = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(`${v}T00:00:00.000Z`)) && new Date(`${v}T00:00:00.000Z`).toISOString().slice(0, 10) === v;
+  const instant = (v: unknown): v is string => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString() === v;
+  const count = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
+  if ((row.failedBudgetDay !== null && !day(row.failedBudgetDay)) || (row.failureRecordedAt !== null && !instant(row.failureRecordedAt)) ||
+      !day(row.currentBudgetDay) || !instant(row.nextBudgetResetAt) ||
+      !['requestsUsed', 'maxRequestsPerDay', 'costUsedMicros', 'maxCostMicrosPerDay', 'nextCallCostMicros'].every(key => count(row[key])) ||
+      (row.recoveryProof === 'VERIFIED' && (row.failedBudgetDay === null || row.failureRecordedAt === null)) ||
+      (typeof row.failureRecordedAt === 'string' && (row.failedBudgetDay === null || row.failureRecordedAt.slice(0, 10) !== row.failedBudgetDay)) ||
+      (typeof row.failedBudgetDay === 'string' && row.failedBudgetDay > row.currentBudgetDay)) return null;
+  const reset = new Date(Date.parse(`${row.currentBudgetDay}T00:00:00.000Z`) + 86400000).toISOString();
+  if (row.nextBudgetResetAt !== reset) return null;
+  const renewed = typeof row.failedBudgetDay === 'string' && row.currentBudgetDay > row.failedBudgetDay;
+  const capacity = Number(row.requestsUsed) < Number(row.maxRequestsPerDay) && Number(row.costUsedMicros) + Number(row.nextCallCostMicros) <= Number(row.maxCostMicrosPerDay);
+  const state = renewed && capacity ? 'Limit na nowy dzień odnowiony; wymagane jest pełne ponowne pobranie danych.'
+    : capacity ? 'Limit dostępny obecnie; pierwotna przyczyna wymaga potwierdzenia.' : 'Bieżący dzienny limit jest wyczerpany.';
+  return `Lokalny dzienny limit badań bota (nie odpowiedź dostawcy): ${state} Dzień UTC: ${row.currentBudgetDay}; użycie zapytań: ${row.requestsUsed}/${row.maxRequestsPerDay}; koszt: ${row.costUsedMicros}/${row.maxCostMicrosPerDay} µ; koszt następnego zapytania: ${row.nextCallCostMicros} µ; następne odnowienie UTC: ${row.nextBudgetResetAt}; dzień poprzedniego wyczerpania: ${row.failedBudgetDay ?? 'niedostępny'}; zapis błędu: ${row.failureRecordedAt ?? 'niedostępny'}; potwierdzenie pochodzenia: ${row.recoveryProof === 'VERIFIED' ? 'dostępne' : 'niedostępne'}.`;
+}
 const sha = (b: Uint8Array | string) => createHash('sha256').update(b).digest('hex');
 export function canonicalJson(value: unknown): string {
   const sort = (v: unknown): unknown => Array.isArray(v) ? v.map(sort) : obj(v) ? Object.fromEntries(Object.keys(v as object).sort().map(k => [k, sort((v as Record<string, unknown>)[k])])) : v;
@@ -454,7 +475,8 @@ export class PaperRuntime {
           if (!calendar && !sourceFailure) continue;
           const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'źródło';
           const ownReason = typeof row.failureReason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(row.failureReason) ? `${row.failureReason}; ` : '';
-          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}`);
+          const localBudget = row.role === 'news' && row.failureReason === 'RESEARCH_BUDGET_EXHAUSTED' ? formatLocalResearchBudget(row.localBudget) : null;
+          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}`);
           if (row.state === 'WAITING' && typeof row.nextCheckAt === 'string' && Number.isFinite(Date.parse(row.nextCheckAt)))
             details.push(`  Dane nadal niedostępne. Najwcześniejsze kolejne sprawdzenie: ${new Date(row.nextCheckAt).toISOString()}.`);
         }

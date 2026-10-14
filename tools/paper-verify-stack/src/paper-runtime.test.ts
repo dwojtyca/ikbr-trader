@@ -593,6 +593,80 @@ test('news recovery prints original and next check once across repeated WAITING 
   } finally {await h.f.cleanup();}
 });
 
+test('local daily research limit explains UTC usage and waits for complete readiness before resume', async () => {
+  const h = await runScenario(), messages: string[] = [];
+  const original = h.adapters.http; let prepares = 0;
+  h.adapters.log = text => messages.push(text);
+  h.adapters.http = async (path, body, ...rest) => {
+    if (path !== '/execution/entry-control/start/prepare') return original(path, body, ...rest);
+    prepares++;
+    if (prepares === 3) {
+      assert.equal(h.resumeCalls, 0);
+      return original(path, body, ...rest);
+    }
+    return { revision: (body as { expectedRevision: number }).expectedRevision, instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({
+      instrumentId, state: 'WAITING', reasons: ['RESEARCH_MARKETAUX_BUDGET_RENEWED'], sources: [{
+        sourceId: 'marketaux_news', role: 'news', state: 'WAITING', reasons: ['RESEARCH_MARKETAUX_BUDGET_RENEWED'],
+        failureReason: 'RESEARCH_BUDGET_EXHAUSTED', nextCheckAt: '2026-10-14T00:15:00.000Z',
+        sourceError: { name: 'Error', code: null, message: 'Oryginalny opis błędu niedostępny w zapisanych danych.' },
+        localBudget: { kind: 'LOCAL_RESEARCH_BUDGET', failedBudgetDay: '2026-10-13', failureRecordedAt: '2026-10-13T17:45:33.967Z',
+          currentBudgetDay: '2026-10-14', requestsUsed: 0, maxRequestsPerDay: 90, costUsedMicros: 0, maxCostMicrosPerDay: 90,
+          nextCallCostMicros: 1, nextBudgetResetAt: '2026-10-15T00:00:00.000Z', recoveryProof: 'VERIFIED' },
+      }],
+    })) };
+  };
+  try {
+    await h.runtime.start();
+    assert.equal(prepares, 3); assert.equal(h.resumeCalls, 1);
+    const output = messages.join('\n');
+    assert.match(output, /Lokalny dzienny limit badań bota/);
+    assert.match(output, /Limit na nowy dzień odnowiony/);
+    assert.match(output, /zapis błędu: 2026-10-13T17:45:33.967Z/);
+    assert.match(output, /2026-10-14; użycie zapytań: 0\/90/);
+    assert.match(output, /następne odnowienie UTC: 2026-10-15T00:00:00.000Z/);
+    assert.doesNotMatch(output, /Marketaux odpowiedział/);
+  } finally { await h.f.cleanup(); }
+});
+
+test('exhausted local limit holds; malformed local diagnosis falls back without hiding original provider details', async () => {
+  const cases: Array<{ name: string; change?: (budget: Record<string, unknown>) => void }> = [
+    { name: 'valid' },
+    { name: 'invalid reset', change: budget => { budget.nextBudgetResetAt = 'invalid'; } },
+    { name: 'extra secret', change: budget => { budget.secretToken = 'private-diagnostic-secret'; } },
+    { name: 'string count secret', change: budget => { budget.requestsUsed = 'private-diagnostic-secret'; } },
+    { name: 'negative count', change: budget => { budget.requestsUsed = -1; } },
+    { name: 'unsafe count', change: budget => { budget.requestsUsed = Number.MAX_SAFE_INTEGER + 1; } },
+    { name: 'nonfinite count', change: budget => { budget.requestsUsed = Infinity; } },
+    { name: 'invalid calendar day', change: budget => { budget.currentBudgetDay = '2026-02-30'; } },
+    { name: 'invalid proof', change: budget => { budget.recoveryProof = 'private-diagnostic-secret'; } },
+  ];
+  for (const variant of cases) {
+    const h = await runScenario(), messages: string[] = [], original = h.adapters.http;
+    h.adapters.log = text => messages.push(text);
+    const localBudget: Record<string, unknown> = { kind: 'LOCAL_RESEARCH_BUDGET', failedBudgetDay: null, failureRecordedAt: null, currentBudgetDay: '2026-10-14',
+      requestsUsed: 90, maxRequestsPerDay: 90, costUsedMicros: 90, maxCostMicrosPerDay: 90, nextCallCostMicros: 1,
+      nextBudgetResetAt: '2026-10-15T00:00:00.000Z', recoveryProof: 'UNAVAILABLE' };
+    variant.change?.(localBudget);
+    h.adapters.http = async (path, body, ...rest) => path !== '/execution/entry-control/start/prepare' ? original(path, body, ...rest) : ({
+      revision: (body as { expectedRevision: number }).expectedRevision,
+      instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_NEWS_ERROR'], sources: [{
+        sourceId: 'marketaux_news', role: 'news', state: 'HOLD', reasons: ['RESEARCH_NEWS_ERROR'], failureReason: 'RESEARCH_BUDGET_EXHAUSTED',
+        sourceError: { name: 'Error', code: 'LOCAL_LIMIT', message: 'Original source fixture' },
+        localBudget,
+      }] })) });
+    try {
+      await assert.rejects(h.runtime.start(), /RESEARCH_NEWS_ERROR/);
+      assert.equal(h.resumeCalls, 0);
+      const output = messages.join('\n');
+      assert.match(output, /LOCAL_LIMIT/);
+      assert.match(output, /Original source/);
+      assert.equal(output.includes('Lokalny dzienny limit badań bota'), variant.name === 'valid', variant.name);
+      assert.doesNotMatch(output, /private-diagnostic-secret/, variant.name);
+      if (variant.name === 'valid') assert.match(output, /Bieżący dzienny limit jest wyczerpany/);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
 test('hard and legacy news failures show original details or truthful unavailability without resuming', async () => {
   for(const sourceError of [{name:'Error',code:401,message:'Unauthorized',httpStatus:401,providerCode:'invalid_api_token',providerMessage:'Invalid fixture'},undefined]) {
     const h=await runScenario(), messages:string[]=[];const original=h.adapters.http;h.adapters.log=text=>messages.push(text);

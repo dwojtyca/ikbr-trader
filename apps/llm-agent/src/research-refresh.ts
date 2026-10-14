@@ -129,7 +129,7 @@ export class ResearchRefreshScheduler {
             const policy = manifest.instruments.find(p => p.instrumentId === instrumentId)!;
             for (const requested of inspected.sources) {
               if (requested.nextCheckAt && Date.parse(requested.nextCheckAt) > (this.options.now ?? Date.now)()) continue;
-              if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE", "RESEARCH_SOURCE_TRANSIENT_FAILURE", "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION"].includes(reason))) continue;
+              if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE", "RESEARCH_SOURCE_TRANSIENT_FAILURE", "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION", "RESEARCH_MARKETAUX_BUDGET_RENEWED"].includes(reason))) continue;
               const source = policy.sources.find(s => s.id === requested.sourceId)!;
               await this.refreshSlot(policy, source, requested.role);
             }
