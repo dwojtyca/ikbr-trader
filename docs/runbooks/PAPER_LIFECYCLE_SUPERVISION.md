@@ -113,6 +113,39 @@ request deadline. An ambiguous notification can duplicate; broker writes cannot.
 Failed/unknown/exhausted critical delivery blocks unattended admission while
 supported close/reconciliation continues. No real recipients are used by tests.
 
+The account-wide `BROKER_STATE_STALE` watchdog still blocks entries after 10s
+without a successful observation. Its notification alone may wait 5s from the
+episode's first observation when a current, complete broker capture proves the
+account flat, with no working orders, uncertain local operations or other faults.
+This proof is bound to the current process, connection and position generation;
+its oldest acquisition time must be less than 10s old. Missing or expired proof
+makes the notification immediately due. Recurrence or restart cannot extend the
+original deadline. Proposal-scoped faults and protection/unknown-outcome alarms
+do not receive this delay.
+
+Recovery within those 5s can finish an entirely unattempted notification as
+`COALESCED`. This records a recovered transient, not Telegram delivery or human
+acknowledgement. Fault episodes and their timestamps remain in supervision history.
+Recovery after the deadline, any delivery attempt, or uncertain proof leaves the
+existing delivery path intact. Repeated qualified transients remain individually
+auditable; there is no periodic Telegram summary. An active fault still blocks
+admission even when its notification has not become due.
+
+The notification decision checks live connection identity and proof expiry just
+before committing its transaction. Known drift after a confirmed commit generates
+an immediate fault; it does not rewrite coalesced history. Broker connectivity and
+database commit cannot be atomic. A process crash or uncertain commit acknowledgement
+can prevent this direct follow-up, so existing startup, observer, freshness and
+transport checks continue to deny unsafe admission during recovery. Do not retry an
+uncertain transaction blindly or treat notification coalescing as trading permission.
+
+Structured broker-phase diagnostics distinguish session and ordinary snapshot
+reads, accounting readiness, clock wait, replay and persistence. Original error
+name/code/message are sanitized before logging; unavailable provider details are
+not invented. A successful ordinary reconciliation does not establish accounting
+readiness. Periodic captures may skip a complete, still-current capture whose
+attempt started within 5s; explicit and fresh-request captures retain their behavior.
+
 During a database outage durable persistence cannot be promised: process-local
 critical status/logging and entry denial apply until audit storage recovers. A
 restart rebuilds work from DB plus IBKR, never from cached healthy status.
@@ -121,6 +154,11 @@ restart rebuilds work from DB plus IBKR, never from cached healthy status.
 
 Keep ownership, attempts, original policy, close markers and fault/delivery history.
 Do not deploy an old writer that ignores the durable pause or new lifecycle state.
+Migration 32 adds notification checkpoint/policy fields and `COALESCED`. Preserve
+these rows and delivery attempts. Rolling back the image to code that does not
+understand this disposition is not a supported recovery: keep entries paused and
+deploy a compatible reviewed fix. Do not relabel coalesced rows as delivered or
+restore an old database over newer broker activity to make rollback succeed.
 Keep master disabled until a compatible reviewed version can manage existing
 ownership. PP5 does not enable the PP7 repeated-entry policy, perform a Paper soak,
 prove provider/broker readiness, or change Live authorization.

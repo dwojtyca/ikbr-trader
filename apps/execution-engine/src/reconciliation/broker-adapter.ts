@@ -95,6 +95,7 @@ export interface BrokerExecutionRow {
 }
 
 export interface BrokerReconciliationSnapshot {
+  readonly originalAcquisitionStartedAt?: string;
   readonly accounting?: AccountingCaptureReference;
   readonly exposureComplete: boolean;
   readonly recoveryComplete: boolean;

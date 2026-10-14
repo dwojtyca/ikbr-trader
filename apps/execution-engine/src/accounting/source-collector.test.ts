@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { AccountingSourceCollector, normalizeAccountingCommission, normalizeAccountingExecution, type AccountingSocket } from "./source-collector.js";
 import type { SourceSettingsV1 } from "./types.js";
+import type { BrokerPhaseEvent } from '../reconciliation/phase-diagnostics.js';
 
 const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: "ibkr-tws-seven-day-v1", environment: "paper", accountId: "TEST-ONLY",
   endpoint: { host: "unused", port: 1 }, sourceClientId: 0, executionTimeZone: "Europe/Warsaw" };
@@ -14,6 +15,32 @@ test("canonical timestamps require explicit zone and retain pending price revisi
   for (const time of ["20261025 02:30:00", "20260329 02:30:00", "invalid"]) assert.throws(() => normalizeAccountingExecution(contract, { ...exec, time }, settings), /TIMESTAMP_INVALID/);
   assert.throws(() => normalizeAccountingExecution(contract, { ...exec, acctNumber: "FOREIGN" }, settings), /IDENTITY_INVALID/);
   assert.equal(normalizeAccountingCommission({ execId: "a", currency: "PLN", commission: 1, realizedPNL: Number.MAX_VALUE }).realizedPnL, null);
+});
+test('phase diagnostics distinguish readiness, unsent clock, missing response and replay end without raw frames', async () => {
+  for (const failure of ['ready', 'clock_unsent', 'clock_sent', 'end'] as const) {
+    const events: BrokerPhaseEvent[] = [], socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 178,
+      connect: () => { if (failure !== 'ready') { socket.emit('server', 178, 'private'); socket.emit('nextValidId', 1); } },
+      disconnect: () => {}, reqManagedAccts: () => socket.emit('managedAccounts', settings.accountId),
+      reqCurrentTime: () => {
+        socket.emit('sent', [7, 'private-broker-payload']); socket.emit('received', ['49', '1', 'private', 'extra']);
+        if (failure !== 'clock_unsent') socket.emit('sent', [49, 1]);
+        if (failure === 'end') {
+          socket.emit('received', ['49', '1', String(Math.floor(Date.now() / 1000))]);
+          socket.emit('currentTime', Math.floor(Date.now() / 1000));
+        }
+      }, reqExecutions: () => {},
+    });
+    const collector = new AccountingSourceCollector(settings, { observe: () => {}, gap: () => {} }, () => socket, { emit: event => events.push(event) });
+    await assert.rejects(collector.replay(20, new AbortController().signal), /REPLAY_INCOMPLETE/);
+    const expected = failure === 'ready' ? 'accounting.ready' : failure === 'end' ? 'accounting.replay_end_wait' : 'accounting.clock_wait';
+    assert.ok(events.some(event => event.phase === expected && event.outcome === 'error'));
+    if (failure === 'clock_unsent') assert.ok(events.some(event => event.reason === 'clock_send_unobserved'));
+    if (failure === 'clock_sent') assert.ok(events.some(event => event.reason === 'clock_response_unavailable'));
+    assert.doesNotMatch(JSON.stringify(events), /private|TEST-ONLY|brokerTime|reportedSeconds/);
+    const count = events.length; socket.emit('sent', [49, 1]); socket.emit('received', ['49', '1', '123']);
+    assert.equal(events.length, count);
+  }
 });
 test("collector uses client-zero all-account unfiltered replay with preceding broker clock and exact end", async () => {
   class Socket extends EventEmitter implements AccountingSocket {

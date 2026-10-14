@@ -59,7 +59,7 @@ export class LifecycleObserver {
     const task = (async () => {
       try {
         await this.store.health(c.accountId, c.sessionId, false, 'lifecycle_observation_overdue');
-        await this.deps.faults.recordFault({ accountId: c.accountId, proposalId: null, code: 'BROKER_STATE_STALE', evidence: { reason: 'lifecycle_observation_overdue' } });
+        await this.deps.faults.recordFault({ accountId: c.accountId, proposalId: null, code: 'BROKER_STATE_STALE', notification: 'FLAT_WATCHDOG_V1', evidence: { reason: 'lifecycle_observation_overdue' } });
         const overdue = await this.store.overdueProtection(c.accountId);
         if (this.closing && this.now()-this.closing.startedAt >= 15000) overdue.push(this.closing.proposalId);
         for (const id of new Set(overdue)) await this.deps.faults.recordFault({ accountId: c.accountId, proposalId: id, code: 'PROTECTION_GAP', evidence: { reason: 'closing_transition_overdue' } });

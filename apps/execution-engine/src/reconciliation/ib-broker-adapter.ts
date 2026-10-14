@@ -1,3 +1,4 @@
+import { emitBrokerPhase, type BrokerPhaseDiagnostics } from "./phase-diagnostics.js";
 import type { CompletedOrdersClient } from "./completed-orders-client.js";
 import type { TwsExecutionClient } from "../tws-execution-client.js";
 import { paperAccountDayStart } from "../paper-daily-loss.js";
@@ -15,25 +16,49 @@ export class IbBrokerReconciliationAdapter
   implements BrokerReconciliationAdapter
 {
   constructor(private readonly tws: TwsExecutionClient, private readonly completed: Pick<CompletedOrdersClient, "load">,
-    private readonly accounting?: AccountingJoin) {}
+    private readonly accounting?: AccountingJoin,
+    private readonly hooks?: { diagnostics?: BrokerPhaseDiagnostics; checkpoint?: (snapshot: BrokerReconciliationSnapshot,
+      request: BrokerReconciliationCaptureRequest, startedAt: Date, sources: Record<string,string>)=>Promise<void> }) {}
 
   async capture(
     req: BrokerReconciliationCaptureRequest,
   ): Promise<BrokerReconciliationSnapshot> {
+    const totalStarted=performance.now();
+    let totalFailed=false;
+    try {
     if (req.abortSignal.aborted) throw new Error("aborted");
 
     const capturedAtStart = new Date();
     const generation = this.tws.getConnectionGeneration();
+    const sourceCompletedAt:Record<string,string>={};
+    const phase=async<T>(name:string,job:()=>Promise<T>):Promise<T>=>{
+      const started=performance.now();
+      try {
+        const value=await job();
+        const result=value as {ok?:boolean;available?:boolean;error?:unknown;reason?:unknown}|null;
+        const failed=result?.ok===false||result?.available===false;
+        totalFailed ||= failed;
+        const reason=typeof result?.error==='string'?result.error:typeof result?.reason==='string'?result.reason:undefined;
+        emitBrokerPhase(this.hooks?.diagnostics,`capture.${name}`,failed?'error':'ok',
+          {runId:req.reconciliationRunId,generation,reason},performance.now()-started);
+        sourceCompletedAt[name]=new Date().toISOString(); return value;
+      } catch(error) {
+        totalFailed=true;
+        emitBrokerPhase(this.hooks?.diagnostics,`capture.${name}`,'error',{runId:req.reconciliationRunId,generation},performance.now()-started,error);
+        throw error;
+      }
+    };
 
     // Session probe first — used to short-circuit further requests
     // when the socket is not connected. `getManagedAccounts` is
     // bounded by the ib client's own timeout, so we wrap it in the
     // same source timeout for consistency.
-    let sessionCov = await captureSession(this.tws, {
+    let sessionCov = await phase('sessionBefore',()=>captureSession(this.tws, {
       accountId: req.accountId,
       timeoutMs: req.sourceTimeoutMs,
       abortSignal: req.abortSignal,
-    });
+      onError:error=>emitBrokerPhase(this.hooks?.diagnostics,'capture.sessionBefore.cause','error',{runId:req.reconciliationRunId,generation},undefined,error),
+    }));
 
     // Executions window: exposureStart = sessionStart - safetyMargin;
     // recoveryStart also includes Warsaw midnight and any older ambiguous attempt.
@@ -55,26 +80,27 @@ export class IbBrokerReconciliationAdapter
     // own timeout + abort handling so a single slow source cannot
     // stall the run past its overall RUN_TIMEOUT.
     const [posResult, openResult, execResult, completedResult] = await Promise.all([
-      this.tws.reqPositionsSnapshot({
+      phase('positions',()=>this.tws.reqPositionsSnapshot({
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
-      }),
-      this.tws.reqAllOpenOrdersSnapshot({
+      })),
+      phase('openOrders',()=>this.tws.reqAllOpenOrdersSnapshot({
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
-      }),
-      this.tws.reqExecutionsSnapshot({
+      })),
+      phase('executions',()=>this.tws.reqExecutionsSnapshot({
         accountId: req.accountId,
         since: recoveryStart,
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
-      }).then(result => ({ ...result, completedAt: new Date() })),
-      this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal }),
+      })).then(result => ({ ...result, completedAt: new Date() })),
+      phase('completedOrders',()=>this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal })),
     ]);
 
-    const finalSession = await captureSession(this.tws, {
+    const finalSession = await phase('sessionAfter',()=>captureSession(this.tws, {
       accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal,
-    });
+      onError:error=>emitBrokerPhase(this.hooks?.diagnostics,'capture.sessionAfter.cause','error',{runId:req.reconciliationRunId,generation},undefined,error),
+    }));
     if (!finalSession.available || !this.tws.isConnected() || generation !== this.tws.getConnectionGeneration()) {
       sessionCov = { available: false, boundedWindow: false, timedOut: finalSession.timedOut, count: 0,
         reason: "execution_session_changed_during_capture" };
@@ -195,6 +221,7 @@ export class IbBrokerReconciliationAdapter
     }));
 
     const snapshot: BrokerReconciliationSnapshot = {
+      originalAcquisitionStartedAt: capturedAtStart.toISOString(),
       connectionGeneration: generation,
       exposureComplete: flags.exposureComplete,
       recoveryComplete: flags.recoveryComplete,
@@ -209,20 +236,30 @@ export class IbBrokerReconciliationAdapter
       completedOrders: completedResult.rows,
       executions,
     };
+    if (this.hooks?.checkpoint && !req.abortSignal.aborted && this.tws.isConnected() && generation===this.tws.getConnectionGeneration()) {
+      try { await phase('notificationCheckpoint',()=>this.hooks!.checkpoint!(snapshot,req,capturedAtStart,sourceCompletedAt)); }
+      catch { /* Notification persistence never authorizes or invalidates broker reconciliation. */ }
+    }
     if (!this.accounting || !req.reconciliationRunId || !req.positionGeneration) return snapshot;
     try {
-      return await this.accounting.join(snapshot, { runId: req.reconciliationRunId, positionGeneration: req.positionGeneration,
-        recoveryStart, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal });
+      return await phase('accountingJoin',()=>this.accounting!.join(snapshot, { runId: req.reconciliationRunId!, positionGeneration: req.positionGeneration!,
+        recoveryStart, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal }));
     } catch {
       // Accounting failure denies entries through its authority; retain reconciliation for exits.
       return snapshot;
+    }
+    } catch(error) {
+      totalFailed=true;
+      throw error;
+    } finally {
+      emitBrokerPhase(this.hooks?.diagnostics,'capture.total',totalFailed?'error':'ok',{runId:req.reconciliationRunId},performance.now()-totalStarted);
     }
   }
 }
 
 async function captureSession(
   tws: TwsExecutionClient,
-  opts: { accountId: string; timeoutMs: number; abortSignal: AbortSignal },
+  opts: { accountId: string; timeoutMs: number; abortSignal: AbortSignal; onError?: (error:unknown)=>void },
 ): Promise<SourceCoverage> {
   if (!tws.isConnected()) {
     return {
@@ -255,6 +292,7 @@ async function captureSession(
       count: accounts.length,
     };
   } catch (err) {
+    opts.onError?.(err);
     return {
       available: false,
       boundedWindow: false,

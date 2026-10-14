@@ -1,4 +1,6 @@
 import { IBApi } from "@stoqey/ib";
+import { performance } from 'node:perf_hooks';
+import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
 import { parseIbExecutionTime } from "../execution-time.js";
 import { accountingError, accountingNumber, type CanonicalExecution, type CanonicalCommission, type SourceSettingsV1 } from "./types.js";
 
@@ -40,10 +42,11 @@ export class AccountingSourceCollector {
   private accounts: string[] = []; private protocol = 0; private generation = 0; private requestId = 0;
   private waiters = new Set<() => void>();
   private clockRequestedAt: string | undefined;
-  private active: { requestId: number; executionIds: Set<string>; ended: boolean; brokerTime?: number; clockWaiting: boolean; clockRequestedAt?: string; error?: Error } | undefined;
+  private active: { requestId: number; executionIds: Set<string>; ended: boolean; brokerTime?: number; clockWaiting: boolean; clockRequestedAt?: string; error?: Error;
+    started: number; phase: 'ready' | 'clock' | 'replay_end'; clockSent: boolean; clockReceived: boolean } | undefined;
   constructor(readonly settings: SourceSettingsV1, private readonly callbacks: {
     observe: (value: CollectorObservation) => void; gap: (generation: number, code?: string) => void;
-  }, socketFactory?: () => AccountingSocket) {
+  }, socketFactory?: () => AccountingSocket, private readonly diagnostics?: BrokerPhaseDiagnostics) {
     this.socketFactory = socketFactory ?? (() => new IBApi({ ...settings.endpoint, clientId: 0 }) as unknown as AccountingSocket);
   }
   private bindSocket(socket: AccountingSocket, generation: number): void {
@@ -52,10 +55,21 @@ export class AccountingSourceCollector {
       if (this.socket !== socket || this.generation !== generation) return;
       try { fn(...args); } catch (error) {
         const failure = error instanceof Error && error.message.startsWith("ACCOUNTING_") ? error : accountingError("IDENTITY_INVALID");
+        emitBrokerPhase(this.diagnostics, 'accounting.callback', 'error', { generation, requestId: this.active?.requestId, reason: failure.message }, undefined, error);
         if (this.active) this.active.error ??= failure;
         this.callbacks.gap(generation, failure.message);
       }
       this.notify();
+    });
+    for (const event of ['sent', 'received'] as const) listen(event, tokens => {
+      const active = this.active;
+      if (!active?.clockWaiting || !Array.isArray(tokens) || tokens.length !== (event === 'sent' ? 2 : 3)
+        || ![49, '49'].includes(tokens[0]) || ![1, '1'].includes(tokens[1])) return;
+      const key = event === 'sent' ? 'clockSent' : 'clockReceived';
+      if (active[key]) return;
+      active[key] = true;
+      emitBrokerPhase(this.diagnostics, event === 'sent' ? 'accounting.clock_socket_write' : 'accounting.clock_frame_received',
+        'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
     });
     listen("server", (version, connectionTime) => {
       if (!Number.isSafeInteger(version) || Number(version) <= 0) throw accountingError("IDENTITY_INVALID");
@@ -97,8 +111,10 @@ export class AccountingSourceCollector {
       this.callbacks.observe({ kind: "clock", value: { brokerTime: new Date(milliseconds).toISOString() }, requestId: this.active.requestId });
     });
     listen("disconnected", () => { this.ready = false; this.connecting = false; this.accounts = []; if (this.active) this.active.error ??= accountingError("SOURCE_GAP"); this.callbacks.gap(this.generation); });
-    listen("error", (_error, code) => {
+    listen("error", (error, code) => {
       if ([2104, 2106, 2107, 2108, 2158].includes(Number(code))) return;
+      emitBrokerPhase(this.diagnostics, 'accounting.socket', 'error', { generation, requestId: this.active?.requestId, reason: 'ACCOUNTING_SOURCE_GAP' }, undefined,
+        { name: error instanceof Error ? error.name : undefined, message: error instanceof Error ? error.message : undefined, code });
       if (Number(code) === 1100) this.upstream = false;
       if ([1101, 1102].includes(Number(code))) this.upstream = true;
       this.callbacks.gap(this.generation);
@@ -114,7 +130,10 @@ export class AccountingSourceCollector {
     this.usedSockets.add(socket); this.socket = socket;
     this.generation++; this.clockRequestedAt = undefined; this.connecting = true; this.protocol = 0; this.accounts = []; this.upstream = true;
     this.bindSocket(socket, this.generation); this.callbacks.gap(this.generation);
-    try { socket.connect(); } catch { this.connecting = false; this.callbacks.gap(this.generation); }
+    try { socket.connect(); } catch (error) {
+      emitBrokerPhase(this.diagnostics, 'accounting.connect', 'error', { generation: this.generation, requestId: this.active?.requestId }, undefined, error);
+      this.connecting = false; this.callbacks.gap(this.generation);
+    }
   }
   close() {
     const socket = this.socket; this.socket = undefined;
@@ -126,7 +145,14 @@ export class AccountingSourceCollector {
     return new Promise((resolve, reject) => {
       const finish = (error?: Error) => { clearTimeout(timer); this.waiters.delete(check); signal.removeEventListener("abort", abort); if (error) reject(error); else resolve(); };
       const check = () => { if (this.active?.error) finish(this.active.error); else if (predicate()) finish(); };
-      const abort = () => finish(accountingError("REPLAY_INCOMPLETE"));
+      const abort = () => {
+        const error = accountingError("REPLAY_INCOMPLETE");
+        emitBrokerPhase(this.diagnostics, `accounting.${this.active?.phase ?? 'wait'}`, 'error', {
+          generation: this.generation, requestId: this.active?.requestId,
+          reason: signal.aborted ? 'aborted' : this.active?.phase === 'clock' ? this.active.clockSent ? 'clock_response_unavailable' : 'clock_send_unobserved' : 'deadline_expired',
+        }, undefined, error);
+        finish(error);
+      };
       const timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
       this.waiters.add(check); signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort(); else check();
@@ -135,20 +161,33 @@ export class AccountingSourceCollector {
   async replay(timeoutMs: number, signal: AbortSignal): Promise<{ requestId: number; brokerTime: string; executionIds: string[]; generation: number }> {
     if (this.active) throw accountingError("SOURCE_BUSY");
     const deadline = Date.now() + Math.min(10_000, timeoutMs);
-    this.active = { requestId: ++this.requestId, executionIds: new Set(), ended: false, clockWaiting: false };
+    this.active = { requestId: ++this.requestId, executionIds: new Set(), ended: false, clockWaiting: false,
+      started: performance.now(), phase: 'ready', clockSent: false, clockReceived: false };
     const active = this.active;
     try {
-      this.connect(); await this.wait(() => this.identity().ready, deadline, signal);
+      await brokerPhase(this.diagnostics, 'accounting.ready', { requestId: active.requestId }, async () => {
+        this.connect(); await this.wait(() => this.identity().ready, deadline, signal);
+      });
       const generation = this.generation;
       if (!Number.isSafeInteger(this.protocol) || this.protocol <= 0) throw accountingError("IDENTITY_INVALID");
       active.clockRequestedAt = new Date().toISOString(); this.clockRequestedAt = active.clockRequestedAt; active.clockWaiting = true;
-      this.socket!.reqCurrentTime(); await this.wait(() => active.brokerTime !== undefined, deadline, signal);
+      active.phase = 'clock';
+      emitBrokerPhase(this.diagnostics, 'accounting.clock_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
+      await brokerPhase(this.diagnostics, 'accounting.clock_wait', { generation, requestId: active.requestId }, async () => {
+        this.socket!.reqCurrentTime(); await this.wait(() => active.brokerTime !== undefined, deadline, signal);
+      });
       this.callbacks.observe({ kind: "replay_start", value: { requestId: active.requestId }, requestId: active.requestId });
-      this.socket!.reqExecutions(active.requestId, { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" });
-      await this.wait(() => active.ended, deadline, signal);
+      active.phase = 'replay_end';
+      emitBrokerPhase(this.diagnostics, 'accounting.replay_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
+      await brokerPhase(this.diagnostics, 'accounting.replay_end_wait', { generation, requestId: active.requestId }, async () => {
+        this.socket!.reqExecutions(active.requestId, { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" });
+        await this.wait(() => active.ended, deadline, signal);
+      });
       if (!this.identity().ready || generation !== this.generation) throw accountingError("SOURCE_GAP");
+      emitBrokerPhase(this.diagnostics, 'accounting.replay_total', 'ok', { generation, requestId: active.requestId }, performance.now() - active.started);
       return { requestId: active.requestId, brokerTime: new Date(active.brokerTime!).toISOString(), executionIds: [...active.executionIds], generation };
     } catch (error) {
+      emitBrokerPhase(this.diagnostics, 'accounting.replay_total', 'error', { generation: this.generation, requestId: active.requestId }, performance.now() - active.started, error);
       // A clock response has no request id: abandon this connection after an incomplete read.
       this.close(); throw error;
     } finally { this.active = undefined; }

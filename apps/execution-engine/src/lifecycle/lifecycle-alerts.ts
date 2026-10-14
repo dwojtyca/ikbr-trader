@@ -1,8 +1,9 @@
+import type { NotificationEligibility, NotificationProof } from "./notification-checkpoint.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { LifecycleFaultCode, LifecycleFaultInput, LifecycleFaultSink } from "./fault-contract.js";
 
-export type LifecycleDeliveryStatus = "PENDING" | "SENDING" | "DELIVERED" | "FAILED" | "UNKNOWN" | "DISABLED";
+export type LifecycleDeliveryStatus = "PENDING" | "SENDING" | "DELIVERED" | "FAILED" | "UNKNOWN" | "DISABLED" | "COALESCED";
 
 export interface LifecycleTransport {
   readonly enabled: boolean;
@@ -11,7 +12,7 @@ export interface LifecycleTransport {
 
 export interface LifecycleAlertStatus {
   accountId: string;
-  faults: Array<{ id: number; proposalId: number | null; code: LifecycleFaultCode; evidence: Record<string, unknown>; firstObservedAt: Date; lastObservedAt: Date; occurrences: number; active: boolean; resolvedAt: Date | null; delivery: LifecycleDeliveryStatus; attempts: number; providerMessageId: string | null }>;
+  faults: Array<{ id: number; proposalId: number | null; code: LifecycleFaultCode; evidence: Record<string, unknown>; firstObservedAt: Date; lastObservedAt: Date; occurrences: number; active: boolean; resolvedAt: Date | null; delivery: LifecycleDeliveryStatus; attempts: number; providerMessageId: string | null; notificationPolicy: string | null; notificationDeadline: Date | null; checkpointRunId: number | null; coalescedAt: Date | null }>;
   probes: Array<{ processId: string; heartbeatAt: Date | null; heartbeatFresh: boolean; transportEnabled: boolean; delivery: LifecycleDeliveryStatus; attempts: number; deliveredAt: Date | null }>;
   deliveryAttempts: Array<{ outboxId: number; faultId: number | null; probeProcessId: string | null; attemptNumber: number; status: "SENDING" | "DELIVERED" | "FAILED" | "UNKNOWN"; startedAt: Date; endedAt: Date | null; providerMessageId: string | null; errorCode: string | null }>;
   transport: "UNVERIFIED" | "VERIFIED" | "DISABLED";
@@ -32,11 +33,17 @@ function safeEvidence(value: unknown, depth = 0): unknown {
   return null;
 }
 
-async function transaction<T>(pool: Pool, work: (db: PoolClient) => Promise<T>): Promise<T> {
+class NotificationProofChanged extends Error {}
+function lockUnavailable(error:unknown):boolean {
+  return typeof error==='object'&&error!==null&&'code' in error&&error.code==='55P03';
+}
+
+async function transaction<T>(pool: Pool, work: (db: PoolClient) => Promise<T>, beforeCommit?:()=>void): Promise<T> {
   const db = await pool.connect();
   try {
     await db.query("BEGIN");
     const result = await work(db);
+    beforeCommit?.();
     await db.query("COMMIT");
     return result;
   } catch (error) {
@@ -48,11 +55,34 @@ async function transaction<T>(pool: Pool, work: (db: PoolClient) => Promise<T>):
 }
 
 export class LifecycleAlertStore implements LifecycleFaultSink {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pool, private readonly notification?: NotificationEligibility) {}
+
+  private live(accountId:string,proof:NotificationProof|null):proof is NotificationProof {
+    if(!proof||!this.notification)return false;
+    try{return this.notification.isCurrent(accountId,proof);}catch{return false;}
+  }
+  private immediateDrift(accountId:string):Promise<void> {
+    return this.recordFault({accountId,proposalId:null,code:'BROKER_STATE_STALE',evidence:{reason:'notification_identity_changed'}});
+  }
+  private async proof(db: PoolClient, accountId: string, resolving=false) {
+    if(!this.notification)return null;
+    await db.query('SAVEPOINT notification_proof');
+    try {
+      const previous=String((await db.query("SELECT setting FROM pg_settings WHERE name='statement_timeout'")).rows[0].setting);
+      await db.query("SELECT set_config('statement_timeout',$1,true)",[String(Math.min(Number(previous)||1000,1000))]);
+      const result=await this.notification.eligible(db,accountId,resolving);
+      await db.query("SELECT set_config('statement_timeout',$1,true)",[previous]);
+      await db.query('RELEASE SAVEPOINT notification_proof'); return this.live(accountId,result)?result:null;
+    }
+    catch { await db.query('ROLLBACK TO SAVEPOINT notification_proof'); await db.query('RELEASE SAVEPOINT notification_proof'); return null; }
+  }
 
   async recordFault(input: LifecycleFaultInput): Promise<void> {
-    await transaction(this.pool, async (db) => {
+    let committedProof:NotificationProof|null=null;
+    try { await transaction(this.pool, async (db) => {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${input.accountId}`]);
+      let proof = input.notification === 'FLAT_WATCHDOG_V1' && input.proposalId === null && input.code === 'BROKER_STATE_STALE'
+        && input.evidence.reason === 'lifecycle_observation_overdue' ? await this.proof(db,input.accountId) : null;
       const active = await db.query<{ id: string }>(
         `SELECT id FROM lifecycle_faults WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND code=$3 AND active FOR UPDATE`,
         [input.accountId, input.proposalId, input.code],
@@ -71,22 +101,54 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
         );
         id = inserted.rows[0].id;
       }
+      if(!this.live(input.accountId,proof))proof=null;
+      committedProof=proof;
       await db.query(
-        `INSERT INTO lifecycle_alert_outbox(account_id,fault_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,
-        [input.accountId, id],
+        `INSERT INTO lifecycle_alert_outbox(account_id,fault_id,notification_policy,notification_deadline,checkpoint_run_id,notification_session_id,notification_generation,next_attempt_at)
+         SELECT $1,id,CASE WHEN q.qualified THEN 'FLAT_WATCHDOG_V1' END,
+          CASE WHEN q.qualified THEN first_observed_at+interval '5 seconds' END,CASE WHEN q.qualified THEN $3::bigint END,CASE WHEN q.qualified THEN $4::text END,CASE WHEN q.qualified THEN $5::bigint END,
+          CASE WHEN q.qualified THEN first_observed_at+interval '5 seconds' ELSE clock_timestamp() END
+         FROM lifecycle_faults CROSS JOIN (SELECT $3::bigint IS NOT NULL AND clock_timestamp()<$6::timestamptz AS qualified) q WHERE id=$2 ON CONFLICT DO NOTHING`,
+        [input.accountId, id, proof?.runId ?? null,proof?.sessionId??null,proof?.generation??null,proof?.validUntil??null],
       );
-    });
+      if(proof&&!this.live(input.accountId,proof))throw new NotificationProofChanged();
+      await db.query(`UPDATE lifecycle_alert_outbox SET next_attempt_at=LEAST(next_attempt_at,clock_timestamp()),notification_promoted_at=COALESCE(notification_promoted_at,clock_timestamp())
+        WHERE fault_id=$1 AND notification_policy='FLAT_WATCHDOG_V1' AND status='PENDING'
+        AND ($2::text IS NULL OR notification_session_id<>$2 OR notification_generation<>$3 OR clock_timestamp()>=$4::timestamptz)`,[id,proof?.sessionId??null,proof?.generation??null,proof?.validUntil??null]);
+    },()=>{if(committedProof&&!this.live(input.accountId,committedProof))throw new NotificationProofChanged();}); }
+    catch(error){if(error instanceof NotificationProofChanged){await this.immediateDrift(input.accountId);return;}throw error;}
+    if(committedProof&&!this.live(input.accountId,committedProof))await this.immediateDrift(input.accountId);
   }
 
   async resolveScope(accountId: string, proposalId: number | null, activeCodes: readonly LifecycleFaultCode[]): Promise<void> {
-    await transaction(this.pool, async (db) => {
+    let committedProof:NotificationProof|null=null;
+    try { await transaction(this.pool, async (db) => {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${accountId}`]);
-      await db.query(
+      const resolved=await db.query<{id:string}>(
         `UPDATE lifecycle_faults SET active=FALSE,resolved_at=clock_timestamp()
-         WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND active AND NOT (code=ANY($3::text[]))`,
+         WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND active AND NOT (code=ANY($3::text[])) RETURNING id`,
         [accountId, proposalId, activeCodes],
       );
-    });
+      const proof=proposalId===null && !activeCodes.includes('BROKER_STATE_STALE') ? await this.proof(db,accountId,true) : null;
+      const liveProof=this.live(accountId,proof);
+      if(proof&&!liveProof)throw new NotificationProofChanged();
+      if (liveProof) {
+        committedProof=proof;
+        await db.query(`UPDATE lifecycle_alert_outbox o SET status='COALESCED',coalesced_at=clock_timestamp()
+          FROM lifecycle_faults f WHERE f.id=o.fault_id AND f.account_id=$1 AND f.code='BROKER_STATE_STALE'
+          AND f.original_proposal_id IS NULL AND NOT f.active AND f.resolved_at<=o.notification_deadline AND clock_timestamp()<=o.notification_deadline
+          AND o.notification_policy='FLAT_WATCHDOG_V1' AND o.status='PENDING' AND o.attempts=0
+          AND o.notification_promoted_at IS NULL AND o.notification_session_id=$2 AND o.notification_generation=$3 AND f.id=ANY($4::bigint[]) AND clock_timestamp()<$5::timestamptz
+          AND o.lease_token IS NULL AND o.lease_expires_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM lifecycle_alert_delivery_attempts a WHERE a.outbox_id=o.id)`,[accountId,proof.sessionId,proof.generation,resolved.rows.map(r=>r.id),proof.validUntil]);
+        if(!this.live(accountId,proof))throw new NotificationProofChanged();
+      } else {
+        await db.query(`UPDATE lifecycle_alert_outbox SET next_attempt_at=LEAST(next_attempt_at,clock_timestamp()),notification_promoted_at=COALESCE(notification_promoted_at,clock_timestamp())
+          WHERE fault_id=ANY($1::bigint[]) AND notification_policy='FLAT_WATCHDOG_V1' AND status='PENDING'`,[resolved.rows.map(r=>r.id)]);
+      }
+    },()=>{if(committedProof&&!this.live(accountId,committedProof))throw new NotificationProofChanged();}); }
+    catch(error){if(error instanceof NotificationProofChanged){await this.immediateDrift(accountId);return;}throw error;}
+    if(committedProof&&!this.live(accountId,committedProof))await this.immediateDrift(accountId);
   }
 
   async startWorkerSession(accountId: string, processId: string): Promise<void> {
@@ -118,8 +180,8 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
   async readStatus(accountId: string, processId?: string): Promise<LifecycleAlertStatus> {
     const [faults, probes, attempts] = await Promise.all([
       this.pool.query<{
-        id: string; original_proposal_id: string | null; code: LifecycleFaultCode; evidence: Record<string, unknown>; first_observed_at: Date; last_observed_at: Date; occurrences: number; active: boolean; resolved_at: Date | null; status: LifecycleDeliveryStatus | null; attempts: number | null; provider_message_id: string | null;
-      }>(`SELECT f.*,o.status,o.attempts,o.provider_message_id FROM lifecycle_faults f LEFT JOIN lifecycle_alert_outbox o ON o.fault_id=f.id WHERE f.account_id=$1 ORDER BY f.id DESC`, [accountId]),
+        id: string; original_proposal_id: string | null; code: LifecycleFaultCode; evidence: Record<string, unknown>; first_observed_at: Date; last_observed_at: Date; occurrences: number; active: boolean; resolved_at: Date | null; status: LifecycleDeliveryStatus | null; attempts: number | null; provider_message_id: string | null; notification_policy: string | null; notification_deadline: Date | null; checkpoint_run_id: string | null; coalesced_at: Date | null;
+      }>(`SELECT f.*,o.status,o.attempts,o.provider_message_id,o.notification_policy,o.notification_deadline,o.checkpoint_run_id,o.coalesced_at FROM lifecycle_faults f LEFT JOIN lifecycle_alert_outbox o ON o.fault_id=f.id WHERE f.account_id=$1 ORDER BY f.id DESC`, [accountId]),
       this.pool.query<{ process_id: string; heartbeat_at: Date | null; heartbeat_fresh: boolean; transport_enabled: boolean | null; status: LifecycleDeliveryStatus; attempts: number; delivered_at: Date | null }>(
         `SELECT o.probe_process_id AS process_id,w.heartbeat_at,
                 COALESCE(w.heartbeat_at BETWEEN clock_timestamp()-interval '15 seconds' AND clock_timestamp(),FALSE) AS heartbeat_fresh,
@@ -134,7 +196,7 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
     ]);
     return {
       accountId,
-      faults: faults.rows.map((r) => ({ id: Number(r.id), proposalId: r.original_proposal_id === null ? null : Number(r.original_proposal_id), code: r.code, evidence: r.evidence, firstObservedAt: r.first_observed_at, lastObservedAt: r.last_observed_at, occurrences: r.occurrences, active: r.active, resolvedAt: r.resolved_at, delivery: r.status ?? "PENDING", attempts: r.attempts ?? 0, providerMessageId: r.provider_message_id })),
+      faults: faults.rows.map((r) => ({ id: Number(r.id), proposalId: r.original_proposal_id === null ? null : Number(r.original_proposal_id), code: r.code, evidence: r.evidence, firstObservedAt: r.first_observed_at, lastObservedAt: r.last_observed_at, occurrences: r.occurrences, active: r.active, resolvedAt: r.resolved_at, delivery: r.status ?? "PENDING", attempts: r.attempts ?? 0, providerMessageId: r.provider_message_id, notificationPolicy:r.notification_policy, notificationDeadline:r.notification_deadline, checkpointRunId:r.checkpoint_run_id===null?null:Number(r.checkpoint_run_id), coalescedAt:r.coalesced_at })),
       probes: probes.rows.map((r) => ({ processId: r.process_id, heartbeatAt: r.heartbeat_at, heartbeatFresh: r.heartbeat_fresh, transportEnabled: r.transport_enabled ?? false, delivery: r.status, attempts: r.attempts, deliveredAt: r.delivered_at })),
       deliveryAttempts: attempts.rows.map((r) => ({ outboxId: Number(r.outbox_id), faultId: r.fault_id === null ? null : Number(r.fault_id), probeProcessId: r.probe_process_id, attemptNumber: r.attempt_number, status: r.status, startedAt: r.started_at, endedAt: r.ended_at, providerMessageId: r.provider_message_id, errorCode: r.error_code })),
       transport: !probes.rows[0]?.heartbeat_fresh ? "UNVERIFIED" : probes.rows[0]?.transport_enabled === false ? "DISABLED" : probes.rows[0]?.status === "DELIVERED" ? "VERIFIED" : probes.rows[0]?.status === "DISABLED" ? "DISABLED" : "UNVERIFIED",
@@ -148,7 +210,7 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
         COALESCE((SELECT transport_enabled FROM lifecycle_alert_workers WHERE account_id=$1 AND process_id=$2),FALSE) AS transport_enabled,
         (SELECT status FROM lifecycle_alert_outbox WHERE account_id=$1 AND probe_process_id=$2) AS probe_status,
         (SELECT count(*)::text FROM lifecycle_faults WHERE account_id=$1 AND active) AS active_faults,
-        (SELECT count(*)::text FROM lifecycle_alert_outbox o JOIN lifecycle_faults f ON f.id=o.fault_id WHERE f.account_id=$1 AND o.status<>'DELIVERED') AS pending_deliveries`,
+        (SELECT count(*)::text FROM lifecycle_alert_outbox o JOIN lifecycle_faults f ON f.id=o.fault_id WHERE f.account_id=$1 AND o.status<>'DELIVERED' AND NOT(o.status='COALESCED' AND NOT f.active AND o.notification_policy='FLAT_WATCHDOG_V1' AND o.attempts=0)) AS pending_deliveries`,
       [accountId, processId],
     );
     const row = result.rows[0];
@@ -161,42 +223,73 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
   }
 
   async markDisabled(accountIds: readonly string[]): Promise<void> {
-    await this.pool.query(`UPDATE lifecycle_alert_outbox SET status='DISABLED',last_error_code='transport_disabled' WHERE account_id=ANY($1::text[]) AND status IN ('PENDING','FAILED','UNKNOWN') AND attempts<3`, [accountIds]);
+    for(const account of [...new Set(accountIds)].sort()) { try { await transaction(this.pool,async db=>{
+      await db.query("SELECT set_config('lock_timeout','100ms',true)");
+      if(!(await db.query("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS acquired",[`snap:${account}`])).rows[0]?.acquired)return;
+      const locked=await db.query<{id:string}>(`SELECT id FROM lifecycle_alert_outbox WHERE account_id=$1
+        AND status IN ('PENDING','FAILED','UNKNOWN') AND attempts<3 ORDER BY id FOR UPDATE SKIP LOCKED`,[account]);
+      if(locked.rowCount)await db.query(`UPDATE lifecycle_alert_outbox SET status='DISABLED',last_error_code='transport_disabled' WHERE id=ANY($1::bigint[])`,[locked.rows.map(r=>r.id)]);
+    }); } catch(error){if(!lockUnavailable(error))throw error;} }
   }
 
   async claimNext(accountIds: readonly string[], processId: string): Promise<OutboxRow | null> {
     if (accountIds.length === 0) return null;
-    return transaction(this.pool, async (db) => {
-      const expired = await db.query<{ id: string; lease_token: string; attempts: number }>(
-        `SELECT id,lease_token,attempts FROM lifecycle_alert_outbox
-         WHERE account_id=ANY($1::text[]) AND (fault_id IS NOT NULL OR probe_process_id=$2)
-           AND status='SENDING' AND lease_expires_at<=clock_timestamp()
-         ORDER BY lease_expires_at,id LIMIT 1 FOR UPDATE SKIP LOCKED`, [accountIds, processId],
-      );
-      if (expired.rows[0]) {
-        const row = expired.rows[0];
-        await db.query(`UPDATE lifecycle_alert_delivery_attempts SET status='UNKNOWN',ended_at=clock_timestamp(),error_code='lease_expired' WHERE outbox_id=$1 AND lease_token=$2 AND status='SENDING'`, [row.id, row.lease_token]);
-        await db.query(`UPDATE lifecycle_alert_outbox SET status='UNKNOWN',lease_token=NULL,lease_expires_at=NULL,last_error_code='lease_expired',next_attempt_at=clock_timestamp()+($2::int * interval '1 second') WHERE id=$1`, [row.id, row.attempts === 1 ? 5 : 15]);
-      }
-      const due = await db.query<OutboxRow>(
-        `SELECT o.id,o.account_id,o.fault_id,o.probe_process_id,f.code,o.attempts,o.lease_token
-         FROM lifecycle_alert_outbox o LEFT JOIN lifecycle_faults f ON f.id=o.fault_id
-         WHERE o.account_id=ANY($1::text[]) AND (o.fault_id IS NOT NULL OR o.probe_process_id=$2)
-           AND o.status IN ('PENDING','FAILED','UNKNOWN','DISABLED') AND o.attempts<3 AND o.next_attempt_at<=clock_timestamp()
-         ORDER BY o.next_attempt_at,o.id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`, [accountIds, processId],
-      );
-      if (!due.rows[0]) return null;
-      const row = due.rows[0];
-      const token = randomUUID();
-      const attempt = row.attempts + 1;
-      await db.query(`UPDATE lifecycle_alert_outbox SET status='SENDING',attempts=$2,lease_token=$3,lease_expires_at=clock_timestamp()+interval '5 seconds',last_error_code=NULL WHERE id=$1`, [row.id, attempt, token]);
-      await db.query(`INSERT INTO lifecycle_alert_delivery_attempts(outbox_id,attempt_number,lease_token,status) VALUES($1,$2,$3,'SENDING')`, [row.id, attempt, token]);
-      return { ...row, attempts: attempt, lease_token: token };
-    });
+    for (const account of [...new Set(accountIds)].sort()) {
+      let committedProof:NotificationProof|null=null;
+      try { await transaction(this.pool,async db=>{
+        await db.query("SELECT set_config('lock_timeout','100ms',true)");
+        if(!(await db.query("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS acquired",[`snap:${account}`])).rows[0]?.acquired)return;
+        const delayed=await db.query(`SELECT id,notification_session_id,notification_generation FROM lifecycle_alert_outbox WHERE account_id=$1
+          AND notification_policy='FLAT_WATCHDOG_V1' AND status='PENDING' ORDER BY id FOR UPDATE SKIP LOCKED`,[account]);
+        let proof=delayed.rowCount?await this.proof(db,account):null;
+        if(!this.live(account,proof))proof=null;
+        committedProof=proof;
+        if(delayed.rowCount) await db.query(`UPDATE lifecycle_alert_outbox SET next_attempt_at=LEAST(next_attempt_at,clock_timestamp()),notification_promoted_at=COALESCE(notification_promoted_at,clock_timestamp())
+          WHERE id=ANY($1::bigint[]) AND notification_policy='FLAT_WATCHDOG_V1' AND status='PENDING' AND ($2::text IS NULL OR notification_session_id<>$2 OR notification_generation<>$3 OR clock_timestamp()>=$4::timestamptz)`,[delayed.rows.map(r=>r.id),proof?.sessionId??null,proof?.generation??null,proof?.validUntil??null]);
+        if(proof&&!this.live(account,proof))throw new NotificationProofChanged();
+        const expired=await db.query<{id:string;lease_token:string;attempts:number}>(`SELECT id,lease_token,attempts FROM lifecycle_alert_outbox
+          WHERE account_id=$1 AND (fault_id IS NOT NULL OR probe_process_id=$2) AND status='SENDING' AND lease_expires_at<=clock_timestamp()
+          ORDER BY id FOR UPDATE SKIP LOCKED`,[account,processId]);
+        for(const row of expired.rows) {
+          await db.query(`UPDATE lifecycle_alert_delivery_attempts SET status='UNKNOWN',ended_at=clock_timestamp(),error_code='lease_expired'
+            WHERE outbox_id=$1 AND lease_token=$2 AND status='SENDING'`,[row.id,row.lease_token]);
+          await db.query(`UPDATE lifecycle_alert_outbox SET status='UNKNOWN',lease_token=NULL,lease_expires_at=NULL,last_error_code='lease_expired',
+            next_attempt_at=clock_timestamp()+($2::int * interval '1 second') WHERE id=$1`,[row.id,row.attempts===1?5:15]);
+        }
+      },()=>{if(committedProof&&!this.live(account,committedProof))throw new NotificationProofChanged();}); }
+      catch(error){if(error instanceof NotificationProofChanged){await this.immediateDrift(account);continue;}if(lockUnavailable(error))continue;throw error;}
+      if(committedProof&&!this.live(account,committedProof))await this.immediateDrift(account);
+    }
+    // Candidate reads do not lock rows. Every mutation takes the account lock first.
+    const candidates=await this.pool.query<{id:string;account_id:string}>(`SELECT id,account_id FROM lifecycle_alert_outbox
+      WHERE account_id=ANY($1::text[]) AND (fault_id IS NOT NULL OR probe_process_id=$2)
+      AND status IN ('PENDING','FAILED','UNKNOWN','DISABLED') AND attempts<3 AND next_attempt_at<=clock_timestamp()
+      ORDER BY next_attempt_at,id`,[accountIds,processId]);
+    for(const candidate of candidates.rows) {
+      const claimed=await transaction(this.pool, async db=>{
+        await db.query("SELECT set_config('lock_timeout','100ms',true)");
+        if(!(await db.query("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS acquired",[`snap:${candidate.account_id}`])).rows[0]?.acquired)return null;
+        const due=await db.query<OutboxRow>(`SELECT o.id,o.account_id,o.fault_id,o.probe_process_id,f.code,o.attempts,o.lease_token
+          FROM lifecycle_alert_outbox o LEFT JOIN lifecycle_faults f ON f.id=o.fault_id WHERE o.id=$1 AND o.account_id=$2
+          AND (o.fault_id IS NOT NULL OR o.probe_process_id=$3) AND o.status IN ('PENDING','FAILED','UNKNOWN','DISABLED')
+          AND o.attempts<3 AND o.next_attempt_at<=clock_timestamp() FOR UPDATE OF o SKIP LOCKED`,[candidate.id,candidate.account_id,processId]);
+        if(!due.rows[0])return null;
+        const row=due.rows[0], token=randomUUID(), attempt=row.attempts+1;
+        await db.query(`UPDATE lifecycle_alert_outbox SET status='SENDING',attempts=$2,lease_token=$3,
+          lease_expires_at=clock_timestamp()+interval '5 seconds',last_error_code=NULL WHERE id=$1`,[row.id,attempt,token]);
+        await db.query(`INSERT INTO lifecycle_alert_delivery_attempts(outbox_id,attempt_number,lease_token,status) VALUES($1,$2,$3,'SENDING')`,[row.id,attempt,token]);
+        return {...row,attempts:attempt,lease_token:token};
+      }).catch(error=>{if(lockUnavailable(error))return null;throw error;});
+      if(claimed)return claimed;
+    }
+    return null;
   }
 
   async complete(id: string, token: string, result: Awaited<ReturnType<LifecycleTransport["send"]>>): Promise<boolean> {
+    const identity=(await this.pool.query<{account_id:string}>('SELECT account_id FROM lifecycle_alert_outbox WHERE id=$1',[id])).rows[0];
+    if(!identity)return false;
     return transaction(this.pool, async (db) => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",[`snap:${identity.account_id}`]);
       const current = await db.query<{ attempts: number }>(`SELECT attempts FROM lifecycle_alert_outbox WHERE id=$1 AND lease_token=$2 AND status='SENDING' AND lease_expires_at>clock_timestamp() FOR UPDATE`, [id, token]);
       if (!current.rows[0]) return false;
       const status = result.status;

@@ -1,3 +1,6 @@
+import { LifecycleNotificationCheckpoint } from "./lifecycle/notification-checkpoint.js";
+import { brokerDiagnosticPrivacy, type BrokerPhaseDiagnostics } from "./reconciliation/phase-diagnostics.js";
+import { readPeriodicProof } from "./reconciliation/periodic-proof.js";
 import { registerResearchPrepareRoute, registerStartupResearchPrepareRoute } from './research-prepare-route.js';
 import { PaperPolicyAuthority, PaperPolicyConflict } from "./paper-policy-authority.js";
 import { registerPaperPolicyControl } from "./paper-policy-control.js";
@@ -91,7 +94,7 @@ import { registerAccountingRoutes } from "./accounting/routes.js";
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
 const pool = new Pool({ connectionString: config.POSTGRES_URL });
 const entryControls = new EntryControlStore(pool);
-const lifecycleAlerts = new LifecycleAlertStore(pool);
+const lifecycleAlerts:LifecycleAlertStore = new LifecycleAlertStore(pool, { eligible: (db,account,resolving)=>notificationCheckpoint.eligible(db,account,resolving), isCurrent:(account,proof)=>notificationCheckpoint.isCurrent(account,proof) });
 let lifecycleLocallyHealthy = false;
 const configurationStore = new TradingConfigurationStore(pool);
 const loadedResearch = loadResearchManifest(process.env, tradingConfiguration.loaded);
@@ -350,17 +353,27 @@ const tws = new TwsExecutionClient(
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
 
+const brokerDiagnostics:BrokerPhaseDiagnostics = {
+  emit: event=>app.log.info({brokerPhase:event}, 'broker phase observation'),
+  privacy: ()=>brokerDiagnosticPrivacy(process.env,config,lastActiveAccountId),
+};
+const notificationCheckpoint:LifecycleNotificationCheckpoint = new LifecycleNotificationCheckpoint(pool,repo,()=>lastActiveAccountId?{
+  accountId:lastActiveAccountId,sessionId:EXECUTION_PROCESS_OWNER_ID,generation:tws.getConnectionGeneration(),connected:tws.isConnected(),
+}:null);
+
 if (loadedAccounting) accountingSource = new AccountingSourceService(
   new AccountingSourceStore(pool, accountingHash({ account: loadedAccounting.settings.accountId, kind: "tws-accounting" }), EXECUTION_PROCESS_OWNER_ID),
   loadedAccounting.settings, loadedAccounting.sha256, () => ({ connected: tws.isConnected(), accountId: lastActiveAccountId,
-    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }));
+    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }), undefined, brokerDiagnostics);
 
 // PR15 — production reconciliation wiring. Uses the REAL
 // `IbBrokerReconciliationAdapter` backed by the same `tws`
 // client the write path uses. Fake adapter is test-only.
 const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws, new CompletedOrdersClient({
   host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT, clientId: config.IB_COMPLETED_ORDERS_CLIENT_ID,
-}), accountingSource);
+}), accountingSource, { diagnostics:brokerDiagnostics,
+  checkpoint:(snapshot,request,startedAt,sources)=>notificationCheckpoint.publish(snapshot,request,startedAt,sources),
+});
 const reconRunner = new ReconciliationRunner(
   pool,
   repo,
@@ -394,6 +407,13 @@ const reconScheduler = new ReconciliationScheduler(
     executionSafetyMarginMs: config.RECONCILIATION_EXECUTION_SAFETY_MARGIN_MS,
   },
   app.log,
+  {
+    diagnostics:brokerDiagnostics,
+    currentIdentity:()=>({accountId:lastActiveAccountId,sessionId:EXECUTION_PROCESS_OWNER_ID,generation:tws.getConnectionGeneration(),connected:tws.isConnected()}),
+    periodicProof:(context,runId)=>readPeriodicProof({db:pool,
+      currentIdentity:()=>({accountId:lastActiveAccountId,sessionId:EXECUTION_PROCESS_OWNER_ID,generation:tws.getConnectionGeneration(),connected:tws.isConnected()}),
+      accounting:()=>accountingSource},context,runId),
+  },
 );
 
 const ticketSchema = z.object({

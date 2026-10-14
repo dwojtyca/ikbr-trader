@@ -65,7 +65,7 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
     read('reconciliation_runs', 'SELECT id,status,started_at,completed_at,snapshot_captured_at,snapshot_complete FROM reconciliation_runs WHERE account_id=$1 ORDER BY started_at DESC,id DESC LIMIT 1', [accountId]),
     read('reconciliation_holds', 'SELECT identity_key,reason,severity,created_at FROM reconciliation_holds WHERE account_id=$1 AND active=true ORDER BY created_at DESC,id DESC LIMIT 1001', [accountId]),
     read('lifecycle_supervision', 'SELECT instrument_id,conid,status,observed_at,exit_deadline,original_proposal_id,terminal_proof IS NOT NULL AS terminal_proof_recorded FROM lifecycle_supervision WHERE account_id=$1 AND instrument_id=ANY($2::text[]) ORDER BY observed_at DESC NULLS LAST,original_proposal_id DESC LIMIT 1001', [accountId, instruments.map(item => item.id)]),
-    read('lifecycle_alert_outbox', 'SELECT status,created_at,delivered_at,last_error_code FROM lifecycle_alert_outbox WHERE account_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1', [accountId]),
+    read('lifecycle_alert_outbox', 'SELECT status,created_at,delivered_at,last_error_code,notification_policy,notification_deadline,checkpoint_run_id,coalesced_at FROM lifecycle_alert_outbox WHERE account_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1', [accountId]),
     read('instrument_session_schedules', 'SELECT instrument_id,conid,use_rth,generation,status,evidence,updated_at FROM instrument_session_schedules WHERE instrument_id=ANY($1::text[]) ORDER BY instrument_id,conid,use_rth LIMIT 1001', [instruments.map(item => item.id)]),
     config.configHash ? read('research_current', `SELECT a.manifest_hash,m.canonical_json AS manifest_json,h.instrument_id,h.snapshot_id,
       s.snapshot_hash,s.canonical_json AS snapshot_json,s.stored_at
@@ -186,8 +186,12 @@ export async function appendDiagnosticStatus(deps: DiagnosticReadModelDeps, quer
     set(fields, field('supervisionObservedAt', 'Obserwacja nadzoru pozycji', iso(managed?.observed_at)));
     set(fields, field('exitDeadline', 'Termin wyjścia', iso(managed?.exit_deadline)));
     set(fields, field('protectionProofRecorded', 'Dowód terminalny', typeof managed?.terminal_proof_recorded === 'boolean' ? managed.terminal_proof_recorded : null));
-    set(fields, field('alertDeliveryStatus', 'Ostatnia dostawa alertu konta', string(alerts[0]?.status)));
+    set(fields, field('alertDeliveryStatus', 'Stan ostatniego powiadomienia konta', string(alerts[0]?.status)));
     set(fields, field('alertDeliveryAt', 'Czas dostawy alertu konta', iso(alerts[0]?.delivered_at)));
+    set(fields, field('alertNotificationPolicy', 'Polityka powiadomienia', string(alerts[0]?.notification_policy)));
+    set(fields, field('alertNotificationDeadline', 'Termin powiadomienia', iso(alerts[0]?.notification_deadline)));
+    set(fields, field('alertCheckpointRunId', 'Uzgodnienie dowodu powiadomienia', string(alerts[0]?.checkpoint_run_id), 'identifier'));
+    set(fields, field('alertCoalescedAt', 'Czas wygaszenia krótkiego powiadomienia', iso(alerts[0]?.coalesced_at)));
 
     const researchRow = research.find(row => row.instrument_id === item.id);
     set(fields, field('researchSnapshotId', 'Ostatni zapis badań', string(researchRow?.snapshot_id), 'identifier'));

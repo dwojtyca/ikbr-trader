@@ -58,6 +58,7 @@ const explanations: Array<[string[], string, string, string]> = [
   [['COMPLETED'], 'Zapisany etap cyklu został zakończony.', 'Kompletność rozliczenia i bieżący stan brokera są osobnymi dowodami.', 'Sprawdź wynik ewaluatora, brakujące prowizje i outstanding orders.'],
   [['FAULT_RESOLVED','HOLD_RESOLVED'], 'Zapisano rozwiązanie epizodu błędu.', 'Nie jest to ogólne potwierdzenie gotowości całego konta.', 'Sprawdź pozostałe blokady i aktualne źródła.'],
   [['PROTECTION_GAP','PROTECTION_UNKNOWN','ORPHAN_OWNERSHIP','FOREIGN_ORDER_CONFLICT'], 'Ochrona lub przypisanie pozycji wymagają reakcji.', 'Nie można uznać zarządzania pozycją za potwierdzone.', 'Sprawdź nadzór PP5 i brokera; nie kasuj holdów ani nie sprzedawaj ponownie.'],
+  [['COALESCED'], 'Krótkotrwały epizod ustąpił przed wysłaniem powiadomienia.', 'Nie wysłano alertu; historia epizodu pozostaje zapisana.', 'Sprawdź bieżący stan i pozostałe blokady.'],
   [['DELIVERED'], 'Dostawca potwierdził przyjęcie alertu.', 'Nie oznacza to przeczytania ani rozwiązania incydentu.', 'Sprawdź stan epizodu i potrzebną reakcję.'],
   [['FAILED','DISABLED'], 'Dany etap jest niedostępny lub wyłączony.', 'Wymagana funkcja nie jest potwierdzona.', 'Sprawdź usługę i zapisany powód.'],
   [['CONFIGURED_EVALUATION'], 'Zapisano ocenę przypisanej strategii.', 'Ocena nie jest uprawnieniem do wysłania zlecenia.', 'Sprawdź wynik oceny i wszystkie blokady wejścia.'],

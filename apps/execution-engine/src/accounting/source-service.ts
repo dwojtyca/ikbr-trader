@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { performance } from 'node:perf_hooks';
+import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
 import type { Pool, PoolClient } from "pg";
 import type { BrokerExecutionFill, BrokerCommissionReport, BrokerOrderStatusUpdate } from "../tws-execution-client.js";
 import type { BrokerReconciliationSnapshot } from "../reconciliation/broker-adapter.js";
@@ -23,9 +25,12 @@ export class AccountingSourceService {
   private valueObservations = new Map<string, string>();
   private connectionObservations = new Map<string, string>();
   private latest: AccountingCaptureReference | undefined;
+  private diagnosticRunId: number | undefined;
   constructor(readonly store: AccountingSourceStore, readonly settings: SourceSettingsV1, readonly settingsHash: string,
-    private readonly executionIdentity: () => ExecutionSourceIdentity, socketFactory?: () => AccountingSocket) {
-    this.collector = new AccountingSourceCollector(settings, { observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory);
+    private readonly executionIdentity: () => ExecutionSourceIdentity, socketFactory?: () => AccountingSocket,
+    private readonly diagnostics?: BrokerPhaseDiagnostics) {
+    this.collector = new AccountingSourceCollector(settings, { observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory,
+      diagnostics && { ...diagnostics, emit: event => diagnostics.emit({ ...event, ...(this.diagnosticRunId === undefined ? {} : { runId: this.diagnosticRunId }) }) });
   }
   async initialize(): Promise<void> {
     this.control = await this.store.begin(this.settings.accountId, this.settingsHash);
@@ -47,7 +52,11 @@ export class AccountingSourceService {
       return;
     }
     this.pending++;
-    this.queue = this.queue.then(job).catch(() => { this.failed = true; this.gap = true; }).finally(() => { this.pending--; });
+    this.queue = this.queue.then(job).catch(error => {
+      if (!this.failed) emitBrokerPhase(this.diagnostics, 'accounting.persistence', 'error', { runId: this.diagnosticRunId,
+        generation: this.collector.identity().generation, reason: 'ACCOUNTING_PERSISTENCE_FAILED' }, undefined, error);
+      this.failed = true; this.gap = true;
+    }).finally(() => { this.pending--; });
   }
   private append(lane: AccountingLane, kind: string, value: unknown, raw?: unknown, requestId?: number, persist?: () => Promise<unknown>, observationId: string = randomUUID()): void {
     if (this.failed) return;
@@ -172,14 +181,27 @@ export class AccountingSourceService {
     const replay = await this.collector.replay(timeoutMs, signal);
     const through = Date.parse(replay.brokerTime), start = paperAccountDayStart(Date.now());
     if (paperAccountDate(through) !== paperAccountDate(Date.now())) throw accountingError("EVIDENCE_STALE");
-    while (true) {
-      await this.drain(); this.assertDrained(allowClockHold); this.assertIdentity();
-      if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())) throw accountingError("SOURCE_GAP");
-      try { this.costs(replay.executionIds, start, through); break; }
-      catch (error) {
-        if (!(error instanceof Error) || !["ACCOUNTING_FEE_PENDING", "ACCOUNTING_VALUE_UNSET"].includes(error.message) || Date.now() >= deadline || signal.aborted) throw error;
-        await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
+    const metadata = { runId: this.diagnosticRunId, generation: replay.generation, requestId: replay.requestId };
+    let phase: 'accounting.drain' | 'accounting.cost_wait' = 'accounting.drain', drainMs = 0;
+    const costsStarted = performance.now();
+    try {
+      while (true) {
+        phase = 'accounting.drain'; const drainStarted = performance.now();
+        try { await this.drain(); this.assertDrained(allowClockHold); this.assertIdentity(); }
+        finally { drainMs += performance.now() - drainStarted; }
+        if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())) throw accountingError("SOURCE_GAP");
+        phase = 'accounting.cost_wait';
+        try { this.costs(replay.executionIds, start, through); break; }
+        catch (error) {
+          if (!(error instanceof Error) || !["ACCOUNTING_FEE_PENDING", "ACCOUNTING_VALUE_UNSET"].includes(error.message) || Date.now() >= deadline || signal.aborted) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
+        }
       }
+      emitBrokerPhase(this.diagnostics, 'accounting.drain', 'ok', metadata, drainMs);
+      emitBrokerPhase(this.diagnostics, 'accounting.cost_wait', 'ok', metadata, Math.max(0, performance.now() - costsStarted - drainMs));
+    } catch (error) {
+      emitBrokerPhase(this.diagnostics, phase, 'error', metadata, phase === 'accounting.drain' ? drainMs : Math.max(0, performance.now() - costsStarted - drainMs), error);
+      throw error;
     }
     const inspection: SourceInspection = { id: randomUUID(), sourceId: this.store.sourceId, processSessionId: this.store.sessionId,
       connectionGeneration: replay.generation, protocolVersion: this.collector.identity().protocolVersion, accounts: this.collector.identity().accounts,
@@ -192,7 +214,7 @@ export class AccountingSourceService {
       }) ? "OBSERVED" : "NOT_OBSERVED" };
     if (!inspection.replayEndId) throw accountingError("REPLAY_INCOMPLETE");
     this.append("accounting", "inspection", inspection, undefined, undefined, undefined, inspection.id);
-    await this.drain();
+    await brokerPhase(this.diagnostics, 'accounting.inspection_persistence', metadata, () => this.drain());
     return inspection;
   }
   async inspect(timeoutMs = 9000, signal = new AbortController().signal): Promise<SourceInspection> {
@@ -277,6 +299,7 @@ export class AccountingSourceService {
   }
   async join(snapshot: BrokerReconciliationSnapshot, input: { runId: number; positionGeneration: number; recoveryStart: Date; timeoutMs: number; abortSignal: AbortSignal }): Promise<BrokerReconciliationSnapshot> {
     if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
+    this.diagnosticRunId = input.runId;
     try {
       const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal);
       await this.drain(); this.assertDrained(); this.assertIdentity(); this.assertQualified();
@@ -296,17 +319,17 @@ export class AccountingSourceService {
           .filter((id): id is string => id !== undefined), replayId: inspection.replayId, replayEndId: inspection.replayEndId };
       capture.fingerprint = accountingHash({ ...capture, fingerprint: undefined });
       const epoch = this.gapEpoch;
-      await this.store.publish(capture, () => {
+      await brokerPhase(this.diagnostics, 'accounting.publication', { runId: input.runId, requestId: inspection.replayId, generation: inspection.connectionGeneration }, () => this.store.publish(capture, () => {
         this.assertDrained(); this.assertIdentity(); this.assertQualified();
         if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("REVISION_CHANGED");
-      });
+      }));
       this.gap = false; this.latest = capture;
       this.assertCurrent(capture);
       const accounting = accountingReference(capture);
       return { ...snapshot, accounting, capturedAt: new Date(capture.capturedAt), executions: fullExecutions.map(e => ({ ...e, executedAt: new Date(e.executedAt) })),
         sourceCoverage: { ...snapshot.sourceCoverage, executions: { ...snapshot.sourceCoverage.executions, count: fullExecutions.length,
           window: { ...snapshot.sourceCoverage.executions.window, certifiedFrom: capture.certifiedFrom, from: input.recoveryStart.toISOString(), to: capture.coveredThrough } } } };
-    } finally { this.busy = false; }
+    } finally { this.diagnosticRunId = undefined; this.busy = false; }
   }
   async readCapture(db: Pick<Pool | PoolClient, "query">, reference: AccountingCaptureReference, lock = false): Promise<AccountingCapture> {
     this.assertCurrent(reference);

@@ -11,6 +11,7 @@ export interface LifecycleFaultInput {
   proposalId: number | null;
   code: LifecycleFaultCode;
   evidence: Record<string, unknown>;
+  notification?: "FLAT_WATCHDOG_V1";
 }
 
 export interface LifecycleFaultSink {

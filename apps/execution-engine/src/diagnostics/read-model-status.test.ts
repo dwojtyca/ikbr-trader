@@ -251,3 +251,19 @@ test('news status retains own code and original HTTP provider details separately
   assert.equal(value(output,`${prefix}:reason`),'RESEARCH_SOURCE_HTTP_429');assert.match(String(value(output,`${prefix}:sourceError`)),/rate_limit/);assert.doesNotMatch(String(value(output,`${prefix}:sourceError`)),/DU1234567/);
   assert.equal(value(output,'researchCoverage'),'INELIGIBLE_AT_REPORT_TIME');
 });
+
+
+test('coalesced notification remains distinguishable from provider delivery in stored status', async () => {
+  const original=deps(), output=report();
+  await appendDiagnosticStatus(deps({pool:{query:async(sql:string,params:unknown[])=>
+    sql.includes('FROM lifecycle_alert_outbox') ? {rows:[{status:'COALESCED',delivered_at:null,
+      notification_policy:'FLAT_WATCHDOG_V1',notification_deadline:now,checkpoint_run_id:42,coalesced_at:now}]} :
+      original.pool.query(sql,params)} as DiagnosticReadModelDeps['pool']}),query,output);
+  assert.equal(value(output,'alertDeliveryStatus'),'COALESCED');
+  assert.equal(value(output,'alertDeliveryAt'),null);
+  assert.equal(value(output,'alertNotificationPolicy'),'FLAT_WATCHDOG_V1');
+  assert.equal(value(output,'alertNotificationDeadline'),now);
+  assert.equal(value(output,'alertCoalescedAt'),now);
+  assert.equal(value(output,'alertCheckpointRunId'),'42');
+  assert.equal(output.sections[0]?.fields.find(f=>f.key==='alertCheckpointRunId')?.sensitivity,'identifier');
+});
