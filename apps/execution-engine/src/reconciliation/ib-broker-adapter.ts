@@ -94,7 +94,7 @@ export class IbBrokerReconciliationAdapter
         timeoutMs: req.sourceTimeoutMs,
         abortSignal: req.abortSignal,
       })).then(result => ({ ...result, completedAt: new Date() })),
-      phase('completedOrders',()=>this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal })),
+      phase('completedOrders',()=>this.completed.load({ accountId: req.accountId, timeoutMs: req.sourceTimeoutMs, abortSignal: req.abortSignal, runId: req.reconciliationRunId })),
     ]);
 
     const finalSession = await phase('sessionAfter',()=>captureSession(this.tws, {

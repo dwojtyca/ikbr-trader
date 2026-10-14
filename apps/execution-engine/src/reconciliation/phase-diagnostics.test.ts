@@ -57,3 +57,14 @@ test('diagnostics emit canonical PostgreSQL run IDs as safe numbers and omit inv
     assert.equal(events.at(-1)?.requestId, 0); assert.equal(events.at(-1)?.generation, 0);
   }
 });
+test('local capture correlation accepts only positive safe integers and remains distinct from broker request identity', () => {
+  const events: BrokerPhaseEvent[] = [], diagnostics = { emit: (event: BrokerPhaseEvent) => events.push(event) };
+  for (const captureId of [1, Number.MAX_SAFE_INTEGER]) {
+    emitBrokerPhase(diagnostics, 'completed.enqueue', 'milestone', { captureId, runId: '42' });
+    assert.equal(events.at(-1)?.captureId, captureId); assert.equal(events.at(-1)?.requestId, undefined);
+  }
+  for (const captureId of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '1', null, undefined]) {
+    emitBrokerPhase(diagnostics, 'completed.enqueue', 'milestone', { captureId: captureId as number });
+    assert.equal(Object.hasOwn(events.at(-1)!, 'captureId'), false);
+  }
+});

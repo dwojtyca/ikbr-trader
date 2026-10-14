@@ -391,3 +391,92 @@ follow-up commit and verify CI for that exact commit. The report must distinguis
 postdeployment observation must demonstrate at least one actual periodic skip with
 a safe run ID and preserved current account/observer/accounting health. Fast runs
 or an absence of alerts alone do not satisfy that final acceptance requirement.
+
+### Completed-order timeout localization amendment
+
+Status: ACCEPTED by independent critical plan reviewer `stale_alert_plan_review`
+(Astra/high), including socket-factory rejection and shutdown-fenced fixtures.
+The lead reports `798ff70`
+CI and deployment at 12:05 UTC, six verified periodic reuse skips, and two subsequent
+approximately eight-second completed-order source timeouts with BROKER_STATE_STALE
+and SUPERVISOR_FAILURE. Accounting clock phases were fast in those episodes. The
+existing adapter phase identifies the source but cannot distinguish its internal
+waits. Thus periodic reuse is demonstrated; stale-alert runtime acceptance is still
+open. The separate Marketaux article-coverage blocker is outside this amendment,
+and entry remains paused under the lead's existing operating decision.
+
+Source: CompletedOrdersClient serializes load calls, includes queue wait in the
+original deadline, creates a fresh socket, waits for nextValidId and managed-account
+validation, calls reqCompletedOrders(false), waits for completedOrdersEnd, then waits
+for confirmed disconnect before settling. Shutdown uncertainty fences subsequent
+loads. Installed @stoqey/ib 1.6.10 encodes the request with message ID 99 and decodes
+completedOrdersEnd from message ID 102. None of these facts identifies the observed
+timeout's internal stage; broker pacing or reconnect delay must not be asserted
+without evidence.
+
+Add bounded, optional internal diagnostics using the existing phase emitter and
+configured privacy closure. Correlate with the safe reconciliation run ID when
+available and a positive, local capture identifier for individual queued loads;
+the latter is not a broker request ID. Record monotonic elapsed timings/milestones
+for enqueue, dequeue/queue wait, connect call, validated nextValidId, managed-account
+request/validated response, completed-order request call, allowlisted public SDK
+`sent` with first token 99, optional first socket ingress (metadata only), first
+validated decoded completed-order row (at most one milestone), decoded end,
+disconnect request, confirmed disconnect and terminal settlement. Observe only the
+first message-type token of `sent`; never scan received tokens for 102, since data
+fields or fragments are not necessarily a decoded message boundary. Never emit
+payloads, account lists,
+order/execution records, host information or raw socket frames. A `sent` event is a
+local socket-write attempt, not broker acknowledgement. A first-ingress milestone
+is not a decoded message, completion or source coverage. Only the existing semantic
+completedOrdersEnd callback establishes the observed end milestone. Missing SDK milestones stay unknown.
+Do not log per completed-order row or introduce unbounded per-request trace storage.
+
+Every failed load must identify the last reached stage and elapsed queue/read/shutdown
+time, including rejection before a socket is created. Derive a stable waiting-stage reason from existing readiness/request/completion
+flags and diagnostic-only milestone flags. Distinguish waiting for queue, nextValidId,
+managed accounts, local request write, first completed-order response versus end, and disconnect
+confirmation; if a write observation is unavailable, name that uncertainty rather
+than infer delivery. Keep both the initial failure and any later shutdown failure
+visible in separate bounded events so disconnect-result replacement cannot erase
+the originating timeout. For thrown connect/request/callback/disconnect errors and
+fatal SDK errors, preserve the actual sanitized original name, code and message;
+retain numeric SDK codes when supplied separately. Never fabricate original details
+for a timeout, abort, disconnect or internal validation result. Informational SDK
+codes remain informational. Diagnostics exceptions must never escape or alter the
+source result, and all new listeners must follow the existing capture cleanup and
+late-event isolation rules.
+
+This is instrumentation only: no changes to queue serialization, queue/deadline
+semantics, eight-second source budget, shutdown timeout/fence, request ordering or
+count, fresh-socket behavior, account/record validation, completed-end requirement,
+returned source results, coverage classification, accounting, notification policy,
+watchdog threshold, retries, caching or entry guards. A behavior fix requires observed
+stage evidence and another bounded plan amendment/review. No broker stress test or
+extra operational request is authorized by this document.
+
+Ownership: `stale_clock_readonly` implements CompletedOrdersClient diagnostics and
+focused tests (Astra/high), with minimal optional request correlation/adapter/index
+wiring and existing diagnostic metadata changes if necessary. This author owns the
+plan only; the lead assigns disjoint wiring ownership, integrates checks/report and
+performs authorized observation. A different independent Astra/high implementation
+reviewer must accept the final diff. Preserve unrelated work and all existing tests.
+
+Acceptance fixtures cover queue expiry and queued abort without socket creation;
+socket-factory rejection and connect throw; missing nextValidId; missing/mismatched managed accounts; request throw;
+request call with no observed write; observed write with no end; socket ingress without
+decoded end; successful end/confirmed disconnect; unexpected disconnect; shutdown
+throw/timeout after an original failure; informational versus fatal SDK errors; and
+late events after settlement and subsequent shutdown-fenced loads. Preserve an
+existing promise rejection as rejection rather than converting it to a source
+result. Assert exact stage/correlation and finite nonnegative
+elapsed values, original sanitized causes, configured secret/account redaction, no
+payload leakage, bounded event count, unchanged results/request counts and listener
+cleanup. Re-run completed-order unit/integration, adapter and diagnostics suites,
+then required repository lint/typecheck/unit/integration/build and clean Docker build.
+Record independent acceptance, follow-up commit and exact CI/deployment evidence.
+Authorized runtime observation must localize the next naturally occurring completed-
+order timeout to its observed stage and preserve current health/alert evidence. If
+no failure recurs during the stated observation window, report that limitation;
+absence of alerts alone does not prove the underlying timeout fixed or close this
+ongoing recovery task.

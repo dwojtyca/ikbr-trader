@@ -4,6 +4,7 @@ import { canonicalRunId } from './run-id.js';
 
 export interface BrokerPhaseMetadata {
   runId?: number | string;
+  captureId?: number;
   requestId?: number;
   generation?: number;
   caller?: 'periodic' | 'explicit' | 'fresh';
@@ -39,6 +40,7 @@ export function emitBrokerPhase(diagnostics: BrokerPhaseDiagnostics | undefined,
       cause: error === undefined ? null : { name: safe(cause?.name), code: safe(cause?.code), message: safe(cause?.message) } };
     const runId = canonicalRunId(metadata.runId);
     if (runId !== null) event.runId = runId;
+    if (Number.isSafeInteger(metadata.captureId) && metadata.captureId! > 0) event.captureId = metadata.captureId;
     for (const key of ['requestId', 'generation'] as const) {
       if (Number.isSafeInteger(metadata[key]) && metadata[key]! >= 0) event[key] = metadata[key];
     }

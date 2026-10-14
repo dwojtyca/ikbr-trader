@@ -178,3 +178,136 @@ scheduler tests inside the image passed with networking disabled. Final packagin
 adds only this report. The follow-up commit must match the isolated source context;
 exact-commit CI and observed periodic reuse are required release receipts after
 this source freeze. No further implementation review findings or repairs occurred.
+
+## Follow-up deployment and remaining completed-order incidents
+
+Commit `798ff702e92162ba4c176181ca9a36907166357b` passed
+[exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/38559837416).
+All 986 committed source files matched its image context. Four service images were
+verified after deployment at 12:05 UTC. Six actual `recent_complete_capture` skips
+with numeric run IDs were observed by 12:11 UTC, confirming the PostgreSQL fix.
+However, two completed-orders timeouts recurred; each caused incomplete ordinary
+coverage and downstream `ACCOUNTING_REPLAY_INCOMPLETE`, then recovered. These
+unqualified incidents correctly remained deliverable. Periodic reuse therefore
+works but does not establish resolution of all stale-alert causes.
+
+Read-only source/cadence review found a fresh completed-orders socket on every
+capture and one deadline spanning queue, connection, identity handshake and replay.
+The current phase log cannot identify which internal wait failed. Connection churn
+is observed, but its causal role is unproved. A separate accepted diagnostic
+amendment is required before drawing a behavior-change conclusion; no coverage,
+clock, timeout, cache or safety relaxation is justified by these observations.
+
+Normal `pnpm start` after this deployment was independently blocked by
+`RESEARCH_MARKETAUX_RESULT_LIMIT` for AAPL. Its existing private research configuration
+allows 30 articles (3 per page, 10 pages) in the fixed 24-hour window; the response
+exceeded that bound. Entries remain paused (revision 37 at 12:11 UTC), while broker
+reconciliation was fresh CLEAN, observer healthy and positions/orders zero. This
+is not described as successful trading activation. No research/AI gate was bypassed.
+Private operational receipts are retained with the deployment backup.
+
+The owner confirmed the free Marketaux entitlement (100 requests/day, 3 articles
+per response); no paid upgrade is assumed or requested as a prerequisite without
+evidence. A separate read-only code review is examining polling and pagination
+efficiency. At 12:23 UTC entry pause revision 37 remained active, reconciliation
+was fresh CLEAN, the observer healthy, and positions/orders zero. The subsequent
+ten-minute phase summary showed 118 successful completed-order captures and one
+8.005-second timeout, with ten actual periodic reuse skips. Clock responses remained
+fast; this further supports localizing completed-order waits rather than changing
+clock or safety thresholds.
+
+## Completed-order timeout diagnostics follow-up
+
+The accepted localization amendment adds optional bounded per-capture milestones
+for queue wait, handshake, account validation, request call/local write attempt,
+first decoded row, semantic end and confirmed shutdown. Initial read failures
+and subsequent cleanup failures remain separate, with sanitized original SDK
+name/code/message (including a string message with a separately supplied code).
+The local capture ID is distinct from a broker request ID; the existing adapter
+forwards the reconciliation run ID. No request/deadline/coverage, result, queue,
+retry, cache, notification or trading policy changes are intended.
+
+Plan author, independent plan reviewer and implementation worker were the existing
+Astra/high agents; requested/actual route is inherited Astra/high, with backend
+model telemetry unavailable. The lead identified one original-string-message gap
+during implementation; it was repaired with a privacy regression before source
+freeze. Worker focused validation passed 79/79 tests, scoped ESLint and execution
+typecheck. An independent ephemeral Astra/high CLI reviewer and the full repository
+checks are now running. Runtime stage evidence, clean image, publication, exact CI
+and deployment remain outstanding; this instrumentation is not a timeout fix.
+Available worker token usage and exact elapsed task time are unavailable.
+
+The first independent CLI diagnostics review rejected two reproduced issues:
+terminal diagnostics could reenter an unprotected finish transition, and missing
+write telemetry could obscure a later validated-row stage. Both were repaired:
+terminal state/abort cleanup precede terminal callbacks, and a decoded row takes
+precedence while missing local write telemetry remains a separate bounded event.
+Nine new regressions cover these cases; 88 focused tests, scoped lint/typecheck
+and diff checks passed. The first reviewer also independently passed 79 tests;
+its token counter was `65.234` (verbatim). One formal implementation repair round
+so far; a fresh independent review and full final suites are running. The previous
+full lint/typecheck/unit pass preceded this repair; its integration run was
+intentionally stopped and is not counted as a completed validation.
+
+Separate read-only Marketaux checks confirmed on-demand mode enabled and 47 local
+reservations today, all HTTP calls recorded successful. A successful HTTP response
+can still fail our local result-capacity validation. No observed article count was
+retained by the older negative snapshot, so neither a specific increased cap nor a
+paid upgrade is justified yet. A separately reviewed plan covers retaining that
+numeric local-failure evidence without changing provider calls, budgets or eligibility.
+
+The second independent diagnostics review rejected an active-stage reentrancy gap:
+a diagnostic callback could abort/throw, finish cleanup, then the caller could
+continue into connect or a request. Its 88 focused tests passed, but independent
+hostile fixtures reproduced the gap. Token counter: `65.698` (verbatim). This
+version was not deployed. A second repair round covers every active callback
+boundary and subsequent queued loads. The second full validation again passed
+lint/typecheck/unit before integration was intentionally interrupted for the repair.
+Final validation must run on the accepted repaired source.
+
+The second production repair added active-stage terminal checks and twenty emit/
+privacy abort-and-throw regressions, including safe subsequent queued loads. The
+worker passed 108 focused tests. Third independent review confirmed both production
+repairs and passed fourteen additional terminal hostile cases, with no new
+production blocker. It rejected one flaky privacy assertion: matching digits 987
+across serialized durationMs falsely identified a broker ID. A test-only repair
+retains structural field/scalar and payload checks while validating durations
+separately; production timing is unchanged. Third review counter: `60.844`
+(verbatim). This is a third formal repair round, limited to that test.
+
+Fourth independent review **ACCEPTED** the final test repair, verified all scoped
+production diffs unchanged from the preceding review, and passed 111 focused
+offline tests plus ten intentional invalid privacy/duration mutations. Requested
+Astra/high was confirmed by its CLI launch header; backend telemetry unavailable.
+Token counter: `50.658` (verbatim). Full final integration/build and clean image
+validation remain outstanding at this record point.
+
+Final unit validation passed: 3705 tests, 3482 passed, 223 skipped, zero failures;
+lint and typecheck passed. The first completed integration attempt failed one
+existing Marketaux partial-budget provenance fixture (UNAVAILABLE vs VERIFIED),
+outside changed source. That exact isolated PostgreSQL file then passed 27/27
+without source changes; full integration/build are being repeated and the first
+failure is retained in a private validation log. It is not counted as a pass.
+
+Operational research review found no supported one-shot refresh for the current
+RESULT_LIMIT HOLD. The validated runtime profile requires on-demand mode; toggling
+scheduled mode would fail its configuration guard. Raising article caps creates a
+new research manifest requiring disabled-write adoption and fresh whole-manifest
+research, not a bounded single diagnostic retry. Neither operation was performed.
+The configured pooled bot budget is 90/day, below the provider entitlement of 100;
+47 local reservations leaves 43 locally, without proving external quota.
+
+Final unchanged-source integration rerun passed: 2820/2820, zero skipped or
+failed, on isolated PostgreSQL. Full build passed. Together with the recorded
+3705-unit total (3482 passed, 223 skipped), lint/typecheck, all required repository
+checks are now green. The unrelated first-run provenance failure remains disclosed
+above. Independent documentation review accepted the exact eight-file scope,
+all local links and status/repair claims; Marketaux proposal/plan and unrelated
+backtest/signal changes are excluded. A clean scoped Docker build is running.
+
+Clean scoped Docker build (`--no-cache`) passed, followed by the focused completed-
+order, phase diagnostics and production adapter suites inside that image with
+networking disabled. Final packaging adds the measured report only. This package
+is accepted for publication; exact-commit CI, deployment and naturally observed
+internal timeout stage remain required release receipts after source freeze.
+Nothing in these offline checks proves the runtime timeout has been fixed.

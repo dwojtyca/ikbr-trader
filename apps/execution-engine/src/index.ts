@@ -371,7 +371,7 @@ if (loadedAccounting) accountingSource = new AccountingSourceService(
 // client the write path uses. Fake adapter is test-only.
 const reconBrokerAdapter = new IbBrokerReconciliationAdapter(tws, new CompletedOrdersClient({
   host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT, clientId: config.IB_COMPLETED_ORDERS_CLIENT_ID,
-}), accountingSource, { diagnostics:brokerDiagnostics,
+}, { diagnostics:brokerDiagnostics }), accountingSource, { diagnostics:brokerDiagnostics,
   checkpoint:(snapshot,request,startedAt,sources)=>notificationCheckpoint.publish(snapshot,request,startedAt,sources),
 });
 const reconRunner = new ReconciliationRunner(
