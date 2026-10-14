@@ -24,11 +24,11 @@ function fixture() {
     state.afterQuery();
     return { rows: state.row ? [state.row] : [] };
   } } as unknown as Pick<Pool, 'query'>;
-  const proof = () => readPeriodicProof({ db, currentIdentity: () => state.identity,
+  const proof = (...requested: [] | [unknown]) => readPeriodicProof({ db, currentIdentity: () => state.identity,
     accounting: () => state.accountingAvailable ? { assertCurrent: actual => {
       state.accountingChecks++; assert.equal(actual, reference);
       if (state.accountingGap) throw new Error('ACCOUNTING_SOURCE_GAP');
-    } } : undefined }, context, 42);
+    } } : undefined }, context, requested.length === 0 ? 42 : requested[0]);
   return { state, snapshot, proof, now };
 }
 test('production periodic proof checks the latest account run and current accounting reference without rejuvenating acquisition time', async () => {
@@ -67,4 +67,25 @@ for (const [name, disqualify] of Object.entries(disqualifications)) test(`produc
 test('production periodic proof retains the existing inclusive five-second acquisition bound', async () => {
   const f = fixture(); f.snapshot.originalAcquisitionStartedAt = new Date(f.now - 5000).toISOString();
   assert.deepEqual(await f.proof(), { generation: 3, acquiredAt: f.now - 5000 });
+});
+test('periodic proof normalizes both canonical run IDs and preserves positive numeric callers', async () => {
+  const f = fixture();
+  for (const id of [42, '42', Number.MAX_SAFE_INTEGER, String(Number.MAX_SAFE_INTEGER)]) {
+    f.state.row!.id = typeof id === 'number' ? String(id) : Number(id);
+    assert.deepEqual(await f.proof(id), { generation: 3, acquiredAt: f.now - 1000 });
+  }
+  f.state.row!.id = '43'; assert.equal(await f.proof('42'), null);
+});
+test('periodic proof rejects invalid IDs on either boundary before accepting proof', async () => {
+  const invalid: unknown[] = [0, -0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1,
+    '0', '-1', '+42', '042', ' 42', '42 ', '42\n', '4.2e1', '42.0', '', 'no-id', '9007199254740992', '9223372036854775807',
+    true, false, null, undefined, {}, ['42'], 42n];
+  for (const [index, value] of invalid.entries()) {
+    const caller = fixture();
+    assert.equal(await caller.proof(value), null, `caller case ${index}`);
+    assert.equal(caller.state.accountingChecks, 0);
+    const latest = fixture(); latest.state.row!.id = value;
+    assert.equal(await latest.proof('42'), null, `latest row case ${index}`);
+    assert.equal(latest.state.accountingChecks, 0);
+  }
 });

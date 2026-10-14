@@ -338,3 +338,56 @@ positive identical-value case and independent quantity, price, contract, securit
 type, currency, side, time, identity, duplicate and unknown-execution contradictions.
 This is an additional notification-only veto; terminal validation, safety thresholds,
 accounting authority and broker requests remain unchanged.
+
+### Postdeployment amendment — canonical PostgreSQL run IDs
+
+Status: ACCEPTED by independent critical plan reviewer `stale_alert_plan_review`
+(Astra/high), with the actual PostgreSQL regression clarification below. The lead reports deployment
+and successful CI for `c293b7f`, with fast reconciliation and no stale-alert recurrence,
+but no observed periodic capture skips. Source inspection identifies a concrete
+representation mismatch: `reconciliation/repository.ts` returns the raw BIGSERIAL
+`id` from `pg` under a TypeScript number annotation. At runtime this can be a decimal
+string. `readPeriodicProof` currently compares `Number(row.id)` with the unnormalized
+caller ID, denying that otherwise eligible proof. The diagnostic emitter likewise
+omits a string run ID because `Number.isSafeInteger` rejects it. These findings do
+not establish the original broker timeout cause or complete operational acceptance.
+
+Normalize run IDs only at the new periodic-proof and diagnostic-emission boundaries.
+Accept a number only when it is a positive safe integer. Accept a string only when
+it is canonical positive decimal text (`^[1-9][0-9]*$`), converts to a positive safe
+integer and round-trips to exactly the same decimal text. Reject zero, negatives,
+fractions, NaN/infinity, whitespace, signs, leading zeros, exponent/decimal notation,
+empty or nonnumeric text, other types, and values above Number.MAX_SAFE_INTEGER.
+Normalize both the requested ID and returned latest-run ID before comparing them;
+invalid or unequal IDs return no periodic proof. This does not change any existing
+account/session/generation, CLEAN/complete capture, accounting, hold, acquisition-age,
+monotonic scheduler-age or explicit/fresh capture condition. Diagnostic run IDs use
+the same conversion, emit only a numeric safe integer, and omit invalid input.
+Request IDs, generations, sanitized original causes and privacy filtering retain
+their existing contracts. Do not alter repository ID behavior globally, install a
+PostgreSQL type parser, broaden numeric coercion, or change persistent schemas.
+
+Ownership: `stale_clock_readonly` implements the boundary normalization and focused
+tests under this accepted contract (requested/actual Astra/high); the lead integrates,
+records release evidence and performs authorized deployment verification. This
+amendment author edits only this plan. A different independent Astra/high reviewer
+must accept implementation before publication. Permitted source is periodic-proof,
+phase-diagnostics and a small shared run-ID validator if needed, plus their tests;
+no scheduler safety-policy rewrite or lifecycle/notification-policy change.
+
+Acceptance requires the actual production periodic-proof predicate to accept a
+canonical PostgreSQL string caller ID with the matching database ID, and preserve
+positive numeric input. An isolated PostgreSQL regression must obtain an actual
+`pg` BIGINT/BIGSERIAL string and feed that value through the actual
+`readPeriodicProof` predicate with otherwise valid evidence; a mock string or
+TypeScript cast alone does not satisfy this runtime-boundary acceptance. Mismatched IDs and every invalid/oversized/noncanonical
+category must deny proof. A diagnostic fixture must show the same canonical string
+emitted as a safe numeric run ID, invalid values omitted, and existing configured
+secret/account redaction unchanged. Retain all existing periodic freshness/failure
+and explicit/fresh tests. Run focused regressions, required repository lint,
+typecheck, unit/integration suites, build and clean Docker build; publish the reviewed
+follow-up commit and verify CI for that exact commit. The report must distinguish
+`c293b7f` deployment from the follow-up commit/CI/deployment evidence. Authorized
+postdeployment observation must demonstrate at least one actual periodic skip with
+a safe run ID and preserved current account/observer/accounting health. Fast runs
+or an absence of alerts alone do not satisfy that final acceptance requirement.

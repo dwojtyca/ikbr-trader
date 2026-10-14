@@ -1,14 +1,16 @@
 import { performance } from 'node:perf_hooks';
 import { safeDiagnosticText, type DiagnosticPrivacy } from '@ikbr/shared/diagnostics';
+import { canonicalRunId } from './run-id.js';
 
 export interface BrokerPhaseMetadata {
-  runId?: number;
+  runId?: number | string;
   requestId?: number;
   generation?: number;
   caller?: 'periodic' | 'explicit' | 'fresh';
   reason?: string;
 }
-export interface BrokerPhaseEvent extends BrokerPhaseMetadata {
+export interface BrokerPhaseEvent extends Omit<BrokerPhaseMetadata, 'runId'> {
+  runId?: number;
   phase: string;
   outcome: 'ok' | 'error' | 'milestone' | 'skipped';
   durationMs: number | null;
@@ -35,7 +37,9 @@ export function emitBrokerPhase(diagnostics: BrokerPhaseDiagnostics | undefined,
     const event: BrokerPhaseEvent = { phase: safeDiagnosticText(phase, privacy), outcome,
       durationMs: durationMs !== undefined && Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : null,
       cause: error === undefined ? null : { name: safe(cause?.name), code: safe(cause?.code), message: safe(cause?.message) } };
-    for (const key of ['runId', 'requestId', 'generation'] as const) {
+    const runId = canonicalRunId(metadata.runId);
+    if (runId !== null) event.runId = runId;
+    for (const key of ['requestId', 'generation'] as const) {
       if (Number.isSafeInteger(metadata[key]) && metadata[key]! >= 0) event[key] = metadata[key];
     }
     if (metadata.caller && ['periodic', 'explicit', 'fresh'].includes(metadata.caller)) event.caller = metadata.caller;

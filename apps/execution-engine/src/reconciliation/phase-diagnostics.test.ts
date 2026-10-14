@@ -42,3 +42,18 @@ test('production privacy collects configured alert secrets and all account scope
   assert.doesNotMatch(events[0].cause!.message!, /chat_id=/);
   assert.deepEqual(brokerDiagnosticPrivacy({}, config, null).accountIds, ['PAPER-PRIVATE', 'LIVE-PRIVATE']);
 });
+test('diagnostics emit canonical PostgreSQL run IDs as safe numbers and omit invalid IDs without changing other counters', () => {
+  const events: BrokerPhaseEvent[] = [], diagnostics = { emit: (event: BrokerPhaseEvent) => events.push(event) };
+  for (const value of [42, '42', Number.MAX_SAFE_INTEGER, String(Number.MAX_SAFE_INTEGER)]) {
+    emitBrokerPhase(diagnostics, 'scheduler.capture', 'ok', { runId: value, requestId: 0, generation: 0 });
+    assert.equal(events.at(-1)?.runId, Number(value));
+    assert.equal(events.at(-1)?.requestId, 0); assert.equal(events.at(-1)?.generation, 0);
+  }
+  for (const value of [0, -0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1,
+    '0', '-1', '+42', '042', ' 42', '42 ', '42\n', '4.2e1', '42.0', '', 'no-id', '9007199254740992', '9223372036854775807',
+    true, false, null, undefined, {}, ['42'], 42n]) {
+    emitBrokerPhase(diagnostics, 'scheduler.capture', 'ok', { runId: value as number, requestId: 0, generation: 0 });
+    assert.equal(Object.hasOwn(events.at(-1)!, 'runId'), false);
+    assert.equal(events.at(-1)?.requestId, 0); assert.equal(events.at(-1)?.generation, 0);
+  }
+});

@@ -1,7 +1,7 @@
 # Broker stale observation recovery evidence
 
 Date: 2026-10-14. [Accepted plan](BROKER_STALE_ALERT_RECOVERY_PLAN.md).
-Status: implementation and documentation independently accepted; all required
+Initial release source-freeze status: implementation and documentation independently accepted; all required
 local checks and clean Docker build passed. Publication, exact-commit CI and
 operational verification are pending at this source freeze.
 
@@ -126,3 +126,55 @@ Focused tests inside the built image passed with network disabled. Subsequent
 packaging only incorporates this final report; committed source must hash-match
 the clean context before publication. CI and deployment results are release receipts
 after this source freeze, not inferred from the local build.
+
+## First release and operational follow-up
+
+Commit `c293b7fbd56468fda152d5ef23508943749b4716` passed
+[exact-commit CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/38556790070).
+All 984 committed files matched the isolated image source context. The packaged
+image was `sha256:fcbe2d143df16ab6348ca4c8d9f6e6a280a97f7b52b93aa31887afa8c082d120`.
+The deployment paused new entries, confirmed fresh CLEAN state and zero exposure/
+orders, saved a private configuration/database backup, and recreated the services.
+The normal start preparation resumed Paper at 11:39 UTC; all four service image
+identities matched. From 11:38:03 to 11:43:12 UTC there were zero new lifecycle
+faults and no active faults. Initial captures were at most 232 ms; clock responses
+were a few milliseconds. This does not prove the earlier remote clock cause.
+
+Operational acceptance found that periodic deduplication had not activated.
+PostgreSQL BIGSERIAL IDs are strings at runtime despite the repository's number
+annotation. The new proof compared `Number(row.id)` to the unconverted run ID,
+always denying reuse; the diagnostic emitter also omitted that run ID. An offline
+production-predicate reproduction confirmed numeric 42 qualifies and string '42'
+does not for otherwise identical evidence. The follow-up is limited to validated
+run-ID normalization in the new proof/diagnostic boundaries, preserving accounting,
+identity and age predicates. The initial release is operationally healthy but this
+optimization is not accepted until the follow-up passes review, checks, CI and
+runtime verification.
+
+The run-ID amendment was independently accepted by `stale_alert_plan_review`
+(Astra/high). `stale_clock_readonly` implemented six bounded reconciliation files
+(Astra/high): canonical validator, proof and diagnostic boundaries, and their tests.
+All 66 focused unit tests and the actual isolated PostgreSQL BIGSERIAL regression
+passed, as did targeted lint/typecheck. There were no targeted repair attempts in
+this amendment. The separate CLI hostile review accepted the follow-up, with 54 offline tests.
+It did not independently run PostgreSQL/full suites/Docker or verify CI/deployment;
+those checks remain separately required. Full follow-up validation results are recorded below. The operational clock measurements remain observations, not proof of the
+original timeout's cause.
+
+Follow-up independent CLI implementation review: **ACCEPT**, no findings;
+54 focused offline tests passed independently. Requested gpt-6-astra/high is
+confirmed in the launch header; backend telemetry remains unavailable. CLI token
+counter: `51.542` (verbatim). Full follow-up lint, typecheck and unit tests passed:
+3648 total, 3425 passed, 223 skipped, zero failures. Integration/build and clean
+image validation remain pending at this point in the record.
+
+Follow-up full integration passed: 2763 tests, 2763 passed, 0 failures,
+0 skipped on isolated PostgreSQL. Full build passed. The eight-file
+documentation/publication scope was independently accepted after status-label
+clarifications. Clean image/CI/deployment remain outstanding at source freeze.
+
+Follow-up clean Docker build (`--no-cache`) passed; focused proof, diagnostic and
+scheduler tests inside the image passed with networking disabled. Final packaging
+adds only this report. The follow-up commit must match the isolated source context;
+exact-commit CI and observed periodic reuse are required release receipts after
+this source freeze. No further implementation review findings or repairs occurred.
