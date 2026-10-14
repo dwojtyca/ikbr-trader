@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { request } from "node:https";
-import { inspectResearch, parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
+import { marketauxSourceUrl, inspectResearch, parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
 import { ResearchRefreshScheduler, researchSourceSlot } from "./research-refresh.js";
 import { marketauxFixture, marketauxResponse } from "./research-marketaux.testfixture.js";
 import type { ResearchFetchResult } from "./research-fetch.js";
@@ -378,4 +378,34 @@ test('JSON syntax diagnostics preserve error identity without storing payload ex
  await s.make().tick();assert.equal(s.coverage().sourceError?.name,'SyntaxError');
  assert.ok(!JSON.stringify(s.state.snapshots).includes('CONFIDENTIAL EARNINGS TEXT'));
  assert.match(s.coverage().sourceError!.message,/source excerpt omitted/);assert.equal(inspectResearch(s.f.manifest,s.f.policy.instrumentId,s.state.prior,s.state.now).state,'HOLD');
+});
+
+
+test("ordinary first-page capacity failure keeps one charged successful call and a diagnostic HOLD", async () => {
+  const s = setup();
+  Object.assign(s.f.newsConfig, { pageSize: 3, maxPagesPerPass: 10, maxArticles: 30 });
+  s.f.source.urls = [marketauxSourceUrl(s.f.newsConfig)]; s.rehash();
+  s.state.response = request => marketauxResponse([
+    { ...s.f.article(1), title: "synthetic-secret DU_TEST private payload must not persist" }, s.f.article(2), s.f.article(3),
+  ], request.page, 31, 3);
+  const repairs = enableRepairs(s);
+  assert.equal((await repairs.enqueue()).state, "WAITING");
+  await s.make(undefined, undefined, true).tickRepairs();
+  const coverage = s.coverage();
+  assert.equal(s.state.requests.length, 1); assert.equal(s.state.reservations.length, 1);
+  assert.deepEqual(s.state.outcomes, [s.state.reservations[0].callKey + ":SUCCEEDED"]);
+  assert.equal(coverage.status, "ERROR"); assert.equal(coverage.complete, false);
+  assert.equal(coverage.reason, "RESEARCH_MARKETAUX_RESULT_LIMIT");
+  assert.deepEqual(coverage.evidenceRefs, []); assert.equal(coverage.acquisition, undefined);
+  assert.equal(s.state.snapshots[0].news.length, 0);
+  assert.deepEqual(coverage.sourceError, { name: "MarketauxCapacityLimitError", code: null,
+    message: "Local Marketaux capacity validation; providerReportedFound=31; pageSize=3; requiredPages=11; maxPagesPerPass=10; maxArticles=30; pass=1; page=1; exceeded=maxArticles,maxPagesPerPass" });
+  const preparation = await repairs.enqueue();
+  assert.equal(preparation.state, "HOLD"); assert.ok(preparation.reasons.includes("RESEARCH_MARKETAUX_RESULT_LIMIT"));
+  const serialized = JSON.stringify(coverage);
+  for (const privateText of ["synthetic-secret", "DU_TEST", "private payload"]) assert.equal(serialized.includes(privateText), false);
+  s.state.now += 900000;
+  const restarted = s.make(undefined, undefined, true);
+  await Promise.all([restarted.tick(), restarted.tickRepairs()]);
+  assert.equal(s.state.requests.length, 1); assert.equal(s.state.reservations.length, 1);
 });

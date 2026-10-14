@@ -1,4 +1,4 @@
-import { researchHash, safeResearchUrl, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest, type ResearchNewsV2 } from "@ikbr/shared/instrument-research";
+import { ResearchSourceFailure, researchHash, safeResearchUrl, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest, type ResearchNewsV2 } from "@ikbr/shared/instrument-research";
 
 export interface MarketauxNewsRecord { uuid: string; title: string; url: string; publishedAt: string; originalPublishedAt: string; entity: MarketauxEntity; inWindow: boolean; enrichment?: { description: string | null; snippet: string | null; providerSentiment: ResearchNewsV2["providerSentiment"] } }
 export interface MarketauxPage { found: number; returned: number; limit: number; page: number; records: MarketauxNewsRecord[] }
@@ -38,7 +38,22 @@ export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, 
   for (const key of ["found", "returned", "limit", "page"]) if (!Number.isSafeInteger(meta[key]) || Number(meta[key]) < 0) invalid();
   const found = meta.found as number, returned = meta.returned as number;
   const pages = Math.max(1, Math.ceil(found / config.pageSize));
-  if (found > config.maxArticles || found > 20_000 || pages > config.maxPagesPerPass || pages * config.pageSize > 20_000) throw new Error("RESEARCH_MARKETAUX_RESULT_LIMIT");
+  if (found > config.maxArticles || found > 20_000 || pages > config.maxPagesPerPass || pages * config.pageSize > 20_000) {
+    const positive = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+    const details = [`providerReportedFound=${found}`];
+    const values: [string, unknown][] = [["pageSize", config.pageSize], ["requiredPages", positive(config.pageSize) ? pages : undefined],
+      ["maxPagesPerPass", config.maxPagesPerPass], ["maxArticles", config.maxArticles],
+      ["pass", request.pass === 1 || request.pass === 2 ? request.pass : undefined], ["page", request.page]];
+    for (const [key, value] of values) if (positive(value)) details.push(`${key}=${value}`);
+    const exceeded: string[] = [];
+    if (positive(config.maxArticles) && found > config.maxArticles) exceeded.push("maxArticles");
+    if (found > 20_000) exceeded.push("providerResultBound");
+    if (positive(config.pageSize) && positive(config.maxPagesPerPass) && pages > config.maxPagesPerPass) exceeded.push("maxPagesPerPass");
+    if (positive(config.pageSize) && positive(pages) && pages * config.pageSize > 20_000) exceeded.push("expandedPageBound");
+    if (exceeded.length) details.push(`exceeded=${exceeded.join(",")}`);
+    const cause = Object.assign(new Error(`Local Marketaux capacity validation; ${details.join("; ")}`), { name: "MarketauxCapacityLimitError" });
+    throw new ResearchSourceFailure("RESEARCH_MARKETAUX_RESULT_LIMIT", cause);
+  }
   if (meta.limit !== config.pageSize || meta.page !== request.page || request.page > pages || returned !== root.data.length || returned !== Math.min(config.pageSize, Math.max(0, found - (request.page - 1) * config.pageSize))) invalid();
   const start = BigInt(Date.parse(request.windowStart)) * 1000n, end = BigInt(Date.parse(request.asOf)) * 1000n;
   const ids = new Set<string>();

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { marketauxFixture } from "./research-marketaux.testfixture.js";
 import { marketauxRecordSetHash, parseMarketauxPage } from "./research-marketaux.js";
-import { researchHash } from "@ikbr/shared/instrument-research";
+import { captureResearchSourceError, researchHash, type MarketauxNewsConfig, type MarketauxRequest } from "@ikbr/shared/instrument-research";
 
 test("real provider envelope maps positive records and detects substituted or changed UUID contents", () => {
   const f = marketauxFixture();
@@ -89,4 +89,69 @@ test("V2 rejects invalid enrichment types, control characters, oversized text, a
     { ...f.article(1), entities: [{ ...f.newsConfig.entity, sentiment_score: "0.5" }] },
     { ...f.article(1), entities: [{ ...f.newsConfig.entity, sentiment_score: Number.NaN }] },
   ]) assert.throws(() => parse(item), /RESEARCH_MARKETAUX_PAYLOAD_INVALID/);
+});
+
+
+test("local capacity diagnostics retain provider-reported count at the free-page boundary", () => {
+  const f = marketauxFixture(), config = { ...f.newsConfig, pageSize: 3, maxPagesPerPass: 10, maxArticles: 30 };
+  const envelope = (found: number) => ({ meta: { found, returned: 3, limit: 3, page: 1 }, data: [f.article(1), f.article(2), f.article(3)] });
+  assert.equal(parseMarketauxPage(envelope(30), config, f.descriptor).found, 30);
+  assert.throws(() => parseMarketauxPage(envelope(31), config, f.descriptor), (error: unknown) => {
+    assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_RESULT_LIMIT");
+    const detail = captureResearchSourceError(error);
+    assert.deepEqual(detail, { name: "MarketauxCapacityLimitError", code: null,
+      message: "Local Marketaux capacity validation; providerReportedFound=31; pageSize=3; requiredPages=11; maxPagesPerPass=10; maxArticles=30; pass=1; page=1; exceeded=maxArticles,maxPagesPerPass" });
+    return true;
+  });
+});
+
+for (const sample of [
+  { label: "article cap", found: 3, pageSize: 3, maxPagesPerPass: 10, maxArticles: 2, exceeded: "maxArticles" },
+  { label: "page cap", found: 31, pageSize: 3, maxPagesPerPass: 10, maxArticles: 100, exceeded: "maxPagesPerPass" },
+  { label: "provider result bound", found: 20001, pageSize: 1, maxPagesPerPass: 30000, maxArticles: 30000, exceeded: "providerResultBound,expandedPageBound" },
+  { label: "expanded final page", found: 20000, pageSize: 3, maxPagesPerPass: 30000, maxArticles: 30000, exceeded: "expandedPageBound" },
+]) test(`capacity details preserve the existing ${sample.label} branch`, () => {
+  const f = marketauxFixture(), config = { ...f.newsConfig, ...sample };
+  assert.throws(() => parseMarketauxPage({ meta: { found: sample.found, returned: 0, limit: sample.pageSize, page: 1 }, data: [] }, config, f.descriptor), (error: unknown) => {
+    assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_RESULT_LIMIT");
+    assert.ok(captureResearchSourceError(error).message.endsWith(`exceeded=${sample.exceeded}`));
+    return true;
+  });
+});
+
+test("capacity diagnostics retain numeric-before-cap-before-consistency validation order", () => {
+  const f = marketauxFixture(), config = { ...f.newsConfig, pageSize: 3, maxPagesPerPass: 10, maxArticles: 30 };
+  const badLaterFields = { meta: { found: 31, returned: 3, limit: 2, page: 2 }, data: [] };
+  assert.throws(() => parseMarketauxPage(badLaterFields, config, f.descriptor), /RESEARCH_MARKETAUX_RESULT_LIMIT/);
+  assert.throws(() => parseMarketauxPage({ ...badLaterFields, meta: { ...badLaterFields.meta, found: 30 } }, config, f.descriptor), /RESEARCH_MARKETAUX_PAYLOAD_INVALID/);
+  for (const key of ["found", "returned", "limit", "page"]) for (const invalid of ["31", -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(() => parseMarketauxPage({ ...badLaterFields, meta: { ...badLaterFields.meta, [key]: invalid } }, config, f.descriptor), (error: unknown) => {
+      assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
+      assert.equal(Object.hasOwn(error, "sourceError"), false);
+      return true;
+    });
+  }
+});
+
+test("invalid diagnostic-only fields are omitted without interpolating payload or config text", () => {
+  const f = marketauxFixture(), privateText = "synthetic-secret-account-payload";
+  const config = { ...f.newsConfig, pageSize: privateText, maxPagesPerPass: privateText, maxArticles: 30 } as unknown as MarketauxNewsConfig;
+  const request = { ...f.descriptor, pass: privateText, page: privateText } as unknown as MarketauxRequest;
+  assert.throws(() => parseMarketauxPage({ meta: { found: 31, returned: 1, limit: 3, page: 1 }, data: [{ title: privateText }] }, config, request), (error: unknown) => {
+    assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_RESULT_LIMIT");
+    assert.deepEqual(captureResearchSourceError(error), { name: "MarketauxCapacityLimitError", code: null,
+      message: "Local Marketaux capacity validation; providerReportedFound=31; maxArticles=30; exceeded=maxArticles" });
+    return true;
+  });
+  for (const invalid of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, "3", null]) {
+    const bad = { ...f.newsConfig, pageSize: invalid, maxPagesPerPass: invalid, maxArticles: 30 } as unknown as MarketauxNewsConfig;
+    const descriptor = { ...f.descriptor, pass: invalid, page: invalid } as unknown as MarketauxRequest;
+    assert.throws(() => parseMarketauxPage({ meta: { found: 31, returned: 0, limit: 3, page: 1 }, data: [] }, bad, descriptor), (error: unknown) => {
+      assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_RESULT_LIMIT");
+      const detail = captureResearchSourceError(error);
+      assert.equal(detail.message.includes("pageSize="), false); assert.equal(detail.message.includes("requiredPages="), false);
+      assert.equal(detail.message.includes("maxPagesPerPass="), false); assert.equal(detail.message.includes("pass="), false); assert.equal(detail.message.includes("page="), false);
+      return true;
+    });
+  }
 });
