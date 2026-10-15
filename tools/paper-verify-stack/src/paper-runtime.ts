@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
-import { formatResearchProviderError, formatResearchSourceError, isResearchProviderError } from '@ikbr/shared/instrument-research';
+import { formatResearchProviderError, formatResearchSourceError, isResearchProviderError, isTwoSourceResearch, parseResearchManifest, researchHash } from '@ikbr/shared/instrument-research';
 import { safeDiagnosticText } from '@ikbr/shared/diagnostics';
 
 export const PAPER_SERVICES = ['postgres', 'redis', 'execution-engine', 'ingestion', 'llm-agent', 'signal-engine'] as const;
@@ -115,7 +115,6 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
       if (!/^[a-f0-9]{64}$/.test(e.RESEARCH_CONFIG_EXPECTED_HASH || '') || e.RESEARCH_BUDGET_ACCOUNT_ID !== e.IBKR_ACCOUNT_ID ||
           e.RESEARCH_CONFIG_PATH !== '/app/private-config/continuous-research.json') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     }
-    if (name === 'llm-agent' && e.RESEARCH_MARKETAUX_ON_DEMAND !== 'true') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const requiredTargets = name === 'execution-engine' || name === 'llm-agent'
       ? ['/app/private-config/continuous-strategy.json', '/app/private-config/continuous-research.json', ...(name === 'execution-engine' ? ['/app/private-accounting'] : [])]
       : ['/app/private-config/continuous-strategy.json'];
@@ -158,6 +157,14 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
     if (sha(bytes) !== strategyProof.sha256) throw new Error();
     strategyText = bytes.toString('utf8');
   } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
+  let researchRaw: unknown;
+  try {
+    const path = '.local/paper-runtime/research.json';
+    const file = proof.files.find(entry => entry.path === path);
+    const bytes = await readFile(await resolveProofPath(root, path));
+    if (!file || sha(bytes) !== file.sha256) throw new Error();
+    researchRaw = JSON.parse(bytes.toString('utf8'));
+  } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
   let instrumentIds: string[] | undefined;
   for (const name of APP_SERVICES) {
     try {
@@ -166,6 +173,11 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
         return strategyText;
       } });
       if (loaded.mode !== 'bundle' || loaded.effectiveHash !== bundleHash) throw new Error();
+      if (name === 'execution-engine' || name === 'llm-agent') {
+        const manifest = parseResearchManifest(researchRaw, loaded.configuration, loaded.effectiveHash);
+        if (researchHash(manifest) !== appEnvironments[name].RESEARCH_CONFIG_EXPECTED_HASH) throw new Error();
+        if (name === 'llm-agent' && appEnvironments[name].RESEARCH_MARKETAUX_ON_DEMAND !== (isTwoSourceResearch(manifest) ? 'false' : 'true')) throw new Error();
+      }
       instrumentIds ??= loaded.configuration.instruments.filter(row => row.entryEnabled).map(row => row.id);
     } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
   }
@@ -466,10 +478,20 @@ export class PaperRuntime {
         const item = obj(result);
         for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
           const row = obj(source), refresh = obj(row?.wshRefresh);
-          const failure = obj(refresh?.latestFailure);
-          if (row?.role !== 'calendar' || row.state !== 'READY' || typeof row.sourceId !== 'string' || typeof item?.instrumentId !== 'string' || refresh?.blocksCachedEvidence !== false) continue;
+          const news = obj(row?.marketauxRefresh), newsFailure = obj(news?.latestFailure);
           const instant = (value: unknown): value is string => typeof value === 'string' &&
             /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
+          if (row?.role === 'news' && row.state === 'READY' && typeof row.sourceId === 'string' && typeof item?.instrumentId === 'string' &&
+              Array.isArray(news?.holdReasons) && news.holdReasons.length === 0 && typeof newsFailure?.retainedSnapshotId === 'string' &&
+              instant(news.lastSuccessfulAt) && instant(news.expiresAt) && instant(newsFailure.recordedAt)) {
+            const privacy = { secrets: [this.options.token], accountIds: [accountId] };
+            const label = safeDiagnosticText(`${item.instrumentId.slice(0, 100)} / ${row.sourceId.slice(0, 100)}`, privacy);
+            const reason = typeof newsFailure.reason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(newsFailure.reason) ? newsFailure.reason : 'RESEARCH_MARKETAUX_ACQUISITION_FAILED';
+            const next = instant(news.nextRegularAt) ? `następne odświeżenie: ${news.nextRegularAt}` : 'termin odświeżenia niedostępny';
+            wshDiagnostics.push(`${label}: odświeżenie Marketaux nie powiodło się (${reason}), ale zachowane wiadomości pozostają ważne. Ostatnie poprawne pobranie: ${news.lastSuccessfulAt}; ważne do: ${news.expiresAt}; ostatni błąd: ${newsFailure.recordedAt}; ${next}. ${formatResearchSourceError(newsFailure.sourceError, privacy)}`);
+          }
+          const failure = obj(refresh?.latestFailure);
+          if (row?.role !== 'calendar' || row.state !== 'READY' || typeof row.sourceId !== 'string' || typeof item?.instrumentId !== 'string' || refresh?.blocksCachedEvidence !== false) continue;
           if (!instant(refresh.lastSuccessfulAt) || !instant(refresh.expiresAt)) continue;
           const privacy = { secrets: [this.options.token], accountIds: [accountId] };
           const label = safeDiagnosticText(`${String(item?.instrumentId).slice(0, 100)} / ${String(row.sourceId).slice(0, 100)}`, privacy);

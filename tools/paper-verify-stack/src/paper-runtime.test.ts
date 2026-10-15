@@ -5,15 +5,16 @@ import { resolve } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { computeTradingConfigurationHash, parseTradingConfiguration } from '@ikbr/shared/trading-config';
+import { researchFixture, twoSourceResearchFixture } from '@ikbr/shared/instrument-research-testfixture';
+import { researchHash as hashResearch } from '@ikbr/shared/instrument-research';
 import { canonicalJson, PaperHttpError, PaperRuntime, PaperRuntimeError, validateRenderedCompose, type ReleaseProof, type RuntimeControl, type RuntimeAdapters } from './paper-runtime.js';
 
 const readyHealth = () => ({ connected: true, bootstrapped: true, bootstrapping: false, automaticBootstrap: { initialized: true, manuallyStopped: false, inFlight: false, recoveryNeeded: false, shuttingDown: false, error: null } });
 
 const imageId = `sha256:${'a'.repeat(64)}`;
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
-const researchHash = 'c'.repeat(64);
 
-async function fixture() {
+async function fixture(twoSource = false) {
   const root = await mkdtemp(resolve(tmpdir(), 'paper-runtime-'));
   const local = resolve(root, '.local/paper-runtime'); const account = resolve(local, 'accounting');
   await mkdir(account, { recursive: true });
@@ -25,7 +26,10 @@ async function fixture() {
   const parsed = parseTradingConfiguration(JSON.stringify(strategy));
   if (!parsed.ok) throw new Error('invalid strategy fixture');
   const bundleHash = computeTradingConfigurationHash(parsed.configuration);
-  await writeFile(resolve(local, 'strategy.json'), JSON.stringify(strategy)); await writeFile(resolve(local, 'research.json'), '{}\n');
+  const research = twoSource ? twoSourceResearchFixture().manifest : researchFixture().manifest;
+  research.configHash = bundleHash;
+  const researchHash = hashResearch(research);
+  await writeFile(resolve(local, 'strategy.json'), JSON.stringify(strategy)); await writeFile(resolve(local, 'research.json'), JSON.stringify(research));
   await writeFile(resolve(account, 'record.txt'), 'private accounting fixture');
   const files = ['docker-compose.yml', '.local/paper-runtime/redis-internal.override.yml', '.local/paper-runtime/compose.override.json',
     '.local/paper-runtime/strategy.json', '.local/paper-runtime/research.json', '.local/paper-runtime/accounting/record.txt'];
@@ -38,7 +42,7 @@ async function fixture() {
       TRADING_ENABLED: name === 'ingestion' ? 'false' : 'true', INGESTION_AUTO_BOOTSTRAP_ENABLED: 'true', EXECUTION_ENTRIES_PAUSED: 'false',
       EXECUTION_LIFECYCLE_AUTOMATION_ENABLED: 'true', TRADING_LOOP_ENABLED: 'true', LLM_AGENT_ENABLED: 'true',
       EXECUTION_ACCOUNTING_SOURCE_PATH: '/app/private-accounting/record.txt', EXECUTION_ACCOUNTING_SOURCE_SHA256: sha('private accounting fixture'),
-      RESEARCH_CONFIG_PATH: '/app/private-config/continuous-research.json', RESEARCH_CONFIG_EXPECTED_HASH: researchHash, RESEARCH_BUDGET_ACCOUNT_ID: 'DU123456', RESEARCH_MARKETAUX_ON_DEMAND: 'true' };
+      RESEARCH_CONFIG_PATH: '/app/private-config/continuous-research.json', RESEARCH_CONFIG_EXPECTED_HASH: researchHash, RESEARCH_BUDGET_ACCOUNT_ID: 'DU123456', RESEARCH_MARKETAUX_ON_DEMAND: twoSource ? 'false' : 'true' };
     const volumes: Array<Record<string, unknown>> = [{ type: 'bind', source: source('strategy.json'), target: '/app/private-config/continuous-strategy.json', read_only: true }];
     if (name === 'execution-engine' || name === 'llm-agent') volumes.push({ type: 'bind', source: source('research.json'), target: '/app/private-config/continuous-research.json', read_only: true });
     if (name === 'execution-engine') volumes.push({ type: 'bind', source: account, target: '/app/private-accounting', read_only: true });
@@ -50,6 +54,45 @@ async function fixture() {
   await writeFile(resolve(root, '.env'), 'EXECUTION_API_TOKEN=testing-token-only\n');
   return { root, rendered, proof, cleanup: () => rm(root, { recursive: true, force: true }) };
 }
+
+test('two-source runtime accepts cyclic mode and rejects on-demand news or an altered policy', async () => {
+  const f = await fixture(true);
+  try {
+    assert.deepEqual(await validateRenderedCompose(f.rendered, f.proof, f.root), { accountId: 'DU123456', instrumentIds: ['pko_wse', 'aapl_smart'] });
+    const service = f.rendered.services['llm-agent'] as { environment: Record<string, string> };
+    service.environment.RESEARCH_MARKETAUX_ON_DEMAND = 'true';
+    await assert.rejects(validateRenderedCompose(f.rendered, f.proof, f.root), /PAPER_CONFIG_CHANGED/);
+    service.environment.RESEARCH_MARKETAUX_ON_DEMAND = 'false';
+    const path = '.local/paper-runtime/research.json';
+    const research = JSON.parse(await readFile(resolve(f.root, path), 'utf8'));
+    delete research.researchPolicy;
+    const raw = JSON.stringify(research);
+    await writeFile(resolve(f.root, path), raw);
+    f.proof.files.find(row => row.path === path)!.sha256 = sha(raw);
+    for (const name of ['execution-engine', 'llm-agent']) {
+      (f.rendered.services[name] as { environment: Record<string, string> }).environment.RESEARCH_CONFIG_EXPECTED_HASH = hashResearch(research);
+    }
+    await assert.rejects(validateRenderedCompose(f.rendered, f.proof, f.root), /PAPER_CONFIG_CHANGED/);
+  } finally { await f.cleanup(); }
+});
+
+test('runtime validates pinned research contents and legacy scheduling policy before startup', async () => {
+  for (const kind of ['malformed', 'hash', 'policy-flag'] as const) {
+    const f = await fixture();
+    try {
+      const services = f.rendered.services as Record<string, { environment: Record<string, string> }>;
+      if (kind === 'malformed') {
+        const path = '.local/paper-runtime/research.json';
+        await writeFile(resolve(f.root, path), '{}');
+        f.proof.files.find(row => row.path === path)!.sha256 = sha('{}');
+      } else if (kind === 'hash') {
+        for (const name of ['execution-engine', 'llm-agent']) services[name].environment.RESEARCH_CONFIG_EXPECTED_HASH = 'd'.repeat(64);
+      } else services['llm-agent'].environment.RESEARCH_MARKETAUX_ON_DEMAND = 'false';
+      await assert.rejects(validateRenderedCompose(f.rendered, f.proof, f.root),
+        (error: unknown) => error instanceof PaperRuntimeError && error.code === 'PAPER_CONFIG_CHANGED');
+    } finally { await f.cleanup(); }
+  }
+});
 
 async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lost' | 'unchanged' | 'transient' | 'server' | 'abort'; waitThenPause?: boolean; abort?: AbortController } = {}) {
   const f = await fixture(); const calls: string[] = []; let control: RuntimeControl['control'] = { account_id: 'DU123456', paused: true, revision: 1 };
@@ -737,4 +780,31 @@ test('successful cached WSH with fenced cleanup is usable but warns even without
   try{await h.runtime.start();assert.equal(h.resumeCalls,1);const output=messages.join('\n');assert.match(output,/RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED/);
     assert.match(output,/Zachowany kalendarz pozostaje ważny do 2026-10-15T12:00:00.000Z/);assert.doesNotMatch(output,/odświeżenie kalendarza nie powiodło/);
   }finally{await h.f.cleanup();}
+});
+
+test('retained Marketaux cache shows its original expiry and sanitized failure without blocking READY', async () => {
+  const h = await runScenario(), messages: string[] = [], original = h.adapters.http;
+  h.adapters.log = text => messages.push(text);
+  h.adapters.http = async (path, body, ...rest) => {
+    const response = await original(path, body, ...rest);
+    if (path !== '/execution/entry-control/start/prepare') return response;
+    return { ...(response as object), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'READY', reasons: [], sources: [{
+      sourceId: 'marketaux_news', role: 'news', state: 'READY', reasons: [],
+      marketauxRefresh: { lastSuccessfulAt: '2026-10-15T08:05:00.000Z', expiresAt: '2026-10-16T08:05:00.000Z',
+        nextRegularAt: '2026-10-15T10:05:00.000Z', holdReasons: [], latestFailure: {
+          recordedAt: '2026-10-15T09:05:01.000Z', reason: 'RESEARCH_SOURCE_HTTP_503', retainedSnapshotId: 'retained',
+          sourceError: { name: 'ProviderError', code: 'UNAVAILABLE', message: 'Temporarily unavailable for DU123456' },
+        } },
+    }] })) };
+  };
+  try {
+    await h.runtime.start();
+    assert.equal(h.resumeCalls, 1);
+    const output = messages.join('\n');
+    assert.match(output, /zachowane wiadomości pozostają ważne/);
+    assert.match(output, /ważne do: 2026-10-16T08:05:00.000Z/);
+    assert.match(output, /UNAVAILABLE/);
+    assert.match(output, /Temporarily unavailable/);
+    assert.doesNotMatch(output, /DU123456/);
+  } finally { await h.f.cleanup(); }
 });

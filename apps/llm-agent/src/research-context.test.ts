@@ -4,8 +4,39 @@ import { evaluateResearchEligibility, parseResearchSnapshot, researchHash, valid
   RESEARCH_REQUEST_VERSION, type InstrumentResearchSnapshotV2, type ResearchManifestV2 } from "@ikbr/shared/instrument-research";
 import { buildResearchModelRequest, validateResearchModelDecision, RESEARCH_SYSTEM_PROMPT } from "./research-decision.js";
 import { reviewFixture } from "./research-review.testfixture.js";
-import { wshSnapshotFixture } from "@ikbr/shared/instrument-research-testfixture";
+import { wshSnapshotFixture, twoSourceResearchFixture } from "@ikbr/shared/instrument-research-testfixture";
 import { canonicalJson } from "@ikbr/shared/trading-config";
+
+test("two-source AI request binds only news/calendar policy and rejects mixed prompt policies", () => {
+  const now = Date.now(), f = reviewFixture(now), two = twoSourceResearchFixture(now);
+  f.research.manifest = two.manifest;
+  f.research.stored.snapshot = two.snapshot;
+  f.research.stored.hash = researchHash(two.snapshot);
+  f.research.binding.manifestHash = two.manifestHash;
+  f.research.binding.snapshotHash = f.research.stored.hash;
+  f.research.eligibility = evaluateResearchEligibility(two.snapshot, two.manifest, now);
+  assert.equal(f.research.eligibility.eligible, true, f.research.eligibility.reasons.join(','));
+  const request = buildResearchModelRequest(f.claim, f.research, f.context);
+  assert.equal(request.promptVersion, "pp7-two-source-context-v1");
+  assert.equal(request.schemaVersion, "pp7-two-source-request-v1");
+  const sent = JSON.parse((request.providerRequest.messages as { content: string }[])[1].content);
+  assert.equal(sent.research.manifest.researchPolicy, "TWO_SOURCE_HOURLY_V1");
+  assert.equal(Object.hasOwn(sent.research.stored.snapshot, "reports"), false);
+  assert.equal(Object.hasOwn(sent.research.stored.snapshot, "facts"), false);
+  validateResearchAiRequest(request as unknown as Record<string, unknown>, two.manifest.model, two.manifest);
+  assert.throws(() => validateResearchAiRequest(request as unknown as Record<string, unknown>, two.manifest.model), /AI_/);
+  assert.throws(() => validateResearchAiRequest({ ...request, systemPrompt: RESEARCH_SYSTEM_PROMPT }, two.manifest.model, two.manifest), /AI_/);
+  assert.throws(() => validateResearchAiRequest(request as unknown as Record<string, unknown>, f.manifest.model, f.manifest), /AI_/);
+  for (const decision of ["EXECUTE", "REJECT"] as const) {
+    assert.equal(validateResearchModelDecision({ decision, confidence: .7, reason: "Assess news and calendar alongside the technical proposal",
+      riskFlags: [], evidenceRefs: f.research.eligibility.requiredEvidenceRefs }, f.research).decision, decision);
+  }
+  assert.throws(() => validateResearchModelDecision({ decision: "EXECUTE", confidence: .7, reason: "Missing source citation",
+    riskFlags: [], evidenceRefs: [] }, f.research), /AI_REQUIRED_EVIDENCE_NOT_CITED/);
+  const hash = researchHash(request);
+  two.snapshot.createdAt = new Date(now + 1000).toISOString();
+  assert.equal(researchHash(request), hash);
+});
 
 for (const offset of [-7 * 86400000, -86400000, -60000, 0, 60000, 86400000, 7 * 86400000]) {
   test(`technical proposal can reach AI with an event ${offset} ms away`, () => {

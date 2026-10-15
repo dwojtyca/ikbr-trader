@@ -1,3 +1,5 @@
+import { isTwoSourceResearch } from "./policy.js";
+import type { MarketauxAttemptIdentity, MarketauxAttemptTicket, MarketauxAttemptClaim, MarketauxAttemptFailure, MarketauxRefreshState } from "./marketaux-refresh.js";
 import { earliestSourceValidityExpiry } from "./source-validity.js";
 import {performance} from 'node:perf_hooks';
 import {connectWshBounded,type WshBoundedConnection} from './wsh-db.js';
@@ -10,12 +12,299 @@ import { canonicalJson, decodeTradingConfigurationSnapshot } from "../trading-co
 import type { TradingConfigurationV1 } from "../trading-configuration/types.js";
 import { evaluateResearchEligibility } from "./eligibility.js";
 import { inspectResearch, researchRefreshInterval, researchRefreshSlot, researchRefreshSlotKey, type ResearchPreparation, type ResearchRepairIdentity, type ResearchRole, type MarketauxLegacyRecoveryAssessment, type MarketauxBudgetRecoveryAssessment, type ResearchLocalBudgetDiagnostic, marketauxLocalBudgetFailure, marketauxTransientFailure } from "./repair.js";
-import { marketauxCallIdentity, marketauxWindow, parseMarketauxNewsConfig } from "./marketaux.js";
+import { marketauxCallIdentity, marketauxWindow, marketauxQualificationDeadline, parseMarketauxNewsConfig, type MarketauxRequest } from "./marketaux.js";
 import { isResearchHash, parseResearchManifest, parseResearchSnapshot, researchAssert, researchHash, researchTime } from "./validation.js";
-import type { ResearchSnapshot, InstrumentResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
+import type { ResearchSnapshot, ResearchSnapshotV2, ResearchConnection, ResearchBinding, ResearchBindingIdentity, ResearchCallReservation, ResearchDb, ResearchIdentity, ResearchManifest, ResearchPool, ResearchSourceError, StoredResearchSnapshot, ValidatedResearchBinding } from "./types.js";
 
+class ResearchBudgetExhausted extends Error {
+  constructor(readonly proof: { day: string; recordedAt: string; requests: number; cost: number; maxRequests: number; maxCost: number; nextCost: number }) { super("RESEARCH_BUDGET_EXHAUSTED"); }
+}
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : String(v);
 export class ResearchStore {
+  private readonly marketauxTickets = new WeakMap<MarketauxAttemptTicket, { deadline: number; ticketHash: string; failureDeadline?: number }>();
+  private marketauxBudget(ticket: MarketauxAttemptTicket, failure = false): number {
+    const budget = this.marketauxTickets.get(ticket);
+    researchAssert(budget && budget.ticketHash === researchHash(ticket), 'RESEARCH_MARKETAUX_TICKET_INVALID');
+    if (failure) budget.failureDeadline ??= performance.now() + 3000;
+    return failure ? budget.failureDeadline! : budget.deadline;
+  }
+  // Marketaux writers lock the attempt table before authority SHARE, attempt rows and snapshot head.
+  // Admission readers take authority SHARE, then attempt-table SHARE, then head; authority SHAREs
+  // are compatible. Adoption takes authority UPDATE but never waits for this table/head protocol.
+  // Callers must not pre-lock a head before entering bind/validateBinding/prepareRepair.
+  private async marketauxTransaction<T>(run: (db: ResearchDb) => Promise<T>, deadline: number, readOnly = false): Promise<T> {
+    const bounded = await connectWshBounded(this.pool, undefined, deadline);
+    try {
+      const db = bounded.db; await db.query('BEGIN');
+      if (!readOnly) await db.query('LOCK TABLE research_marketaux_attempts IN ROW EXCLUSIVE MODE');
+      const result = await run(db); await db.query('COMMIT'); return result;
+    } catch (error) { bounded.destroy(); throw error; }
+    finally { bounded.release(); }
+  }
+  private async marketauxSource(identity: ResearchIdentity & { instrumentId: string; sourceId: string }, db: ResearchDb) {
+    const manifest = await this.readManifest(identity, db), policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
+    const source = policy?.sources.find(s => s.id === identity.sourceId);
+    researchAssert(isTwoSourceResearch(manifest) && policy && source, 'RESEARCH_MARKETAUX_SOURCE_INVALID');
+    const config = parseMarketauxNewsConfig(source, policy);
+    researchAssert(config.kind === 'marketaux-news-v2', 'RESEARCH_MARKETAUX_SOURCE_INVALID');
+    return { manifest, policy, source, config, ledger: 'marketaux:ibkr-conid:' + config.qualification.conId };
+  }
+  private async marketauxTicketRow(ticket: MarketauxAttemptTicket, db: ResearchDb, states: string[]) {
+    const row = (await db.query('SELECT * FROM research_marketaux_attempts WHERE id=$1 FOR UPDATE', [ticket.attemptId])).rows[0];
+    researchAssert(row && states.includes(String(row.state)) && row.account_id === ticket.accountId && row.config_hash === ticket.configHash && row.manifest_hash === ticket.manifestHash && row.instrument_id === ticket.instrumentId && row.source_id === ticket.sourceId && row.source_hash === ticket.sourceHash && Number(row.slot) === ticket.slot && iso(row.started_at) === ticket.startedAt && iso(row.deadline_at) === ticket.deadlineAt, 'RESEARCH_MARKETAUX_TICKET_INVALID');
+    return row;
+  }
+  async claimMarketauxAttempt(identity: MarketauxAttemptIdentity): Promise<MarketauxAttemptClaim> {
+    const deadline = performance.now() + 120000;
+    return this.marketauxTransaction(async db => {
+      researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), 'RESEARCH_ACCOUNT_INVALID');
+      await this.assertAuthority(identity, db);
+      const { source, config, ledger, policy } = await this.marketauxSource(identity, db);
+      await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`research-marketaux-issuer:${identity.accountId}:${ledger}`]);
+      await this.assertAuthority(identity, db);
+      const now = await this.now(db); marketauxQualificationDeadline(config, now);
+      researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now, "RESEARCH_PERMISSION_UNVERIFIED");
+      const prior = (await db.query('SELECT * FROM research_marketaux_attempts WHERE account_id=$1 AND ledger_key=$2 ORDER BY started_at DESC', [identity.accountId, ledger])).rows;
+      const unresolved = prior.find(r => ['STARTED','FINALIZING','UNKNOWN'].includes(String(r.state)));
+      if (unresolved) return { claimed: false, reason: 'RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED', nextCheckAt: unresolved.state === 'STARTED' && now < researchTime(iso(unresolved.deadline_at)) ? iso(unresolved.deadline_at) : null };
+      const next = prior.length ? researchTime(iso(prior[0].started_at)) + 3600000 : null;
+      if (next !== null && now < next) return { claimed: false, reason: 'RESEARCH_MARKETAUX_SLOT_TOO_EARLY', nextCheckAt: new Date(next).toISOString() };
+      const slot = Math.floor(now / 3600000), window = marketauxWindow(slot, config);
+      const ticket: MarketauxAttemptTicket = { ...identity, attemptId: randomUUID(), sourceHash: researchHash(source), slot, startedAt: new Date(now).toISOString(), deadlineAt: new Date(now + 120000).toISOString(), ...window, monotonicDeadlineMs: deadline };
+      await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED')`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt]);
+      this.marketauxTickets.set(ticket, { deadline, ticketHash: researchHash(ticket) }); return { claimed: true, ticket };
+    }, deadline);
+  }
+  async reserveMarketauxCall(ticket: MarketauxAttemptTicket, request: MarketauxRequest, reservation: Omit<ResearchCallReservation, 'deadlineAt'>): Promise<{ deadlineAt: string; monotonicDeadlineMs: number }> {
+    const budget = this.marketauxBudget(ticket), entered = performance.now();
+    const result = await this.marketauxTransaction(async db => {
+      await this.assertAuthority(ticket, db);
+      const { source, config, policy } = await this.marketauxSource(ticket, db);
+      await this.marketauxTicketRow(ticket, db, ['STARTED']);
+      researchAssert('kind' in request && request.kind === 'marketaux-news-v2' && request.attemptId === ticket.attemptId && request.slot === ticket.slot && request.windowStart === ticket.windowStart && request.asOf === ticket.asOf, 'RESEARCH_MARKETAUX_REQUEST_INVALID');
+      const expected = marketauxCallIdentity(ticket.manifestHash, ticket.instrumentId, source, request), now = await this.now(db), expiry = marketauxQualificationDeadline(config, now);
+      researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now, "RESEARCH_PERMISSION_UNVERIFIED");
+      researchAssert(source && researchHash(source) === ticket.sourceHash && reservation.callKey === expected.callKey && reservation.requestHash === expected.requestHash && reservation.accountId === ticket.accountId && reservation.provider === source.provider && reservation.kind === 'source' && reservation.configHash === ticket.configHash && reservation.manifestHash === ticket.manifestHash, 'RESEARCH_MARKETAUX_REQUEST_INVALID');
+      const manifest = await this.readManifest(ticket,db), providers = manifest.instruments.flatMap(p=>p.sources).filter(s=>s.provider===source.provider);
+      researchAssert(reservation.maxRequestsPerDay===Math.min(...providers.map(s=>s.maxRequestsPerDay)) && reservation.maxCostMicrosPerDay===Math.min(...providers.map(s=>s.maxCostMicrosPerDay)) && reservation.reservedCostMicros===Math.max(...providers.map(s=>s.costMicrosPerCall)), 'RESEARCH_BUDGET_MANIFEST_MISMATCH');
+      const remaining = Math.min(10000, researchTime(ticket.deadlineAt) - now, budget - performance.now(), expiry === null ? 10000 : expiry - now);
+      researchAssert(remaining > 0, 'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
+      const deadlineAt = new Date(Math.floor(now + remaining)).toISOString();
+      try { await this.reserveCall({ ...reservation, deadlineAt }, db, ticket.attemptId); }
+      catch (error) {
+        if (!(error instanceof ResearchBudgetExhausted)) throw error;
+        const p = error.proof;
+        await db.query(`INSERT INTO research_marketaux_budget_denials(attempt_id,budget_day,recorded_at,requests_used,cost_used,max_requests,max_cost,next_cost)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [ticket.attemptId,p.day,p.recordedAt,p.requests,p.cost,p.maxRequests,p.maxCost,p.nextCost]);
+        return { denied: true as const };
+      }
+      await db.query('INSERT INTO research_marketaux_attempt_calls(call_key,attempt_id,pass,page) VALUES($1,$2,$3,$4)', [expected.callKey,ticket.attemptId,request.pass,request.page]);
+      return { deadlineAt, monotonicDeadlineMs: Math.min(budget, entered + remaining) };
+    }, budget);
+    if ("denied" in result) throw new Error("RESEARCH_BUDGET_EXHAUSTED");
+    return result;
+  }
+  async recordMarketauxCallOutcome(ticket: MarketauxAttemptTicket, callKey: string, result: { outcome: 'SUCCEEDED'; contentHash: string } | { outcome: 'FAILED' | 'UNKNOWN' }): Promise<{ recordedAt: string }> {
+    const deadline = this.marketauxBudget(ticket, result.outcome !== 'SUCCEEDED');
+    return this.marketauxTransaction(async db => {
+      await this.assertAuthority(ticket, db);
+      await db.query('LOCK TABLE research_marketaux_attempts IN ROW EXCLUSIVE MODE');
+      await this.marketauxTicketRow(ticket, db, ['STARTED']);
+      const call = (await db.query(`SELECT r.* FROM research_marketaux_attempt_calls c JOIN research_call_reservations r USING(call_key) WHERE c.attempt_id=$1 AND c.call_key=$2`, [ticket.attemptId,callKey])).rows[0];
+      researchAssert(call, 'RESEARCH_MARKETAUX_CALL_INVALID');
+      const now = await this.now(db);
+      if (result.outcome === 'SUCCEEDED') researchAssert(isResearchHash(result.contentHash) && now < researchTime(iso(call.deadline_at)) && now < researchTime(ticket.deadlineAt), 'RESEARCH_MARKETAUX_CALL_EXPIRED');
+      const stamp = new Date(now).toISOString();
+      await db.query('INSERT INTO research_call_outcomes(call_key,outcome,recorded_at) VALUES($1,$2,$3)', [callKey,result.outcome,stamp]);
+      await db.query('INSERT INTO research_marketaux_response_receipts(call_key,content_hash,recorded_at) VALUES($1,$2,$3)', [callKey,result.outcome === 'SUCCEEDED' ? result.contentHash : null,stamp]);
+      return { recordedAt: stamp };
+    }, deadline);
+  }
+  private async marketauxFinalizeFence(ticket: MarketauxAttemptTicket, deadline: number): Promise<void> {
+    await this.marketauxTransaction(async db => {
+      await this.assertAuthority(ticket, db); await this.marketauxTicketRow(ticket, db, ['STARTED']);
+      await db.query("UPDATE research_marketaux_attempts SET state='FINALIZING' WHERE id=$1", [ticket.attemptId]);
+    }, deadline);
+  }
+  private async marketauxCalls(ticket: Pick<MarketauxAttemptTicket, "attemptId">, db: ResearchDb) {
+    return (await db.query(`SELECT c.pass,c.page,r.*,o.outcome,o.recorded_at,receipt.content_hash,receipt.recorded_at AS receipt_at
+      FROM research_marketaux_attempt_calls c JOIN research_call_reservations r USING(call_key)
+      LEFT JOIN research_call_outcomes o USING(call_key) LEFT JOIN research_marketaux_response_receipts receipt USING(call_key)
+      WHERE c.attempt_id=$1 ORDER BY c.pass,c.page`, [ticket.attemptId])).rows;
+  }
+  private marketauxProjection(snapshot: ResearchSnapshot, sourceId: string) {
+    const evidence = snapshot.evidence.filter(e => e.sourceId === sourceId), refs = new Set(evidence.map(e => e.ref));
+    return { coverage: snapshot.coverage.filter(c => c.sourceId === sourceId), evidence, news: snapshot.news.filter(n => refs.has(n.evidenceRef)) };
+  }
+  private async mergeMarketauxSnapshot(ticket: MarketauxAttemptTicket, incoming: ResearchSnapshot, manifest: ResearchManifest, db: ResearchDb): Promise<ResearchSnapshot> {
+    const parsed = parseResearchSnapshot(incoming, manifest);
+    researchAssert(isTwoSourceResearch(parsed) && parsed.instrumentId === ticket.instrumentId && parsed.configHash === ticket.configHash && parsed.manifestHash === ticket.manifestHash, 'RESEARCH_MARKETAUX_PUBLICATION_IDENTITY');
+    const keys = [ticket.configHash,ticket.manifestHash,ticket.instrumentId];
+    await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', keys);
+    const current = await this.latestSnapshot(ticket, db, true);
+    if (!current) researchAssert(parsed.coverage.every(c => c.sourceId === ticket.sourceId) && parsed.evidence.every(e => e.sourceId === ticket.sourceId) && parsed.events.length === 0, "RESEARCH_MARKETAUX_SOURCE_PROJECTION_INVALID");
+    const merged = structuredClone(current?.snapshot ?? parsed);
+    researchAssert(isTwoSourceResearch(merged), 'RESEARCH_POLICY_INVALID');
+    const oldRefs = new Set(merged.evidence.filter(e => e.sourceId === ticket.sourceId).map(e => e.ref));
+    const projection = this.marketauxProjection(parsed, ticket.sourceId);
+    merged.coverage = [...merged.coverage.filter(c => c.sourceId !== ticket.sourceId), ...projection.coverage];
+    merged.evidence = [...merged.evidence.filter(e => e.sourceId !== ticket.sourceId), ...projection.evidence];
+    merged.news = [...merged.news.filter(n => !oldRefs.has(n.evidenceRef)), ...projection.news] as typeof merged.news;
+    merged.createdAt = parsed.createdAt; return merged;
+  }
+  async finalizeMarketauxSuccess(ticket: MarketauxAttemptTicket, build: (completedAt: string) => ResearchSnapshot): Promise<StoredResearchSnapshot> {
+    const deadline = this.marketauxBudget(ticket);
+    await this.marketauxFinalizeFence(ticket, deadline);
+    return this.marketauxTransaction(async db => {
+      await this.assertAuthority(ticket, db);
+      const { manifest, config, source, policy } = await this.marketauxSource(ticket, db);
+      await this.marketauxTicketRow(ticket, db, ['FINALIZING']);
+      await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[ticket.configHash,ticket.manifestHash,ticket.instrumentId]);
+      await this.latestSnapshot(ticket,db,true);
+      const now = await this.now(db); marketauxQualificationDeadline(config, now);
+      researchAssert(source.automation === 'PERMITTED' && source.retention === 'FACTS_AND_REFERENCES' && policy.verification.outcome === 'VERIFIED' && researchTime(policy.verification.verifiedAt) <= now, 'RESEARCH_PERMISSION_UNVERIFIED');
+      researchAssert(now < researchTime(ticket.deadlineAt), 'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
+      const completedAt = new Date(now).toISOString(), incoming = build(completedAt);
+      researchAssert(incoming.createdAt === completedAt, 'RESEARCH_MARKETAUX_COMPLETION_INVALID');
+      const snapshot = await this.mergeMarketauxSnapshot(ticket, incoming, manifest, db);
+      const coverage = snapshot.coverage.find(c => c.sourceId === ticket.sourceId);
+      researchAssert(coverage && 'acquisition' in coverage && coverage.complete && ['AVAILABLE','EMPTY'].includes(coverage.status) && coverage.acquisition?.kind === 'marketaux-news-v2', 'RESEARCH_MARKETAUX_RECEIPT_INVALID');
+      const a = coverage.acquisition, calls = await this.marketauxCalls(ticket, db);
+      researchAssert(a.attemptId === ticket.attemptId && a.startedAt === ticket.startedAt && a.completedAt === completedAt && a.sourceHash === ticket.sourceHash && a.slot === ticket.slot && a.asOf === ticket.asOf && coverage.windowStart === ticket.windowStart && calls.length === a.pages.length, 'RESEARCH_MARKETAUX_RECEIPT_INVALID');
+      for (const page of a.pages) {
+        const call = calls.find(c => c.call_key === page.callKey);
+        researchAssert(call && call.outcome === 'SUCCEEDED' && Number(call.pass) === page.pass && Number(call.page) === page.page && call.request_hash === page.requestHash && call.content_hash === page.contentHash && iso(call.recorded_at) === page.fetchedAt && iso(call.receipt_at) === page.fetchedAt, 'RESEARCH_MARKETAUX_RECEIPT_INVALID');
+      }
+      const stored = await this.persistSnapshot(snapshot, researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot), ticket.deadlineAt, db, undefined, ticket.attemptId);
+      await db.query(`UPDATE research_marketaux_attempts SET state='SUCCEEDED',finished_at=$2,snapshot_id=$3,projection_hash=$4 WHERE id=$1`, [ticket.attemptId,completedAt,stored.id,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId))]);
+      return stored;
+    }, deadline);
+  }
+  async finishMarketauxFailure(ticket: MarketauxAttemptTicket, failure: MarketauxAttemptFailure, buildNegative: (recordedAt: string) => ResearchSnapshot): Promise<{ retained: boolean; snapshot: StoredResearchSnapshot | null }> {
+    const deadline = this.marketauxBudget(ticket, true);
+    researchAssert(/^RESEARCH_[A-Z0-9_]{1,100}$/.test(failure.reason) && (!failure.sourceError || isResearchSourceError(failure.sourceError)), 'RESEARCH_MARKETAUX_FAILURE_INVALID');
+    await this.marketauxFinalizeFence(ticket, deadline);
+    return this.marketauxTransaction(async db => {
+      await this.assertAuthority(ticket, db); const { manifest,config,source,policy } = await this.marketauxSource(ticket, db);
+      await this.marketauxTicketRow(ticket, db, ['FINALIZING']);
+      await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[ticket.configHash,ticket.manifestHash,ticket.instrumentId]);
+      await this.latestSnapshot(ticket,db,true);
+      const calls = await this.marketauxCalls(ticket, db), now = await this.now(db), stamp = new Date(now).toISOString();
+      const known = calls.every(c => ['SUCCEEDED','FAILED'].includes(String(c.outcome)) && c.recorded_at && c.receipt_at && iso(c.recorded_at) === iso(c.receipt_at));
+      if (failure.outcome === 'UNKNOWN' || !known) {
+        await db.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=$2,failure_class='UNKNOWN',failure_reason=$3,source_error=$4 WHERE id=$1", [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null]);
+        return { retained: false, snapshot: null };
+      }
+      const current = await this.latestSnapshot(ticket, db, true);
+      if (current) await this.assertMarketauxSnapshotProvenance(current.snapshot, db);
+      const old = current?.snapshot.coverage.find(c => c.sourceId === ticket.sourceId);
+      const http = failure.sourceError?.httpStatus;
+      const transient = http !== undefined && [429,500,502,503,504].includes(http) && failure.reason === `RESEARCH_SOURCE_HTTP_${http}` && calls.some(c => c.outcome === 'FAILED');
+      const denial = (await db.query('SELECT * FROM research_marketaux_budget_denials WHERE attempt_id=$1',[ticket.attemptId])).rows[0];
+      const budget = failure.reason === 'RESEARCH_BUDGET_EXHAUSTED' && failure.sourceError?.httpStatus === undefined && calls.every(c => c.outcome === 'SUCCEEDED') && Boolean(denial);
+      let rights = false; try { marketauxQualificationDeadline(config, now); rights = source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now; } catch { /* A failed qualification cannot retain cached news. */ }
+      const retained = Boolean(current && old && old.complete && ['AVAILABLE','EMPTY'].includes(old.status) && now >= researchTime(old.checkedAt) && now < researchTime(old.checkedAt) + config.maxAgeMs && rights && (transient || budget));
+      let stored = current;
+      if (!retained) {
+        const incoming = buildNegative(stamp);
+        researchAssert(incoming.createdAt === stamp, 'RESEARCH_MARKETAUX_COMPLETION_INVALID');
+        const projection = this.marketauxProjection(incoming,ticket.sourceId), negative = projection.coverage[0];
+        researchAssert(projection.coverage.length === 1 && !projection.evidence.length && !projection.news.length && negative?.status === 'ERROR' && !negative.complete && negative.checkedAt === stamp && negative.reason === failure.reason && canonicalJson(negative.sourceError ?? null) === canonicalJson(failure.sourceError ?? null), 'RESEARCH_MARKETAUX_NEGATIVE_INVALID');
+        const snapshot = await this.mergeMarketauxSnapshot(ticket,incoming,manifest,db);
+        stored = await this.persistSnapshot(snapshot,researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),undefined,db);
+      } else {
+        await db.query('INSERT INTO research_refresh_slots(slot_key,snapshot_id) VALUES($1,$2)', [researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),stored!.id]);
+      }
+      researchAssert(stored, 'RESEARCH_MARKETAUX_PUBLICATION_INVALID');
+      await db.query(`UPDATE research_marketaux_attempts SET state='FAILED',finished_at=$2,failure_reason=$3,source_error=$4,snapshot_id=$5,retained=$6,projection_hash=$7,failure_class=$8 WHERE id=$1`, [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null,stored.id,retained,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId)),transient ? 'TRANSIENT' : budget ? 'BUDGET' : 'HARD']);
+      return { retained, snapshot: stored };
+    }, deadline);
+  }
+  private async assertMarketauxSnapshotProvenance(snapshot: ResearchSnapshot, db: ResearchDb, publishingId?: string): Promise<void> {
+    if (!isTwoSourceResearch(snapshot)) return;
+    for (const coverage of snapshot.coverage) {
+      if (!('acquisition' in coverage) || coverage.acquisition?.kind !== 'marketaux-news-v2') continue;
+      const row = (await db.query('SELECT * FROM research_marketaux_attempts WHERE id=$1', [coverage.acquisition.attemptId])).rows[0];
+      researchAssert(row && row.config_hash === snapshot.configHash && row.manifest_hash === snapshot.manifestHash && row.instrument_id === snapshot.instrumentId && row.source_id === coverage.sourceId && (row.state === 'SUCCEEDED' || row.state === 'FINALIZING' && row.id === publishingId), 'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+      if (row.state === 'SUCCEEDED') {
+        const a = coverage.acquisition;
+        researchAssert(row.projection_hash === researchHash(this.marketauxProjection(snapshot,coverage.sourceId)) && a.sourceHash === row.source_hash && a.startedAt === iso(row.started_at) && a.completedAt === iso(row.finished_at) && Number(row.slot) === a.slot && researchTime(a.completedAt) < researchTime(iso(row.deadline_at)), 'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+        const original = await this.readSnapshot(String(row.snapshot_id),db);
+        researchAssert(original && researchHash(this.marketauxProjection(original.snapshot,coverage.sourceId)) === row.projection_hash, 'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+        const calls = await this.marketauxCalls({attemptId:String(row.id)},db);
+        researchAssert(calls.length === a.pages.length && calls.length >= 2, 'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+        for (const p of a.pages) {
+          const c = calls.find(c=>c.call_key === p.callKey);
+          researchAssert(c && c.outcome === 'SUCCEEDED' && c.account_id === row.account_id && c.config_hash === row.config_hash && c.manifest_hash === row.manifest_hash && c.content_hash === p.contentHash && c.request_hash === p.requestHash && Number(c.pass) === p.pass && Number(c.page) === p.page && iso(c.recorded_at) === p.fetchedAt && iso(c.receipt_at) === p.fetchedAt && researchTime(p.fetchedAt) < researchTime(iso(c.deadline_at)) && researchTime(iso(c.deadline_at)) <= researchTime(iso(row.deadline_at)), 'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+        }
+      }
+    }
+  }
+  private async marketauxFailureProof(identity: ResearchIdentity & { instrumentId: string; sourceId?: string; accountId?: string }, db: ResearchDb): Promise<boolean> {
+    const rows = (await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE a.config_hash=$1 AND a.manifest_hash=$2 AND a.instrument_id=$3 AND a.state='FAILED'
+      AND ($4::text IS NULL OR a.source_id=$4) AND ($5::text IS NULL OR a.account_id=$5)
+      AND NOT EXISTS(SELECT 1 FROM research_marketaux_attempts good WHERE good.config_hash=a.config_hash AND good.manifest_hash=a.manifest_hash AND good.instrument_id=a.instrument_id AND good.source_id=a.source_id AND good.account_id=a.account_id AND good.state='SUCCEEDED' AND good.started_at>a.started_at)`,[identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId??null,identity.accountId??null])).rows;
+    for (const row of rows) {
+      if (!['TRANSIENT','BUDGET'].includes(String(row.failure_class))) return false;
+      const error = row.source_error as ResearchSourceError | null;
+      if (error && !isResearchSourceError(error)) return false;
+      const original = row.snapshot_id ? await this.readSnapshot(String(row.snapshot_id),db) : null;
+      if (!original || original.snapshot.configHash !== row.config_hash || original.snapshot.manifestHash !== row.manifest_hash || original.snapshot.instrumentId !== row.instrument_id || row.projection_hash !== researchHash(this.marketauxProjection(original.snapshot,String(row.source_id)))) return false;
+      const calls = await this.marketauxCalls({attemptId:String(row.id)},db);
+      if (calls.some(c=>!['SUCCEEDED','FAILED'].includes(String(c.outcome)) || !c.recorded_at || !c.receipt_at || iso(c.recorded_at)!==iso(c.receipt_at) || c.outcome==='SUCCEEDED'&&!isResearchHash(c.content_hash) || c.outcome==='FAILED'&&c.content_hash!==null || c.account_id!==row.account_id || c.config_hash!==row.config_hash || c.manifest_hash!==row.manifest_hash || researchTime(iso(c.recorded_at))>researchTime(iso(row.finished_at)))) return false;
+      if (row.failure_class === 'TRANSIENT') {
+        if (!error?.httpStatus || ![429,500,502,503,504].includes(error.httpStatus) || row.failure_reason!==`RESEARCH_SOURCE_HTTP_${error.httpStatus}` || !calls.some(c=>c.outcome==='FAILED')) return false;
+      } else {
+        const denial=(await db.query('SELECT * FROM research_marketaux_budget_denials WHERE attempt_id=$1',[row.id])).rows[0];
+        if (row.failure_reason!=='RESEARCH_BUDGET_EXHAUSTED' || error?.httpStatus!==undefined || !denial || calls.some(c=>c.outcome!=='SUCCEEDED') || researchTime(iso(denial.recorded_at))<researchTime(iso(row.started_at)) || researchTime(iso(denial.recorded_at))>researchTime(iso(row.finished_at))) return false;
+      }
+      if (row.retained) {
+        await this.assertMarketauxSnapshotProvenance(original.snapshot,db);
+        const c=original.snapshot.coverage.find(c=>c.sourceId===row.source_id);
+        const {config,source,policy}=await this.marketauxSource({...identity,sourceId:String(row.source_id)},db), at=researchTime(iso(row.finished_at));
+        if (!c?.complete || !['AVAILABLE','EMPTY'].includes(c.status) || at<researchTime(c.checkedAt) || at>=researchTime(c.checkedAt)+config.maxAgeMs || source.automation!=='PERMITTED' || source.retention!=='FACTS_AND_REFERENCES' || policy.verification.outcome!=='VERIFIED') return false;
+        try {marketauxQualificationDeadline(config,at);} catch {return false;}
+      } else {
+        const c=original.snapshot.coverage.find(c=>c.sourceId===row.source_id);
+        if (!c || c.complete || c.status!=='ERROR' || c.reason!==row.failure_reason || canonicalJson(c.sourceError??null)!==canonicalJson(error)) return false;
+      }
+    }
+    return true;
+  }
+  private async marketauxAdmissionReasons(identity: ResearchIdentity & { instrumentId: string; sourceId?: string; accountId?: string }, db: ResearchDb): Promise<string[]> {
+    if (!(await this.marketauxFailureProof(identity,db))) return ['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED'];
+    const orphan = (await db.query(`SELECT 1 FROM research_call_reservations r WHERE r.config_hash=$1 AND r.manifest_hash=$2 AND r.provider='https://api.marketaux.com' AND r.kind='source'
+      AND ($3::text IS NULL OR r.account_id=$3) AND NOT EXISTS(SELECT 1 FROM research_marketaux_attempt_calls c WHERE c.call_key=r.call_key) LIMIT 1`, [identity.configHash,identity.manifestHash,identity.accountId ?? null])).rows.length;
+    if (orphan) return ['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED'];
+    const rows = (await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE a.config_hash=$1 AND a.manifest_hash=$2 AND a.instrument_id=$3
+      AND ($4::text IS NULL OR a.source_id=$4) AND ($5::text IS NULL OR a.account_id=$5)
+      AND ((a.state IN ('FINALIZING','UNKNOWN')) OR (a.state='STARTED' AND (a.deadline_at<=clock_timestamp() OR EXISTS(
+       SELECT 1 FROM research_marketaux_attempt_calls c JOIN research_call_reservations r USING(call_key) LEFT JOIN research_call_outcomes o USING(call_key)
+       WHERE c.attempt_id=a.id AND (o.outcome IN ('UNKNOWN','FAILED') OR o.call_key IS NULL AND r.deadline_at<=clock_timestamp()))))
+       OR (a.state='FAILED' AND a.failure_class='HARD'))
+      AND NOT EXISTS(SELECT 1 FROM research_marketaux_attempts good WHERE good.config_hash=a.config_hash AND good.manifest_hash=a.manifest_hash AND good.instrument_id=a.instrument_id AND good.source_id=a.source_id AND good.account_id=a.account_id AND good.state='SUCCEEDED' AND good.started_at>a.started_at) LIMIT 1`, [identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId ?? null,identity.accountId ?? null])).rows;
+    return rows.length ? ['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED'] : [];
+  }
+  async readMarketauxRefreshState(identity: MarketauxAttemptIdentity, existing?: ResearchDb): Promise<MarketauxRefreshState> {
+    const read = async (db: ResearchDb): Promise<MarketauxRefreshState> => {
+      const { config,ledger } = await this.marketauxSource(identity,db), stored = await this.latestSnapshot(identity,db);
+      if (stored) await this.assertMarketauxSnapshotProvenance(stored.snapshot,db);
+      const coverage = stored?.snapshot.coverage.find(c => c.sourceId === identity.sourceId && c.complete && 'acquisition' in c && c.acquisition?.kind === 'marketaux-news-v2');
+      const success = coverage ? researchTime(coverage.checkedAt) : null, expiry = earliestSourceValidityExpiry(config.qualification,config.entitlement);
+      const rows = (await db.query('SELECT * FROM research_marketaux_attempts WHERE account_id=$1 AND ledger_key=$2 ORDER BY started_at DESC', [identity.accountId,ledger])).rows;
+      const own = rows.filter(r => r.config_hash === identity.configHash && r.manifest_hash === identity.manifestHash && r.instrument_id === identity.instrumentId && r.source_id === identity.sourceId);
+      const failure = own.find(r => r.state === 'FAILED' || r.state === 'UNKNOWN'), active = rows.find(r => r.state === 'STARTED' || r.state === 'FINALIZING');
+      const holdReasons = await this.marketauxAdmissionReasons(identity,db);
+      const now = await this.now(db);
+      if (rows.some(r => r.state === 'UNKNOWN' || r.state === 'FINALIZING' || r.state === 'STARTED' && researchTime(iso(r.deadline_at)) <= now) && !holdReasons.length) holdReasons.push('RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED');
+      return { sourceId:identity.sourceId,lastSuccessfulAt:success === null ? null : new Date(success).toISOString(), expiresAt:success === null ? null : new Date(Math.min(success+config.maxAgeMs,expiry ?? success+config.maxAgeMs)).toISOString(),
+        nextRegularAt:rows.length ? new Date(researchTime(iso(rows[0].started_at))+3600000).toISOString() : null, activeAttemptId:active ? String(active.id) : null, holdReasons,
+        latestFailure:failure ? { attemptId:String(failure.id),recordedAt:iso(failure.finished_at),reason:String(failure.failure_reason),...(failure.source_error ? { sourceError:failure.source_error as ResearchSourceError } : {}),retainedSnapshotId:failure.retained ? String(failure.snapshot_id) : null,retainedProjectionHash:failure.retained ? String(failure.projection_hash) : null } : null };
+    };
+    return existing ? read(existing) : this.marketauxTransaction(read,performance.now()+3000,true);
+  }
+
   private wshDueCursor = 0;
   private readonly wshTicketDeadlines=new WeakMap<WshAttemptTicket,number>();
   private budgetDiscovery: { identity: string; nextScanAt: number; cursor: string } | undefined;
@@ -43,13 +332,17 @@ export class ResearchStore {
       researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), "RESEARCH_ACCOUNT_INVALID");
       await this.assertAuthority(identity, db);
       const manifest = await this.readManifest(identity, db), now = await this.now(db);
+      if (isTwoSourceResearch(manifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
       const stored = await this.latestSnapshot(identity, db, true);
       const legacy = await this.legacyMarketauxRecoveries(identity, manifest, stored, now, db);
       const budget = await this.marketauxBudgetRecoveries(identity, manifest, stored, now, db);
       const wshStates:WshRefreshState[]=[];
       for(const source of manifest.instruments.find(p=>p.instrumentId===identity.instrumentId)?.sources??[])
         if(source.adapter==='ibkr-wsh')wshStates.push(await this.readWshRefreshState({...identity,sourceId:source.id},db));
-      const result = inspectResearch(manifest, identity.instrumentId, stored, now, legacy, budget.assessments,wshStates);
+      const marketauxStates: MarketauxRefreshState[] = [];
+      if (isTwoSourceResearch(manifest)) for (const source of manifest.instruments.find(p=>p.instrumentId===identity.instrumentId)?.sources ?? [])
+        if (source.adapter === 'marketaux-news') marketauxStates.push(await this.readMarketauxRefreshState({...identity,sourceId:source.id},db));
+      const result = inspectResearch(manifest, identity.instrumentId, stored, now, legacy, budget.assessments,wshStates,marketauxStates);
       for (const row of result.sources) {
         const diagnostic = budget.diagnostics.get(row.sourceId);
         if (row.role === "news" && diagnostic) row.localBudget = diagnostic;
@@ -62,10 +355,14 @@ export class ResearchStore {
         const usage = (await db.query(`SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost
           FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=$3`, [identity.accountId, source.provider, new Date(now).toISOString().slice(0, 10)])).rows[0];
         if (Number(usage.requests) >= Math.min(...providers.map(s => s.maxRequestsPerDay)) || Number(usage.cost) + Math.max(...providers.map(s => s.costMicrosPerCall)) > Math.min(...providers.map(s => s.maxCostMicrosPerDay))) {
-          row.state = "HOLD"; row.reasons = ["RESEARCH_BUDGET_EXHAUSTED"]; row.nextCheckAt = null; continue;
+          row.state = isTwoSourceResearch(manifest) ? "WAITING" : "HOLD"; row.reasons = ["RESEARCH_BUDGET_EXHAUSTED"]; row.nextCheckAt = isTwoSourceResearch(manifest) ? new Date(Date.parse(new Date(now).toISOString().slice(0,10))+86400000).toISOString() : null; continue;
         }
-        if (source.adapter === "marketaux-news" && await this.hasUnresolvedMarketauxFailure(identity,manifest,source.id,now,db)) {
+        if (!isTwoSourceResearch(manifest) && source.adapter === "marketaux-news" && await this.hasUnresolvedMarketauxFailure(identity,manifest,source.id,now,db)) {
           row.state="HOLD";row.reasons=["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"];row.nextCheckAt=null;continue;
+        }
+        if (source.parserConfig.kind === 'marketaux-news-v2') {
+          row.nextCheckAt = new Date(Math.max(now, row.marketauxRefresh?.nextRegularAt ? researchTime(row.marketauxRefresh.nextRegularAt) : now)).toISOString();
+          continue;
         }
         if (Date.parse(row.nextCheckAt!) > now) continue;
         if(source.adapter==='ibkr-wsh' && row.wshRefresh){
@@ -179,6 +476,7 @@ export class ResearchStore {
     return result;
   }
   private async hasUnresolvedMarketauxFailure(identity: ResearchRepairIdentity, manifest: ResearchManifest, sourceId: string, now: number, db: ResearchDb): Promise<boolean> {
+    if (isTwoSourceResearch(manifest)) return false;
     const policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId)!,source=policy.sources.find(s=>s.id===sourceId)!,config=parseMarketauxNewsConfig(source,policy);
     const calls=(await db.query(`SELECT r.*,o.recorded_at FROM research_call_reservations r JOIN research_call_outcomes o USING(call_key)
       WHERE r.account_id=$1 AND r.provider=$2 AND r.kind='source' AND r.config_hash=$3 AND r.manifest_hash=$4 AND o.outcome='FAILED'`,[identity.accountId,source.provider,identity.configHash,identity.manifestHash])).rows;
@@ -218,6 +516,7 @@ export class ResearchStore {
     return false;
   }
   private async marketauxBudgetRecoveries(identity: ResearchRepairIdentity, manifest: ResearchManifest, stored: StoredResearchSnapshot | null, now: number, db: ResearchDb): Promise<{ assessments: MarketauxBudgetRecoveryAssessment[]; diagnostics: Map<string, ResearchLocalBudgetDiagnostic> }> {
+    if (isTwoSourceResearch(manifest)) return { assessments: [], diagnostics: new Map() };
     const assessments: MarketauxBudgetRecoveryAssessment[] = [], diagnostics = new Map<string, ResearchLocalBudgetDiagnostic>();
     const policy = manifest.instruments.find(p => p.instrumentId === identity.instrumentId);
     if (!stored || !policy) return { assessments, diagnostics };
@@ -287,6 +586,7 @@ export class ResearchStore {
     return { assessments, diagnostics };
   }
   private async legacyMarketauxRecoveries(identity: ResearchRepairIdentity, manifest: ResearchManifest, stored: StoredResearchSnapshot | null, now: number, db: ResearchDb): Promise<MarketauxLegacyRecoveryAssessment[]> {
+    if (isTwoSourceResearch(manifest)) return [];
     const policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId), result:MarketauxLegacyRecoveryAssessment[]=[];
     if (!stored || !policy) return result;
     for (const source of policy.sources.filter(s=>s.adapter==='marketaux-news')) {
@@ -351,6 +651,8 @@ export class ResearchStore {
           OR EXISTS(SELECT 1 FROM research_wsh_acquisitions WHERE state='PENDING' AND retired_at IS NULL)
           OR EXISTS(SELECT 1 FROM research_wsh_refresh_attempts WHERE state='STARTED')`);
         researchAssert(!active.rows.length, "RESEARCH_ADOPTION_ACTIVE_OR_UNKNOWN_WORK");
+        const hasMarketaux = (await db.query("SELECT to_regclass('research_marketaux_attempts') AS table_name")).rows[0]?.table_name;
+        if (hasMarketaux) researchAssert(!(await db.query("SELECT 1 FROM research_marketaux_attempts WHERE state IN ('STARTED','FINALIZING','UNKNOWN') LIMIT 1")).rows.length, "RESEARCH_ADOPTION_ACTIVE_OR_UNKNOWN_WORK");
         await db.query(`INSERT INTO research_authority(config_hash,manifest_hash) VALUES($1,$2) ON CONFLICT(config_hash)
           DO UPDATE SET manifest_hash=EXCLUDED.manifest_hash,adopted_at=clock_timestamp()`, [manifest.configHash, hash]);
         await db.query("INSERT INTO research_authority_history(config_hash,manifest_hash,previous_hash,entries_disabled) VALUES($1,$2,$3,TRUE)", [manifest.configHash, hash, authority?.manifest_hash ?? null]);
@@ -398,11 +700,12 @@ export class ResearchStore {
   async storeSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
     return this.persistSnapshot(input, refreshSlot, admissionDeadlineAt);
   }
-  private async persistSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string, existing?: ResearchDb, publishingAcquisitionId?: string): Promise<StoredResearchSnapshot> {
+  private async persistSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string, existing?: ResearchDb, publishingAcquisitionId?: string, publishingMarketauxId?: string): Promise<StoredResearchSnapshot> {
     if (admissionDeadlineAt !== undefined) researchTime(admissionDeadlineAt);
     return this.transaction(async db => {
       await this.assertAuthority(input, db); const manifest = await this.readManifest(input, db), snapshot = parseResearchSnapshot(input, manifest);
       await this.assertWshSnapshotProvenance(snapshot, db, publishingAcquisitionId);
+      await this.assertMarketauxSnapshotProvenance(snapshot, db, publishingMarketauxId);
       researchAssert(researchTime(snapshot.createdAt) <= await this.now(db), "RESEARCH_FUTURE_SNAPSHOT");
       const key = [snapshot.configHash, snapshot.manifestHash, snapshot.instrumentId];
       await db.query("INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", key);
@@ -461,7 +764,9 @@ export class ResearchStore {
         proposal.conid === review.conid && review.instrument_id === input.instrumentId && proposal.client_order_hash === input.clientOrderHash && proposal.instrument_id === input.instrumentId && proposal.strategy_configuration_hash === input.configHash && review.client_order_hash === input.clientOrderHash && review.status === "PENDING" && !review.decision_json && !review.decided_at && !review.delivery_started_at && !review.delivery_outcome && proposal.status === "PROPOSED" && !proposal.execution_attempted_at && !proposal.broker_order_id, "RESEARCH_PROPOSAL_BINDING_INVALID");
       await this.assertAuthority(input, db);
       if (!(await this.getBinding(input.proposalId, db))) {
-        const manifest = await this.readManifest(input, db), stored = await this.latestSnapshot(input, db, true);
+        const manifest = await this.readManifest(input, db);
+        if (isTwoSourceResearch(manifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
+        const stored = await this.latestSnapshot(input, db, true);
         researchAssert(stored, "RESEARCH_SNAPSHOT_MISSING"); const eligibility = evaluateResearchEligibility(stored.snapshot, manifest, await this.now(db));
         researchAssert(eligibility.eligible, `RESEARCH_INELIGIBLE:${eligibility.reasons.join(",")}`);
         await db.query("INSERT INTO research_bindings(proposed_order_id,client_order_hash,config_hash,manifest_hash,instrument_id,snapshot_id,snapshot_hash,sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [input.proposalId, input.clientOrderHash, input.configHash, input.manifestHash, input.instrumentId, stored.id, stored.hash, stored.sequence]);
@@ -474,20 +779,27 @@ export class ResearchStore {
       await this.assertAuthority(input, db);
       const binding = await this.getBinding(input.proposalId, db);
       researchAssert(binding && binding.clientOrderHash === input.clientOrderHash && binding.configHash === input.configHash && binding.manifestHash === input.manifestHash && binding.instrumentId === input.instrumentId, "RESEARCH_BINDING_MISMATCH");
+      const activeManifest = await this.readManifest(input, db);
+      if (isTwoSourceResearch(activeManifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
       const stored = await this.latestSnapshot(input, db, lockHead);
       researchAssert(stored && stored.id === binding.snapshotId && stored.hash === binding.snapshotHash && stored.sequence === binding.sequence, "RESEARCH_SNAPSHOT_SUPERSEDED");
       await this.assertWshRefreshAdmission(input,db);
+      if (isTwoSourceResearch(stored.snapshot)) {
+        await this.assertMarketauxSnapshotProvenance(stored.snapshot,db);
+        researchAssert(!(await this.marketauxAdmissionReasons(input,db)).length, "RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED");
+      }
       const manifest = await this.readManifest(input, db), eligibility = evaluateResearchEligibility(stored.snapshot, manifest, await this.now(db));
       researchAssert(eligibility.eligible, `RESEARCH_INELIGIBLE:${eligibility.reasons.join(",")}`);
       return { binding, stored, manifest, eligibility };
     }, existing);
   }
-  async reserveCall(input: ResearchCallReservation, existing?: ResearchDb): Promise<{ callKey: string; reservedAt: string; budgetDay: string }> {
+  async reserveCall(input: ResearchCallReservation, existing?: ResearchDb, marketauxAttemptId?: string): Promise<{ callKey: string; reservedAt: string; budgetDay: string }> {
     for (const n of [input.reservedCostMicros, input.maxRequestsPerDay, input.maxCostMicrosPerDay]) researchAssert(Number.isSafeInteger(n) && n >= 0, "RESEARCH_BUDGET_INVALID");
     researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(input.accountId) && input.provider.length > 0 && input.provider.length <= 200 && input.callKey.length > 0 && input.callKey.length <= 1000 && isResearchHash(input.requestHash));
     return this.transaction(async db => {
       const authority = await this.assertAuthority(input, db);
       const manifest = await this.readManifest(input, db);
+      if (isTwoSourceResearch(manifest) && input.kind === 'source' && input.provider === 'https://api.marketaux.com') researchAssert(existing && marketauxAttemptId && (await db.query("SELECT 1 FROM research_marketaux_attempts WHERE id=$1 AND state='STARTED' AND config_hash=$2 AND manifest_hash=$3 AND account_id=$4",[marketauxAttemptId,input.configHash,input.manifestHash,input.accountId])).rows.length, 'RESEARCH_MARKETAUX_TICKET_REQUIRED');
       const limits = input.kind === "model" ? manifest.model.provider === input.provider ? [{ requests: manifest.model.maxRequestsPerDay, cost: manifest.model.maxCostMicrosPerDay, perCall: manifest.model.maxCostMicrosPerCall }] : [] :
         manifest.refreshEnabled ? manifest.instruments.flatMap(i => i.sources).filter(s => s.provider === input.provider).map(s => ({ requests: s.maxRequestsPerDay, cost: s.maxCostMicrosPerDay, perCall: s.costMicrosPerCall })) : [];
       researchAssert(limits.length && input.maxRequestsPerDay <= Math.min(...limits.map(l => l.requests)) && input.maxCostMicrosPerDay <= Math.min(...limits.map(l => l.cost)) && input.reservedCostMicros >= Math.max(...limits.map(l => l.perCall)), "RESEARCH_BUDGET_MANIFEST_MISMATCH");
@@ -497,7 +809,7 @@ export class ResearchStore {
       researchAssert(deadline > now && deadline <= now + 10000, "RESEARCH_CALL_DEADLINE_INVALID");
       researchAssert(!(await db.query("SELECT 1 FROM research_call_reservations WHERE call_key=$1", [input.callKey])).rows.length, "RESEARCH_CALL_ALREADY_RESERVED");
       const usage = (await db.query("SELECT count(*) AS requests,coalesce(sum(reserved_cost_micros),0) AS cost FROM research_call_reservations WHERE account_id=$1 AND provider=$2 AND budget_day=$3", [input.accountId, input.provider, day])).rows[0];
-      researchAssert(Number(usage.requests) < input.maxRequestsPerDay && Number(usage.cost) + input.reservedCostMicros <= input.maxCostMicrosPerDay, "RESEARCH_BUDGET_EXHAUSTED");
+      if (!(Number(usage.requests) < input.maxRequestsPerDay && Number(usage.cost) + input.reservedCostMicros <= input.maxCostMicrosPerDay)) throw new ResearchBudgetExhausted({ day, recordedAt: new Date(now).toISOString(), requests: Number(usage.requests), cost: Number(usage.cost), maxRequests: input.maxRequestsPerDay, maxCost: input.maxCostMicrosPerDay, nextCost: input.reservedCostMicros });
       await db.query("INSERT INTO research_call_reservations(call_key,account_id,provider,kind,config_hash,manifest_hash,request_hash,reserved_cost_micros,reserved_at,deadline_at,budget_day) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
         [input.callKey, input.accountId, input.provider, input.kind, input.configHash, input.manifestHash, input.requestHash, input.reservedCostMicros, new Date(now).toISOString(), input.deadlineAt, day]);
       return { callKey: input.callKey, reservedAt: new Date(now).toISOString(), budgetDay: day };
@@ -856,7 +1168,7 @@ export class ResearchStore {
       if (row.state === "PUBLISHED") {
         const original = (await db.query("SELECT canonical_json FROM research_snapshots WHERE id=$1", [row.snapshot_id])).rows[0];
         researchAssert(original && typeof original.canonical_json === "string", "RESEARCH_WSH_ACQUISITION_INVALID");
-        const published = JSON.parse(original.canonical_json) as InstrumentResearchSnapshotV2;
+        const published = JSON.parse(original.canonical_json) as ResearchSnapshotV2;
         const projection = (value: ResearchSnapshot) => { const evidence = value.evidence.filter(e => e.sourceId === coverage.sourceId), refs = new Set(evidence.map(e => e.ref)); return { coverage: value.coverage.filter(c => c.sourceId === coverage.sourceId), evidence, events: value.events.filter(e => refs.has(e.evidenceRef)) }; };
         researchAssert(canonicalJson(projection(snapshot)) === canonicalJson(projection(published)), "RESEARCH_WSH_PUBLISHED_CONTEXT_IMMUTABLE");
       }
@@ -867,7 +1179,7 @@ export class ResearchStore {
       researchAssert(row && iso(row.first_observed_at) === e.firstObservedAt, "RESEARCH_WSH_FIRST_OBSERVATION_INVALID");
     }
   }
-  async publishWshSnapshot(lease: WshEndpointLease, acquisition: WshAcquisition, input: InstrumentResearchSnapshotV2, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
+  async publishWshSnapshot(lease: WshEndpointLease, acquisition: WshAcquisition, input: ResearchSnapshotV2, refreshSlot?: string, admissionDeadlineAt?: string): Promise<StoredResearchSnapshot> {
     return this.wshTransaction(lease, async db => {
       await this.assertAuthority(acquisition, db); await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
       researchAssert(input.configHash === acquisition.configHash && input.manifestHash === acquisition.manifestHash && input.instrumentId === acquisition.instrumentId, "RESEARCH_WSH_PUBLICATION_IDENTITY_INVALID");
@@ -882,7 +1194,7 @@ export class ResearchStore {
       await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',headKey);
       const current=await this.latestSnapshot(acquisition,db,true);
       researchAssert(!current||current.snapshot.schemaVersion===2,'RESEARCH_WSH_VERSION_INVALID');
-      const snapshot=structuredClone(current?.snapshot??incoming) as InstrumentResearchSnapshotV2;
+      const snapshot=structuredClone(current?.snapshot??incoming) as ResearchSnapshotV2;
       const oldRefs=new Set(snapshot.evidence.filter(e=>e.sourceId===acquisition.sourceId).map(e=>e.ref));
       const evidence=incoming.evidence.filter(e=>e.sourceId===acquisition.sourceId),newRefs=new Set(evidence.map(e=>e.ref));
       snapshot.coverage=[...snapshot.coverage.filter(c=>c.sourceId!==acquisition.sourceId),...incoming.coverage.filter(c=>c.sourceId===acquisition.sourceId)];
@@ -915,7 +1227,7 @@ export class ResearchStore {
     };
     if (existing) await retire(existing); else await this.wshTransaction(lease, retire);
   }
-  async finishWshFailure(lease: WshEndpointLease, acquisition: WshAcquisition, snapshot: InstrumentResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN", refreshSlot?: string): Promise<StoredResearchSnapshot> {
+  async finishWshFailure(lease: WshEndpointLease, acquisition: WshAcquisition, snapshot: ResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN", refreshSlot?: string): Promise<StoredResearchSnapshot> {
     return this.wshTransaction(lease, async db => {
       await this.assertAuthority(acquisition, db); await this.assertWshFence(lease, acquisition, db);
       researchAssert(snapshot.configHash === acquisition.configHash && snapshot.manifestHash === acquisition.manifestHash && snapshot.instrumentId === acquisition.instrumentId && snapshot.coverage.some(c => c.sourceId === acquisition.sourceId && !c.complete && c.status !== "AVAILABLE" && c.status !== "EMPTY"), "RESEARCH_WSH_NEGATIVE_INVALID");

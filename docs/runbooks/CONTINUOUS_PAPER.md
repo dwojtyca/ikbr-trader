@@ -22,8 +22,7 @@ wejścia. Każda próba zachowuje własny zapis, a kolejne poprawne transakcje t
 samego instrumentu nie zastępują historii poprzednich.
 
 AI ocenia każdą nową propozycję ze świeżym kontekstem cenowym i sprawdzonym
-zestawem danych badawczych. Nie musi za każdym razem pobierać tego samego raportu
-spółki. Używa aktualnej, zapisanej wersji źródeł, przypisanej niezmiennie do tej
+zestawem danych badawczych. Nie musi za każdym razem pobierać tych samych wiadomości i kalendarza. Używa aktualnej, zapisanej wersji źródeł, przypisanej niezmiennie do tej
 oceny. Zużycie oraz zachowawcze rezerwacje kosztu są wspólne dla rachunku;
 restart ani nowa propozycja nie odnawiają budżetu. Wyczerpanie 5 USD może
 wstrzymać dalsze oceny do następnej doby UTC.
@@ -35,24 +34,23 @@ nieaktualne dane uruchamiają kolejkę uzupełnienia przez dotychczasowego dosta
 Stan `WAITING` nie rezerwuje wejścia ani nie wywołuje AI. Kolejny cykl strategii
 sprawdza od nowa sygnał, ceny i ryzyko po uzupełnieniu danych.
 
-`RESEARCH_MARKETAUX_ON_DEMAND=true` pomija cykliczne pobieranie wiadomości
-Marketaux; pobiera je kolejka uruchomiona po rzeczywistym sygnale. Raporty i WSH
-pozostają cykliczne. Brak sygnału i brak oczekującego uzupełnienia oznacza zero
-żądań Marketaux. Domyślne `false` zachowuje wcześniejszy harmonogram. Pierwszy
-pełny zestaw badań należy przygotować przy wyłączonym handlu przez dotychczasową
-ścieżkę odświeżania, z tym samym rejestrem zużycia i limitami dostawcy.
+Decyzja właściciela z 15 października 2026 wybiera politykę
+`TWO_SOURCE_HOURLY_V1`: wyłącznie Marketaux i WSH, oba odświeżane co godzinę,
+oba ważne przez 24 godziny od poprawnego pobrania. Start korzysta od razu
+z ważnego zestawu. Brakujące lub przeterminowane źródło uzupełnia przed
+wznowieniem wejść. Zwykłe odświeżanie działa w tle niezależnie od sygnałów.
+Raporty SEC i PKO oraz ich terminy publikacji nie są wymagane w tej polityce.
+Stan wdrożenia i dowody są w [raporcie pakietu](../implementation/phase3/TWO_SOURCE_RESEARCH_HOURLY_REPORT.md).
 
-Przy 100 żądaniach wiadomości na dobę pełny harmonogram co15min dla obu spółek
-nie mieści się w limicie: dwie wymagane serie pobrania na każdą spółkę to minimum
-384 żądania/dobę, a stronicowanie może zwiększać zużycie. Tryb na żądanie ogranicza
-zbędne pobrania; nie gwarantuje wystarczającego budżetu przy każdej liczbie sygnałów.
+Nowa polityka wymaga `RESEARCH_MARKETAUX_ON_DEMAND=false`. Starsze manifesty
+zachowują swój harmonogram i tryb na żądanie; sama zmiana flagi nie przełącza
+polityki. Przyjęcie nowego manifestu nie przenosi starych danych pod nowy hash.
 
-Pobieranie respektuje wspólne limity i odstępy dostawcy. Nie tworzy dodatkowej
-tożsamości wywołania, aby ponowić nieznany wynik. Brak praw dostępu, wygaśnięcie
-potwierdzenia uprawnień, zmiana nieobsługiwanego formatu raportu, przyszłe lub
-sprzeczne dane oraz wyczerpanie budżetu dają jawny `HOLD` dla instrumentu.
-Sam upływ czasu nie odnawia uprawnień. Ta wersja nie dodaje automatycznego
-rozpoznawania dowolnych nowych układów PDF ani odnawiania kwalifikacji źródeł.
+Chwilowy, potwierdzony błąd odświeżenia może pozostawić poprzednie ważne dane.
+Ich pierwotny czas pobrania i termin ważności nie zmieniają się. Oryginalny błąd
+pozostaje w diagnostyce. Nieznany wynik, nieprawidłowa odpowiedź lub utrata
+potwierdzonego dostępu pozostają jawną blokadą. Pobieranie respektuje wspólny
+budżet i odstępy dostawcy; restart nie odnawia limitu ani nie przyspiesza cyklu.
 
 Jeżeli dane zestarzeją się już po zapisaniu propozycji, można poczekać na ich
 uzupełnienie tylko przed przypisaniem badań i wywołaniem modelu. Pierwotny termin

@@ -1,6 +1,7 @@
+import { isTwoSourceResearch, researchRequiredRoles } from "./policy.js";
 import { sourceValidityExpiry } from "./source-validity.js";
 import { parseWshConfig, wshQualificationDeadline } from "./wsh.js";
-import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
+import { marketauxQualificationDeadline, marketauxMaxAge, parseMarketauxNewsConfig } from "./marketaux.js";
 import type { ResearchSnapshot, ResearchEligibility, ResearchManifest, ResearchMetric } from "./types.js";
 import { parseResearchSnapshot, publicationRange, researchTime } from "./validation.js";
 
@@ -26,7 +27,7 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
     }
     if (published(e.ref) > nowMs || publicationRange(e.published!).start > researchTime(e.fetchedAt) || researchTime(e.fetchedAt) > nowMs || researchTime(e.observedAt) > nowMs || researchTime(e.fetchedAt) > researchTime(s.createdAt) || researchTime(e.observedAt) > researchTime(e.fetchedAt)) deny("RESEARCH_FUTURE_EVIDENCE");
   }
-  for (const role of ["reports", "news", "calendar"] as const) {
+  for (const role of researchRequiredRoles(manifest)) {
     const sources = policy.sources.filter(x => x.roles.includes(role));
     if (!sources.length) deny(`RESEARCH_${role.toUpperCase()}_MISSING`);
     for (const source of sources) {
@@ -44,21 +45,23 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
       }
       const c = s.coverage.find(x => x.sourceId === source.id && x.role === role);
       if (!c) { deny(`RESEARCH_${role.toUpperCase()}_MISSING`); continue; }
-      const maxAge = source.adapter === "ibkr-wsh" ? parseWshConfig(source, policy).maxAgeMs : role === "news" ? 1800000 : DAY;
+      const maxAge = source.adapter === "ibkr-wsh" ? parseWshConfig(source, policy).maxAgeMs : source.adapter === "marketaux-news" ? marketauxMaxAge(parseMarketauxNewsConfig(source, policy)) : role === "news" ? 1800000 : DAY;
       const checked = researchTime(c.checkedAt), start = researchTime(c.windowStart), end = researchTime(c.windowEnd);
       deadlines.push(checked + maxAge);
       if (checked > nowMs || checked > researchTime(s.createdAt) || end > checked || nowMs - checked >= maxAge) deny("RESEARCH_SOURCE_STALE_OR_FUTURE");
       if (!c.complete || !(c.status === "AVAILABLE" || role !== "reports" && c.status === "EMPTY")) deny(`RESEARCH_${role.toUpperCase()}_${c.status}`);
-      if (role === "news" && (end < checked || start > checked - DAY)) deny("RESEARCH_NEWS_WINDOW_INCOMPLETE");
+      if (role === "news" && !(source.adapter === "marketaux-news" && parseMarketauxNewsConfig(source, policy).kind === "marketaux-news-v2") && (end < checked || start > checked - DAY)) deny("RESEARCH_NEWS_WINDOW_INCOMPLETE");
       if (c.status === "AVAILABLE" && !c.evidenceRefs.length) deny("RESEARCH_COVERAGE_EVIDENCE_MISSING");
       if (c.status === "EMPTY" && (c.evidenceRefs.length || (role === "news" ? s.news : s.events).some(x => evidence.get(x.evidenceRef)?.sourceId === source.id))) deny("RESEARCH_FALSE_EMPTY");
       for (const ref of c.evidenceRefs) required.add(ref);
     }
   }
   const covered = (ref: string, role: "reports" | "news" | "calendar") => s.coverage.some(c => c.role === role && c.status === "AVAILABLE" && c.evidenceRefs.includes(ref));
-  const reportById = new Map(s.reports.map(r => [r.id, r]));
-  const factById = new Map(s.facts.map(f => [f.id, f]));
-  for (const r of s.reports) {
+  if (!isTwoSourceResearch(s) && policy.annual && policy.periodic) {
+    const reports = s.reports, facts = s.facts;
+  const reportById = new Map(reports.map(r => [r.id, r]));
+  const factById = new Map(facts.map(f => [f.id, f]));
+  for (const r of reports) {
     if (!covered(r.evidenceRef, "reports")) deny("RESEARCH_REPORT_UNCOVERED");
     if (Date.parse(r.periodEnd) > published(r.evidenceRef)) deny("RESEARCH_REPORT_PERIOD_IN_FUTURE");
     if (r.supersedes !== null) {
@@ -66,7 +69,7 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
       if (!old || old.kind !== r.kind || old.periodStart !== r.periodStart || old.periodEnd !== r.periodEnd || old.scope !== r.scope || published(old.evidenceRef) >= published(r.evidenceRef)) deny("RESEARCH_RESTATEMENT_INVALID");
     }
   }
-  for (const f of s.facts) {
+  for (const f of facts) {
     const report = reportById.get(f.reportId)!;
     if (f.scope !== report.scope || f.periodEnd !== report.periodEnd || f.periodType === "duration" && f.periodStart !== report.periodStart || !covered(f.evidenceRef, "reports") || published(f.evidenceRef) < published(report.evidenceRef)) deny("RESEARCH_FACT_PERIOD_OR_SCOPE_INVALID");
     const ratio = f.metric === "cet1_ratio" || f.metric === "tier1_ratio";
@@ -81,18 +84,19 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
   }
   const metrics: ResearchMetric[] = policy.profile === "bank" ? ["net_interest_income", "net_profit", "loans", "deposits", policy.bankCapitalMetric!] : ["revenue", "net_income", "operating_cash_flow", "total_debt"];
   for (const kind of ["annual", "periodic"] as const) {
-    const expected = policy[kind]; deadlines.push(researchTime(expected.nextPublicationDeadline));
+    const expected = policy[kind]!; deadlines.push(researchTime(expected.nextPublicationDeadline));
     if (researchTime(expected.nextPublicationDeadline) <= nowMs) deny("RESEARCH_EXPECTED_REPORT_OVERDUE");
-    const candidates = s.reports.filter(r => r.kind === kind && r.periodStart === expected.periodStart && r.periodEnd === expected.periodEnd && r.scope === expected.scope && published(r.evidenceRef) <= nowMs);
+    const candidates = reports.filter(r => r.kind === kind && r.periodStart === expected.periodStart && r.periodEnd === expected.periodEnd && r.scope === expected.scope && published(r.evidenceRef) <= nowMs);
     const current = candidates.filter(r => !candidates.some(n => n.supersedes === r.id));
     if (current.length !== 1) { deny(`RESEARCH_${kind.toUpperCase()}_REPORT_MISSING_OR_CONFLICTING`); continue; }
     const report = current[0]; required.add(report.evidenceRef);
     for (const metric of metrics) {
-      const candidates = s.facts.filter(f => f.reportId === report.id && f.metric === metric && published(f.evidenceRef) <= nowMs);
-      const latest = candidates.filter(f => !s.facts.some(n => n.supersedes === f.id && published(n.evidenceRef) <= nowMs));
+      const candidates = facts.filter(f => f.reportId === report.id && f.metric === metric && published(f.evidenceRef) <= nowMs);
+      const latest = candidates.filter(f => !facts.some(n => n.supersedes === f.id && published(n.evidenceRef) <= nowMs));
       if (latest.length !== 1) deny(`RESEARCH_${kind.toUpperCase()}_${metric.toUpperCase()}_MISSING_OR_CONFLICTING`);
       else required.add(latest[0].evidenceRef);
     }
+  }
   }
   for (const n of s.news) {
     if (!covered(n.evidenceRef, "news")) deny("RESEARCH_NEWS_UNCOVERED");

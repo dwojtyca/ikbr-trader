@@ -24,7 +24,7 @@ export interface ResearchReportRequirement {
   nextPublicationDeadline: string;
   scope: "consolidated" | "separate";
 }
-export interface ResearchInstrumentPolicy {
+export interface LegacyResearchInstrumentPolicy {
   instrumentId: string;
   assetClass: "stock" | "etf";
   listing: TradingInstrumentV1["contract"];
@@ -42,10 +42,16 @@ export interface ResearchInstrumentPolicy {
   bankCapitalMetric: "cet1_ratio" | "tier1_ratio" | null;
   sources: ResearchSource[];
 }
+export interface TwoSourceResearchInstrumentPolicy extends Omit<LegacyResearchInstrumentPolicy, "annual" | "periodic" | "bankCapitalMetric"> {
+  annual?: never;
+  periodic?: never;
+  bankCapitalMetric?: never;
+}
+export type ResearchInstrumentPolicy = LegacyResearchInstrumentPolicy | TwoSourceResearchInstrumentPolicy;
 export interface ResearchManifestV1 {
   schemaVersion: 1;
   configHash: string;
-  instruments: ResearchInstrumentPolicy[];
+  instruments: LegacyResearchInstrumentPolicy[];
   refreshEnabled: boolean;
   model: { provider: string; model: string; promptVersion: string; outputSchemaVersion: string; maxInputChars: number; maxOutputTokens: number; maxCostMicrosPerCall: number; maxRequestsPerDay: number; maxCostMicrosPerDay: number };
 }
@@ -151,7 +157,11 @@ export interface ResearchEtfDescriptor {
 }
 
 export interface ResearchManifestV2 extends Omit<ResearchManifestV1, "schemaVersion"> { schemaVersion: 2 }
-export type ResearchManifest = ResearchManifestV1 | ResearchManifestV2;
+export interface TwoSourceResearchManifest extends Omit<ResearchManifestV2, "instruments"> {
+  researchPolicy: "TWO_SOURCE_HOURLY_V1";
+  instruments: TwoSourceResearchInstrumentPolicy[];
+}
+export type ResearchManifest = ResearchManifestV1 | ResearchManifestV2 | TwoSourceResearchManifest;
 export interface ResearchNewsV2 { id: string; evidenceRef: string; title: string; description: string | null; snippet: string | null; providerSentiment: { status: "PROVIDED"; score: number | null } | { status: "NOT_PROVIDED" } }
 export interface InstrumentResearchSnapshotV2 extends Omit<InstrumentResearchSnapshotV1, "schemaVersion" | "evidence" | "coverage" | "events" | "news"> {
   schemaVersion: 2;
@@ -160,4 +170,10 @@ export interface InstrumentResearchSnapshotV2 extends Omit<InstrumentResearchSna
   events: (ResearchEvent | import("./wsh.js").WshEvent)[];
   news: ResearchNewsV2[];
 }
-export type ResearchSnapshot = InstrumentResearchSnapshotV1 | InstrumentResearchSnapshotV2;
+export interface TwoSourceResearchSnapshot extends Omit<InstrumentResearchSnapshotV2, "reports" | "facts"> {
+  researchPolicy: "TWO_SOURCE_HOURLY_V1";
+  reports?: never;
+  facts?: never;
+}
+export type ResearchSnapshotV2 = InstrumentResearchSnapshotV2 | TwoSourceResearchSnapshot;
+export type ResearchSnapshot = InstrumentResearchSnapshotV1 | ResearchSnapshotV2;

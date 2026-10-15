@@ -1,5 +1,5 @@
 import { SaxesParser } from "saxes";
-import type { ResearchEvidence, ResearchFact, ResearchInstrumentPolicy, ResearchMetric, ResearchReport, ResearchSource, ResearchSourceResult } from "@ikbr/shared/instrument-research";
+import type { ResearchEvidence, ResearchFact, ResearchInstrumentPolicy, LegacyResearchInstrumentPolicy, ResearchMetric, ResearchReport, ResearchSource, ResearchSourceResult } from "@ikbr/shared/instrument-research";
 import { researchHash, publicationRange } from "@ikbr/shared/instrument-research";
 import { normalizeIssuerPdf, parseIssuerPdfMapping } from "./research-pdf-mapping.js";
 import type { PdfTextDocument } from "./research-pdf-types.js";
@@ -30,8 +30,12 @@ const numberValue = (v: unknown): number => {
   const n = Number(v); if (!Number.isFinite(n)) throw new Error("invalid numeric fact"); return n;
 };
 const idPart = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_");
+function requireReportPolicy(policy: ResearchInstrumentPolicy): asserts policy is LegacyResearchInstrumentPolicy {
+  if (!policy.annual || !policy.periodic) throw new Error("RESEARCH_REPORT_POLICY_UNSUPPORTED");
+}
 
 export function normalizeSecReports(submissionsInput: unknown, companyfactsInput: unknown, mapping: SecMapping, fetchedAt: string, policy: ResearchInstrumentPolicy): NormalizedReports {
+  requireReportPolicy(policy);
   if (!iso(fetchedAt) || !/^\d{10}$/.test(mapping.expectedCik) || !/^https:\/\//.test(mapping.sourceUrl)) throw new Error("invalid SEC mapping or fetch time");
   const configuredSource = policy.sources.find(s => s.id === mapping.sourceId);
   if (!configuredSource || !configuredSource.urls.includes(mapping.sourceUrl) || !configuredSource.roles.includes("reports") || configuredSource.issuerIdentifier.scheme !== "CIK" || configuredSource.issuerIdentifier.value !== mapping.expectedCik) throw new Error("SEC source is not configured for this issuer and role");
@@ -144,6 +148,7 @@ export interface XhtmlMapping { sourceId: string; sourceUrl: string; contentHash
 const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 
 export function normalizeIssuerXhtml(xml: string, mapping: XhtmlMapping, policy: ResearchInstrumentPolicy, fetchedAt: string): NormalizedReports {
+  requireReportPolicy(policy);
   if (Buffer.byteLength(xml, "utf8") > 10 * 1024 * 1024 || !iso(fetchedAt)) throw new Error("XHTML exceeds bound or has invalid fetch time");
   const tables: { rows: string[][] }[] = [];
   const stack: { rows: string[][]; row: string[] | null; cell: string | null }[] = [];

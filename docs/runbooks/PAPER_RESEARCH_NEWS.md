@@ -1,5 +1,12 @@
 # Paper research: Marketaux news qualification and operation
 
+Current two-source policy (2026-10-15): `TWO_SOURCE_HOURLY_V1` uses only Marketaux
+and WSH, refreshed hourly with 24-hour validity from verified successful acquisition.
+It requires no SEC/issuer reports. See the [current contract](../implementation/phase3/TWO_SOURCE_RESEARCH_HOURLY_PLAN.md)
+and [delivery status](../implementation/phase3/TWO_SOURCE_RESEARCH_HOURLY_REPORT.md).
+The v1 instructions below remain the legacy qualification and receipt contract;
+`marketaux-news-v2` adds explicit hourly cadence and completion-based freshness.
+
 Updated 2026-10-07: the [WSH context contract](RESEARCH_CONTEXT_WSH.md) adds V2
 news descriptions, snippets and matched-issuer sentiment for AI adjudication.
 Calendar proximity is context, not an automatic entry veto; WSH is the sole

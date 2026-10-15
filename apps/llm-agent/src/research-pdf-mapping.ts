@@ -184,6 +184,7 @@ export function normalizeIssuerPdf(document: PdfTextDocument, input: IssuerPdfMa
   requirePdf(sha.safeParse(contentHash).success && contentHash === mapping.documentSha256, "DOCUMENT_HASH_MISMATCH");
   requirePdf(instant.safeParse(fetchedAt).success && Date.parse(mapping.report.publishedAt) <= Date.parse(fetchedAt), "PUBLICATION_INVALID");
   const expected = policy[mapping.report.kind];
+  requirePdf(expected !== undefined, "REPORT_POLICY_MISMATCH");
   requirePdf(expected.periodStart === mapping.report.periodStart && expected.periodEnd === mapping.report.periodEnd && expected.scope === mapping.report.scope, "REPORT_POLICY_MISMATCH");
   const expectedMetrics = policy.profile === "bank" ? ["net_interest_income", "net_profit", "loans", "deposits", policy.bankCapitalMetric] :
     policy.profile === "industrial" ? ["revenue", "net_income", "operating_cash_flow", "total_debt"] : [];

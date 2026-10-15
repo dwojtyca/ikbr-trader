@@ -70,13 +70,14 @@ type ResearchFetchDeps = {
   httpsRequest?: typeof request;
   readJsonError?: boolean;
   privacy?: DiagnosticPrivacy;
+  monotonicDeadlineMs?: number;
 };
 
 export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, accept: string,
   deps: ResearchFetchDeps = {}, maxBytes = RESEARCH_SOURCE_MAX_BYTES): Promise<ResearchFetchResult> {
   if (!safeResearchUrl(url.href)) throw new Error("RESEARCH_SOURCE_URL_NOT_ALLOWED");
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > RESEARCH_SOURCE_MAX_BYTES) throw new Error("RESEARCH_SOURCE_TOO_LARGE");
-  const remaining = Date.parse(deadlineAt) - Date.now();
+  const remaining = deps.monotonicDeadlineMs === undefined ? Date.parse(deadlineAt) - Date.now() : deps.monotonicDeadlineMs - performance.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > RESEARCH_SOURCE_TIMEOUT_MS) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
   const controller = new AbortController();
   let timedOut = false;

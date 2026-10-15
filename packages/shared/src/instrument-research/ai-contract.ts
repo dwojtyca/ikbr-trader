@@ -1,5 +1,6 @@
 import { canonicalJson } from "../trading-configuration/identity.js";
-import type { ResearchManifestV1 } from "./types.js";
+import { isTwoSourceResearch } from "./policy.js";
+import type { ResearchManifest, ResearchManifestV1 } from "./types.js";
 
 export const RESEARCH_PROMPT_VERSION = "pp7-research-context-v2";
 export const RESEARCH_REQUEST_VERSION = "pp7-ai-context-request-v2";
@@ -27,6 +28,25 @@ export const RESEARCH_SYSTEM_PROMPT = [
   "Return strict JSON with decision, confidence, reason, riskFlags and evidenceRefs only.",
 ].join("\n");
 
+export const TWO_SOURCE_PROMPT_VERSION = "pp7-two-source-context-v1";
+export const TWO_SOURCE_REQUEST_VERSION = "pp7-two-source-request-v1";
+export const TWO_SOURCE_SYSTEM_PROMPT = RESEARCH_SYSTEM_PROMPT.split("\n").filter(line =>
+  !line.startsWith("Assess whether issuer reports") && !line.startsWith("Do not invent values") && !line.startsWith("For banks use"))
+  .concat([
+    "Assess Marketaux news and WSH calendar alongside the exact technical proposal and supplied account/order context. These are the only external research sources in this policy.",
+    "Audited financial reports, required financial metrics and consensus forecasts are not supplied or required. Do not invent them or reject solely because they are absent. News is not audited financial evidence.",
+    "Use actual article publication times, the provider query cutoff, and the original verified acquisition completion time. A usable acquisition lasting 24 hours does not imply every article was published in the last 24 hours at decision time.",
+    "Do not invent values, dates, FX, fees, full articles or source coverage.",
+  ]).join("\n");
+export function researchPromptContract(manifest: ResearchManifest): { promptVersion: string; requestVersion: string; systemPrompt: string } {
+  const contract = isTwoSourceResearch(manifest)
+    ? { promptVersion: TWO_SOURCE_PROMPT_VERSION, requestVersion: TWO_SOURCE_REQUEST_VERSION, systemPrompt: TWO_SOURCE_SYSTEM_PROMPT }
+    : { promptVersion: RESEARCH_PROMPT_VERSION, requestVersion: RESEARCH_REQUEST_VERSION, systemPrompt: RESEARCH_SYSTEM_PROMPT };
+  if (manifest.model.promptVersion !== contract.promptVersion || manifest.model.outputSchemaVersion !== RESEARCH_OUTPUT_SCHEMA_VERSION)
+    throw new Error("AI_PROMPT_OR_SCHEMA_UNSUPPORTED");
+  return contract;
+}
+
 export interface ResearchAiWireInput {
   model: string;
   maxOutputTokens: number;
@@ -46,16 +66,18 @@ export function researchWireRequest(request: ResearchAiWireInput): Record<string
   };
 }
 
-export function validateResearchAiRequest(request: Record<string, unknown>, model: ResearchManifestV1["model"]): void {
-  if (request.schemaVersion !== RESEARCH_REQUEST_VERSION || request.promptVersion !== RESEARCH_PROMPT_VERSION ||
-      request.outputSchemaVersion !== RESEARCH_OUTPUT_SCHEMA_VERSION || model.promptVersion !== RESEARCH_PROMPT_VERSION ||
+export function validateResearchAiRequest(request: Record<string, unknown>, model: ResearchManifestV1["model"], manifest?: ResearchManifest): void {
+  const contract = manifest ? researchPromptContract(manifest) : { promptVersion: RESEARCH_PROMPT_VERSION, requestVersion: RESEARCH_REQUEST_VERSION, systemPrompt: RESEARCH_SYSTEM_PROMPT };
+  if (manifest && canonicalJson(model) !== canonicalJson(manifest.model)) throw new Error("AI_MODEL_CONFIGURATION_MISMATCH");
+  if (request.schemaVersion !== contract.requestVersion || request.promptVersion !== contract.promptVersion ||
+      request.outputSchemaVersion !== RESEARCH_OUTPUT_SCHEMA_VERSION || model.promptVersion !== contract.promptVersion ||
       model.outputSchemaVersion !== RESEARCH_OUTPUT_SCHEMA_VERSION)
     throw new Error("AI_PROMPT_OR_SCHEMA_UNSUPPORTED");
   if (request.model !== model.model || request.maxOutputTokens !== model.maxOutputTokens ||
       JSON.stringify(request).length > model.maxInputChars)
     throw new Error("AI_MODEL_CONFIGURATION_MISMATCH");
-  if (request.systemPrompt !== RESEARCH_SYSTEM_PROMPT || !request.context || typeof request.context !== "object" ||
+  if (request.systemPrompt !== contract.systemPrompt || !request.context || typeof request.context !== "object" ||
       Array.isArray(request.context) || canonicalJson(request.providerRequest) !== canonicalJson(researchWireRequest({
-        model: model.model, maxOutputTokens: model.maxOutputTokens, systemPrompt: RESEARCH_SYSTEM_PROMPT, context: request.context,
+        model: model.model, maxOutputTokens: model.maxOutputTokens, systemPrompt: contract.systemPrompt, context: request.context,
       }))) throw new Error("AI_WIRE_REQUEST_MISMATCH");
 }

@@ -1,3 +1,4 @@
+import { isTwoSourceResearch } from "./policy.js";
 import { isResearchSourceError } from "./source-error.js";
 import { parseWshConfig, validateWshEvidence, validateWshEvent, validateWshCoverage } from "./wsh.js";
 import { isResearchProviderError } from "./provider-error.js";
@@ -79,7 +80,9 @@ export function parseResearchManifest(raw: unknown, configuration: TradingConfig
   return m;
 }
 export function validateResearchManifest(raw: unknown): ResearchManifest {
-  const m = obj(raw, "schemaVersion configHash instruments refreshEnabled model"); researchAssert((m.schemaVersion === 1 || m.schemaVersion === 2) && isResearchHash(m.configHash) && typeof m.refreshEnabled === "boolean");
+  const hasPolicy = raw !== null && typeof raw === "object" && Object.hasOwn(raw, "researchPolicy");
+  const m = obj(raw, "schemaVersion configHash instruments refreshEnabled model" + (hasPolicy ? " researchPolicy" : ""));
+  if (hasPolicy) researchAssert(m.schemaVersion === 2 && m.researchPolicy === "TWO_SOURCE_HOURLY_V1" && m.refreshEnabled === true, "RESEARCH_POLICY_INVALID"); researchAssert((m.schemaVersion === 1 || m.schemaVersion === 2) && isResearchHash(m.configHash) && typeof m.refreshEnabled === "boolean");
   const model = obj(m.model, "provider model promptVersion outputSchemaVersion maxInputChars maxOutputTokens maxCostMicrosPerCall maxRequestsPerDay maxCostMicrosPerDay");
   for (const k of ["provider", "model", "promptVersion", "outputSchemaVersion"]) txt(model[k]);
   researchAssert(model.provider === "openai", "RESEARCH_MODEL_PROVIDER_UNSUPPORTED");
@@ -88,7 +91,8 @@ export function validateResearchManifest(raw: unknown): ResearchManifest {
   arr(m.instruments, 100); researchAssert(m.instruments.length > 0); unique(m.instruments, "instrumentId");
   const listings = new Set<string>(), sourceIdentities = new Map<string, string>(), marketauxEntities = new Map<string, string>();
   for (const value of m.instruments) {
-    const p = obj(value, "instrumentId assetClass listing issuerId legalName country sector business identifiers verification profile reportingCurrency annual periodic bankCapitalMetric sources");
+    const p = obj(value, "instrumentId assetClass listing issuerId legalName country sector business identifiers verification profile reportingCurrency sources" + (hasPolicy ? "" : " annual periodic bankCapitalMetric"));
+    if (hasPolicy) researchAssert(p.assetClass === "stock" && p.profile !== "etf", "RESEARCH_NOT_SUPPORTED");
     for (const k of ["instrumentId", "issuerId", "legalName", "country", "sector"]) txt(p[k]); txt(p.business, 4000); txt(p.reportingCurrency, 3); researchAssert(/^[A-Z]{3}$/.test(p.reportingCurrency));
     choice(p.assetClass, "stock etf"); choice(p.profile, "bank industrial etf"); researchAssert((p.assetClass === "etf") === (p.profile === "etf"));
     const listing = obj(p.listing, "broker symbol conId exchange primaryExchange currency localSymbol tradingClass expectedMinTick");
@@ -97,9 +101,10 @@ export function validateResearchManifest(raw: unknown): ResearchManifest {
     const key = `${listing.broker}:${listing.conId}`; researchAssert(!listings.has(key), "RESEARCH_DUPLICATE_LISTING"); listings.add(key);
     arr(p.identifiers, 20); researchAssert(p.identifiers.length > 0); for (const id of p.identifiers) identifier(id); unique(p.identifiers, "scheme");
     const verification = obj(p.verification, "url verifiedAt outcome"); researchAssert(safeResearchUrl(verification.url)); researchTime(verification.verifiedAt); choice(verification.outcome, "VERIFIED UNVERIFIED");
-    reportRequirement(p.annual); reportRequirement(p.periodic);
-    researchAssert(p.profile === "bank" ? p.bankCapitalMetric === "cet1_ratio" || p.bankCapitalMetric === "tier1_ratio" : p.bankCapitalMetric === null);
+    if (!hasPolicy) { reportRequirement(p.annual); reportRequirement(p.periodic);
+      researchAssert(p.profile === "bank" ? p.bankCapitalMetric === "cet1_ratio" || p.bankCapitalMetric === "tier1_ratio" : p.bankCapitalMetric === null); }
     arr(p.sources, 20); unique(p.sources, "id");
+    if (hasPolicy) researchAssert(p.sources.length === 2, "RESEARCH_POLICY_SOURCES_INVALID");
     for (const source of p.sources) {
       const s = obj(source, "id provider adapter parserConfig roles urls issuerIdentifier automation retention permissionEvidenceUrl maxRequestsPerDay maxCostMicrosPerDay costMicrosPerCall");
       txt(s.id); txt(s.provider); choice(s.adapter, m.schemaVersion === 2 ? "sec-json issuer-document marketaux-news ibkr-wsh" : "sec-json issuer-document marketaux-news"); arr(s.roles, 3); researchAssert(s.roles.length > 0 && new Set(s.roles).size === s.roles.length); for (const role of s.roles) choice(role, "reports news calendar");
@@ -110,15 +115,21 @@ export function validateResearchManifest(raw: unknown): ResearchManifest {
       identifier(s.issuerIdentifier); researchAssert(p.identifiers.some(i => canonicalJson(i) === canonicalJson(s.issuerIdentifier)), "RESEARCH_SOURCE_IDENTITY_MISMATCH");
       choice(s.automation, "PERMITTED UNVERIFIED DENIED"); choice(s.retention, "FACTS_AND_REFERENCES FULL_DOCUMENT UNVERIFIED DENIED"); researchAssert(safeResearchUrl(s.permissionEvidenceUrl));
       for (const k of ["maxRequestsPerDay", "maxCostMicrosPerDay", "costMicrosPerCall"]) integer(s[k]);
-      if (s.adapter === "ibkr-wsh") parseWshConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
+      if (hasPolicy) researchAssert(s.adapter === "marketaux-news" || s.adapter === "ibkr-wsh", "RESEARCH_POLICY_SOURCES_INVALID");
+      if (s.adapter === "ibkr-wsh") {
+        const config = parseWshConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
+        if (hasPolicy) researchAssert(config.refreshIntervalMs === 3600000 && config.maxAgeMs === 86400000, "RESEARCH_POLICY_CADENCE_INVALID");
+      }
       if (s.adapter === "marketaux-news" || (s.parserConfig as Record<string, unknown>).kind === "marketaux-news-v1") {
         const config = parseMarketauxNewsConfig(s as unknown as import("./types.js").ResearchSource, p as unknown as import("./types.js").ResearchInstrumentPolicy);
+        researchAssert(hasPolicy ? config.kind === "marketaux-news-v2" : config.kind === "marketaux-news-v1", "RESEARCH_POLICY_SOURCES_INVALID");
         researchAssert(!marketauxEntities.has(config.entity.symbol) || marketauxEntities.get(config.entity.symbol) === p.issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY");
         marketauxEntities.set(config.entity.symbol, String(p.issuerId));
       }
       const sourceKey = `${s.provider}:${canonicalJson(s.issuerIdentifier)}`, issuerId = String(p.issuerId);
       researchAssert(!sourceIdentities.has(sourceKey) || sourceIdentities.get(sourceKey) === issuerId, "RESEARCH_AMBIGUOUS_PROVIDER_IDENTITY"); sourceIdentities.set(sourceKey, issuerId);
     }
+    if (hasPolicy) researchAssert((p.sources as import("./types.js").ResearchSource[]).filter(s => s.adapter === "marketaux-news").length === 1 && (p.sources as import("./types.js").ResearchSource[]).filter(s => s.adapter === "ibkr-wsh").length === 1, "RESEARCH_POLICY_SOURCES_INVALID");
     researchAssert((p.sources as import("./types.js").ResearchSource[]).filter(s => s.adapter === "ibkr-wsh").length <= 1, "RESEARCH_WSH_DUPLICATE_SOURCE");
     if ((p.sources as import("./types.js").ResearchSource[]).some(s => s.adapter === "ibkr-wsh")) researchAssert((p.sources as import("./types.js").ResearchSource[]).filter(s => s.roles.includes("calendar")).length === 1, "RESEARCH_WSH_CALENDAR_SOURCE_CONFLICT");
   }
@@ -126,12 +137,14 @@ export function validateResearchManifest(raw: unknown): ResearchManifest {
 }
 
 export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifest): ResearchSnapshot {
-  const s = obj(raw, "schemaVersion configHash manifestHash instrumentId mappingHash createdAt evidence coverage reports facts news events");
+  const twoSource = isTwoSourceResearch(manifest);
+  const s = obj(raw, "schemaVersion configHash manifestHash instrumentId mappingHash createdAt evidence coverage news events" + (twoSource ? " researchPolicy" : " reports facts"));
+  if (twoSource) researchAssert(s.researchPolicy === manifest.researchPolicy, "RESEARCH_POLICY_INVALID");
   researchAssert(s.schemaVersion === manifest.schemaVersion && s.configHash === manifest.configHash && s.manifestHash === researchHash(manifest), "RESEARCH_SNAPSHOT_IDENTITY_INVALID");
   const policy = manifest.instruments.find(i => i.instrumentId === s.instrumentId); researchAssert(policy && s.mappingHash === researchHash(policy), "RESEARCH_MAPPING_MISMATCH"); researchTime(s.createdAt);
-  for (const k of ["evidence", "coverage", "reports", "facts", "news", "events"]) arr(s[k]);
-  const evidence = s.evidence as unknown[], reports = s.reports as unknown[];
-  unique(evidence, "ref"); unique(reports, "id"); unique(s.facts as unknown[], "id"); unique(s.news as unknown[], "id"); unique(s.events as unknown[], "id");
+  for (const k of ["evidence", "coverage", "news", "events", ...(twoSource ? [] : ["reports", "facts"])]) arr(s[k]);
+  const evidence = s.evidence as unknown[], reports = twoSource ? [] : s.reports as unknown[], facts = twoSource ? [] : s.facts as unknown[];
+  unique(evidence, "ref"); unique(reports, "id"); unique(facts, "id"); unique(s.news as unknown[], "id"); unique(s.events as unknown[], "id");
   const refs = new Set<string>(), reportIds = new Set<string>();
   for (const value of evidence) {
     if (value && typeof value === "object" && "kind" in value && value.kind === "wsh-calendar") {
@@ -175,7 +188,7 @@ export function parseResearchSnapshot(raw: unknown, manifest: ResearchManifest):
   for (const value of reports) {
     const r = obj(value, "id kind periodStart periodEnd scope evidenceRef supersedes"); txt(r.id); choice(r.kind, "annual periodic"); date(r.periodStart); date(r.periodEnd); researchAssert(r.periodStart <= r.periodEnd); choice(r.scope, "consolidated separate"); researchAssert(httpRefs.has(r.evidenceRef as string)); researchAssert(r.supersedes === null || typeof r.supersedes === "string"); reportIds.add(r.id as string);
   }
-  for (const value of s.facts as unknown[]) {
+  for (const value of facts) {
     const f = obj(value, "id reportId metric value unit currency scale periodStart periodEnd periodType scope evidenceRef sourcePointer supersedes"); txt(f.id); researchAssert(reportIds.has(f.reportId as string) && httpRefs.has(f.evidenceRef as string)); txt(f.sourcePointer, 1000);
     choice(f.metric, "net_interest_income net_profit loans deposits cet1_ratio tier1_ratio revenue net_income operating_cash_flow total_debt"); researchAssert(typeof f.value === "number" && Number.isFinite(f.value) && !Object.is(f.value, -0));
     choice(f.unit, "currency percent decimal"); researchAssert(f.currency === null || typeof f.currency === "string" && /^[A-Z]{3}$/.test(f.currency));

@@ -11,8 +11,8 @@ import { evaluateRoundTrip } from "./lifecycle/round-trip-evidence.js";
 import { registerDiagnosticRoutes } from "./diagnostics/routes.js";
 import { createDiagnosticReadModel } from "./diagnostics/read-model.js";
 import { registerResearchAuditRoute } from "./research-audit-routes.js";
-import { createResearchEntryValidator } from "./research-entry-guard.js";
-import { loadResearchManifest, ResearchStore, evaluateResearchEligibility } from "@ikbr/shared/instrument-research";
+import { createResearchEntryValidator, assertResearchResumeAllowed } from "./research-entry-guard.js";
+import { loadResearchManifest, ResearchStore } from "@ikbr/shared/instrument-research";
 import { EntryControlStore, EntryControlError, registerEntryControlRoutes } from "./entry-control.js";
 import { LifecycleObserverRepository, pinLifecycleEntryPolicy, assertLifecycleEntryDeadline } from "./lifecycle/observer-repository.js";
 import { LifecycleObserver } from "./lifecycle/observer.js";
@@ -1742,16 +1742,10 @@ registerEntryControlRoutes(app, {
     await configurationRuntime.assertEntryAllowed();
     const identity = researchIdentity();
     if (!identity || !loadedResearch || tradingConfiguration.loaded.mode !== "bundle") throw new EntryControlError("RESEARCH_UNAVAILABLE");
-    const authority = await researchStore.assertAuthority(identity, db);
-    let deadline = authority.validUntilMs;
-    for (const instrument of tradingConfiguration.loaded.configuration.instruments.filter(item => item.entryEnabled)) {
-      const stored = await researchStore.latestSnapshot({ ...identity, instrumentId: instrument.id }, db, true);
-      const now = new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime();
-      const eligible = stored ? evaluateResearchEligibility(stored.snapshot, loadedResearch.manifest, now) : null;
-      if (!eligible?.eligible || !eligible.expiresAt) throw new EntryControlError("RESEARCH_REQUIRED_COVERAGE_UNAVAILABLE");
-      deadline = Math.min(deadline, Date.parse(eligible.expiresAt));
-    }
     const context = entryControlContext();
+    const deadline = await assertResearchResumeAllowed({ db, store: researchStore, identity,
+      manifest: loadedResearch.manifest, accountId: context.accountId,
+      instrumentIds: tradingConfiguration.loaded.configuration.instruments.filter(item => item.entryEnabled).map(item => item.id) });
     const permit = await entryControls.permit(db, context, entryPermitDependencies(context.accountId), { resuming: true });
     return { ...permit, validUntilMs: Math.min(deadline, permit.validUntilMs) };
   },

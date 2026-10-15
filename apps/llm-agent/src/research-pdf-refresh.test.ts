@@ -43,7 +43,7 @@ function refreshHarness(malformed = false) {
     facts: [], news: [], events: [],
   };
   parseResearchSnapshot(initial, manifest);
-  const snapshots: StoredResearchSnapshot[] = [{ id: "seed", hash: researchHash(initial), sequence: 0, snapshot: structuredClone(initial) }];
+  const snapshots: (StoredResearchSnapshot & { snapshot: InstrumentResearchSnapshotV1 })[] = [{ id: "seed", hash: researchHash(initial), sequence: 0, snapshot: structuredClone(initial) }];
   const slots = new Set([now, now + DAY].map(time => "research_slot_" + researchHash({ manifestHash, instrumentId: f.policy.instrumentId, sourceId: preservedSource.id, role: "reports", slot: researchSourceSlot(time, "reports") })));
   const reservations: ResearchCallReservation[] = [], outcomes: { key: string; outcome: string }[] = [];
   let fetches = 0, locked = false;
@@ -67,6 +67,8 @@ function refreshHarness(malformed = false) {
     storeSnapshot: async (input, slotKey) => {
       assert.ok(slotKey); assert.equal(slots.has(slotKey), false);
       const snapshot = parseResearchSnapshot(input, manifest);
+      assert.equal(snapshot.schemaVersion, 1);
+      if (snapshot.schemaVersion !== 1) throw new Error("Expected legacy PDF snapshot");
       const stored = { id: "snapshot_" + snapshots.length, hash: researchHash(snapshot), sequence: snapshots.length, snapshot };
       slots.add(slotKey); snapshots.push(structuredClone(stored)); return structuredClone(stored);
     },

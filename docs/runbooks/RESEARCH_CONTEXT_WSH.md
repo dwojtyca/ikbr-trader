@@ -1,15 +1,14 @@
 # WSH i newsy jako kontekst decyzji AI
 
-Decyzja właściciela z 7 października 2026: strategia techniczna nadal tworzy
-propozycję wejścia. AI dostaje tę propozycję, raporty emitenta, dostępne prognozy
-i wyniki, wiadomości oraz kalendarz WSH. Ocenia, czy informacje wspierają wejście,
+Decyzja właściciela z 15 października 2026: strategia techniczna nadal tworzy
+propozycję wejścia. W polityce `TWO_SOURCE_HOURLY_V1` AI dostaje tę propozycję,
+wiadomości Marketaux oraz kalendarz WSH. Ocenia, czy informacje wspierają wejście,
 i odpowiada EXECUTE albo REJECT. Bliskość wydarzenia nie uruchamia blokady 24 h,
 7 dni ani innego stałego okresu. Deterministyczne kontrole ryzyka nadal obowiązują.
 
 ## Co otrzymuje AI
 
 - Dane techniczne oraz dokładną cenę, stop, cel i ilość z istniejącej propozycji.
-- Wymagane raporty i dane finansowe z dotychczasowych źródeł.
 - Newsy Marketaux, dostępne opisy i fragmenty oraz sentyment przypisany dokładnie
   do sprawdzonego emitenta. Sentyment dostawcy nie jest prognozą wyników.
 - Wszystkie rekordy z poprawnej, ograniczonej odpowiedzi WSH: terminy, statusy,
@@ -31,12 +30,15 @@ ogranicza konsensus `estimated_eps` do publikacji dzisiejszych lub wczorajszych.
 
 ## Konfiguracja i wdrożenie
 
-Użyj manifestu badań `schemaVersion: 2` oraz promptu `pp7-research-context-v2`;
+Nowa polityka używa manifestu badań `schemaVersion: 2`, pola
+`researchPolicy: "TWO_SOURCE_HOURLY_V1"` oraz promptu `pp7-two-source-context-v1`;
 schemat odpowiedzi pozostaje `pp4-decision-v1`. [Fragment źródła WSH](../../config/research/wsh-source.example.json)
 jest celowo niezakwalifikowany, wygasły i ma zerowy budżet. To fragment źródła,
 nie gotowy manifest. Zastępuje stare źródło roli `calendar` dla danego emitenta.
 WSH wymaga zgodnego ISIN, conId, strefy IANA, aktualnego uprawnienia, kwalifikacji
-metadanych i jawnego budżetu. Źródła raportów i newsów pozostają osobnymi rolami.
+metadanych i jawnego budżetu. W tej polityce aktywne są tylko role `news` i `calendar`. Nie pobieramy raportów
+SEC ani PKO i nie wymagamy zawartych w nich wskaźników. Brak raportów nie oznacza
+zerowych wyników finansowych. Starsze manifesty zachowują dotychczasowe wymagania.
 
 W lokalnym `.env` ustaw `RESEARCH_WSH_ENABLED`, identyfikator endpointu
 `RESEARCH_WSH_ENDPOINT_ID`, host/port oraz osobny niezerowy
@@ -45,12 +47,21 @@ W lokalnym `.env` ustaw `RESEARCH_WSH_ENABLED`, identyfikator endpointu
 klienta ingestion lub execution. Włączenie WSH nie włącza zleceń.
 
 Przed wdrożeniem zachowaj wyłączone zlecenia i wstrzymane wejścia, wykonaj kopię
-bazy, aktualny łańcuch migracji aż do 34 (28 jest historyczną podstawą WSH)
+bazy, aktualny łańcuch migracji aż do 35 (28 jest historyczną podstawą WSH)
 i kontrolowane przyjęcie manifestu przez obie usługi. Migracje i przyjęcie
 manifestu wykonuj przy wyłączonych zapisach oraz wstrzymanych wejściach. Stare
 archiwalne manifesty i decyzje pozostają czytelne; stare zatwierdzenie AI nie może
 wykonać zlecenia według nowego promptu. Zaktualizuj hash prywatnego manifestu.
 Nie usuwaj historii, żeby ominąć nieznane wyniki wcześniejszych operacji.
+
+Stan wdrożenia nowej polityki opisuje [raport pakietu](../implementation/phase3/TWO_SOURCE_RESEARCH_HOURLY_REPORT.md).
+Marketaux używa `marketaux-news-v2`: odświeżanie godzinne, ważność 24 godziny
+od potwierdzonego zakończenia pobierania. Okno wyszukiwania wiadomości obejmuje
+24 godziny przed granicą cyklu; daty publikacji pozostają jawne i nie są
+przesuwane przy ponownym użyciu danych.
+[Przykładowe źródło Marketaux](../../config/research/marketaux-hourly-source.example.json)
+jest niezakwalifikowanym fragmentem z zerowymi budżetami, a nie gotową konfiguracją
+do handlu. Nie potwierdza tożsamości emitenta ani wykupionego planu.
 
 Nowy profil WSH ustawia `refreshIntervalMs=3600000` i `maxAgeMs=86400000`:
 zwykłe odświeżanie odbywa się co godzinę, a poprawny kalendarz, również

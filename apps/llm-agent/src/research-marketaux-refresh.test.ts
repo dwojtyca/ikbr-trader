@@ -289,6 +289,8 @@ test("ERROR checkedAt stays slot-anchored across late completion, and large fina
   await s.make().tick(); assert.equal(s.coverage().checkedAt, s.f.descriptor.asOf);
   const large = setup(); large.f.newsConfig.pageSize = 100; large.f.newsConfig.maxPagesPerPass = 9; large.f.newsConfig.maxArticles = 900;
   const { marketauxSourceUrl } = await import("@ikbr/shared/instrument-research"); large.f.source.urls = [marketauxSourceUrl(large.f.newsConfig)];
+  assert.equal(large.state.prior.snapshot.schemaVersion, 1);
+  if (large.state.prior.snapshot.schemaVersion !== 1) throw new Error("V1 fixture required");
   const first = large.state.prior.snapshot.facts[0];
   large.state.prior.snapshot.facts = Array.from({ length: 900 }, (_, i) => ({ ...first, id: "fact_" + i, sourcePointer: "x".repeat(1000) }));
   large.state.response = r => marketauxResponse(Array.from({ length: 100 }, (_, i) => ({ ...large.f.article((r.page - 1) * 100 + i + 1), title: "x".repeat(1000) })), r.page, 900, 100);

@@ -1,7 +1,7 @@
 import { marketauxQualificationDeadline, marketauxRequestUrl, parseMarketauxNewsConfig, ResearchSourceFailure, type MarketauxRequest, type ResearchSource } from "@ikbr/shared/instrument-research";
 import { fetchBoundedResearchUrl, RESEARCH_SOURCE_MAX_BYTES, type ResearchFetchResult } from "./research-fetch.js";
 
-export type MarketauxFetch = (source: ResearchSource, descriptor: MarketauxRequest, deadlineAt: string, maxBytes?: number) => Promise<ResearchFetchResult>;
+export type MarketauxFetch = (source: ResearchSource, descriptor: MarketauxRequest, deadlineAt: string, maxBytes?: number, monotonicDeadlineMs?: number) => Promise<ResearchFetchResult>;
 const SAFE_CODES = new Set([
   ...["SCHEMA_INVALID", "LIMIT_INVALID", "TEXT_INVALID", "QUALIFICATION_INVALID", "SOURCE_INVALID", "ENTITY_INVALID", "IDENTITY_MISMATCH", "BUDGET_INVALID", "URL_INVALID", "TIME_INVALID", "QUALIFICATION_UNAVAILABLE", "REQUEST_INVALID", "RECEIPT_INVALID", "KEY_MISSING", "CONTENT_TYPE_INVALID", "ACQUISITION_FAILED", "PAYLOAD_INVALID", "RESULT_LIMIT", "DUPLICATE_UUID", "ENTITY_MISMATCH", "PUBLICATION_OUTSIDE_QUERY", "DEADLINE_EXPIRED", "BYTES_EXCEEDED", "RESULT_CHANGED"].map(code => "RESEARCH_MARKETAUX_" + code),
   ...["TIMEOUT", "TRANSPORT_TRANSIENT", "TOO_LARGE", "REDIRECT", "DNS_NOT_PUBLIC", "DEADLINE_INVALID"].map(code => "RESEARCH_SOURCE_" + code),
@@ -15,17 +15,19 @@ export function sanitizeMarketauxError(error: unknown): string {
 
 export function createMarketauxFetch(apiKey: string | undefined,
   deps: Parameters<typeof fetchBoundedResearchUrl>[3] = {}): MarketauxFetch {
-  return async (source, descriptor, deadlineAt, maxBytes = RESEARCH_SOURCE_MAX_BYTES) => {
+  return async (source, descriptor, deadlineAt, maxBytes = RESEARCH_SOURCE_MAX_BYTES, monotonicDeadlineMs) => {
     try {
       if (!apiKey?.trim()) throw new Error("RESEARCH_MARKETAUX_KEY_MISSING");
       const config = parseMarketauxNewsConfig(source), now = Date.now();
-      const expiry = marketauxQualificationDeadline(config, now);
       const deadline = Date.parse(deadlineAt);
-      if (!Number.isFinite(deadline) || deadline <= now || (expiry !== null && deadline > expiry)) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
+      if (config.kind === "marketaux-news-v1") {
+        const expiry = marketauxQualificationDeadline(config, now);
+        if (!Number.isFinite(deadline) || deadline <= now || (expiry !== null && deadline > expiry)) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
+      } else if (!Number.isFinite(monotonicDeadlineMs) || monotonicDeadlineMs! <= performance.now()) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
       const url = new URL(marketauxRequestUrl(source, descriptor));
       url.searchParams.set("api_token", apiKey);
       const result = await fetchBoundedResearchUrl(url, deadlineAt, "application/json", {
-        ...deps, readJsonError: true, privacy: { ...deps.privacy, secrets: [...(deps.privacy?.secrets ?? []), apiKey] },
+        ...deps, ...(config.kind === "marketaux-news-v2" ? { monotonicDeadlineMs } : {}), readJsonError: true, privacy: { ...deps.privacy, secrets: [...(deps.privacy?.secrets ?? []), apiKey] },
       }, maxBytes);
       if (result.contentType.split(";")[0].trim().toLowerCase() !== "application/json") throw new Error("RESEARCH_MARKETAUX_CONTENT_TYPE_INVALID");
       return result;

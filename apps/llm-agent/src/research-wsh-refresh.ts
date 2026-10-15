@@ -3,11 +3,12 @@ import {
   captureResearchSourceError, isResearchSourceError, sanitizeResearchProviderError, isResearchProviderError, type ResearchProviderError,
   parseResearchSnapshot, parseWshConfig, researchAssert, researchHash, validateWshValue,
   wshQualificationDeadline, wshRequestDates, wshReceiptPolicy,
-  type InstrumentResearchSnapshotV2, type ResearchCallReservation, type ResearchInstrumentPolicy,
+  type ResearchSnapshotV2, type ResearchCallReservation, type ResearchInstrumentPolicy,
   type ResearchManifest, type ResearchSource, type ResearchStore, type WshAcquisition, type WshEndpointLease,
   type WshAttemptKind, type WshAttemptTicket, type WshAttemptResult, type WshFailureClass, type WshFailureStage, type WshCleanupResult,
 } from "@ikbr/shared/instrument-research";
 import { normalizeWshEvents } from "./research-wsh-normalization.js";
+import { emptyResearchSnapshot } from "./research-empty-snapshot.js";
 import { WshSocketTransport, type WshEventRequest, type WshRuntimeConfiguration, type WshTransport } from "./research-wsh-transport.js";
 
 export type WshRefreshStore = Pick<ResearchStore, "latestSnapshot" | "readSnapshot" | "storeSnapshot" | "recordCallOutcome" |
@@ -61,16 +62,14 @@ export async function refreshWsh(options: Options): Promise<boolean> {
   const previous = await store.latestSnapshot(identity);
   assertActive();
   researchAssert(!previous || previous.snapshot.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
-  const snapshot: InstrumentResearchSnapshotV2 = previous ? structuredClone(previous.snapshot as InstrumentResearchSnapshotV2) : {
-    schemaVersion: 2, ...identity, mappingHash: researchHash(policy), createdAt: new Date(now()).toISOString(),
-    evidence: [], coverage: [], reports: [], facts: [], news: [], events: [],
-  };
+  const snapshot = previous ? structuredClone(previous.snapshot) : emptyResearchSnapshot(manifest, manifestHash, policy, new Date(now()).toISOString());
+  researchAssert(snapshot.schemaVersion === 2, "RESEARCH_WSH_VERSION_INVALID");
   const oldRefs = new Set(snapshot.evidence.filter(e => e.sourceId === source.id).map(e => e.ref));
   snapshot.evidence = snapshot.evidence.filter(e => !oldRefs.has(e.ref));
   snapshot.events = snapshot.events.filter(e => !oldRefs.has(e.evidenceRef));
   snapshot.coverage = snapshot.coverage.filter(c => c.sourceId !== source.id);
   const baseline = structuredClone(snapshot);
-  const negative = (status: "UNVERIFIED" | "ERROR", reason: string, providerError?: ResearchProviderError): InstrumentResearchSnapshotV2 => {
+  const negative = (status: "UNVERIFIED" | "ERROR", reason: string, providerError?: ResearchProviderError): ResearchSnapshotV2 => {
     const result = structuredClone(baseline), checkedAt = new Date(now()).toISOString();
     result.createdAt = checkedAt;
     result.coverage.push({ sourceId: source.id, role: "calendar", status, checkedAt, windowStart: checkedAt, windowEnd: checkedAt,
@@ -246,7 +245,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       receipt && "wshAcquisition" in receipt && receipt.wshAcquisition.acquisitionId === acquisition.id && receipt.wshAcquisition.sessionId === acquisition.sessionId && receipt.wshAcquisition.generation === acquisition.generation, "RESEARCH_WSH_COMMIT_UNVERIFIED");
     return true;
   }
-  async function finishFailure(lease: WshEndpointLease, acquisition: WshAcquisition, failure: InstrumentResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN"): Promise<void> {
+  async function finishFailure(lease: WshEndpointLease, acquisition: WshAcquisition, failure: ResearchSnapshotV2, outcome: "FAILED" | "UNKNOWN"): Promise<void> {
     try { await store.finishWshFailure(lease, acquisition, failure, outcome, slotKey); }
     catch (error) {
       const resolutionDeadline = new Date(Date.now() + 3000).toISOString();

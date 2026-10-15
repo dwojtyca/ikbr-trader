@@ -46,7 +46,7 @@ export class ResearchBoundReviewRepository extends BoundReviewRepository impleme
       await this.lockClaim(client, claim);
       const identity = this.identity(claim);
       if (!await this.researchStore.getBinding(claim.order.id, client)) {
-        const stored = await this.researchStore.latestSnapshot(identity, client, true);
+        const stored = await this.researchStore.latestSnapshot(identity, client);
         const now = (await client.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
         if (inspectResearch(this.research!.manifest, identity.instrumentId, stored, now).state === "WAITING") throw new ResearchPreparationNeededError();
       }
@@ -83,7 +83,7 @@ export class ResearchBoundReviewRepository extends BoundReviewRepository impleme
         clientOrderHash: identity.clientOrderHash, effectiveConfigHash: identity.configHash, accountId: claim.identity.accountId,
         sessionId: claim.identity.sessionId, instrumentId: identity.instrumentId, conid: claim.identity.conid }, nowMs);
       const model = validated.manifest.model;
-      validateResearchAiRequest(request as unknown as Record<string, unknown>, model);
+      validateResearchAiRequest(request as unknown as Record<string, unknown>, model, validated.manifest);
       const deadlineMs = Math.min(nowMs + 10_000, review.claim_until.getTime() - 1000, review.expires_at.getTime() - 1000);
       if (deadlineMs <= nowMs + 100) throw new Error("AI_DEADLINE_EXHAUSTED");
       const requestHash = researchHash(request), callKey = `model:proposal:${claim.order.id}`;

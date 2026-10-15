@@ -2,13 +2,13 @@ import { z } from "zod";
 import { researchHash, type ValidatedResearchBinding, type ResearchOrderContextV1 } from "@ikbr/shared/instrument-research";
 import type { BoundClaim } from "./bound-review-repository.js";
 
-import { RESEARCH_PROMPT_VERSION, RESEARCH_REQUEST_VERSION, RESEARCH_OUTPUT_SCHEMA_VERSION, RESEARCH_SYSTEM_PROMPT, researchWireRequest, validateResearchAiRequest } from "@ikbr/shared/instrument-research";
+import { RESEARCH_PROMPT_VERSION, RESEARCH_OUTPUT_SCHEMA_VERSION, RESEARCH_SYSTEM_PROMPT, researchPromptContract, researchWireRequest, validateResearchAiRequest } from "@ikbr/shared/instrument-research";
 export { RESEARCH_PROMPT_VERSION, RESEARCH_OUTPUT_SCHEMA_VERSION, RESEARCH_SYSTEM_PROMPT, researchWireRequest };
 
 export interface ResearchModelRequest {
-  schemaVersion: typeof RESEARCH_REQUEST_VERSION;
+  schemaVersion: ReturnType<typeof researchPromptContract>["requestVersion"];
   model: string;
-  promptVersion: typeof RESEARCH_PROMPT_VERSION;
+  promptVersion: ReturnType<typeof researchPromptContract>["promptVersion"];
   outputSchemaVersion: typeof RESEARCH_OUTPUT_SCHEMA_VERSION;
   maxOutputTokens: number;
   systemPrompt: string;
@@ -42,17 +42,16 @@ export function validateResearchModelDecision(raw: unknown, research: ValidatedR
 
 export function buildResearchModelRequest(claim: BoundClaim, research: ValidatedResearchBinding, context: ResearchOrderContextV1): ResearchModelRequest {
   const model = research.manifest.model;
-  if (model.promptVersion !== RESEARCH_PROMPT_VERSION || model.outputSchemaVersion !== RESEARCH_OUTPUT_SCHEMA_VERSION)
-    throw new Error("AI_PROMPT_OR_SCHEMA_UNSUPPORTED");
+  const contract = researchPromptContract(research.manifest);
   const request: ResearchModelRequest = {
-    schemaVersion: RESEARCH_REQUEST_VERSION, model: model.model, promptVersion: RESEARCH_PROMPT_VERSION,
+    schemaVersion: contract.requestVersion, model: model.model, promptVersion: contract.promptVersion,
     outputSchemaVersion: RESEARCH_OUTPUT_SCHEMA_VERSION, maxOutputTokens: model.maxOutputTokens,
-    systemPrompt: RESEARCH_SYSTEM_PROMPT, providerRequest: {},
+    systemPrompt: contract.systemPrompt, providerRequest: {},
     context: { research, orderContext: context, proposal: claim.proposalSnapshot ?? { ...claim.order },
       identity: claim.identity, indicators: claim.order.indicators ?? null },
   };
   request.providerRequest = researchWireRequest(request);
-  validateResearchAiRequest(request as unknown as Record<string, unknown>, model);
+  validateResearchAiRequest(request as unknown as Record<string, unknown>, model, research.manifest);
   if (JSON.stringify(request).length > model.maxInputChars) throw new Error("AI_CONTEXT_SIZE_LIMIT");
   // Serialization severs references held by callers before the durable digest is made.
   return JSON.parse(JSON.stringify(request)) as ResearchModelRequest;

@@ -1,7 +1,8 @@
 import type { PoolClient } from 'pg';
 import type { ProposedOrder } from '@ikbr/shared';
 import { canonicalJson } from '@ikbr/shared/trading-config';
-import { researchHash, validateResearchOrderContext, validateResearchAiRequest, type ResearchStore, type ResearchIdentity } from '@ikbr/shared/instrument-research';
+import { researchHash, evaluateResearchEligibility, isTwoSourceResearch, type ResearchManifest, validateResearchOrderContext, validateResearchAiRequest, type ResearchStore, type ResearchIdentity } from '@ikbr/shared/instrument-research';
+import { EntryControlError } from './entry-control.js';
 import { aiApprovalFailure, readAiProposalReview } from './ai-proposal-review.js';
 
 export interface ResearchEntryPermit { validUntilMs: number; assertCurrent: () => void }
@@ -26,7 +27,7 @@ export function createResearchEntryValidator(options: { store: Pick<ResearchStor
     if (!call || !object(call.request_json) || researchHash(call.request_json) !== call.request_hash ||
         call.research_snapshot_id !== validated.binding.snapshotId) throw new Error('RESEARCH_MODEL_REQUEST_INVALID');
     const request = call.request_json, context = request.context;
-    validateResearchAiRequest(request, validated.manifest.model);
+    validateResearchAiRequest(request, validated.manifest.model, validated.manifest);
     const outcome = call.outcome_json;
     if (!object(outcome) || outcome.kind !== 'COMPLETED' || !object(outcome.result) || !object(outcome.result.decision))
       throw new Error('RESEARCH_MODEL_OUTCOME_INVALID');
@@ -74,4 +75,25 @@ export function createResearchEntryValidator(options: { store: Pick<ResearchStor
       if (canonicalJson(options.loadedIdentity()) !== canonicalJson(identity)) throw new Error('RESEARCH_LOCAL_IDENTITY_CHANGED');
     } };
   };
+}
+
+export async function assertResearchResumeAllowed(input: {
+  db: PoolClient; store: ResearchStore; identity: ResearchIdentity; manifest: ResearchManifest;
+  accountId: string; instrumentIds: readonly string[];
+}): Promise<number> {
+  const { db, store, identity, manifest, accountId } = input;
+  const authority = await store.assertAuthority(identity, db);
+  let deadline = authority.validUntilMs;
+  for (const instrumentId of input.instrumentIds) {
+    if (isTwoSourceResearch(manifest)) {
+      const preparation = await store.prepareRepair({ ...identity, instrumentId, accountId }, db);
+      if (preparation.state !== 'READY') throw new EntryControlError('RESEARCH_REQUIRED_COVERAGE_UNAVAILABLE');
+    }
+    const stored = await store.latestSnapshot({ ...identity, instrumentId }, db, true);
+    const now = new Date((await db.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
+    const eligible = stored ? evaluateResearchEligibility(stored.snapshot, manifest, now) : null;
+    if (!eligible?.eligible || !eligible.expiresAt) throw new EntryControlError('RESEARCH_REQUIRED_COVERAGE_UNAVAILABLE');
+    deadline = Math.min(deadline, Date.parse(eligible.expiresAt));
+  }
+  return deadline;
 }

@@ -1,12 +1,12 @@
 import { readFileSync } from "node:fs";
-import type { ResearchInstrumentPolicy } from "@ikbr/shared/instrument-research";
+import type { LegacyResearchInstrumentPolicy } from "@ikbr/shared/instrument-research";
 import { parseIssuerPdfMapping } from "./research-pdf-mapping.js";
 import type { PdfRectangle, PdfTextDocument, PdfTextItem } from "./research-pdf-types.js";
 
 const inset = (text: string, box: PdfRectangle): PdfTextItem => ({ text, left: box.left + 1, right: box.right - 1, top: box.top + 1, bottom: box.bottom - 1 });
 
 export function issuerPdfFixture() {
-  const example = JSON.parse(readFileSync(new URL("../../../config/research/paper.example.json", import.meta.url), "utf8")) as { instruments: ResearchInstrumentPolicy[] };
+  const example = JSON.parse(readFileSync(new URL("../../../config/research/paper.example.json", import.meta.url), "utf8")) as { instruments: LegacyResearchInstrumentPolicy[] };
   const policy = example.instruments.find(item => item.instrumentId === "pko_wse")!;
   const source = policy.sources.find(item => item.id === "latest_periodic")!;
   const mapping = parseIssuerPdfMapping(source.parserConfig);

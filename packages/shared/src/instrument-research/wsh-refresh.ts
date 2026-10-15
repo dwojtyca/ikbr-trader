@@ -1,4 +1,4 @@
-import type { InstrumentResearchSnapshotV2, ResearchIdentity, ResearchProviderError, ResearchSourceError } from './types.js';
+import type { ResearchSnapshotV2, ResearchIdentity, ResearchProviderError, ResearchSourceError } from './types.js';
 import type { WshAcquisition } from './wsh.js';
 
 export type WshAttemptKind = 'regular' | 'retry';
@@ -23,7 +23,7 @@ export interface WshAttemptFailure {
 }
 export type WshAttemptResult = {
   cleanup: WshCleanupResult; acquisition?: WshAcquisition; slotKey?: string;
-} & ({ outcome: 'SUCCEEDED' } | ({ outcome: 'FAILED' | 'UNKNOWN'; acquisitionOutcome?: 'FAILED' | 'UNKNOWN'; snapshot: InstrumentResearchSnapshotV2 } & WshAttemptFailure));
+} & ({ outcome: 'SUCCEEDED' } | ({ outcome: 'FAILED' | 'UNKNOWN'; acquisitionOutcome?: 'FAILED' | 'UNKNOWN'; snapshot: ResearchSnapshotV2 } & WshAttemptFailure));
 export interface WshAttemptDiagnostic {
   id: string; cycleId: string; ordinal: 0 | 1 | 2; state: 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN';
   terminalResultHash: string | null;
