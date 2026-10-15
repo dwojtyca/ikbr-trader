@@ -17,7 +17,7 @@ export interface WshConfig {
   timeoutMs: number;
   maxEventBytes: 1048576;
   maxMetadataBytes: 524288;
-  refreshIntervalMs: 900000;
+  refreshIntervalMs: 900000 | 3600000;
   maxAgeMs: 900000 | 86400000;
 }
 export interface WshLocator {
@@ -85,8 +85,13 @@ export function parseWshConfig(source: ResearchSource, policy: ResearchInstrumen
   const q = exact(c.qualification, "id validFrom expiresAt endpointOwnershipRef metadataHash"), e = exact(c.entitlement, "reference validFrom expiresAt termsReference");
   for (const field of [q.id, q.endpointOwnershipRef, e.reference, e.termsReference]) nonempty(field);
   researchAssert(isResearchHash(q.metadataHash) && researchTime(q.validFrom) < researchTime(q.expiresAt) && researchTime(e.validFrom) < researchTime(e.expiresAt), "RESEARCH_WSH_QUALIFICATION_INVALID");
-  researchAssert(c.lookbackDays === 7 && c.lookaheadDays === 45 && c.edgeDays === 2 && c.totalLimit === 100 && c.maxEventBytes === 1048576 && c.maxMetadataBytes === 524288 && c.refreshIntervalMs === 900000 && (c.maxAgeMs === 900000 || c.maxAgeMs === 86400000) && Number.isInteger(c.timeoutMs) && Number(c.timeoutMs) > 0 && Number(c.timeoutMs) <= 10000, "RESEARCH_WSH_BOUNDS_INVALID");
+  researchAssert(c.lookbackDays === 7 && c.lookaheadDays === 45 && c.edgeDays === 2 && c.totalLimit === 100 && c.maxEventBytes === 1048576 && c.maxMetadataBytes === 524288 && ((c.refreshIntervalMs === 900000 && (c.maxAgeMs === 900000 || c.maxAgeMs === 86400000)) || (c.refreshIntervalMs === 3600000 && c.maxAgeMs === 86400000)) && Number.isInteger(c.timeoutMs) && Number(c.timeoutMs) > 0 && Number(c.timeoutMs) <= 10000, "RESEARCH_WSH_BOUNDS_INVALID");
   return structuredClone(c) as unknown as WshConfig;
+}
+export function wshRefreshIntervalMs(source: ResearchSource): 900000 | 3600000 {
+  const interval = source.parserConfig.refreshIntervalMs;
+  researchAssert(source.adapter === "ibkr-wsh" && (interval === 900000 || interval === 3600000), "RESEARCH_WSH_BOUNDS_INVALID");
+  return interval;
 }
 export function wshQualificationDeadline(config: WshConfig, nowMs: number): number {
   researchAssert(nowMs >= researchTime(config.qualification.validFrom) && nowMs >= researchTime(config.entitlement.validFrom), "RESEARCH_WSH_QUALIFICATION_UNAVAILABLE");

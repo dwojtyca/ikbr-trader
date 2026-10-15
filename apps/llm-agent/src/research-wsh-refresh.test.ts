@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { wshResearchFixture } from "@ikbr/shared/instrument-research-testfixture";
-import { ResearchStore, parseResearchSnapshot, researchHash, type ResearchCallReservation, type StoredResearchSnapshot, type WshAcquisition, type WshEndpointLease, type WshAttemptTicket, type WshAttemptResult, type WshCleanupResult } from "@ikbr/shared/instrument-research";
+import { ResearchStore, parseResearchSnapshot, researchHash, researchRefreshSlotKey, type ResearchCallReservation, type StoredResearchSnapshot, type WshAcquisition, type WshEndpointLease, type WshAttemptTicket, type WshAttemptResult, type WshCleanupResult } from "@ikbr/shared/instrument-research";
 import { classifyWshFailure, refreshWsh } from "./research-wsh-refresh.js";
 import { ResearchRefreshScheduler } from "./research-refresh.js";
 import type { WshEventRequest, WshTransport } from "./research-wsh-transport.js";
@@ -22,7 +22,7 @@ function harness(rows: unknown[] = []) {
   let failNegative = false, publishCommitLost = false, negativeCommitLost = false, beginCommitLost = false, retirementCommitLost = false;
   let advanceOnEvent = 0, refreshLocked = false;
   let readFailure = false;
-  let cycleStart = -Infinity;
+  let cycleStart = -Infinity, nextRegularAt = -Infinity;
   const attempts: { ticket: WshAttemptTicket; preflightComplete?: boolean; result?: WshAttemptResult }[] = [];
   const cleanupReceipt = (sessionId = 'session-' + sessions): WshCleanupResult => ({ sessionId, state: 'CONFIRMED', completedAt: new Date(clock).toISOString(),
     cancellationAttemptedAt: new Date(clock).toISOString(), disconnectRequestedAt: new Date(clock).toISOString(), localClosedAt: new Date(clock).toISOString(), verifiedLocalClosure: true });
@@ -39,20 +39,20 @@ function harness(rows: unknown[] = []) {
   const store: any = {
     claimWshAttempt: async (_lease: unknown, input: any, kind: string) => {
       const last = attempts.at(-1), ordinal = kind === 'retry' ? (last?.ticket.ordinal ?? 0) + 1 : 0;
-      if (kind === 'regular' && clock < cycleStart + 900000 || kind === 'retry' && (!last?.result || last.result.outcome !== 'FAILED'
+      if (kind === 'regular' && clock < nextRegularAt || kind === 'retry' && (!last?.result || last.result.outcome !== 'FAILED'
         || last.result.failureClass !== 'TRANSIENT' || last.result.cleanup.state === 'UNKNOWN' || ordinal > 2
-        || clock < Date.parse(last.result.cleanup.completedAt) + (ordinal === 1 ? 30000 : 120000) || clock >= cycleStart + 900000))
+        || clock < Date.parse(last.result.cleanup.completedAt) + (ordinal === 1 ? 30000 : 120000) || clock >= nextRegularAt))
         return { state: 'DEFERRED', reason: 'not-due', nextCheckAt: null };
-      if (kind === 'regular') cycleStart = clock;
+      if (kind === 'regular') { cycleStart = clock; nextRegularAt = clock + Number(f.source.parserConfig.refreshIntervalMs); }
       const ticket: WshAttemptTicket = { ...input, id: `attempt-${attempts.length + 1}`, cycleId: `cycle-${cycleStart}`, ordinal,
-        endpointId: lease.endpointId, startedAt: new Date(clock).toISOString(), deadlineAt: new Date(clock + 35000).toISOString(), nextRegularAt: new Date(cycleStart + 900000).toISOString() };
+        endpointId: lease.endpointId, startedAt: new Date(clock).toISOString(), deadlineAt: new Date(clock + 35000).toISOString(), nextRegularAt: new Date(nextRegularAt).toISOString() };
       attempts.push({ ticket }); return { state: 'CLAIMED', ticket };
     },
     confirmWshPreflight: async (_lease: unknown, ticket: WshAttemptTicket) => { attempts.find(a => a.ticket.id === ticket.id)!.preflightComplete = true; },
     dueWshAttempts: async () => {
       const last = attempts.at(-1);
       return last?.result?.outcome === 'FAILED' && last.result.failureClass === 'TRANSIENT' && last.result.cleanup.state !== 'UNKNOWN'
-        && last.ticket.ordinal < 2 && clock >= Date.parse(last.result.cleanup.completedAt) + (last.ticket.ordinal === 0 ? 30000 : 120000)
+        && last.ticket.ordinal < 2 && clock < nextRegularAt && clock >= Date.parse(last.result.cleanup.completedAt) + (last.ticket.ordinal === 0 ? 30000 : 120000)
         ? [{ identity: { ...last.ticket }, kind: 'retry', dueAt: new Date(clock).toISOString() }] : [];
     },
     readWshAttempt: async (ticket: WshAttemptTicket) => {
@@ -127,7 +127,7 @@ function harness(rows: unknown[] = []) {
   }; };
   const wsh = { runtime: { enabled: true, endpointId: "fixture-endpoint", host: "127.0.0.1", port: 4002, clientId: 77 }, createTransport };
   const options = { manifest: f.manifest, manifestHash, policy: f.policy, source: f.source, accountId: "DU1", store, slotKey: "slot", now: () => clock, wsh };
-  return { f, options, trace, outcomes, calls, snapshots, store, wsh, attempts, cleanupReceipt, get head() { return head; }, get request() { return request; }, get acquisition() { return acquisition; }, get state() { return state; },
+  return { f, options, trace, outcomes, calls, snapshots, slots, store, wsh, attempts, cleanupReceipt, get head() { return head; }, get request() { return request; }, get acquisition() { return acquisition; }, get state() { return state; },
     run: () => refreshWsh(options), advance: (ms: number) => clock += ms,
     faults: (v: { eventError?: Error; metadataText?: string; eventText?: string; fenceLost?: boolean; failNegative?: boolean; publishCommitLost?: boolean; negativeCommitLost?: boolean; beginCommitLost?: boolean; retirementCommitLost?: boolean; advanceOnEvent?: number; readFailure?: boolean }) => {
       if (v.eventError) eventError = v.eventError; if (v.metadataText !== undefined) metadataText = v.metadataText; if (v.eventText !== undefined) eventText = v.eventText;
@@ -255,6 +255,36 @@ test("misaligned 15-minute backoff and endpoint lock contention do not consume a
   assert.equal(h.trace.filter(t => t === "events").length, 3);
 });
 
+test('hourly scheduler suppresses intervening 15-minute slots and retries a deferred hour boundary at the durable deadline', async () => {
+  const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
+  h.f.source.parserConfig.refreshIntervalMs = 3600000; h.f.source.parserConfig.maxAgeMs = 86400000;
+  h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
+  h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
+  const key = (hour: string) => researchRefreshSlotKey(h.options.manifestHash, h.f.policy.instrumentId, h.f.source.id, 'calendar', Math.floor(Date.parse(hour) / 3600000));
+  const scheduler = new ResearchRefreshScheduler(h.options);
+  const claim = h.store.claimWshAttempt; let claims = 0;
+  h.store.claimWshAttempt = async (...args: any[]) => { claims++; return claim(...args); };
+  await scheduler.tick();
+  assert.deepEqual([...h.slots], [key('2026-10-07T10:00:00Z')]);
+  assert.equal(h.attempts[0].ticket.nextRegularAt, '2026-10-07T11:01:00.000Z');
+  for (const elapsed of [14, 15, 15]) {
+    h.advance(elapsed * 60000); await scheduler.tick(); await new ResearchRefreshScheduler(h.options).tick();
+    assert.equal(claims, 1); assert.equal(h.calls.length, 2);
+  }
+  h.advance(15 * 60000); await scheduler.tick(); // 11:00, before the 11:01 durable deadline.
+  assert.equal(claims, 2); assert.equal(h.attempts.length, 1); assert.equal(h.slots.size, 1);
+  h.advance(59999); await scheduler.tick();
+  assert.equal(claims, 3); assert.equal(h.calls.length, 2); assert.equal(h.slots.size, 1);
+  h.store.dueWshAttempts = async () => [{ identity: { ...h.attempts[0].ticket }, kind: 'regular', dueAt: h.attempts[0].ticket.nextRegularAt }];
+  h.advance(1); await scheduler.tickRepairs();
+  assert.equal(claims, 4); assert.equal(h.calls.length, 4); assert.equal(h.attempts.length, 2);
+  assert.equal(h.attempts[1].ticket.startedAt, '2026-10-07T11:01:00.000Z');
+  assert.equal(h.attempts[1].ticket.nextRegularAt, '2026-10-07T12:01:00.000Z');
+  assert.deepEqual([...h.slots], [key('2026-10-07T10:00:00Z'), key('2026-10-07T11:00:00Z')]);
+  await scheduler.tick(); await scheduler.tickRepairs(); await new ResearchRefreshScheduler(h.options).tick();
+  assert.equal(claims, 4); assert.equal(h.calls.length, 4);
+});
+
 test("lost endpoint lease cannot send or publish from a stale generation", async () => {
   const h = harness(); h.faults({ fenceLost: true });
   await assert.rejects(h.run(), /RESEARCH_WSH_LOCK_LOST/);
@@ -355,14 +385,15 @@ test('numeric source/provider cause 502 permits SEND_FAILED only in metadata/eve
       assert.equal(classifyWshFailure(error, stage), code === 502 && ['metadata', 'events'].includes(stage) ? 'TRANSIENT' : 'HARD');
   }
 });
-test('READY retained calendar still receives only two due fresh-session retries without moving regular cadence', async () => {
+for (const interval of [900000, 3600000]) test(`READY retained calendar receives only two retries without moving ${interval}ms regular cadence or publishing retry slots`, async () => {
   const h = harness(); h.f.policy.sources = [h.f.source]; h.f.manifest.instruments = [h.f.policy];
-  h.f.source.parserConfig.maxAgeMs = 86400000;
+  h.f.source.parserConfig.maxAgeMs = 86400000; h.f.source.parserConfig.refreshIntervalMs = interval;
   h.options.manifestHash = researchHash(h.f.manifest); h.head.snapshot.manifestHash = h.options.manifestHash; h.head.snapshot.mappingHash = researchHash(h.f.policy);
   h.head.snapshot.reports = []; h.head.snapshot.facts = []; h.head.snapshot.evidence = []; h.head.snapshot.coverage = [];
   const scheduler = new ResearchRefreshScheduler(h.options); await scheduler.tick();
-  const good = structuredClone(h.head); h.advance(900000); h.faults({ eventError: new Error('RESEARCH_WSH_TIMEOUT') });
+  const good = structuredClone(h.head); h.advance(interval); h.faults({ eventError: new Error('RESEARCH_WSH_TIMEOUT') });
   await scheduler.tick(); assert.deepEqual(h.head, good);
+  const regularSlots = [...h.slots];
   const nextRegular = h.attempts.at(-1)!.ticket.nextRegularAt;
   h.store.dueRepairs = async () => []; h.store.prepareRepair = async () => ({ state: 'READY', sources: [] });
   await scheduler.tickRepairs(); assert.equal(h.attempts.length, 2);
@@ -375,6 +406,14 @@ test('READY retained calendar still receives only two due fresh-session retries 
   assert.ok(h.attempts.slice(1).every(a => a.ticket.nextRegularAt === nextRegular));
   assert.equal(new Set(h.attempts.map(a => a.ticket.sessionId)).size, 4);
   assert.deepEqual(h.head, good); assert.equal(h.calls.length, 8);
+  assert.deepEqual([...h.slots], regularSlots);
+  assert.ok(h.attempts.slice(2).every(a => a.result?.slotKey === undefined));
+  for (const [index, attempt] of h.attempts.slice(2).entries()) {
+    const call = h.calls[4 + index * 2];
+    const slotKey = researchRefreshSlotKey(h.options.manifestHash, h.f.policy.instrumentId, h.f.source.id, 'calendar', Math.floor(Date.parse(attempt.ticket.startedAt) / interval));
+    assert.equal(call.callKey, 'research_wsh_' + researchHash({ configHash: h.f.manifest.configHash, manifestHash: h.options.manifestHash,
+      instrumentId: h.f.policy.instrumentId, sourceId: h.f.source.id, slotKey, requestHash: call.requestHash }));
+  }
   assert.ok(h.attempts.slice(1).every(a => a.result?.outcome === 'FAILED' && a.result.acquisitionOutcome === 'UNKNOWN'));
 });
 test('durable admission precedes connection and deferred admission makes no socket call', async () => {

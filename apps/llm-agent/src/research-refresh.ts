@@ -1,4 +1,4 @@
-import { ResearchSourceFailure, captureResearchSourceError, type ResearchSourceError, parseResearchSnapshot, researchHash, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
+import { ResearchSourceFailure, captureResearchSourceError, type ResearchSourceError, parseResearchSnapshot, researchHash, researchRefreshSlot, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore } from "@ikbr/shared/instrument-research";
 import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
 import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
@@ -128,7 +128,7 @@ export class ResearchRefreshScheduler {
               this.assertActive();
               if (attempt.kind === 'regular') await this.refreshSlot(policy, source, 'calendar');
               else await refreshWsh({ ...this.options, policy, source, kind: 'retry', signal: this.controller.signal,
-                slotKey: researchRefreshSlotKey(manifestHash, policy.instrumentId, source.id, 'calendar', researchSourceSlot((this.options.now ?? Date.now)(), 'news')) });
+                slotKey: researchRefreshSlotKey(manifestHash, policy.instrumentId, source.id, 'calendar', researchRefreshSlot(source, 'calendar', (this.options.now ?? Date.now)())) });
             });
           } catch (error) { errors.push(error); }
         }
@@ -163,7 +163,8 @@ export class ResearchRefreshScheduler {
 
   private async refreshSlot(policy: ResearchInstrumentPolicy, source: ResearchSource, role: Role): Promise<void> {
     this.assertActive();
-    const slot = researchSourceSlot((this.options.now ?? Date.now)(), source.adapter === "ibkr-wsh" ? "news" : role);
+    const now = (this.options.now ?? Date.now)();
+    const slot = source.adapter === "ibkr-wsh" ? researchRefreshSlot(source, role, now) : researchSourceSlot(now, role);
     const key = [this.options.manifestHash, policy.instrumentId, source.id, role].join(":");
     if (this.attemptedSlots.get(key) === slot) return;
     const slotKey = researchRefreshSlotKey(this.options.manifestHash, policy.instrumentId, source.id, role, slot);

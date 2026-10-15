@@ -1,6 +1,6 @@
 import {performance} from 'node:perf_hooks';
 import {connectWshBounded,type WshBoundedConnection} from './wsh-db.js';
-import { WSH_ATTEMPT_MS, WSH_REGULAR_MS, WSH_RETRY_DELAYS_MS, type WshAttemptIdentity, type WshAttemptTicket, type WshAttemptKind, type WshAttemptClaim, type WshAttemptResult, type WshAttemptDiagnostic, type WshRefreshState, type WshDueAttempt } from "./wsh-refresh.js";
+import { WSH_ATTEMPT_MS, WSH_RETRY_DELAYS_MS, type WshAttemptIdentity, type WshAttemptTicket, type WshAttemptKind, type WshAttemptClaim, type WshAttemptResult, type WshAttemptDiagnostic, type WshRefreshState, type WshDueAttempt } from "./wsh-refresh.js";
 import { isResearchSourceError } from "./source-error.js";
 import { isResearchProviderError } from "./provider-error.js";
 import { parseWshConfig, wshQualificationDeadline, wshLedgerKey, type WshAcquisition, type WshAcquisitionRecord, type WshEndpointLease } from "./wsh.js";
@@ -94,13 +94,9 @@ export class ResearchStore {
         } else if (source.adapter !== "ibkr-wsh") {
           for (const url of source.urls) for (const attempt of [1, 2]) keys.push("research_source_" + researchHash({ manifestHash: identity.manifestHash, instrumentId: identity.instrumentId, sourceId: source.id, role: row.role, slot, url, attempt }));
         } else {
-          const acquisitions = (await db.query(`SELECT a.*,clock_timestamp() AS now FROM research_wsh_acquisitions a
-            WHERE ledger_key=$1 AND started_at>clock_timestamp()-interval '15 minutes' ORDER BY started_at DESC LIMIT 1`, [wshLedgerKey(parseWshConfig(source, policy!).isin)])).rows;
-          if (acquisitions.length) {
-            const acquisition = acquisitions[0];
-            if (["UNKNOWN", "FAILED"].includes(String(acquisition.state))) { row.state = "HOLD"; row.reasons = ["RESEARCH_PROVIDER_OUTCOME_UNAVAILABLE"]; row.nextCheckAt = null; }
-            else { row.reasons = ["RESEARCH_WAITING_ACQUISITION_OR_PACING"]; row.nextCheckAt = new Date(acquisition.state === "PENDING" ? now + 5_000 : researchTime(iso(acquisition.started_at)) + 900_000).toISOString(); }
-          }
+          const config=parseWshConfig(source,policy!);
+          const baseline=await this.wshRegularNotBefore(wshLedgerKey(config.isin),config.refreshIntervalMs,db);
+          if(baseline!==null && baseline>now){row.reasons=["RESEARCH_WAITING_ACQUISITION_OR_PACING"];row.nextCheckAt=new Date(baseline).toISOString();}
         }
         if (keys.length) {
           const calls = (await db.query(`SELECT r.deadline_at,o.outcome FROM research_call_reservations r
@@ -580,7 +576,10 @@ export class ResearchStore {
       await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-wsh-issuer:${ledger}`]);
       const observedAt=performance.now(),now=await this.now(db);
       const cleanupFence=await this.wshCleanupFence(lease.endpointId,ledger,kind,db);
-      if(cleanupFence)return {state:'DEFERRED',reason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED',nextCheckAt:cleanupFence===true?null:cleanupFence};
+      if(cleanupFence){
+        const baseline=cleanupFence!==true && kind==='regular'?await this.wshRegularNotBefore(ledger,config.refreshIntervalMs,db):null;
+        return {state:'DEFERRED',reason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED',nextCheckAt:cleanupFence===true?null:new Date(Math.max(researchTime(cleanupFence),baseline??0)).toISOString()};
+      }
       const defer=(reason:string,at:number|null):WshAttemptClaim=>({state:'DEFERRED',reason,nextCheckAt:at===null?null:new Date(at).toISOString()});
       const active=(await db.query(`SELECT a.* FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
         WHERE (c.ledger_key=$1 OR a.endpoint_id=$2) AND a.state='STARTED' ORDER BY a.started_at`,[ledger,lease.endpointId])).rows;
@@ -604,10 +603,9 @@ export class ResearchStore {
         if(now<researchTime(iso(last.retry_due_at)))return defer('RESEARCH_WSH_RETRY_NOT_DUE',researchTime(iso(last.retry_due_at)));
         ordinal=Number(last.ordinal)+1;predecessor=last.id;
       }else{
-        const legacy=(await db.query('SELECT started_at FROM research_wsh_acquisitions WHERE ledger_key=$1 ORDER BY started_at DESC LIMIT 1',[ledger])).rows[0];
-        const baseline=cycle?researchTime(iso(cycle.next_regular_at)):legacy?researchTime(iso(legacy.started_at))+WSH_REGULAR_MS:0;
-        if(now<baseline)return defer('RESEARCH_WSH_SLOT_TOO_EARLY',baseline);
-        cycle={id:randomUUID(),next_regular_at:new Date(now+WSH_REGULAR_MS)};
+        const baseline=await this.wshRegularNotBefore(ledger,config.refreshIntervalMs,db);
+        if(baseline!==null && now<baseline)return defer('RESEARCH_WSH_SLOT_TOO_EARLY',baseline);
+        cycle={id:randomUUID(),next_regular_at:new Date(now+config.refreshIntervalMs)};
         await db.query(`INSERT INTO research_wsh_refresh_cycles(id,ledger_key,config_hash,manifest_hash,instrument_id,source_id,account_id,source_policy_hash,started_at,next_regular_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[cycle.id,ledger,input.configHash,input.manifestHash,input.instrumentId,input.sourceId,input.accountId,researchHash(source),new Date(now),cycle.next_regular_at]);
       }
@@ -619,6 +617,10 @@ export class ResearchStore {
         startedAt:new Date(now).toISOString(),deadlineAt:deadline.toISOString(),nextRegularAt:iso(cycle.next_regular_at)};
       this.wshTicketDeadlines.set(ticket,observedAt+WSH_ATTEMPT_MS);return {state:'CLAIMED',ticket};
     });
+  }
+  private async wshRegularNotBefore(ledger:string,interval:900000|3600000,db:ResearchDb):Promise<number|null> {
+    const row=(await db.query('SELECT research_wsh_regular_not_before($1,$2,clock_timestamp()) AS due',[ledger,interval])).rows[0];
+    return row?.due==null?null:researchTime(iso(row.due));
   }
   private async wshCleanupFence(endpointId:string,ledger:string,kind:WshAttemptKind,db:ResearchDb):Promise<true|string|null> {
     const rows=(await db.query(`SELECT a.verified_local_closure,c.next_regular_at,clock_timestamp() AS now
@@ -742,9 +744,10 @@ export class ResearchStore {
     const failures=(await db.query(`SELECT a.* ${base} AND a.started_at>$6 AND a.state IN ('FAILED','UNKNOWN') ORDER BY a.started_at DESC,a.ordinal DESC LIMIT 1`,[...params,since])).rows;
     const blocked=(await db.query(`SELECT 1 ${base} AND a.started_at>$6 AND
       ((a.state='STARTED' AND (NOT a.preflight_complete OR a.deadline_at<=clock_timestamp() AND ac.state IS DISTINCT FROM 'PUBLISHED')) OR a.failure_class IN ('HARD','UNCERTAIN')) LIMIT 1`,[...params,since])).rows.length>0;
-    const global=(await db.query('SELECT next_regular_at FROM research_wsh_refresh_cycles WHERE ledger_key=$1 ORDER BY started_at DESC LIMIT 1',[wshLedgerKey(config.isin)])).rows[0];
+    const baseline=await this.wshRegularNotBefore(wshLedgerKey(config.isin),config.refreshIntervalMs,db);
     const cleanupFence=await this.wshCleanupFence(config.endpointId,wshLedgerKey(config.isin),'regular',db);
-    const nextRegular=cleanupFence===true?null:cleanupFence??(global?iso(global.next_regular_at):null);
+    const effective=cleanupFence===true?null:Math.max(baseline??0,cleanupFence?researchTime(cleanupFence):0);
+    const nextRegular=effective?new Date(effective).toISOString():null;
     const retry=last?.retry_due_at && last.state!=='STARTED' && now<researchTime(iso(last.next_regular_at))?iso(last.retry_due_at):null;
     return {sourceId:identity.sourceId,lastSuccessfulAt:success===null?null:new Date(success).toISOString(),expiresAt:expiry===null?null:new Date(expiry).toISOString(),
       retained:!!failures.length && success!==null && expiry!==null && now<expiry && !blocked,
@@ -794,7 +797,10 @@ export class ResearchStore {
       if(ticket){
         const attempt=await this.wshAttemptRow(ticket,db,true);
         researchAssert(attempt.state==='STARTED' && attempt.preflight_complete===true && ticket.accountId===input.reservation.accountId && attempt.acquisition_id===null && ticket.sessionId===input.sessionId && ticket.endpointId===lease.endpointId && ticket.configHash===input.configHash && ticket.manifestHash===input.manifestHash && ticket.instrumentId===input.instrumentId && ticket.sourceId===input.sourceId && await this.now(db)<researchTime(ticket.deadlineAt),'RESEARCH_WSH_ATTEMPT_IDENTITY');
-      }else researchAssert(!(await db.query("SELECT 1 FROM research_wsh_acquisitions WHERE ledger_key=$1 AND started_at>clock_timestamp()-interval '15 minutes'", [ledgerKey])).rows.length, "RESEARCH_WSH_SLOT_TOO_EARLY");
+      }else {
+        const baseline=await this.wshRegularNotBefore(ledgerKey,config.refreshIntervalMs,db);
+        researchAssert(baseline===null || await this.now(db)>=baseline,"RESEARCH_WSH_SLOT_TOO_EARLY");
+      }
       const generation = Number((await db.query("UPDATE research_wsh_endpoints SET generation=generation+1 WHERE endpoint_id=$1 RETURNING generation", [lease.endpointId])).rows[0].generation);
       researchAssert(Number.isSafeInteger(generation)); const id = randomUUID();
       const row = (await db.query(`INSERT INTO research_wsh_acquisitions(id,endpoint_id,generation,session_id,source_id,instrument_id,ledger_key,config_hash,manifest_hash,state)

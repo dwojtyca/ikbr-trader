@@ -1,6 +1,6 @@
 import { evaluateResearchEligibility } from "./eligibility.js";
 import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
-import { parseWshConfig, wshQualificationDeadline } from "./wsh.js";
+import { parseWshConfig, wshQualificationDeadline, wshRefreshIntervalMs } from "./wsh.js";
 import type { ResearchIdentity, ResearchManifest, ResearchSource, StoredResearchSnapshot, ResearchProviderError, ResearchSourceError, ResearchSourceResult } from "./types.js";
 import { researchHash } from "./validation.js";
 
@@ -22,7 +22,7 @@ export interface ResearchPreparation {
 export class ResearchPreparationNeededError extends Error {
   constructor() { super("RESEARCH_PREPARATION_WAITING"); }
 }
-export const researchRefreshInterval = (source: ResearchSource, role: ResearchRole): number => source.adapter === "ibkr-wsh" || role === "news" ? 900_000 : 86_400_000;
+export const researchRefreshInterval = (source: ResearchSource, role: ResearchRole): number => source.adapter === "ibkr-wsh" ? wshRefreshIntervalMs(source) : role === "news" ? 900_000 : 86_400_000;
 export const researchRefreshSlot = (source: ResearchSource, role: ResearchRole, nowMs: number): number => Math.floor(nowMs / researchRefreshInterval(source, role));
 export const researchRefreshSlotKey = (manifestHash: string, instrumentId: string, sourceId: string, role: ResearchRole, slot: number): string =>
   "research_slot_" + researchHash({ manifestHash, instrumentId, sourceId, role, slot });

@@ -45,20 +45,26 @@ W lokalnym `.env` ustaw `RESEARCH_WSH_ENABLED`, identyfikator endpointu
 klienta ingestion lub execution. Włączenie WSH nie włącza zleceń.
 
 Przed wdrożeniem zachowaj wyłączone zlecenia i wstrzymane wejścia, wykonaj kopię
-bazy, aktualny łańcuch migracji aż do 33 (28 jest historyczną podstawą WSH)
+bazy, aktualny łańcuch migracji aż do 34 (28 jest historyczną podstawą WSH)
 i kontrolowane przyjęcie manifestu przez obie usługi. Migracje i przyjęcie
 manifestu wykonuj przy wyłączonych zapisach oraz wstrzymanych wejściach. Stare
 archiwalne manifesty i decyzje pozostają czytelne; stare zatwierdzenie AI nie może
 wykonać zlecenia według nowego promptu. Zaktualizuj hash prywatnego manifestu.
 Nie usuwaj historii, żeby ominąć nieznane wyniki wcześniejszych operacji.
 
-Zwykłe odświeżanie WSH odbywa się co 15 minut. Zgodnie z decyzją właściciela
-z 14 października nowy profil może ustawić `maxAgeMs=86400000`: poprawny
-kalendarz, również poprawnie potwierdzony pusty wynik, zachowuje ważność przez
-24 godziny od rzeczywistego pobrania. Dokładnie po 24 godzinach jest już
-nieaktualny. Starsze manifesty z `maxAgeMs=900000` zachowują wcześniejsze
-15 minut; zmiana wymaga przyjęcia nowego manifestu, nie edycji historii.
-Wcześniejsze wygaśnięcie uprawnień lub kwalifikacji nadal ogranicza ważność.
+Nowy profil WSH ustawia `refreshIntervalMs=3600000` i `maxAgeMs=86400000`:
+zwykłe odświeżanie odbywa się co godzinę, a poprawny kalendarz, również
+poprawnie potwierdzony pusty wynik, zachowuje ważność przez 24 godziny od
+rzeczywistego pobrania. Dokładnie po 24 godzinach jest już nieaktualny.
+Godzina jest liczona od rozpoczęcia poprzedniego zwykłego cyklu w bazie,
+nie od pełnej godziny na zegarze. Restart nie przyspiesza pobierania.
+
+Starsze manifesty z `refreshIntervalMs=900000` zachowują cykle 15-minutowe
+oraz zapisaną ważność danych (15 minut lub 24 godziny). Zmiana wymaga
+przyjęcia nowego manifestu, nie edycji historii. Przy przejściu na godzinę
+bot czeka co najmniej godzinę od poprzedniego zwykłego pobrania; powrót do
+15 minut nie skraca już zapisanego godzinnego terminu. Wcześniejsze
+wygaśnięcie uprawnień lub kwalifikacji nadal ogranicza ważność danych.
 
 Przejściowy błąd odświeżenia nie zastępuje poprawnego, nadal ważnego kalendarza.
 Bot zachowuje jego pierwotne daty i dowody, a błąd próby zapisuje osobno.
@@ -69,7 +75,7 @@ takiego błędu. Nowy poprawny wynik aktualizuje kontekst i jego powiązanie z A
 W jednym cyklu dopuszczalne są najwyżej dwie dodatkowe próby odczytu:
 po 30 sekundach od zapisania potwierdzonego zakończenia pierwszej sesji w bazie
 oraz po 120 sekundach od zapisania zakończenia kolejnej. Liczniki i terminy są trwałe;
-restart ich nie zeruje. Ponowienia nie przesuwają zwykłego cyklu 15 minut.
+restart ich nie zeruje. Ponowienia nie przesuwają terminu następnego zwykłego cyklu.
 Wymagają zakończenia poprzedniego zadania i potwierdzenia zamknięcia jego
 lokalnego połączenia. Kod `10281`, niepewne sprzątanie lub awaria procesu
 nie uprawniają do szybkiego ponowienia. Bez pewnego dowodu zamknięcia dokładnie
@@ -86,7 +92,8 @@ wstrzymuje wejścia. Z ważnym kalendarzem przejściowy błąd odświeżenia poz
 widoczną informacją i sam nie blokuje pracy. Niepewność zapisu wyniku wymagająca
 odzyskania stanu nadal blokuje użycie danych. Zmiana innej części manifestu
 nie przenosi automatycznie kalendarza między wersjami konfiguracji.
-Szczegóły kontraktu: [ważność i odzyskiwanie WSH](../implementation/phase3/WSH_FRESHNESS_RECOVERY_PLAN.md).
+Szczegóły godzinnego harmonogramu: [plan odświeżania](../implementation/phase3/WSH_HOURLY_REFRESH_PLAN.md).
+Kontrakt ważności i ponowień: [ważność i odzyskiwanie WSH](../implementation/phase3/WSH_FRESHNESS_RECOVERY_PLAN.md).
 
 Raport `pnpm paper:ops --env-file .env status --instrument pko_wse` pokazuje rolę kalendarza, liczbę wydarzeń, liczbę newsów
 z treścią oraz aktualność i blokady źródeł. Nie wyświetla surowych odpowiedzi WSH.

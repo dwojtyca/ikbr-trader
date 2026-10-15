@@ -42,7 +42,7 @@
     "timeoutMs": 10000,
     "maxEventBytes": 1048576,
     "maxMetadataBytes": 524288,
-    "refreshIntervalMs": 900000,
-    "maxAgeMs": 900000
+    "refreshIntervalMs": 3600000,
+    "maxAgeMs": 86400000
   }
 }
