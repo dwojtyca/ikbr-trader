@@ -86,3 +86,25 @@ test("shipped PKO/AAPL research example has actual adapter wiring but no qualifi
     assert.ok(policy.sources.some(source => source.roles.includes("calendar") && source.automation === "UNVERIFIED"));
   }
 });
+
+test('ongoing Marketaux binds full policies and retains30minute news expiry',()=>{
+ const f=fixture();
+ for(const q of [f.newsConfig.qualification,f.newsConfig.entitlement])Object.assign(q,{expiresAt:null,validity:{mode:'OPERATOR_CONFIRMED_ONGOING',confirmedAt:'2026-10-07T11:59:00Z',confirmationRef:'owner-paid-access',confirmationHash:'e'.repeat(64)}});
+ f.snapshot.manifestHash=researchHash(f.manifest);f.snapshot.mappingHash=researchHash(f.policy);
+ const c=f.snapshot.coverage.at(-1)!,a=c.acquisition!;a.entityQualificationHash=researchHash(f.newsConfig.qualification);a.entitlementHash=researchHash(f.newsConfig.entitlement);
+ for(const p of a.pages)Object.assign(p,marketauxCallIdentity(f.snapshot.manifestHash,f.policy.instrumentId,f.source,{sourceUrl:f.source.urls[0],...f.window,pass:p.pass,page:p.page}));
+ assert.doesNotThrow(()=>parseResearchSnapshot(f.snapshot,f.manifest));
+ const result=evaluateResearchEligibility(f.snapshot,f.manifest,f.now);assert.equal(result.eligible,true,result.reasons.join());assert.equal(result.expiresAt,new Date(Date.parse(c.checkedAt)+1800000).toISOString());
+ assert.equal(evaluateResearchEligibility(f.snapshot,f.manifest,Date.parse(c.checkedAt)+1800000).eligible,false);
+ const wrong=structuredClone(f.snapshot);wrong.coverage.at(-1)!.acquisition!.entitlementHash='f'.repeat(64);assert.throws(()=>parseResearchSnapshot(wrong,f.manifest));
+ Object.assign(f.newsConfig.qualification.validity!,{confirmedAt:'2026-10-07T12:01:01Z'});f.snapshot.manifestHash=researchHash(f.manifest);f.snapshot.mappingHash=researchHash(f.policy);a.entityQualificationHash=researchHash(f.newsConfig.qualification);
+ for(const p of a.pages)Object.assign(p,marketauxCallIdentity(f.snapshot.manifestHash,f.policy.instrumentId,f.source,{sourceUrl:f.source.urls[0],...f.window,pass:p.pass,page:p.page}));
+ assert.throws(()=>parseResearchSnapshot(f.snapshot,f.manifest),/QUALIFICATION_UNAVAILABLE/);
+});
+test('Marketaux ongoing does not qualify UNVERIFIED identity or allow malformed/null-only policy',()=>{
+ const f=fixture(),q=f.newsConfig.qualification as any;
+ q.expiresAt=null;assert.throws(()=>parseMarketauxNewsConfig(f.source,f.policy));
+ q.validity={mode:'OPERATOR_CONFIRMED_ONGOING',confirmedAt:'2026-10-07T11:59:00Z',confirmationRef:'owner-paid-access',confirmationHash:'e'.repeat(64)};q.outcome='UNVERIFIED';
+ const c=f.snapshot.coverage.at(-1)!;c.status='UNVERIFIED';c.complete=false;delete c.acquisition;f.snapshot.manifestHash=researchHash(f.manifest);f.snapshot.mappingHash=researchHash(f.policy);
+ assert.ok(evaluateResearchEligibility(f.snapshot,f.manifest,f.now).reasons.includes('RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE'));
+});

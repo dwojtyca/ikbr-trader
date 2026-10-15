@@ -7,11 +7,17 @@ import { classifyWshFailure, refreshWsh } from "./research-wsh-refresh.js";
 import { ResearchRefreshScheduler } from "./research-refresh.js";
 import type { WshEventRequest, WshTransport } from "./research-wsh-transport.js";
 
-function harness(rows: unknown[] = []) {
+function harness(rows: unknown[] = [], ongoing = false, configure?: (source: ReturnType<typeof wshResearchFixture>["source"], now: number) => void) {
   let clock = Date.parse("2026-10-07T10:01:00Z");
   const f = wshResearchFixture(clock);
+  if (ongoing) {
+    for (const name of ["qualification", "entitlement"]) Object.assign(f.source.parserConfig[name] as object, { expiresAt: null,
+      validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt: new Date(clock - 1000).toISOString(), confirmationRef: "fixture-confirmation", confirmationHash: "a".repeat(64) } });
+    f.source.parserConfig.refreshIntervalMs = 3600000; f.source.parserConfig.maxAgeMs = 86400000;
+  }
   const metadata = JSON.stringify({ meta_data: { event_types: [{ tag: "wshe_ed", name: "Earnings", columns: [] }] } });
   (f.source.parserConfig.qualification as any).metadataHash = createHash("sha256").update(metadata).digest("hex");
+  configure?.(f.source, clock);
   const manifestHash = researchHash(f.manifest);
   f.snapshot.manifestHash = manifestHash; f.snapshot.mappingHash = researchHash(f.policy);
   let head: StoredResearchSnapshot = { id: "prior", hash: researchHash(f.snapshot), sequence: 1, snapshot: structuredClone(f.snapshot) };
@@ -633,4 +639,53 @@ for (const handoff of ['connection', 'query'] as const) test(`positive monotonic
     assert.equal(destroyed, true); assert.equal(queries, handoff === 'connection' ? 0 : 1);
     await scheduler.tick(); await scheduler.drain(); assert.equal(h.calls.length, 2);
   } finally { Date.now = realNow; }
+});
+
+
+test("ongoing WSH publishes bound v2 evidence with finite calls and hourly pacing", async () => {
+  const h = harness([], true); await h.run();
+  const c = calendar(h);
+  assert.equal(c.status, "EMPTY"); assert.ok("wshAcquisition" in c);
+  assert.equal(c.wshAcquisition.contractVersion, "ibkr-wsh-v2");
+  assert.equal(c.wshAcquisition.qualificationExpiresAt, null);
+  assert.equal(c.wshAcquisition.entitlementExpiresAt, null);
+  assert.equal(h.calls.length, 2);
+  for (const call of h.calls) {
+    const deadline = Date.parse(call.deadlineAt), start = Date.parse(h.attempts[0].ticket.startedAt);
+    assert.ok(Number.isFinite(deadline) && deadline > start && deadline <= start + 10000);
+  }
+  h.advance(3599999); await h.run(); assert.equal(h.calls.length, 2);
+  h.advance(1); await h.run(); assert.equal(h.calls.length, 4);
+});
+
+test("ongoing paid policy does not mask a hard WSH provider failure after success", async () => {
+  const h = harness([], true); await h.run(); h.advance(3600000);
+  h.faults({ eventError: Object.assign(new Error("RESEARCH_WSH_ERROR_10277"), { providerError: { code: 10277, message: "WSH subscription unavailable" } }) });
+  await h.run();
+  assert.equal(calendar(h).status, "ERROR");
+  const result = h.attempts.at(-1)?.result;
+  assert.ok(result && result.outcome !== "SUCCEEDED"); assert.equal(result.failureClass, "HARD");
+  assert.deepEqual(calendar(h).providerError, { code: 10277, message: "WSH subscription unavailable" });
+});
+
+
+test("future ongoing WSH confirmation makes no broker connection", async () => {
+  const h = harness([], true, (source, now) => {
+    (source.parserConfig.qualification as any).validity.confirmedAt = new Date(now + 1).toISOString();
+  });
+  await h.run(); assert.equal(h.calls.length, 0); assert.ok(!h.trace.includes("connect"));
+  assert.equal(calendar(h).status, "UNVERIFIED");
+});
+
+test("mixed WSH policy expiry after metadata prevents sending events", async () => {
+  const h = harness([], true, (source, now) => {
+    const entitlement = source.parserConfig.entitlement as any;
+    delete entitlement.validity; entitlement.expiresAt = new Date(now + 50).toISOString();
+  });
+  const create = h.wsh.createTransport;
+  h.wsh.createTransport = () => { const transport = create(); return { ...transport, metadata: async (...args) => {
+    const result = await transport.metadata(...args); h.advance(100); return result;
+  } }; };
+  await h.run(); assert.equal(h.calls.length, 1); assert.ok(!h.trace.includes("events"));
+  assert.notEqual(calendar(h).status, "EMPTY"); assert.notEqual(calendar(h).status, "AVAILABLE");
 });

@@ -9,7 +9,8 @@ import {researchHash} from './validation.js';
 import {wshResearchFixture} from './research.fixture.js';
 import {loadTradingConfiguration} from '../trading-configuration/loader.js';
 import {TradingConfigurationStore} from '../trading-configuration/store.js';
-import {parseWshConfig,wshRequestDates,type WshEndpointLease} from './wsh.js';
+import {buildStrategyAttribution} from '../trading-config.js';
+import {parseWshConfig,wshRequestDates,wshReceiptPolicy,type WshEndpointLease} from './wsh.js';
 import type {WshAttemptResult,WshAttemptTicket} from './wsh-refresh.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
@@ -18,8 +19,9 @@ async function isolated(run:(pool:any)=>Promise<void>){
  const admin=new Pool({connectionString:url.href}),name='wsh_recovery_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href});try{const dir=new URL('../../../../infra/sql/migrations/',import.meta.url);for(const f of readdirSync(dir).filter(f=>f.endsWith('.sql')).sort())await pool.query(readFileSync(new URL(f,dir),'utf8'));await run(pool);}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }
-async function seed(pool:any,omitNews=false){
+async function seed(pool:any,omitNews=false,ongoing=false){
  const f=wshResearchFixture();
+ if(ongoing){f.source.parserConfig.refreshIntervalMs=3600000;for(const name of ['qualification','entitlement'])Object.assign(f.source.parserConfig[name] as object,{expiresAt:null,validity:{mode:'OPERATOR_CONFIRMED_ONGOING',confirmedAt:new Date(Date.now()-10000).toISOString(),confirmationRef:'owner-confirmation-fixture',confirmationHash:'e'.repeat(64)}});}
 
  f.source.parserConfig.maxAgeMs=86400000;f.snapshot.manifestHash=researchHash(f.manifest);f.snapshot.mappingHash=researchHash(f.policy);
  const store=new ResearchStore(pool),loaded=loadTradingConfiguration({TRADING_CONFIG_MODE:'bundle',TRADING_CONFIG_PATH:'/fixture.json',TRADING_CONFIG_EXPECTED_HASH:f.configHash},{readFile:()=>readFileSync(new URL('../trading-configuration/fixtures/valid-generic.json',import.meta.url),'utf8')});
@@ -66,11 +68,11 @@ async function published(pool:any,h:Awaited<ReturnType<typeof seed>>,unknownClos
   const now=new Date().toISOString(),config=parseWshConfig(h.f.source,h.f.policy),dates=wshRequestDates(config,now),requestHash=researchHash({endpointId:config.endpointId,sessionId,requestId:2,method:'reqWshEventData',request:{conId:config.conId,filter:'',fillWatchlist:false,fillPortfolio:false,fillCompetitors:false,...dates,totalLimit:100}});
   const call={...base,callKey:'events_'+randomUUID(),requestHash,deadlineAt:deadline()};await h.store.reserveWshCall(lease,acq,call);
   const s=structuredClone(h.f.snapshot);s.createdAt=now;s.coverage=s.coverage.filter(c=>c.sourceId!==h.f.source.id);
-  s.coverage.push({sourceId:h.f.source.id,role:'calendar',status:'EMPTY',complete:true,checkedAt:now,windowStart:now,windowEnd:now,evidenceRefs:[],reason:'RESEARCH_WSH_PROVIDER_QUERY_COMPLETE',wshAcquisition:{contractVersion:'ibkr-wsh-v1',coverageBasis:'PROVIDER_REPORTED_QUERY',acquisitionId:acq.id,generation:acq.generation,sessionId,requestId:2,requestAsOf:now,requestStartDate:dates.startDate,requestEndDate:dates.endDate,totalLimit:100,rowCount:0,duplicateCount:0,requestHash,receiptHash:'e'.repeat(64),metadataHash:config.qualification.metadataHash,qualificationId:config.qualification.id,qualificationExpiresAt:config.qualification.expiresAt,entitlementReference:config.entitlement.reference,entitlementExpiresAt:config.entitlement.expiresAt}});
+  s.coverage.push({sourceId:h.f.source.id,role:'calendar',status:'EMPTY',complete:true,checkedAt:now,windowStart:now,windowEnd:now,evidenceRefs:[],reason:'RESEARCH_WSH_PROVIDER_QUERY_COMPLETE',wshAcquisition:{...wshReceiptPolicy(config),coverageBasis:'PROVIDER_REPORTED_QUERY',acquisitionId:acq.id,generation:acq.generation,sessionId,requestId:2,requestAsOf:now,requestStartDate:dates.startDate,requestEndDate:dates.endDate,totalLimit:100,rowCount:0,duplicateCount:0,requestHash,receiptHash:'e'.repeat(64),metadataHash:config.qualification.metadataHash}});
   if(beforePublish)await beforePublish(s,lease,acq);
   result=await h.store.publishWshSnapshot(lease,acq,s);
   if(ticket){const at=new Date().toISOString();await h.store.finishWshAttempt(lease,ticket,{outcome:'SUCCEEDED',acquisition:acq,cleanup:{sessionId:ticket.sessionId,state:'UNKNOWN',verifiedLocalClosure:unknownClosure!,completedAt:at,cancellationAttemptedAt:at,disconnectRequestedAt:at,localClosedAt:unknownClosure?at:null}});}
-  await pool.query("UPDATE research_wsh_acquisitions SET started_at=clock_timestamp()-interval '16 minutes' WHERE id=$1",[acq.id]);
+  await pool.query("UPDATE research_wsh_acquisitions SET started_at=clock_timestamp()-$2::interval WHERE id=$1",[acq.id,`${config.refreshIntervalMs+60000} milliseconds`]);
  });return result;
 }
 test('real published EMPTY success retains exact head after transient; hard failure invalidates and cannot resurrect', {skip:!connection},()=>isolated(async pool=>{
@@ -123,6 +125,17 @@ async function bound(pool:any,h:Awaited<ReturnType<typeof seed>>,good:any){
  VALUES($1,$2,$3,'BUY','LMT',1,100,99,102,'fixture',1,'PASS',$4) RETURNING id`,[listing.symbol,h.identity.instrumentId,String(listing.conId),hash])).rows[0];
  await pool.query(`INSERT INTO research_bindings(proposed_order_id,client_order_hash,config_hash,manifest_hash,instrument_id,snapshot_id,snapshot_hash,sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[row.id,hash,h.identity.configHash,h.identity.manifestHash,h.identity.instrumentId,good.id,good.hash,good.sequence]);
  return{...h.identity,proposalId:Number(row.id),clientOrderHash:hash};
+}
+async function bindProposal(pool:any,h:Awaited<ReturnType<typeof seed>>){
+ const hash='b'.repeat(64),listing=h.f.policy.listing,stamp=new Date().toISOString(),attribution=buildStrategyAttribution(h.f.config,h.identity.instrumentId,'momentum_default');
+ const trigger={version:1,source:'evaluation_bucket',timeframe:'1m',observedAt:stamp,bucketStartMs:Math.floor(Date.parse(stamp)/60000)*60000};
+ const row=(await pool.query(`INSERT INTO proposed_orders(instrument,instrument_id,conid,side,order_type,quantity,entry,stop,take_profit,reason,confidence,risk_check_status,client_order_hash,client_order_hash_version,strategy_attribution,strategy_trigger)
+ VALUES($1,$2,$3,'BUY','LMT',1,100,99,102,'fixture',1,'PASS',$4,2,$5,$6) RETURNING id`,[listing.symbol,h.identity.instrumentId,String(listing.conId),hash,attribution,trigger])).rows[0];
+ await pool.query(`INSERT INTO proposal_ai_reviews(proposed_order_id,client_order_hash,instrument_id,conid,account_id,session_id,client_order_hash_version,strategy_attribution,strategy_trigger)
+ VALUES($1,$2,$3,$4,'DU_TEST','fixture',2,$5,$6)`,[row.id,hash,h.identity.instrumentId,String(listing.conId),attribution,trigger]);
+ const identity={...h.identity,proposalId:Number(row.id),clientOrderHash:hash},result=await h.store.bind(identity);
+ assert.equal(result.eligibility.eligible,true);assert.ok(Number.isFinite(Date.parse(result.eligibility.expiresAt!)));
+ return identity;
 }
 test('unconfirmed preflight immediately holds preparation and actual existing binding across restart without changing good head',{skip:!connection},()=>isolated(async pool=>{
  const h=await seed(pool),good=await published(pool,h),binding=await bound(pool,h,good);
@@ -221,7 +234,7 @@ for(const omitted of [true,false])test(`successful acquisition merges current he
  const good=await published(pool,h,undefined,async incoming=>{
   const prior=(await h.store.latestSnapshot(h.identity))!,changed=structuredClone(prior.snapshot),at=new Date().toISOString();
   changed.createdAt=at;changed.facts[0].value=2001;
-  if(omitted)changed.coverage.push({sourceId:'official',role:'news',status:'EMPTY',complete:true,evidenceRefs:[],reason:'newly acquired news',checkedAt:at,windowStart:new Date(Date.now()-86400000).toISOString(),windowEnd:at});
+  if(omitted)changed.coverage.push({sourceId:'official',role:'news',status:'EMPTY',complete:true,evidenceRefs:[],reason:'newly acquired news',checkedAt:at,windowStart:new Date(Date.parse(at)-86400000).toISOString(),windowEnd:at});
   else{const c=changed.coverage.find(c=>c.role==='news')!;c.checkedAt=at;c.windowEnd=at;c.reason='newer ordinary news';}
   assert.notDeepEqual(unrelated(incoming),unrelated(changed));newer=await new ResearchStore(pool).storeSnapshot(changed);
  });
@@ -250,4 +263,32 @@ test('successful publication blocked on current head expires without publication
  assert.deepEqual(await h.store.latestSnapshot(h.identity),original);
  assert.equal((await pool.query('SELECT state FROM research_wsh_acquisitions WHERE id=$1',[acquisitionId])).rows[0].state,'PENDING');
  assert.equal((await pool.query('SELECT count(*) FROM research_call_outcomes WHERE outcome=\'SUCCEEDED\'')).rows[0].count,'1');
+}));
+test('ongoing published calendar retains finite24h expiry, actual binding and exact SQL policy hash',{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool,false,true),good=await published(pool,h),binding=await bindProposal(pool,h),coverage=good.snapshot.coverage.find((c:any)=>c.role==='calendar');
+ assert.equal(coverage.wshAcquisition.contractVersion,'ibkr-wsh-v2');assert.equal(coverage.wshAcquisition.qualificationExpiresAt,null);assert.equal(coverage.wshAcquisition.qualificationHash,researchHash(h.f.source.parserConfig.qualification));
+ await h.store.validateBinding(binding);assert.equal((await h.store.prepareRepair(h.identity)).state,'READY');
+ const state=await h.store.readWshRefreshState(h.identity,pool);assert.equal(Date.parse(state.expiresAt!),Date.parse(coverage.checkedAt)+86400000);
+ const sql=(await pool.query('SELECT * FROM research_wsh_source_policy($1,$2,$3,$4)',[h.identity.configHash,h.identity.manifestHash,h.identity.instrumentId,h.identity.sourceId])).rows[0];assert.equal(sql.policy_hash,researchHash(h.f.source));assert.equal(sql.interval_ms,3600000);
+ await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.claim(lease);assert.equal(c.state,'CLAIMED');if(c.state==='CLAIMED')await h.store.finishWshAttempt(lease,c.ticket,h.failure());});
+ assert.deepEqual(await h.store.latestSnapshot(h.identity),good);await h.store.validateBinding(binding);assert.equal((await h.store.prepareRepair(h.identity)).state,'READY');
+ await dueNow(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.claim(lease,'retry');assert.equal(c.state,'CLAIMED');if(c.state==='CLAIMED')await h.store.finishWshAttempt(lease,c.ticket,h.failure('HARD'));});
+ const restarted=new ResearchStore(pool);assert.equal((await restarted.prepareRepair(h.identity)).state,'HOLD');await assert.rejects(restarted.validateBinding(binding));assert.equal((await restarted.readWshRefreshState(h.identity,pool)).blocksCachedEvidence,true);
+}));
+test('ongoing receipt does not bypass failed hard settlement and restart HOLD',{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool,false,true),good=await published(pool,h),binding=await bindProposal(pool,h);await h.store.validateBinding(binding);
+ await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.store.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},'regular');assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')return;
+ const result=h.failure('HARD');if(result.outcome==='SUCCEEDED')throw Error('fixture');result.cleanup.sessionId=c.ticket.sessionId;result.snapshot.manifestHash='0'.repeat(64);await assert.rejects(h.store.finishWshAttempt(lease,c.ticket,result));});
+ const restarted=new ResearchStore(pool);assert.deepEqual(await restarted.latestSnapshot(h.identity),good);assert.equal((await restarted.prepareRepair(h.identity)).state,'HOLD');await assert.rejects(restarted.validateBinding(binding),/ATTEMPT_UNRESOLVED/);
+}));
+test('ongoing calendar24h equality agrees across real stored head/binding and controlled evaluation clock',{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool,false,true),good=await published(pool,h),checked=Date.parse(good.snapshot.coverage.find((c:any)=>c.role==='calendar').checkedAt);
+ // Only evaluation time is injected. All manifests, acquisitions, provenance, heads and bindings use real isolated PostgreSQL.
+ let at=checked+86400000-1;
+ const wrap=(db:any)=>({query:(sql:any,values?:any[])=>sql==='SELECT clock_timestamp() AS now'?Promise.resolve({rows:[{now:new Date(at)}]}):db.query(sql,values),release:()=>db.release()});
+ const clockPool={query:wrap(pool).query,connect:async()=>wrap(await pool.connect())};const store=new ResearchStore(clockPool as any);
+ const fresh=structuredClone(good.snapshot);fresh.createdAt=new Date(at).toISOString();for(const c of fresh.coverage.filter((c:any)=>c.role!=='calendar')){c.checkedAt=fresh.createdAt;c.windowEnd=fresh.createdAt;c.windowStart=new Date(at-86400000).toISOString();}
+ const head=await store.storeSnapshot(fresh),binding=await bound(pool,h,head);assert.equal((await store.validateBinding(binding)).eligibility.eligible,true);assert.equal((await store.prepareRepair(h.identity)).state,'READY');assert.equal((await store.readWshRefreshState(h.identity,clockPool as any)).expiresAt,new Date(checked+86400000).toISOString());
+ at++;await assert.rejects(store.validateBinding(binding),/SOURCE_STALE_OR_FUTURE/);assert.notEqual((await store.prepareRepair(h.identity)).state,'READY');
+ assert.equal((await pool.query('SELECT state FROM research_wsh_acquisitions')).rows[0].state,'PUBLISHED');assert.deepEqual((await h.store.readSnapshot(good.id))?.snapshot,good.snapshot);
 }));

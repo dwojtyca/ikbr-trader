@@ -51,18 +51,48 @@ mapping/binding identity; key rotation alone does not refund durable calls.
 3. Keep a private nonsecret qualification receipt recording the observed entity,
    issuer/listing crosswalk, actual plan limits, reviewed API/retention permission
    and dated evidence. Hash that receipt and reference its credential-free
-   evidence URL in the manifest. Record explicit verification and expiry times.
+   evidence URL in the manifest. Record the original verification time and explicit
+   finite or ongoing validity policy described below.
    These are reviewed operator assertions, not provider-signed attestations.
 4. Set actual page and request/cost bounds no higher than the qualified allowance.
    The source permits only news, one exact canonical query URL and verified
    FACTS_AND_REFERENCES retention. Requalify when entity, plan, permissions or
-   listing change, and before expiry. Keep entries disabled until every separate
+   listing change, and before a finite expiry. Keep entries disabled until every separate
    operational gate has passed.
 
 The scheduled adapter never performs entity-search probes, subscription discovery,
 publisher-page requests, or retries in response to unknown outcomes. Diagnostics
 are read-only and cannot spend provider or model calls. Source qualification does
 not authorize a new paid subscription or any broker action.
+
+## Access validity and news freshness
+
+Qualification/entitlement validity does not measure the age of news. Existing
+finite `expiresAt` records retain their exact expiry behavior. An established
+source with operator-confirmed ongoing access may instead explicitly use
+`expiresAt: null` plus `validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt,
+confirmationRef, confirmationHash }` on each record. The time is when confirmation
+was actually recorded, with a nonsecret reference and SHA256 of the private receipt.
+Keep original entity/evidence verification times and hashes unchanged. Null without
+this complete policy is invalid; UNVERIFIED still denies use. Known actual finite
+subscription/permission termination must retain a finite expiry. This is an
+operator assertion of continuing access, not a provider guarantee or automatic
+renewal service. New identities, plans or permissions require explicit review.
+
+The source policy is included in acquisition and manifest hashes. Adopt changes
+with writes disabled and acquire new ordinary news; do not copy old receipts or
+change their timestamps. HTTP401/403/429, quota, malformed data, mismatched entities
+and incomplete coverage remain failures. Operation deadlines remain finite.
+
+With `RESEARCH_MARKETAUX_ON_DEMAND=true`, the ordinary periodic refresh skips
+Marketaux. A proposal needing missing/stale news queues supported preparation
+before AI evaluation; startup preparation can also request news. Eligible cached
+news is reused, so a new proposal does not always cause a new API call. Freshness
+remains less than30 minutes from the coverage cutoff, using the preceding24-hour
+window ending one second before a15-minute slot boundary. Complete acquisition
+still reads the result twice. These settings do not provide news through the
+precise signal timestamp. The cadence calculation below describes polling every
+slot; actual on-demand usage depends on preparation requests.
 
 ## Budget the actual cadence
 

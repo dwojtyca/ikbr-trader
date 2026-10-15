@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import {
   captureResearchSourceError, isResearchSourceError, sanitizeResearchProviderError, isResearchProviderError, type ResearchProviderError,
   parseResearchSnapshot, parseWshConfig, researchAssert, researchHash, validateWshValue,
-  wshQualificationDeadline, wshRequestDates,
+  wshQualificationDeadline, wshRequestDates, wshReceiptPolicy,
   type InstrumentResearchSnapshotV2, type ResearchCallReservation, type ResearchInstrumentPolicy,
   type ResearchManifest, type ResearchSource, type ResearchStore, type WshAcquisition, type WshEndpointLease,
   type WshAttemptKind, type WshAttemptTicket, type WshAttemptResult, type WshFailureClass, type WshFailureStage, type WshCleanupResult,
@@ -124,7 +124,8 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       await store.confirmWshPreflight(lease, ticket);
       preflightComplete = true;
       const requestAsOf = new Date(now()).toISOString();
-      const admissionDeadline = Math.min(Date.parse(ticket.startedAt) + 30000, wshQualificationDeadline(config, now()));
+      const operationDeadline = Date.parse(ticket.startedAt) + 30000;
+      const admissionDeadline = Math.min(operationDeadline, wshQualificationDeadline(config, now()) ?? operationDeadline);
       const deadline = () => new Date(Math.min(now() + config.timeoutMs, admissionDeadline)).toISOString();
       const checkpoint = async (callDeadline?: string) => {
         assertActive();
@@ -189,11 +190,10 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       snapshot.createdAt = receiptAt;
       snapshot.coverage.push({ sourceId: source.id, role: "calendar", status: normalized.rowCount ? "AVAILABLE" : "EMPTY", checkedAt: receiptAt,
         windowStart: requestAsOf, windowEnd: receiptAt, complete: true, evidenceRefs: snapshot.evidence.filter(e => e.sourceId === source.id).map(e => e.ref),
-        reason: "RESEARCH_WSH_PROVIDER_QUERY_COMPLETE", wshAcquisition: { contractVersion: "ibkr-wsh-v1", coverageBasis: "PROVIDER_REPORTED_QUERY",
+        reason: "RESEARCH_WSH_PROVIDER_QUERY_COMPLETE", wshAcquisition: { ...wshReceiptPolicy(config), coverageBasis: "PROVIDER_REPORTED_QUERY",
           acquisitionId: acquisition.id, generation: acquisition.generation, sessionId: transport.sessionId, requestId: 2, requestAsOf,
           requestStartDate: dates.startDate, requestEndDate: dates.endDate, totalLimit: 100, rowCount: normalized.rowCount, duplicateCount: normalized.duplicateCount,
-          requestHash: eventsCall.requestHash, receiptHash, metadataHash, qualificationId: config.qualification.id, qualificationExpiresAt: config.qualification.expiresAt,
-          entitlementReference: config.entitlement.reference, entitlementExpiresAt: config.entitlement.expiresAt } });
+          requestHash: eventsCall.requestHash, receiptHash, metadataHash } });
       parseResearchSnapshot(snapshot, manifest);
       await checkpoint(eventsCall.deadlineAt);
       stage = 'publish';

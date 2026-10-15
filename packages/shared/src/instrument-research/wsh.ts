@@ -1,3 +1,4 @@
+import { assertSourceValidity, assertSourceValidityAt, earliestSourceValidityExpiry, type ResearchSourceValidity } from "./source-validity.js";
 import type { ResearchSource, ResearchInstrumentPolicy, ResearchSourceResult } from "./types.js";
 import { canonicalJson } from "../trading-configuration/identity.js";
 import { researchAssert, researchTime, isResearchHash, researchHash } from "./validation.js";
@@ -8,8 +9,8 @@ export interface WshConfig {
   conId: number;
   isin: string;
   issuerTimeZone: string;
-  qualification: { id: string; validFrom: string; expiresAt: string; endpointOwnershipRef: string; metadataHash: string };
-  entitlement: { reference: string; validFrom: string; expiresAt: string; termsReference: string };
+  qualification: ResearchSourceValidity & { id: string; validFrom: string; endpointOwnershipRef: string; metadataHash: string };
+  entitlement: ResearchSourceValidity & { reference: string; validFrom: string; termsReference: string };
   lookbackDays: 7;
   lookaheadDays: 45;
   edgeDays: 2;
@@ -41,13 +42,15 @@ export interface WshEvent {
   context: { [key: string]: WshValue }; sourceFields: { [key: string]: WshValue };
   versionHash: string; evidenceRef: string;
 }
-export interface WshAcquisitionReceipt {
-  contractVersion: "ibkr-wsh-v1"; coverageBasis: "PROVIDER_REPORTED_QUERY";
+export type WshReceiptPolicy =
+  | { contractVersion: "ibkr-wsh-v1"; qualificationId: string; qualificationExpiresAt: string; entitlementReference: string; entitlementExpiresAt: string }
+  | { contractVersion: "ibkr-wsh-v2"; qualificationId: string; qualificationExpiresAt: string | null; entitlementReference: string; entitlementExpiresAt: string | null; qualificationHash: string; entitlementHash: string };
+export type WshAcquisitionReceipt = WshReceiptPolicy & {
+  coverageBasis: "PROVIDER_REPORTED_QUERY";
   acquisitionId: string; generation: number; sessionId: string; requestId: number;
   requestAsOf: string; requestStartDate: string; requestEndDate: string; totalLimit: 100; rowCount: number; duplicateCount: number;
   requestHash: string; receiptHash: string; metadataHash: string;
-  qualificationId: string; qualificationExpiresAt: string; entitlementReference: string; entitlementExpiresAt: string;
-}
+};
 export interface WshSourceResult extends Omit<ResearchSourceResult, "acquisition"> { wshAcquisition: WshAcquisitionReceipt; role: "calendar" }
 export interface WshAcquisition {
   id: string; endpointId: string; generation: number; sessionId: string; sourceId: string;
@@ -82,9 +85,11 @@ export function parseWshConfig(source: ResearchSource, policy: ResearchInstrumen
   nonempty(c.endpointId); nonempty(c.issuerTimeZone);
   researchAssert(typeof c.issuerTimeZone === "string" && (c.issuerTimeZone === "UTC" || c.issuerTimeZone.includes("/")), "RESEARCH_TIMEZONE_INVALID");
   try { new Intl.DateTimeFormat("en", { timeZone: String(c.issuerTimeZone) }).format(); } catch { throw new Error("RESEARCH_TIMEZONE_INVALID"); }
-  const q = exact(c.qualification, "id validFrom expiresAt endpointOwnershipRef metadataHash"), e = exact(c.entitlement, "reference validFrom expiresAt termsReference");
+  const q = exact(c.qualification, "id validFrom expiresAt endpointOwnershipRef metadataHash" + (c.qualification && typeof c.qualification === "object" && Object.hasOwn(c.qualification,"validity") ? " validity" : "")), e = exact(c.entitlement, "reference validFrom expiresAt termsReference" + (c.entitlement && typeof c.entitlement === "object" && Object.hasOwn(c.entitlement,"validity") ? " validity" : ""));
   for (const field of [q.id, q.endpointOwnershipRef, e.reference, e.termsReference]) nonempty(field);
-  researchAssert(isResearchHash(q.metadataHash) && researchTime(q.validFrom) < researchTime(q.expiresAt) && researchTime(e.validFrom) < researchTime(e.expiresAt), "RESEARCH_WSH_QUALIFICATION_INVALID");
+  researchAssert(isResearchHash(q.metadataHash), "RESEARCH_WSH_QUALIFICATION_INVALID");
+  assertSourceValidity(q,q.validFrom,"RESEARCH_WSH_QUALIFICATION_INVALID");
+  assertSourceValidity(e,e.validFrom,"RESEARCH_WSH_QUALIFICATION_INVALID");
   researchAssert(c.lookbackDays === 7 && c.lookaheadDays === 45 && c.edgeDays === 2 && c.totalLimit === 100 && c.maxEventBytes === 1048576 && c.maxMetadataBytes === 524288 && ((c.refreshIntervalMs === 900000 && (c.maxAgeMs === 900000 || c.maxAgeMs === 86400000)) || (c.refreshIntervalMs === 3600000 && c.maxAgeMs === 86400000)) && Number.isInteger(c.timeoutMs) && Number(c.timeoutMs) > 0 && Number(c.timeoutMs) <= 10000, "RESEARCH_WSH_BOUNDS_INVALID");
   return structuredClone(c) as unknown as WshConfig;
 }
@@ -93,21 +98,31 @@ export function wshRefreshIntervalMs(source: ResearchSource): 900000 | 3600000 {
   researchAssert(source.adapter === "ibkr-wsh" && (interval === 900000 || interval === 3600000), "RESEARCH_WSH_BOUNDS_INVALID");
   return interval;
 }
-export function wshQualificationDeadline(config: WshConfig, nowMs: number): number {
-  researchAssert(nowMs >= researchTime(config.qualification.validFrom) && nowMs >= researchTime(config.entitlement.validFrom), "RESEARCH_WSH_QUALIFICATION_UNAVAILABLE");
-  const deadline = Math.min(researchTime(config.qualification.expiresAt), researchTime(config.entitlement.expiresAt));
-  researchAssert(nowMs < deadline, "RESEARCH_WSH_QUALIFICATION_UNAVAILABLE"); return deadline;
+export function wshQualificationDeadline(config: WshConfig, nowMs: number): number | null {
+  assertSourceValidityAt(config.qualification,config.qualification.validFrom,nowMs,"RESEARCH_WSH_QUALIFICATION_UNAVAILABLE");
+  assertSourceValidityAt(config.entitlement,config.entitlement.validFrom,nowMs,"RESEARCH_WSH_QUALIFICATION_UNAVAILABLE");
+  return earliestSourceValidityExpiry(config.qualification,config.entitlement);
+}
+export function wshReceiptPolicy(config: WshConfig): WshReceiptPolicy {
+  const common={qualificationId:config.qualification.id,entitlementReference:config.entitlement.reference};
+  if(config.qualification.expiresAt!==null && config.entitlement.expiresAt!==null)
+    return {...common,contractVersion:"ibkr-wsh-v1",qualificationExpiresAt:config.qualification.expiresAt,entitlementExpiresAt:config.entitlement.expiresAt};
+  return {...common,contractVersion:"ibkr-wsh-v2",qualificationExpiresAt:config.qualification.expiresAt,entitlementExpiresAt:config.entitlement.expiresAt,
+    qualificationHash:researchHash(config.qualification),entitlementHash:researchHash(config.entitlement)};
 }
 export function wshLedgerKey(isin: string): string { return `ibkr-wsh:${isin}`; }
 export function wshEventVersionProjection(event: Omit<WshEvent, "id" | "versionHash" | "evidenceRef">): unknown {
   return { providerEventKey: event.providerEventKey, providerEventType: event.providerEventType, issuerIsin: event.issuerIsin, conIds: [...event.conIds].sort((a,b) => a-b), status: event.status, interpretation: event.interpretation, metadataDescription: event.metadataDescription, statusInterpretation: event.statusInterpretation, context: event.context, sourceFields: event.sourceFields };
 }
 export function assertWshReceiptIdentity(receipt: WshAcquisitionReceipt, config: WshConfig): void {
-  exact(receipt, "contractVersion coverageBasis acquisitionId generation sessionId requestId requestAsOf requestStartDate requestEndDate totalLimit rowCount duplicateCount requestHash receiptHash metadataHash qualificationId qualificationExpiresAt entitlementReference entitlementExpiresAt");
-  researchAssert(receipt.contractVersion === "ibkr-wsh-v1" && receipt.coverageBasis === "PROVIDER_REPORTED_QUERY" && receipt.totalLimit === 100 && Number.isInteger(receipt.rowCount) && receipt.rowCount >= 0 && receipt.rowCount < 100 && Number.isInteger(receipt.duplicateCount) && receipt.duplicateCount >= 0 && receipt.duplicateCount <= receipt.rowCount, "RESEARCH_WSH_RECEIPT_INVALID");
+  const expected=wshReceiptPolicy(config);
+  exact(receipt, "contractVersion coverageBasis acquisitionId generation sessionId requestId requestAsOf requestStartDate requestEndDate totalLimit rowCount duplicateCount requestHash receiptHash metadataHash qualificationId qualificationExpiresAt entitlementReference entitlementExpiresAt" + (expected.contractVersion === "ibkr-wsh-v2" ? " qualificationHash entitlementHash" : ""));
+  researchAssert(receipt.contractVersion === expected.contractVersion && receipt.coverageBasis === "PROVIDER_REPORTED_QUERY" && receipt.totalLimit === 100 && Number.isInteger(receipt.rowCount) && receipt.rowCount >= 0 && receipt.rowCount < 100 && Number.isInteger(receipt.duplicateCount) && receipt.duplicateCount >= 0 && receipt.duplicateCount <= receipt.rowCount, "RESEARCH_WSH_RECEIPT_INVALID");
   for (const h of [receipt.requestHash,receipt.receiptHash,receipt.metadataHash]) researchAssert(isResearchHash(h));
   for (const id of [receipt.acquisitionId,receipt.sessionId]) nonempty(id);
   for (const n of [receipt.generation,receipt.requestId]) researchAssert(Number.isSafeInteger(n) && n > 0);
+  researchAssert(Object.entries(expected).every(([key,value]) => (receipt as unknown as Record<string,unknown>)[key] === value), "RESEARCH_WSH_QUALIFICATION_MISMATCH");
+  if(expected.contractVersion === "ibkr-wsh-v2") wshQualificationDeadline(config,researchTime(receipt.requestAsOf));
   const dates = wshRequestDates(config, receipt.requestAsOf);
   researchAssert(receipt.requestStartDate === dates.startDate && receipt.requestEndDate === dates.endDate, "RESEARCH_WSH_REQUEST_INVALID");
   researchAssert(receipt.requestHash === researchHash({ endpointId: config.endpointId, sessionId: receipt.sessionId, requestId: receipt.requestId, method: "reqWshEventData", request: { conId: config.conId, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false, startDate: dates.startDate, endDate: dates.endDate, totalLimit: 100 } }), "RESEARCH_WSH_REQUEST_HASH_INVALID");
@@ -143,6 +158,7 @@ export function validateWshCoverage(raw: unknown, policy: ResearchInstrumentPoli
   const source = policy.sources.find(s => s.id === c.sourceId); researchAssert(source?.adapter === "ibkr-wsh");
   const config = parseWshConfig(source, policy), receipt = c.wshAcquisition as WshAcquisitionReceipt;
   assertWshReceiptIdentity(receipt, config);
+  if(receipt.contractVersion === "ibkr-wsh-v2") wshQualificationDeadline(config,researchTime(c.checkedAt));
   researchAssert(c.role === "calendar" && c.complete === true && (c.status === "AVAILABLE" || c.status === "EMPTY") && (c.status === "EMPTY") === (receipt.rowCount === 0), "RESEARCH_WSH_COVERAGE_INVALID");
   researchAssert(researchTime(receipt.requestAsOf) <= researchTime(c.checkedAt) && researchTime(c.checkedAt) - researchTime(receipt.requestAsOf) <= 30000 && researchTime(c.checkedAt) <= researchTime(createdAt) && researchTime(c.windowStart) <= researchTime(c.windowEnd) && researchTime(c.windowEnd) <= researchTime(c.checkedAt));
   researchAssert(typeof c.reason === "string" && c.reason.length <= 1000 && Array.isArray(c.evidenceRefs) && new Set(c.evidenceRefs).size === c.evidenceRefs.length);

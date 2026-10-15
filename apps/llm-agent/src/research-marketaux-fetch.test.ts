@@ -55,3 +55,26 @@ test("authenticated transport rejects redirect, HTTP quota and non-JSON content 
     assert.equal(calls, 1);
   }
 });
+
+
+test("ongoing Marketaux rejects invalid operation deadlines and preserves provider denial", async () => {
+  const f = marketauxFixture();
+  for (const name of ["qualification", "entitlement"]) Object.assign(f.source.parserConfig[name] as object, { expiresAt: null,
+    validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt: new Date(Date.now() - 1000).toISOString(), confirmationRef: "fixture-confirmation", confirmationHash: "a".repeat(64) } });
+  let calls = 0;
+  const fake = ((_url: URL, _options: unknown, callback: (res: any) => void) => {
+    calls++; const req = new EventEmitter() as any; req.destroy = () => {};
+    req.end = () => { const res = new EventEmitter() as any; res.statusCode = 403; res.headers = { "content-type": "application/json" }; res.destroy = () => {};
+      callback(res); res.emit("data", Buffer.from(JSON.stringify({ error: { code: "access_denied", message: "Subscription access denied" } }))); res.emit("end"); };
+    return req;
+  }) as typeof request;
+  const fetch = createMarketauxFetch("synthetic-secret", { resolveAddress: async () => ({ address: "8.8.8.8", family: 4 }), httpsRequest: fake });
+  for (const deadline of ["invalid", "Infinity", new Date(Date.now() - 1000).toISOString()])
+    await assert.rejects(fetch(f.source, f.descriptor, deadline), /RESEARCH_SOURCE_DEADLINE_INVALID/);
+  assert.equal(calls, 0);
+  await assert.rejects(fetch(f.source, f.descriptor, new Date(Date.now() + 9000).toISOString()), error => {
+    assert.ok(error instanceof ResearchSourceFailure); assert.equal(error.message, "RESEARCH_SOURCE_HTTP_403");
+    assert.equal(error.sourceError.providerMessage, "Subscription access denied"); return true;
+  });
+  assert.equal(calls, 1);
+});

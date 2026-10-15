@@ -292,7 +292,8 @@ export class ResearchRefreshScheduler {
     let admissionDeadline = 0;
     try {
       if (!this.options.marketauxApiKey?.trim()) throw new Error("RESEARCH_MARKETAUX_KEY_MISSING");
-      admissionDeadline = Math.min(startedAt + MARKETAUX_MAX_ACQUISITION_MS, marketauxQualificationDeadline(config, now()));
+      const policyDeadline = marketauxQualificationDeadline(config, now());
+      admissionDeadline = Math.min(startedAt + MARKETAUX_MAX_ACQUISITION_MS, policyDeadline ?? startedAt + MARKETAUX_MAX_ACQUISITION_MS);
       const checkpoint = () => {
         this.assertActive();
         marketauxQualificationDeadline(config, now());

@@ -116,3 +116,21 @@ that missing mandatory context blocks entry before broker dispatch. A provider
 REJECT remains a valid result, not an integration failure or a reason to loosen
 strategy thresholds. Live provider checks during acceptance require scoped owner
 authorization and a recorded request/cost ceiling.
+
+
+## 2026-10-15: source-access policy is separate from data TTL
+
+The [explicit ongoing validity contract](../implementation/phase3/RESEARCH_SOURCE_VALIDITY_PLAN.md)
+adds an operator-confirmed ongoing policy to established WSH and Marketaux
+qualification/entitlement records. Legacy finite records and canonical hashes
+remain unchanged. Ongoing records use null expiry plus a dated, referenced,
+hashed operator confirmation; they do not invent provider access guarantees.
+Actual permission/identity failures still deny use, and a known finite termination
+retains its finite deadline. WSH receipts explicitly version this new policy
+binding; Marketaux retains its existing full-record qualification hashes.
+
+Hourly WSH refresh and24-hour successful-data TTL remain independent from this
+access policy. Marketaux remains on-demand when configured, with30-minute cached
+coverage,15-minute query slots and two complete traversals. All request, acquisition
+and AI-binding deadlines remain finite. New manifest adoption requires new ordinary
+source data, preserving immutable history and unknown-outcome/cleanup fences.

@@ -1,3 +1,4 @@
+import { earliestSourceValidityExpiry } from "./source-validity.js";
 import {performance} from 'node:perf_hooks';
 import {connectWshBounded,type WshBoundedConnection} from './wsh-db.js';
 import { WSH_ATTEMPT_MS, WSH_RETRY_DELAYS_MS, type WshAttemptIdentity, type WshAttemptTicket, type WshAttemptKind, type WshAttemptClaim, type WshAttemptResult, type WshAttemptDiagnostic, type WshRefreshState, type WshDueAttempt } from "./wsh-refresh.js";
@@ -732,7 +733,8 @@ export class ResearchStore {
     if(stored)await this.assertWshSnapshotProvenance(stored.snapshot,db);
     const c=stored?.snapshot.coverage.find(c=>c.sourceId===identity.sourceId && 'wshAcquisition' in c);
     const success=c ? researchTime(c.checkedAt):null;
-    const expiry=success===null?null:Math.min(success+config.maxAgeMs,researchTime(config.qualification.expiresAt),researchTime(config.entitlement.expiresAt));
+    const policyExpiry=earliestSourceValidityExpiry(config.qualification,config.entitlement);
+    const expiry=success===null?null:policyExpiry===null?success+config.maxAgeMs:Math.min(success+config.maxAgeMs,policyExpiry);
     const params=[identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId,identity.accountId];
     const base=`FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
       LEFT JOIN research_wsh_acquisitions ac ON ac.id=a.acquisition_id

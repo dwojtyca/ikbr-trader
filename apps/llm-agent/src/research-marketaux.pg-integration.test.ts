@@ -140,6 +140,7 @@ test(`${expiryField} expiry fences actual ${stage} with fresh news and readable 
   const repo = new ResearchBoundReviewRepository(pool, { manifest: f.manifest, hash: f.manifestHash });
   const claim = (await repo.claim())!, bound = await repo.prepareResearch(claim);
   const expiresAt = f.newsConfig[expiryField].expiresAt;
+  assert.equal(typeof expiresAt, "string"); assert.ok(expiresAt !== null);
   assert.equal(bound.eligibility.expiresAt, expiresAt);
   const request = buildResearchModelRequest(claim, bound, r.context);
   const reservation = await repo.reserveModel(claim, request);

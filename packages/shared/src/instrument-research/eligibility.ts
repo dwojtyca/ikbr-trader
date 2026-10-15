@@ -1,3 +1,4 @@
+import { sourceValidityExpiry } from "./source-validity.js";
 import { parseWshConfig, wshQualificationDeadline } from "./wsh.js";
 import { marketauxQualificationDeadline, parseMarketauxNewsConfig } from "./marketaux.js";
 import type { ResearchSnapshot, ResearchEligibility, ResearchManifest, ResearchMetric } from "./types.js";
@@ -33,12 +34,12 @@ export function evaluateResearchEligibility(input: ResearchSnapshot, manifest: R
       if (source.adapter === "marketaux-news") {
         try {
           const config = parseMarketauxNewsConfig(source, policy);
-          deadlines.push(researchTime(config.qualification.expiresAt), researchTime(config.entitlement.expiresAt));
+          for(const record of [config.qualification,config.entitlement]){const expiry=sourceValidityExpiry(record);if(expiry!==null)deadlines.push(expiry);}
           marketauxQualificationDeadline(config, nowMs);
         } catch { deny("RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE"); }
       }
       if (source.adapter === "ibkr-wsh") {
-        try { deadlines.push(wshQualificationDeadline(parseWshConfig(source, policy), nowMs)); }
+        try { const expiry=wshQualificationDeadline(parseWshConfig(source, policy), nowMs);if(expiry!==null)deadlines.push(expiry); }
         catch { deny("RESEARCH_WSH_QUALIFICATION_UNAVAILABLE"); }
       }
       const c = s.coverage.find(x => x.sourceId === source.id && x.role === role);

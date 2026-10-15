@@ -1,3 +1,4 @@
+import { assertSourceValidity, assertSourceValidityAt, earliestSourceValidityExpiry, type ResearchSourceValidity } from "./source-validity.js";
 import type { ResearchInstrumentPolicy, ResearchSource, ResearchSourceResult } from "./types.js";
 import { isResearchHash, researchAssert, researchHash, researchTime, safeResearchUrl } from "./validation.js";
 
@@ -6,7 +7,7 @@ export const MARKETAUX_SLOT_MS = 900_000;
 export const MARKETAUX_MAX_ACQUISITION_MS = 120_000;
 export const MARKETAUX_MAX_ACQUISITION_BYTES = 20 * 1024 * 1024;
 export interface MarketauxEntity { symbol: string; name: string; type: "equity"; country: string; exchange: string | null }
-interface Qualification { outcome: "VERIFIED" | "UNVERIFIED"; verifiedAt: string; expiresAt: string; evidenceUrl: string; receiptHash: string }
+type Qualification = ResearchSourceValidity & { outcome: "VERIFIED" | "UNVERIFIED"; verifiedAt: string; evidenceUrl: string; receiptHash: string };
 export interface MarketauxNewsConfig {
   kind: "marketaux-news-v1";
   entity: MarketauxEntity;
@@ -41,7 +42,8 @@ function text(value: unknown, max = 200): asserts value is string {
 }
 function qualification(value: Record<string, unknown>): void {
   researchAssert(value.outcome === "VERIFIED" || value.outcome === "UNVERIFIED", "RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
-  researchAssert(researchTime(value.verifiedAt) < researchTime(value.expiresAt) && safeResearchUrl(value.evidenceUrl) && isResearchHash(value.receiptHash), "RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
+  assertSourceValidity(value,value.verifiedAt,"RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
+  researchAssert(safeResearchUrl(value.evidenceUrl) && isResearchHash(value.receiptHash), "RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
   researchAssert(![...new URL(value.evidenceUrl as string).searchParams.keys()].some(key => key.toLowerCase() === "api_token"), "RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
 }
 
@@ -54,14 +56,14 @@ export function parseMarketauxNewsConfig(source: ResearchSource, policy?: Resear
   text(e.symbol, 80); researchAssert(/^[A-Za-z0-9._^-]+$/.test(e.symbol), "RESEARCH_MARKETAUX_ENTITY_INVALID");
   text(e.name); researchAssert(e.type === "equity" && typeof e.country === "string" && /^[a-z]{2}$/.test(e.country), "RESEARCH_MARKETAUX_ENTITY_INVALID");
   if (e.exchange !== null) text(e.exchange, 80);
-  const q = exact(c.qualification, "outcome verifiedAt expiresAt evidenceUrl receiptHash issuerIdentifier conId"); qualification(q);
+  const q = exact(c.qualification, "outcome verifiedAt expiresAt evidenceUrl receiptHash issuerIdentifier conId" + (c.qualification && typeof c.qualification === "object" && Object.hasOwn(c.qualification,"validity") ? " validity" : "")); qualification(q);
   exact(q.issuerIdentifier, "scheme value");
   researchAssert(researchHash(q.issuerIdentifier) === researchHash(source.issuerIdentifier), "RESEARCH_MARKETAUX_IDENTITY_MISMATCH");
   integer(q.conId, 1, Number.MAX_SAFE_INTEGER);
   const entityUrl = new URL(String(q.evidenceUrl));
   researchAssert(entityUrl.origin === MARKETAUX_ORIGIN && entityUrl.pathname === "/v1/entity/search", "RESEARCH_MARKETAUX_QUALIFICATION_INVALID");
   if (policy) researchAssert(q.conId === policy.listing.conId && policy.identifiers.some(id => researchHash(id) === researchHash(q.issuerIdentifier)), "RESEARCH_MARKETAUX_IDENTITY_MISMATCH");
-  const entitlement = exact(c.entitlement, "outcome verifiedAt expiresAt evidenceUrl receiptHash maxArticlesPerRequest maxRequestsPerDay maxCostMicrosPerDay"); qualification(entitlement);
+  const entitlement = exact(c.entitlement, "outcome verifiedAt expiresAt evidenceUrl receiptHash maxArticlesPerRequest maxRequestsPerDay maxCostMicrosPerDay" + (c.entitlement && typeof c.entitlement === "object" && Object.hasOwn(c.entitlement,"validity") ? " validity" : "")); qualification(entitlement);
   integer(entitlement.maxArticlesPerRequest, 1, 100);
   integer(entitlement.maxRequestsPerDay, 0, Number.MAX_SAFE_INTEGER); integer(entitlement.maxCostMicrosPerDay, 0, Number.MAX_SAFE_INTEGER);
   integer(c.pageSize, 1, entitlement.maxArticlesPerRequest); integer(c.maxPagesPerPass, 1, 100);
@@ -86,10 +88,13 @@ export function marketauxWindow(slot: number): { windowStart: string; asOf: stri
   return { windowStart: new Date(asOf - 86400000).toISOString(), asOf: new Date(asOf).toISOString() };
 }
 
-export function marketauxQualificationDeadline(config: MarketauxNewsConfig, now: number): number {
+export function marketauxQualificationDeadline(config: MarketauxNewsConfig, now: number): number | null {
   researchAssert(Number.isFinite(now), "RESEARCH_MARKETAUX_TIME_INVALID");
-  for (const q of [config.qualification, config.entitlement]) researchAssert(q.outcome === "VERIFIED" && researchTime(q.verifiedAt) <= now && now < researchTime(q.expiresAt), "RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE");
-  return Math.min(researchTime(config.qualification.expiresAt), researchTime(config.entitlement.expiresAt));
+  for (const q of [config.qualification, config.entitlement]) {
+    researchAssert(q.outcome === "VERIFIED", "RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE");
+    assertSourceValidityAt(q,q.verifiedAt,now,"RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE");
+  }
+  return earliestSourceValidityExpiry(config.qualification,config.entitlement);
 }
 
 export function marketauxRequestUrl(source: ResearchSource, descriptor: MarketauxRequest): string {

@@ -66,6 +66,26 @@ bot czeka co najmniej godzinę od poprzedniego zwykłego pobrania; powrót do
 15 minut nie skraca już zapisanego godzinnego terminu. Wcześniejsze
 wygaśnięcie uprawnień lub kwalifikacji nadal ogranicza ważność danych.
 
+Ważność kalendarza i potwierdzenie dostępu do źródła są osobnymi zasadami.
+Starszy zapis z datą `expiresAt` nadal wygasa dokładnie w tej dacie. Dla
+potwierdzonej przez operatora, trwającej subskrypcji można jawnie wybrać
+`validity.mode=OPERATOR_CONFIRMED_ONGOING` oraz `expiresAt=null` osobno dla
+kwalifikacji i uprawnienia. Taki zapis wymaga czasu utrwalenia potwierdzenia,
+referencji i hasha prywatnego dowodu; sam brak daty nie oznacza ważnego dostępu.
+Nie wpisujemy fikcyjnego terminu odległego w przyszłości ani nie odnawiamy
+potwierdzenia automatycznie co dwa dni. Znany rzeczywisty koniec uprawnienia
+nadal wymaga daty wygaśnięcia. Tryb ciągły nie kwalifikuje nowego emitenta,
+rachunku ani zmienionych metadanych.
+
+W tym trybie poprawny kalendarz wygasa po 24 godzinach od pobrania; kontrola
+lokalnego potwierdzenia nie skraca tego czasu. Rzeczywista odmowa dostępu,
+niezgodne metadane/tożsamość lub niepewny zapis nadal blokują użycie danych.
+Odpowiedź WSH zapisuje wtedy dowód `ibkr-wsh-v2`, powiązany hashami z obydwoma
+potwierdzeniami. Stare dowody `ibkr-wsh-v1` zachowują dotychczasowe znaczenie.
+Zmiana trybu wymaga zwykłego przyjęcia manifestu przy wyłączonych zleceniach
+oraz nowego poprawnego pobrania; nie zmienia dat wcześniejszych danych.
+Szczegółowy kontrakt: [ważność źródeł](../implementation/phase3/RESEARCH_SOURCE_VALIDITY_PLAN.md).
+
 Przejściowy błąd odświeżenia nie zastępuje poprawnego, nadal ważnego kalendarza.
 Bot zachowuje jego pierwotne daty i dowody, a błąd próby zapisuje osobno.
 Nie odświeża wieku danych samym ponowieniem. Błędna tożsamość, uprawnienia,

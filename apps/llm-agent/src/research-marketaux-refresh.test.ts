@@ -410,3 +410,39 @@ test("ordinary first-page capacity failure keeps one charged successful call and
   await Promise.all([restarted.tick(), restarted.tickRepairs()]);
   assert.equal(s.state.requests.length, 1); assert.equal(s.state.reservations.length, 1);
 });
+
+
+test("ongoing Marketaux retains two-pass acquisition, finite budgets and on-demand scheduling", async () => {
+  const s = setup();
+  for (const name of ["qualification", "entitlement"]) Object.assign(s.f.source.parserConfig[name] as object, { expiresAt: null,
+    validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt: new Date(s.state.now - 1000).toISOString(), confirmationRef: "fixture-confirmation", confirmationHash: "a".repeat(64) } });
+  s.rehash();
+  await s.make(undefined, undefined, true).tick(); assert.equal(s.state.requests.length, 0);
+  await s.make().tick();
+  assert.equal(s.coverage().status, "AVAILABLE"); assert.equal(s.state.requests.length, 4);
+  assert.deepEqual(s.state.requests.map(r => r.pass), [1, 1, 2, 2]);
+  for (const r of s.state.reservations) assert.ok(Date.parse(r.deadlineAt) > s.state.now && Date.parse(r.deadlineAt) <= s.state.now + 10000);
+  assert.equal(s.coverage().acquisition?.entityQualificationHash, researchHash(s.f.source.parserConfig.qualification));
+  assert.equal(s.coverage().acquisition?.entitlementHash, researchHash(s.f.source.parserConfig.entitlement));
+});
+
+
+test("mixed Marketaux policy expiry after first page prevents the next send", async () => {
+  const s = setup();
+  Object.assign(s.f.newsConfig.qualification, { expiresAt: null,
+    validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt: new Date(s.state.now - 1000).toISOString(), confirmationRef: "fixture-confirmation", confirmationHash: "a".repeat(64) } });
+  s.f.newsConfig.entitlement.expiresAt = new Date(s.state.now + 50).toISOString(); s.rehash();
+  s.state.onReserve = () => { if (s.state.reservations.length === 2) s.state.now += 100; };
+  await s.make().tick();
+  assert.equal(s.state.requests.length, 1); assert.equal(s.state.reservations.length, 2);
+  assert.equal(s.coverage().status, "ERROR"); assert.equal(s.coverage().reason, "RESEARCH_MARKETAUX_QUALIFICATION_UNAVAILABLE");
+});
+
+test("future ongoing Marketaux confirmation sends no provider request", async () => {
+  const s = setup();
+  Object.assign(s.f.newsConfig.qualification, { expiresAt: null,
+    validity: { mode: "OPERATOR_CONFIRMED_ONGOING", confirmedAt: new Date(s.state.now + 1).toISOString(), confirmationRef: "fixture-confirmation", confirmationHash: "a".repeat(64) } });
+  s.rehash(); await s.make().tick();
+  assert.equal(s.state.requests.length, 0); assert.equal(s.state.reservations.length, 0);
+  assert.equal(s.coverage().status, "UNVERIFIED");
+});

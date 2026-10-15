@@ -20,7 +20,8 @@ export function createMarketauxFetch(apiKey: string | undefined,
       if (!apiKey?.trim()) throw new Error("RESEARCH_MARKETAUX_KEY_MISSING");
       const config = parseMarketauxNewsConfig(source), now = Date.now();
       const expiry = marketauxQualificationDeadline(config, now);
-      if (Date.parse(deadlineAt) > expiry || Date.parse(deadlineAt) <= now) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
+      const deadline = Date.parse(deadlineAt);
+      if (!Number.isFinite(deadline) || deadline <= now || (expiry !== null && deadline > expiry)) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
       const url = new URL(marketauxRequestUrl(source, descriptor));
       url.searchParams.set("api_token", apiKey);
       const result = await fetchBoundedResearchUrl(url, deadlineAt, "application/json", {
