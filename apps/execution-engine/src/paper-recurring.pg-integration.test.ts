@@ -12,9 +12,26 @@ import { PaperPolicyAuthority } from './paper-policy-authority.js';
 import { stockMetadataFixture } from './stock-market-test-fixture.js';
 const url=process.env.TEST_POSTGRES_URL;
 async function tx<T>(pool:Pool,fn:(db:PoolClient)=>Promise<T>){const db=await pool.connect();try{await db.query('BEGIN');const result=await fn(db);await db.query('COMMIT');return result;}catch(e){await db.query('ROLLBACK');throw e;}finally{db.release();}}
+async function sessionClock(pool: Pool): Promise<() => void> {
+    const realDate = globalThis.Date;
+    const offset = realDate.parse('2026-10-12T14:00:00Z') - realDate.now();
+    // Isolated synthetic sessions must stay inside one Warsaw account day, including night-time CI runs.
+    await pool.query('CREATE TABLE fixture_clock(offset_ms bigint NOT NULL)');
+    await pool.query('INSERT INTO fixture_clock VALUES($1)', [offset]);
+    await pool.query(`CREATE FUNCTION public.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS $$
+      SELECT pg_catalog.clock_timestamp()+(SELECT offset_ms FROM fixture_clock)*interval '1 millisecond' $$;
+      CREATE FUNCTION public.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$
+      SELECT pg_catalog.transaction_timestamp()+(SELECT offset_ms FROM fixture_clock)*interval '1 millisecond' $$`);
+    globalThis.Date = new Proxy(realDate, {
+        construct(target, args) { return Reflect.construct(target, args.length ? args : [target.now() + offset]); },
+        get(target, property, receiver) { return property === 'now' ? () => target.now() + offset : Reflect.get(target, property, receiver); }
+    });
+    return () => { globalThis.Date = realDate; };
+}
 async function fixture(fn:(f:Awaited<ReturnType<typeof setup>>)=>Promise<void>){
- const name=`recurring_${randomUUID().replaceAll('-','')}`,target=new URL(url!);target.pathname='/postgres';const admin=new Pool({connectionString:target.toString()});await admin.query(`CREATE DATABASE ${name}`);target.pathname=`/${name}`;const pool=new Pool({connectionString:target.toString()});
- try{await runMigrations(pool);await fn(await setup(pool));}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
+ const name=`recurring_${randomUUID().replaceAll('-','')}`,target=new URL(url!);target.pathname='/postgres';const admin=new Pool({connectionString:target.toString()});await admin.query(`CREATE DATABASE ${name}`);target.pathname=`/${name}`;const pool=new Pool({connectionString:target.toString(),options:'-c search_path=public,pg_catalog'});
+ const restore=await sessionClock(pool);
+ try{await runMigrations(pool);await fn(await setup(pool));}finally{restore();await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }
 async function setup(pool:Pool){
  const now=Date.now(),f=recurringPolicyFixture(paperLocalDate(now,'Europe/Warsaw')),account=f.policy.accountId;

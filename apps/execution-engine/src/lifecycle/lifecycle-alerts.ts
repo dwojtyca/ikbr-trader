@@ -1,4 +1,5 @@
 import type { NotificationEligibility, NotificationProof } from "./notification-checkpoint.js";
+import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { LifecycleFaultCode, LifecycleFaultInput, LifecycleFaultSink } from "./fault-contract.js";
@@ -54,6 +55,57 @@ async function transaction<T>(pool: Pool, work: (db: PoolClient) => Promise<T>, 
   }
 }
 
+// Clock notifications must leave the shared pool and account locks available for exits.
+async function clockAlertTransaction<T>(pool: Pool, work: (db: PoolClient) => Promise<T>, beforeCommit?: () => void): Promise<T> {
+  const deadline = performance.now() + 1750;
+  if (pool.idleCount === 0 && pool.totalCount >= (pool.options.max ?? 10)) throw new Error("ACCOUNTING_CLOCK_RECOVERY_ALERT_BUSY");
+  let client: PoolClient | undefined, expired = false, released = false, committing = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const dispose = (destroy: boolean) => { if (client && !released) { released = true; client.release(destroy); } };
+  const check = () => {
+    const remaining = Math.floor(deadline - performance.now());
+    if (expired || released || remaining <= 0) throw new Error("ACCOUNTING_CLOCK_RECOVERY_ALERT_TIMEOUT");
+    return remaining;
+  };
+  const operation = async () => {
+    client = await pool.connect();
+    if (expired || performance.now() >= deadline) { dispose(true); throw new Error("ACCOUNTING_CLOCK_RECOVERY_ALERT_TIMEOUT"); }
+    const query = client.query.bind(client);
+    const bounded = new Proxy(client, { get(target, key) {
+      if (key !== 'query') return Reflect.get(target, key);
+      return async (text: string, values?: unknown[]) => {
+        let remaining = check();
+        // Server cancellation bounds SQL work, not merely its response wait.
+        if (text !== 'BEGIN') {
+          const configure = { text: "SELECT set_config('statement_timeout',$1,true)", values: [String(Math.max(1, remaining - 25))], query_timeout: remaining };
+          await query(configure); remaining = check();
+        }
+        const config = { text, values, query_timeout: remaining };
+        const result = await query(config); check(); return result;
+      };
+    } });
+    await bounded.query('BEGIN');
+    await bounded.query("SET LOCAL lock_timeout='100ms'; SET LOCAL idle_in_transaction_session_timeout='1750ms'");
+    const result = await work(bounded);
+    // Execute deferred work while statement cancellation can still roll back the transaction.
+    await bounded.query('SET CONSTRAINTS ALL IMMEDIATE');
+    check(); beforeCommit?.(); check(); committing = true;
+    await bounded.query('COMMIT'); check(); dispose(false); return result;
+  };
+  try {
+    return await Promise.race([operation(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expired = true; dispose(true); reject(new Error("ACCOUNTING_CLOCK_RECOVERY_ALERT_TIMEOUT"));
+      }, 1750);
+    })]);
+  } catch (error) {
+    // Destroying the session rolls back unfinished work. A lost COMMIT response remains unknown.
+    expired = true; dispose(true);
+    if (committing && error instanceof Error) Object.assign(error, { commitUnknown: true });
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+
 export class LifecycleAlertStore implements LifecycleFaultSink {
   constructor(private readonly pool: Pool, private readonly notification?: NotificationEligibility) {}
 
@@ -79,10 +131,18 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
 
   async recordFault(input: LifecycleFaultInput): Promise<void> {
     let committedProof:NotificationProof|null=null;
-    try { await transaction(this.pool, async (db) => {
+    const transact = input.code === "ACCOUNTING_CLOCK_RECOVERY_REQUIRED" ? clockAlertTransaction : transaction;
+    try { await transact(this.pool, async (db) => {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${input.accountId}`]);
       let proof = input.notification === 'FLAT_WATCHDOG_V1' && input.proposalId === null && input.code === 'BROKER_STATE_STALE'
         && input.evidence.reason === 'lifecycle_observation_overdue' ? await this.proof(db,input.accountId) : null;
+      const episodeId = input.code === "ACCOUNTING_CLOCK_RECOVERY_REQUIRED" && input.proposalId === null
+        && typeof input.evidence.episodeId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.evidence.episodeId)
+        ? input.evidence.episodeId : null;
+      const evidence = { ...safeEvidence(input.evidence) as Record<string, unknown>, ...(episodeId ? { episodeId } : {}) };
+      if (episodeId) await db.query(`UPDATE lifecycle_faults SET active=false,resolved_at=clock_timestamp()
+        WHERE account_id=$1 AND original_proposal_id IS NULL AND code=$2 AND active AND evidence->>'episodeId' IS DISTINCT FROM $3`,
+        [input.accountId,input.code,episodeId]);
       const active = await db.query<{ id: string }>(
         `SELECT id FROM lifecycle_faults WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND code=$3 AND active FOR UPDATE`,
         [input.accountId, input.proposalId, input.code],
@@ -92,12 +152,12 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
         id = active.rows[0].id;
         await db.query(
           `UPDATE lifecycle_faults SET evidence=$2::jsonb, last_observed_at=clock_timestamp(), occurrences=occurrences+1 WHERE id=$1`,
-          [id, JSON.stringify(safeEvidence(input.evidence))],
+          [id, JSON.stringify(evidence)],
         );
       } else {
         const inserted = await db.query<{ id: string }>(
           `INSERT INTO lifecycle_faults(account_id,original_proposal_id,code,evidence) VALUES($1,$2,$3,$4::jsonb) RETURNING id`,
-          [input.accountId, input.proposalId, input.code, JSON.stringify(safeEvidence(input.evidence))],
+          [input.accountId, input.proposalId, input.code, JSON.stringify(evidence)],
         );
         id = inserted.rows[0].id;
       }
@@ -126,7 +186,7 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${accountId}`]);
       const resolved=await db.query<{id:string}>(
         `UPDATE lifecycle_faults SET active=FALSE,resolved_at=clock_timestamp()
-         WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND active AND NOT (code=ANY($3::text[])) RETURNING id`,
+         WHERE account_id=$1 AND original_proposal_id IS NOT DISTINCT FROM $2 AND active AND code<>'ACCOUNTING_CLOCK_RECOVERY_REQUIRED' AND NOT (code=ANY($3::text[])) RETURNING id`,
         [accountId, proposalId, activeCodes],
       );
       const proof=proposalId===null && !activeCodes.includes('BROKER_STATE_STALE') ? await this.proof(db,accountId,true) : null;
@@ -149,6 +209,15 @@ export class LifecycleAlertStore implements LifecycleFaultSink {
     },()=>{if(committedProof&&!this.live(accountId,committedProof))throw new NotificationProofChanged();}); }
     catch(error){if(error instanceof NotificationProofChanged){await this.immediateDrift(accountId);return;}throw error;}
     if(committedProof&&!this.live(accountId,committedProof))await this.immediateDrift(accountId);
+  }
+
+  async resolveClockRecovery(accountId: string, assertRecovered: () => void): Promise<void> {
+    await clockAlertTransaction(this.pool, async db => {
+      await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${accountId}`]);
+      assertRecovered();
+      await db.query(`UPDATE lifecycle_faults SET active=FALSE,resolved_at=clock_timestamp()
+        WHERE account_id=$1 AND original_proposal_id IS NULL AND active AND code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED'`, [accountId]);
+    }, assertRecovered);
   }
 
   async startWorkerSession(accountId: string, processId: string): Promise<void> {

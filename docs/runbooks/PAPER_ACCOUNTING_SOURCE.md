@@ -135,3 +135,42 @@ incomplete reconciliation or other entry requirements. Healthy source status doe
 not establish research coverage, an AI approval, a strategy signal or permission
 to trade. The supervised entry and exit still follow the selected
 [AAPL](AAPL_PAPER_ROUND_TRIP.md) or [GPW](GPW_PAPER_ROUND_TRIP.md) runbook and current PP7 gates.
+
+## Automatyczne odzyskiwanie zegara w Paper
+
+`EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED=true` wybiera ograniczone
+odzyskiwanie izolowanego `ACCOUNTING_CLOCK_INVALID` w działającym execution-engine.
+Domyślnie flaga jest wyłączona. Wymagane są Paper, skonfigurowane źródło accounting
+oraz istniejąca ważna kwalifikacja ustawień. Sama flaga nie udziela zgody na handel.
+
+Automat utrzymuje blokadę nowych wejść, odnawia wyłącznie połączenie accounting,
+weryfikuje czas, pełny replay wykonań i prowizji, zapisuje dowód, a następnie wymaga
+nowego qualified capture. Nie zmienia master switch ani ręcznej/startup pauzy,
+nie zatrzymuje execution socketu i nie składa lub ponawia zleceń. Zwykły snapshot
+brokera dla wyjść pozostaje dostępny przy błędzie accounting; nadal obowiązują
+pełne reguły ownership, close-risk i świeżości danych.
+
+Stan jest w accounting status, supervision oraz `pnpm status`: `WAITING`,
+`RECOVERING`, `BACKOFF`, `VERIFYING`, `RECOVERED`, `OPERATOR_REQUIRED` lub
+`OUTCOME_UNKNOWN`. `RECOVERED` dotyczy tylko rozliczeń; ręczna pauza i inne blokady
+pozostają niezależne. Brak aktualnego statusu nie jest dowodem powodzenia.
+
+Automat wykonuje najwyżej trzy próby na epizod, z odstępami 30/120 s po błędach,
+oraz najwyżej sześć akwizycji na źródło w godzinę. Niepewny zapis lub rozłączenie,
+konflikt tożsamości, koszty, sprzeczności i utrata kwalifikacji wymagają operatora.
+Restart i zmiana flagi nie kasują historii ani nie odnawiają limitu. Nie zmieniać
+zegara i nie usypiać hosta, aby testować odzyskiwanie na rachunku z pozycją.
+
+Manualny `recover-clock` nadal wymaga wyłączonych zapisów i efektywnej pauzy.
+Gdy dowód recovery już istnieje, lecz końcowa weryfikacja wymagała operatora,
+manualna ścieżka może zamknąć epizod na podstawie aktualnego poprawnego capture;
+nie tworzy wtedy kolejnego recovery ani nie kasuje innych holdów. Wygasła
+kwalifikacja wymaga istniejącej procedury `qualify` i rzeczywistych dowodów.
+Nie wolno wyłączać master writes tylko w celu recovery, gdy pozycje wymagają
+automatycznych wyjść: najpierw uzgodnić obsługę ekspozycji.
+
+Po utracie właściciela socketu lub braku potwierdzenia jego zakończenia źródło
+pozostaje zablokowane. Wygaśnięcie locka/lease nie dowodzi rozłączenia brokera.
+Nie usuwać wierszy właściciela, epizodu ani prób. Eskalować nieznany wynik.
+Wdrożenie i rollback muszą zachować kompatybilny writer i trwałe entry fences.
+Szczegółowe kryteria są w [planie](../implementation/phase3/ACCOUNTING_AUTOMATIC_CLOCK_RECOVERY_PLAN.md).

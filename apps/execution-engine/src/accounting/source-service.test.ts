@@ -1,3 +1,5 @@
+import type { AccountingSourceOwner } from "./source-owner.js";
+const testOwner = { acquire:async()=>{},assertCurrent:()=>{},assertHeld:()=>{},retire:async()=>{},release:async()=>{},endpoint:()=>({host:"unused",port:1}) } as unknown as AccountingSourceOwner;
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -14,12 +16,12 @@ test("overflow bounds retained jobs, holds durably, and leaves legacy persistenc
   let appended = 0, legacy = 0; const holds: Array<string | undefined> = [];
   const control: SourceControl = { source_id: "test", process_session_id: "test", connection_generation: 0, semantic_revision: 0,
     qualification_id: null, gap: true, hold: null, settings_hash: "a", lanes: { accounting: { received: 0, persisted: 0, pending: 0 }, execution: { received: 0, persisted: 0, pending: 0 } } };
-  const store = { sourceId: "test", sessionId: "test", begin: async () => control, qualification: async () => null, latestValues: async () => [],
+  const store = { rejectedClock:async()=>null, recovery:{initialize:async()=>{},latest:async()=>null}, sourceId: "test", sessionId: "test", begin: async () => control, qualification: async () => null, latestValues: async () => [],
     append: async (o: SourceObservation) => { await blocked; appended++; return { control, value: o.value }; },
     gap: async (_generation: number, hold?: string) => { holds.push(hold); return { ...control, hold: hold ?? null }; } } as unknown as AccountingSourceStore;
   const socket = new EventEmitter() as EventEmitter & AccountingSocket;
   Object.assign(socket, { serverVersion: 178, connect: () => {}, disconnect: () => {}, reqManagedAccts: () => {}, reqCurrentTime: () => {}, reqExecutions: () => {} });
-  const service = new AccountingSourceService(store, settings, "a", () => ({ connected: true, accountId: "TEST", sessionId: "test", generation: 1 }), () => socket);
+  const service = new AccountingSourceService(store, settings, "a", () => ({ connected: true, accountId: "TEST", sessionId: "test", generation: 1 }), () => socket,undefined,{owner:testOwner});
   await service.initialize();
   for (let n = 0; n < 20_000; n++) service.observeCommission({ execId: String(n), currency: "USD", commission: 1, realizedPnL: 0 }, async () => { legacy++; });
   assert.equal(service.status().pending, 10_000); assert.equal(legacy, 20_000); assert.throws(() => service.assertCurrent(), /PERSISTENCE_FAILED/);

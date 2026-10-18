@@ -81,3 +81,16 @@ export function accountingReference(c: AccountingCaptureReference): AccountingCa
     accountDate: c.accountDate, periodStart: c.periodStart, certifiedFrom: c.certifiedFrom, coveredThrough: c.coveredThrough,
     capturedAt: c.capturedAt, fingerprint: c.fingerprint };
 }
+
+export type ClockRecoveryState = 'IDLE' | 'WAITING' | 'RECOVERING' | 'VERIFYING' | 'BACKOFF' | 'OPERATOR_REQUIRED' | 'OUTCOME_UNKNOWN' | 'RECOVERED';
+export interface AutomaticClockRecoveryStatus {
+  enabled: boolean; episodeId: string | null; state: ClockRecoveryState; attemptCount: number; attemptLimit: 3;
+  nextAttemptAt: string | null; firstErrorAt: string | null; lastError: string | null;
+  receiptId: string | null; captureId: string | null; entryBlocked: boolean;
+  originalCause?: { name: string | null; code: string | null; message: string | null } | null;
+  rejectedClock?: { requestedAt: string; receivedAt: string; reportedKind: string; reportedSeconds: string; skewMs?: number; generation: number } | null;
+}
+export interface ClockRecoveryReservation {
+  episodeId: string; attemptId: string; ownerSessionId: string; fencingGeneration: number;
+  sourceId: string; accountId: string; settingsHash: string; automatic: boolean;
+}

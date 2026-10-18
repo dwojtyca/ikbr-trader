@@ -140,3 +140,18 @@ przejściu kontroli włącz źródła, AI, scheduler, nadzór i zapisy w zakresi
 właściciela, a następnie jawnie wznów wejścia. Nie deklaruj gotowości na podstawie
 samego `/ready`, liczby świec ani testów. Faktyczne zlecenie i pełny obrót wymagają
 osobnych dowodów brokera.
+
+## Przejściowy błąd zegara
+
+Opcjonalne `EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED=true` pozwala
+execution-engine odzyskać izolowaną blokadę zegara bez ponownego `pnpm start`.
+Wymaga wdrożenia kompatybilnego obrazu i jawnego Paper opt-in; domyślnie pozostaje
+wyłączone. Nowe wejścia wracają dopiero po pełnym potwierdzeniu rozliczeń, jeśli
+nie zatrzymałeś ich ręcznie i pozostałe bramki pozwalają. Automat nie zmienia pauzy
+operatora, master switch, ochrony pozycji ani zleceń.
+
+`OPERATOR_REQUIRED` i `OUTCOME_UNKNOWN` oznaczają potrzebę interwencji, nie zachętę
+do restartowania usług. Sprawdź `pnpm status` i
+[runbook rozliczeń](PAPER_ACCOUNTING_SOURCE.md#automatyczne-odzyskiwanie-zegara-w-paper).
+Pozostaw host pod zasilaniem, bez sleep i zamykania pokrywy; automat nie zastępuje
+ciągłej dostępności TWS i komputera.

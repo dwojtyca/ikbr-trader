@@ -1,3 +1,5 @@
+import type { AccountingSourceOwner } from "./source-owner.js";
+const testOwner = { acquire:async()=>{},assertCurrent:()=>{},assertHeld:()=>{},retire:async()=>{},release:async()=>{},endpoint:()=>({host:"unused",port:1}) } as unknown as AccountingSourceOwner;
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -18,14 +20,14 @@ async function fixture(mode: 'ok' | 'drain' | 'cost' | 'publication') {
   const events: BrokerPhaseEvent[] = [];
   const qualification = { id: 'qualification', settings, input: { settingsSha256: 'hash' }, protocolVersion: 178,
     expiresAt: new Date(Date.now() + 60_000).toISOString() } as StoredQualification;
-  const store = { sourceId: 'source', sessionId: 'process', begin: async () => control, qualification: async () => qualification,
+  const store = { rejectedClock:async()=>null, recovery:{initialize:async()=>{},latest:async()=>null}, sourceId: 'source', sessionId: 'process', begin: async () => control, qualification: async () => qualification,
     latestValues: async () => [], gap: async () => control,
     append: async (observation: SourceObservation) => { if (mode === 'drain') throw original; return { control, value: observation.value }; },
     publish: async (_capture: unknown, validate: () => void) => { validate(); if (mode === 'publication') throw original; },
   } as unknown as AccountingSourceStore;
   const socket = new EventEmitter() as EventEmitter & AccountingSocket;
   Object.assign(socket, { serverVersion: 178,
-    connect: () => { socket.emit('server', 178, 'private'); socket.emit('nextValidId', 1); }, disconnect: () => {},
+    connect: () => { socket.emit('server', 178, 'private'); socket.emit('nextValidId', 1); }, disconnect: () => {socket.emit('disconnected');socket.emit('transportClosed');},
     reqManagedAccts: () => socket.emit('managedAccounts', settings.accountId),
     reqCurrentTime: () => socket.emit('currentTime', Math.floor(Date.now() / 1000)),
     reqExecutions: (requestId: number) => {
@@ -38,7 +40,7 @@ async function fixture(mode: 'ok' | 'drain' | 'cost' | 'publication') {
   });
   const service = new AccountingSourceService(store, settings, 'hash', () => ({ connected: true, accountId: settings.accountId,
     sessionId: 'process', generation: 1 }), () => socket,
-  { emit: event => events.push(event), privacy: () => ({ accountIds: [settings.accountId], secrets: ['private-secret'] }) });
+  { emit: event => events.push(event), privacy: () => ({ accountIds: [settings.accountId], secrets: ['private-secret'] }) },{owner:testOwner});
   await service.initialize();
   const snapshot = { exposureComplete: true, recoveryComplete: true, accountId: settings.accountId, sessionId: 'process', connectionGeneration: 1,
     sourceCoverage: { executions: { window: {} } } } as unknown as BrokerReconciliationSnapshot;

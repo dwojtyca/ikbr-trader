@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Socket } from "node:net";
 import { EventEmitter } from "node:events";
-import { AccountingSourceCollector, normalizeAccountingCommission, normalizeAccountingExecution, type AccountingSocket } from "./source-collector.js";
+import { accountingSocketWithTransportClose, AccountingSourceCollector, normalizeAccountingCommission, normalizeAccountingExecution, type AccountingSocket } from "./source-collector.js";
 import type { SourceSettingsV1 } from "./types.js";
 import type { BrokerPhaseEvent } from '../reconciliation/phase-diagnostics.js';
 
@@ -46,7 +47,7 @@ test("collector uses client-zero all-account unfiltered replay with preceding br
   class Socket extends EventEmitter implements AccountingSocket {
     serverVersion = 178;
     connect() { this.emit("server", 178, "broker connection"); this.emit("nextValidId", 1); }
-    disconnect() { this.emit("disconnected"); }
+    disconnect() { this.emit("disconnected"); this.emit("transportClosed"); }
     reqManagedAccts() { this.emit("managedAccounts", settings.accountId); }
     reqCurrentTime() { this.emit("currentTime", Math.floor(Date.now() / 1000)); }
     reqExecutions(id: number, filter: unknown) {
@@ -79,7 +80,7 @@ test("fresh sockets fence retired callbacks and ignore unsolicited clocks before
   const collector = new AccountingSourceCollector(settings, { observe: e => events.push(e.kind), gap: () => events.push("gap") }, () => {
     const socket = new EventEmitter() as EventEmitter & AccountingSocket;
     Object.assign(socket, { serverVersion: 178, connect: () => { socket.emit("server", 178, "time"); socket.emit("nextValidId", 1); },
-      disconnect: () => socket.emit("disconnected"), reqManagedAccts: () => { socket.emit("currentTime", Math.floor(Date.now() / 1000)); socket.emit("managedAccounts", settings.accountId); },
+      disconnect: () => { socket.emit("disconnected"); socket.emit("transportClosed"); }, reqManagedAccts: () => { socket.emit("currentTime", Math.floor(Date.now() / 1000)); socket.emit("managedAccounts", settings.accountId); },
       reqCurrentTime: () => { if (!delayClock) socket.emit("currentTime", Math.floor(Date.now() / 1000)); },
       reqExecutions: (id: number) => socket.emit("execDetailsEnd", id) }); sockets.push(socket); return socket;
   });
@@ -102,4 +103,68 @@ test("invalid first clock records bounded evidence and cannot accept a later goo
     const rejected = observed.filter(e => e.kind === "clock_rejected"); assert.equal(rejected.length, 1);
     assert.equal(observed.some(e => e.kind === "clock"), false); assert.ok(JSON.stringify(rejected[0]).length < 700);
   }
+});
+
+test("retirement waits for transport ack while late data remain fenced", async () => {
+  const sockets: Array<EventEmitter & AccountingSocket> = [], observations: string[] = [];
+  const collector = new AccountingSourceCollector(settings, { observe: event => observations.push(event.kind), gap: () => {} }, () => {
+    const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 178, connect: () => { socket.emit("server", 178, "test"); socket.emit("nextValidId", 1); },
+      disconnect: () => {}, reqManagedAccts: () => socket.emit("managedAccounts", settings.accountId),
+      reqCurrentTime: () => socket.emit("currentTime", Math.floor(Date.now() / 1000)), reqExecutions: (id: number) => socket.emit("execDetailsEnd", id) });
+    sockets.push(socket); return socket;
+  });
+  await collector.replay(100, new AbortController().signal);
+  const retiring = collector.retire(100);
+  assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/);
+  const before = [...observations]; sockets[0].emit("currentTime", 1); sockets[0].emit("managedAccounts", "FOREIGN");
+  assert.deepEqual(observations, before); assert.equal(sockets.length, 1);
+  sockets[0].emit("disconnected"); assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/);
+  sockets[0].emit("transportClosed"); assert.equal(await retiring, true);
+  assert.equal((await collector.replay(100, new AbortController().signal)).generation, 2);
+  const cleanup = collector.retire(100); sockets[1].emit("disconnected"); sockets[1].emit("transportClosed"); assert.equal(await cleanup, true);
+});
+test("missing retirement ack times out and prevents replacement socket", async () => {
+  let created = 0;
+  const collector = new AccountingSourceCollector(settings, { observe: () => {}, gap: () => {} }, () => {
+    created++; const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 178, connect: () => {}, disconnect: () => {}, reqManagedAccts: () => {}, reqCurrentTime: () => {}, reqExecutions: () => {} });
+    return socket;
+  });
+  collector.connect(); assert.equal(await collector.retire(10), false);
+  assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/); assert.equal(created, 1);
+});
+test("owner fence precedes every connection and rejects socket callbacks after ownership loss", async () => {
+  let owns = false, created = 0, observed = 0;
+  const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+  Object.assign(socket, { serverVersion: 178, connect: () => {}, disconnect: () => { socket.emit("disconnected"); socket.emit("transportClosed"); }, reqManagedAccts: () => {}, reqCurrentTime: () => {}, reqExecutions: () => {} });
+  const collector = new AccountingSourceCollector(settings, { observe: () => observed++, gap: () => {},
+    assertOwner: () => { if (!owns) throw Error("ACCOUNTING_SOURCE_OWNER_LOST"); } }, () => { created++; return socket; });
+  assert.throws(() => collector.connect(), /SOURCE_OWNER_LOST/); assert.equal(created, 0);
+  owns = true; collector.connect(); owns = false; socket.emit("server", 178, "test");
+  assert.equal(observed, 0); await assert.rejects(collector.replay(10, new AbortController().signal), /SOURCE_OWNER_LOST/);
+  assert.equal(await collector.retire(), true);
+});
+
+test("installed adapter retirement waits for native close after API disconnected or EOF", async () => {
+  const transport = new Socket({ allowHalfOpen: true });
+  const api = new EventEmitter() as EventEmitter & AccountingSocket;
+  let disconnects = 0;
+  Object.assign(api, { serverVersion: 178, controller: { socket: { client: transport } },
+    connect: () => {}, disconnect: () => { disconnects++; api.emit("disconnected"); }, reqManagedAccts: () => {}, reqCurrentTime: () => {}, reqExecutions: () => {} });
+  const wrapped = accountingSocketWithTransportClose(api);
+  const collector = new AccountingSourceCollector(settings, { observe: () => {}, gap: () => {} }, () => wrapped);
+  collector.connect(); api.emit("disconnected"); transport.emit("end");
+  let acknowledged = false;
+  const retiring = collector.retire(100).then(result => { acknowledged = result; return result; });
+  assert.equal(acknowledged, false); assert.equal(disconnects, 1);
+  assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/);
+  assert.equal(await retiring, true); assert.equal(transport.closed, true);
+});
+test("unsupported native transport never manufactures retirement proof", async () => {
+  const api = new EventEmitter() as EventEmitter & AccountingSocket;
+  Object.assign(api, { serverVersion: 178, connect: () => {}, disconnect: () => api.emit("disconnected"), reqManagedAccts: () => {}, reqCurrentTime: () => {}, reqExecutions: () => {} });
+  const collector = new AccountingSourceCollector(settings, { observe: () => {}, gap: () => {} }, () => accountingSocketWithTransportClose(api));
+  collector.connect(); assert.equal(await collector.retire(10), false);
+  assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/);
 });

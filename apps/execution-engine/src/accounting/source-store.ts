@@ -1,9 +1,12 @@
+import { performance } from "node:perf_hooks";
+import { ClockRecoveryStore } from "./clock-recovery-store.js";
+import type { AccountingSourceOwner } from "./source-owner.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { paperAccountDate, paperAccountDayStart } from "../paper-daily-loss.js";
 import { parseQualification } from "./config.js";
 import { accountingError, accountingHash, accountingReference, accountingNumber, type AccountingCapture, type AccountingLane, type LaneBarrier,
-  type ClockRecoveryEvidence, type ClockRecoveryReceipt, type SourceInspection, type StoredQualification } from "./types.js";
+  type ClockRecoveryEvidence, type ClockRecoveryReservation, type ClockRecoveryReceipt, type SourceInspection, type StoredQualification } from "./types.js";
 
 export interface SourceControl { source_id: string; process_session_id: string; connection_generation: string | number;
   semantic_revision: string | number; qualification_id: string | null; gap: boolean; hold: string | null;
@@ -13,18 +16,52 @@ export interface SourceObservation {
   kind: string; key?: string; value: unknown; raw?: unknown; receivedAt: string;
 }
 export class AccountingSourceStore {
+  readonly recovery = new ClockRecoveryStore(this);
+  owner: AccountingSourceOwner | undefined;
   constructor(readonly pool: Pool, readonly sourceId: string, readonly sessionId: string) {}
   async transaction<T>(fn: (db: PoolClient) => Promise<T>, beforeCommit?: () => void): Promise<T> {
-    const db = await this.pool.connect();
-    try { await db.query("BEGIN"); const result = await fn(db); beforeCommit?.(); await db.query("COMMIT"); return result; }
-    catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
+    const deadline = performance.now() + 2000;
+    let expired = false;
+    const connection = this.pool.connect();
+    const timeout = setTimeout(() => { expired = true; }, 2000);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const db = await Promise.race([connection, new Promise<never>((_,reject) => {
+      timer = setTimeout(() => reject(accountingError("PERSISTENCE_TIMEOUT")), 2000);
+    })]).catch(error => { void connection.then(client => client.release(true),()=>undefined); throw error; }).finally(() => { clearTimeout(timer); clearTimeout(timeout); });
+    if (expired) { db.release(true); throw accountingError("PERSISTENCE_TIMEOUT"); }
+    let committing = false, destroy = false;
+    const query = db.query.bind(db);
+    const bounded = new Proxy(db, { get(target, property) {
+      if (property !== 'query') return Reflect.get(target,property);
+      return async (text: string, values?: unknown[]) => {
+        const remaining = Math.floor(deadline - performance.now());
+        if (remaining <= 0) throw accountingError("PERSISTENCE_TIMEOUT");
+        const config = { text, values, query_timeout: remaining };
+        return query(config);
+      };
+    } });
+    try {
+      await bounded.query("BEGIN");
+      await bounded.query("SET LOCAL statement_timeout='1900ms'; SET LOCAL lock_timeout='1800ms'");
+      await this.owner?.assertInTransaction(bounded);
+      const result = await fn(bounded); beforeCommit?.(); this.owner?.assertHeld();
+      committing = true; await bounded.query("COMMIT"); return result;
+    } catch (error) {
+      const rollback = {text:"ROLLBACK",query_timeout:100};
+      await query(rollback).catch(() => {destroy=true;});
+      if (committing && error instanceof Error) Object.assign(error,{commitUnknown:true});
+      throw error;
+    } finally { db.release(destroy || performance.now() >= deadline); }
   }
+
   async control(db: Pick<Pool | PoolClient, "query"> = this.pool, lock = false): Promise<SourceControl> {
     const row = (await db.query<SourceControl>(`SELECT * FROM broker_accounting_sources WHERE source_id=$1${lock ? " FOR UPDATE" : ""}`, [this.sourceId])).rows[0];
     if (!row || row.process_session_id !== this.sessionId) throw accountingError("SOURCE_SESSION_CHANGED");
     return row;
   }
   async begin(accountId: string, settingsHash: string): Promise<SourceControl> {
+    if (!this.owner) throw accountingError("SOURCE_OWNER_REQUIRED");
+    this.owner.assertCurrent();
     return this.transaction(async db => {
       await db.query(`INSERT INTO broker_accounting_sources(source_id,account_id,settings_hash,process_session_id)
         VALUES($1,$2,$3,$4) ON CONFLICT(source_id) DO UPDATE SET process_session_id=$4, connection_generation=0,
@@ -79,10 +116,11 @@ export class AccountingSourceStore {
           WHEN hold IS NOT NULL AND hold NOT IN ('ACCOUNTING_CLOCK_INVALID','ACCOUNTING_SOURCE_GAP') THEN hold
           WHEN $3='ACCOUNTING_SOURCE_GAP' THEN hold ELSE $3 END,updated_at=clock_timestamp() WHERE source_id=$1`,
       [this.sourceId, generation, hold ?? null, revoke]);
+      await this.recovery.observe(db);
       return this.control(db);
     });
   }
-  async recoverClock(e: ClockRecoveryEvidence, assertCurrent: () => void): Promise<{ control: SourceControl; receipt: ClockRecoveryReceipt }> {
+  async recoverClock(e: ClockRecoveryEvidence, assertCurrent: () => void, reservation: ClockRecoveryReservation): Promise<{ control: SourceControl; receipt: ClockRecoveryReceipt }> {
     const fresh = () => {
       assertCurrent();
       const through = Date.parse(e.inspection.brokerTime), now = Date.now();
@@ -90,6 +128,7 @@ export class AccountingSourceStore {
     };
     return this.transaction(async db => {
       const control = await this.control(db, true); fresh();
+      await this.recovery.assertReservation(db,reservation);
       const identity = (await db.query("SELECT account_id,clock_timestamp() AS now FROM broker_accounting_sources WHERE source_id=$1", [this.sourceId])).rows[0];
       const databaseNow = new Date(identity.now).getTime(), through = Date.parse(e.inspection.brokerTime);
       if (control.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
@@ -155,11 +194,23 @@ export class AccountingSourceStore {
           gapEpoch: e.gapEpoch, observationIds: ids }, receivedAt: receipt.recoveredAt });
       await db.query(`UPDATE broker_accounting_sources SET hold=NULL,gap=true,semantic_revision=semantic_revision+1,updated_at=clock_timestamp()
         WHERE source_id=$1 AND hold='ACCOUNTING_CLOCK_INVALID'`, [this.sourceId]);
+      await this.recovery.verified(db,reservation,receipt.id);
       const next = await this.control(db);
       const finalNow = new Date((await db.query("SELECT clock_timestamp() AS recovery_database_now")).rows[0].recovery_database_now).getTime();
       if (!Number.isFinite(finalNow) || through > finalNow || finalNow - through >= 10_000 || paperAccountDate(through) !== paperAccountDate(finalNow)) throw accountingError("CLOCK_RECOVERY_STALE");
       fresh(); return { control: next, receipt };
     }, fresh);
+  }
+  async recoveryReceipt(id: string): Promise<ClockRecoveryReceipt> {
+    return this.transaction(async db => {
+      const row=(await db.query(`SELECT payload->'value' AS value,payload_hash FROM broker_accounting_observations WHERE id=$1 AND source_id=$2 AND kind='clock_recovery'`,[id,this.sourceId])).rows[0];
+      if(!row || accountingHash(row.value)!==row.payload_hash || row.value.receipt.id!==id) throw accountingError('CLOCK_RECOVERY_EVIDENCE_INVALID');
+      return row.value.receipt;
+    });
+  }
+  async rejectedClock(db: Pick<Pool | PoolClient,"query"> = this.pool) {
+    const row=(await db.query(`SELECT payload->'value' AS value,connection_generation FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_rejected' ORDER BY sequence DESC LIMIT 1`,[this.sourceId])).rows[0];
+    return row ? {...row.value,generation:Number(row.connection_generation)} : null;
   }
   async latestValues(): Promise<Array<{ id: string; kind: string; value: unknown }>> {
     return (await this.pool.query(`SELECT DISTINCT ON(kind,event_key) id,kind,payload->'value' AS value FROM broker_accounting_observations
@@ -194,6 +245,7 @@ export class AccountingSourceStore {
     });
   }
   async publish(capture: AccountingCapture, assertCurrent: () => void): Promise<void> {
+    let verificationDeadline:number|null=null;
     await this.transaction(async db => {
       const c = await this.control(db, true), q = await this.qualification(db);
       assertCurrent();
@@ -209,9 +261,11 @@ export class AccountingSourceStore {
       await db.query(`INSERT INTO broker_accounting_captures(id,source_id,qualification_id,receipt_id,reconciliation_run_id,position_generation,semantic_revision,record,fingerprint)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [capture.captureId, this.sourceId, q.id, capture.connectionReceiptId, capture.reconciliationRunId,
           capture.positionGeneration, capture.barrier.semanticRevision, capture, capture.fingerprint]);
+      const episode = await this.recovery.active(db,true);
+      if (episode?.state === "VERIFYING") verificationDeadline=await this.recovery.complete(db,capture.captureId);
       await db.query(`UPDATE broker_accounting_sources SET gap=false WHERE source_id=$1`, [this.sourceId]);
       assertCurrent();
-    });
+    },()=>{assertCurrent();if(verificationDeadline!==null && performance.now()>=verificationDeadline) throw accountingError("CLOCK_RECOVERY_VERIFY_TIMEOUT");});
   }
   private receipt(capture: AccountingCapture) {
     return { reference: accountingReference(capture), accountId: capture.accountId, replayId: capture.replayId,

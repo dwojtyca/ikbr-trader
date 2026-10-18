@@ -394,3 +394,27 @@ describe("read-only broker metadata client ID", () => {
     });
   }
 });
+
+
+describe("automatic accounting clock recovery configuration", () => {
+  const source = { EXECUTION_ACCOUNTING_SOURCE_PATH: "/private/accounting.json",
+    EXECUTION_ACCOUNTING_SOURCE_SHA256: "a".repeat(64), EXECUTION_BROKER_TIME_ZONE: "UTC" };
+  it("defaults off and requires exact boolean configuration", () => {
+    assert.equal(buildExecutionConfig(paperBase).EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED, "false");
+    for (const flag of ["1", "yes", "TRUE", ""]) assert.throws(() => buildExecutionConfig({ ...paperBase,
+      ...source, EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED: flag }), ZodError);
+  });
+  it("permits configured Paper with broker writes enabled without changing pause or master", () => {
+    const cfg = buildExecutionConfig({ ...paperBase, ...source, TRADING_ENABLED: "true", EXECUTION_API_TOKEN: VALID_TOKEN,
+      EXECUTION_ENTRIES_PAUSED: "true", EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED: "true" });
+    assert.equal(cfg.EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED, "true");
+    assert.equal(cfg.tradingEnabled, true);
+    assert.equal(cfg.EXECUTION_ENTRIES_PAUSED, "true");
+  });
+  it("rejects Live and a missing source before any service connects", () => {
+    assert.throws(() => buildExecutionConfig({ ...paperBase, EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED: "true" }), ZodError);
+    assert.throws(() => buildExecutionConfig({ ...paperBase, ...source, IBKR_ENVIRONMENT: "live",
+      ALLOWED_LIVE_ACCOUNTS: "U_TEST", EXECUTION_API_TOKEN: VALID_TOKEN,
+      EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED: "true" }), ZodError);
+  });
+});

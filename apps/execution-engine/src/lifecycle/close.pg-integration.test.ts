@@ -6,6 +6,9 @@ import { stockMetadataFixture } from "../stock-market-test-fixture.js";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { AccountingSourceService } from "../accounting/source-service.js";
+import { AccountingSourceStore } from "../accounting/source-store.js";
 import { Pool } from "pg";
 import {
   InstrumentBindingAuthority,
@@ -17,6 +20,10 @@ import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import { findAccountReservation } from "../ai-proposal-review.js";
 import { runMigrations } from "../migrations.js";
 import { ReconciliationRunner } from "../reconciliation/runner.js";
+import { ReconciliationScheduler } from "../reconciliation/scheduler.js";
+import { IbBrokerReconciliationAdapter } from "../reconciliation/ib-broker-adapter.js";
+import type { TwsExecutionClient } from "../tws-execution-client.js";
+import type { AccountingJoin } from "../accounting/types.js";
 import { ReconciliationRepository } from "../reconciliation/repository.js";
 import type { BrokerReconciliationSnapshot } from "../reconciliation/broker-adapter.js";
 import { deriveParentOrderRef } from "../reconciliation/order-ref.js";
@@ -75,7 +82,7 @@ const instrument: Instrument = {
     priceRoundingMode: "nearest",
   },
 };
-async function createFixture(currency: "USD" | "PLN") {
+async function createFixture(currency: "USD" | "PLN", accounting?: AccountingJoin) {
   const exchange = currency === "PLN" ? "WSE" : "SMART";
   const selectedInstrument: Instrument = { ...instrument, currency, exchange, primaryExchange: currency === "PLN" ? "WSE" : "NASDAQ", conId: 123, localSymbol: "TEST", tradingClass: "TEST",
     session: currency === "PLN" ? { useRegularTradingHours: true, timezone: "Europe/Warsaw", sessionTemplate: "wse_stock_rth" } : instrument.session };
@@ -360,7 +367,7 @@ async function createFixture(currency: "USD" | "PLN") {
         holdResolves: [],
       });
       let completedRunId = runId;
-      if (state.useRunner) {
+      if (state.useRunner || accounting) {
         for (const fill of executions)
           await execution.upsertBrokerExecutionFill({
             execId: fill.execId,
@@ -374,11 +381,19 @@ async function createFixture(currency: "USD" | "PLN") {
             price: fill.price,
             executedAt: fill.executedAt.toISOString(),
           });
+        const productionAdapter = accounting ? new IbBrokerReconciliationAdapter({
+          isConnected: () => true, getConnectionGeneration: () => generation,
+          getManagedAccounts: async () => [accountId],
+          reqPositionsSnapshot: async () => ({ ok: true, rows: positions.map(p => ({ ...p, secType: "STK", currency, exchange })) }),
+          reqAllOpenOrdersSnapshot: async () => ({ ok: true, rows: orders.map(o => ({ ...o, secType: "STK", currency, exchange })) }),
+          reqExecutionsSnapshot: async () => ({ ok: true, endObserved: true,
+            rows: executions.map(e => ({ ...e, secType: "STK", currency, exchange })) }),
+        } as unknown as TwsExecutionClient, { load: async () => ({ ok: true, rows: [], endObserved: true }) }, accounting) : null;
         const runner = new ReconciliationRunner(
           pool,
           execution,
           reconciliation,
-          {
+          productionAdapter ?? {
             capture: async () => {
               const now = (await db.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0].now;
               return {
@@ -403,14 +418,15 @@ async function createFixture(currency: "USD" | "PLN") {
           },
           { info: () => {}, warn: () => {}, error: () => {} },
         );
-        const completedRun = await runner.runOnce(
+        const scheduler = new ReconciliationScheduler(runner,
+          { currentContext: () => ({ accountId, sessionId, sessionStartedAt: attempt }) },
+          { enabled: false, intervalMs: 5000, startupDelayMs: 0, minIntervalMs: 0,
+            runTimeoutMs: 1000, sourceTimeoutMs: 1000, executionSafetyMarginMs: 1000 },
+          { info: () => {}, warn: () => {}, error: () => {} });
+        const completedRun = accounting ? await scheduler.triggerFresh() : await runner.runOnce(
           { accountId, sessionId, sessionStartedAt: attempt },
-          {
-            runTimeoutMs: 1000,
-            sourceTimeoutMs: 1000,
-            executionSafetyMarginMs: 1000,
-          },
-        );
+          { runTimeoutMs: 1000, sourceTimeoutMs: 1000, executionSafetyMarginMs: 1000 });
+        await scheduler.stop();
         assert.ok(completedRun, "fixture reconciliation must produce a run");
         completedRunId = completedRun.runId;
       }
@@ -1031,8 +1047,8 @@ for (const currency of ["USD", "PLN"] as const) describe(
 
 
 describe('PP5 durable observer with real FullCloseService and PostgreSQL', {skip:!connection},()=>{
-  async function supervised(pending=false) {
-    const f=await createFixture('PLN'); const store=new LifecycleObserverRepository(f.pool,f.execution);
+  async function supervised(pending=false, accounting?: AccountingJoin) {
+    const f=await createFixture('PLN',accounting); const store=new LifecycleObserverRepository(f.pool,f.execution);
     const now=Date.now();const metadata=stockMetadataFixture(f.context().bound!,accountId,now);
     metadata.sessionEvidence.schedule!.sessions[0].end=new Date(now+15*60000-100).toISOString();
     await f.pool.query(`INSERT INTO instrument_session_schedules(instrument_id,conid,use_rth,generation,status,evidence,updated_at) VALUES('test','123',true,1,'READY',$1,$2)`,[metadata.sessionEvidence.schedule,new Date(now)]);
@@ -1068,6 +1084,78 @@ describe('PP5 durable observer with real FullCloseService and PostgreSQL', {skip
       assert.equal((await f.store.get(f.id))?.status,'FLAT',JSON.stringify([...f.faults]));await f.observer.triggerNow();assert.equal(f.state.dispatches,1);assert.ok((await f.store.get(f.id))?.terminalProof);
     }finally{await f.observer.stop();await f.close();}
   });
+  it("deadline close stays live during real automatic replay and concurrent SELL/fee keeps entry fenced", async () => {
+    const f = await supervised(false, { join: (...args) => source.join(...args) });
+    let release!: () => void, entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let sockets = 0;
+    class Socket extends EventEmitter {
+      serverVersion = 178;
+      replacement = sockets++ > 0;
+      connect() { this.emit("server",178,"test"); this.emit("nextValidId",1); }
+      disconnect() { this.emit("disconnected"); this.emit("transportClosed"); }
+      reqManagedAccts() { this.emit("managedAccounts",accountId); }
+      reqCurrentTime() { this.emit("currentTime",Math.floor(Date.now()/1000)); }
+      reqExecutions(id: number) {
+        if (this.replacement) { release = () => this.emit("execDetailsEnd",id); entered(); }
+        else this.emit("execDetailsEnd",id);
+      }
+    }
+    const store = new AccountingSourceStore(f.pool,randomUUID(),sessionId);
+    const source = new AccountingSourceService(store,{schemaVersion:1,sourceKind:"ibkr-tws-seven-day-v1",environment:"paper",accountId,
+      endpoint:{host:"127.0.0.1",port:49837},sourceClientId:0,executionTimeZone:"UTC"},"a".repeat(64),
+      () => ({connected:true,accountId,sessionId,generation:1}),() => new Socket(),undefined,{automaticClockRecoveryEnabled:true});
+    try {
+      await source.initialize(); source.start();
+      const inspection = await source.inspect(), observedAt = new Date().toISOString();
+      await source.qualify({schemaVersion:1,sourceKind:"ibkr-tws-seven-day-v1",settingsSha256:"a".repeat(64),inspectionId:inspection.id,
+        operator:"test",observedAt,product:"TWS",productVersion:"test",productBuild:"test",tradeLogDays:7,masterClientId:0,executionTimeZone:"UTC",
+        confirmations:{exactEndpointAndAccount:true,evidenceBelongsToCurrentHostSession:true,noSettingsChangeSinceEvidence:true,pauseAndRequalifyBeforeSettingsChange:true},
+        artifacts:["tws-product-build","tws-trade-log-seven-days","tws-master-client-zero","execution-timezone"].map(kind=>({kind,relativePath:"test.txt",sha256:"b".repeat(64),observedAt}))});
+      await store.gap(source.status().sourceGeneration,"ACCOUNTING_CLOCK_INVALID");
+      const recovery = source.automaticRecovery(new AbortController().signal).then(value=>({value,error:null}),error=>({value:null,error}));
+      await started;
+      assert.throws(()=>source.assertCurrent());
+      await f.observer.triggerNow();
+      assert.equal(f.state.dispatches,1,JSON.stringify([...f.faults]));
+      assert.equal((await f.repo.get(f.id))?.state,"SUBMITTED");
+      const execId = randomUUID();
+      source.observeExecution({execId,accountId,orderId:Number(f.state.closeId),conid:"123",symbol:"TEST",secType:"STK",currency:"PLN",exchange:"WSE",
+        side:"SELL",shares:1,price:100,executedAt:new Date().toISOString()},async()=>{});
+      source.observeCommission({execId,commission:0.5,currency:"PLN",realizedPnL:0},async()=>{});
+      f.state.closeWorking=false; f.state.closeFilled=true; f.state.position=0;
+      await f.observer.triggerNow();
+      assert.equal((await f.repo.get(f.id))?.state,"COMPLETED",JSON.stringify([...f.faults]));
+      assert.equal(f.state.dispatches,1);
+      release();
+      const result = await recovery;
+      assert.ok(result.error,"replay missing concurrent execution must not clear accounting hold");
+      assert.throws(()=>source.assertCurrent());
+      const snapshot=(await f.pool.query("SELECT broker_snapshot FROM reconciliation_runs WHERE account_id=$1 ORDER BY id DESC LIMIT 1",[accountId])).rows[0].broker_snapshot;
+      assert.equal(snapshot.accounting,undefined);
+      assert.equal(source.status().automaticClockRecovery.attemptCount,1);
+    } finally { release?.(); await f.observer.stop(); await source.close(); await f.close(); }
+  });
+  for (const reason of ["ACCOUNTING_SOURCE_BUSY", "ACCOUNTING_CLOCK_INVALID"]) {
+    it(`deadline close preserves production exit reconciliation while ${reason} denies accounting`, async () => {
+      let calls = 0;
+      const f = await supervised(false, { join: async () => { calls++; throw new Error(reason); } });
+      try {
+        await f.observer.triggerNow();
+        assert.ok(calls > 0, "production adapter invokes accounting join");
+        assert.equal(f.state.dispatches, 1, JSON.stringify([...f.faults]));
+        assert.equal((await f.repo.get(f.id))?.state, "SUBMITTED");
+        const capture = (await f.pool.query("SELECT broker_snapshot FROM reconciliation_runs WHERE account_id=$1 ORDER BY id DESC LIMIT 1", [accountId])).rows[0].broker_snapshot;
+        assert.equal(capture.accounting, undefined, "exit snapshot must never become accounting entry proof");
+        assert.equal(capture.exposureComplete, true);
+        f.state.closeWorking = false; f.state.closeFilled = true; f.state.position = 0;
+        await f.observer.triggerNow();
+        assert.equal((await f.repo.get(f.id))?.state, "COMPLETED", JSON.stringify([...f.faults]));
+        await f.observer.triggerNow();
+        assert.equal(f.state.dispatches, 1);
+      } finally { await f.observer.stop(); await f.close(); }
+    });
+  }
   it('lost cancel acknowledgement remains reserved across observer cycles, no duplicate broker writes',async()=>{
     const f=await supervised();try{f.state.failCancel=true;await f.observer.triggerNow();assert.equal((await f.repo.get(f.id))?.state,'CANCEL_UNKNOWN');const before=f.state.cancels.length;
       await f.observer.triggerNow();assert.equal(f.state.cancels.length,before);assert.equal(f.state.dispatches,0);assert.ok(f.faults.has('PROTECTION_GAP'));

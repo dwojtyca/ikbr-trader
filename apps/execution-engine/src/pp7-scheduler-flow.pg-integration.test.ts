@@ -58,13 +58,30 @@ interface Faults {
     stalePrice?: boolean;
     unauthorized?: boolean;
 }
+async function sessionClock(pool: Pool): Promise<() => void> {
+    const realDate = globalThis.Date;
+    const offset = realDate.parse('2026-10-12T14:00:00Z') - realDate.now();
+    // Isolated synthetic sessions must stay inside one Warsaw account day, including night-time CI runs.
+    await pool.query('CREATE TABLE fixture_clock(offset_ms bigint NOT NULL)');
+    await pool.query('INSERT INTO fixture_clock VALUES($1)', [offset]);
+    await pool.query(`CREATE FUNCTION public.clock_timestamp() RETURNS timestamptz LANGUAGE sql VOLATILE AS $$
+      SELECT pg_catalog.clock_timestamp()+(SELECT offset_ms FROM fixture_clock)*interval '1 millisecond' $$;
+      CREATE FUNCTION public.now() RETURNS timestamptz LANGUAGE sql STABLE AS $$
+      SELECT pg_catalog.transaction_timestamp()+(SELECT offset_ms FROM fixture_clock)*interval '1 millisecond' $$`);
+    globalThis.Date = new Proxy(realDate, {
+        construct(target, args) { return Reflect.construct(target, args.length ? args : [target.now() + offset]); },
+        get(target, property, receiver) { return property === 'now' ? () => target.now() + offset : Reflect.get(target, property, receiver); }
+    });
+    return () => { globalThis.Date = realDate; };
+}
 async function flow(instrumentId: string, body: (f: Awaited<ReturnType<typeof setup>>) => Promise<void>, faults: Faults = {}) {
     const name = `pp7_flow_${randomUUID().replaceAll('-', '')}`, url = new URL(connection!);
     url.pathname = '/postgres';
     const admin = new Pool({ connectionString: url.toString() });
     await admin.query(`CREATE DATABASE ${name}`);
     url.pathname = `/${name}`;
-    const pool = new Pool({ connectionString: url.toString() });
+    const pool = new Pool({ connectionString: url.toString(), ...(faults.recurring ? {options: '-c search_path=public,pg_catalog'} : {}) });
+    const restore = faults.recurring ? await sessionClock(pool) : () => {};
     let f: Awaited<ReturnType<typeof setup>> | undefined;
     try {
         await runMigrations(pool);
@@ -72,13 +89,17 @@ async function flow(instrumentId: string, body: (f: Awaited<ReturnType<typeof se
         await body(f);
     }
     finally {
-        await f?.loop.stop();
-        await f?.lifecycle.observer.stop();
-        await f?.alertsWorker.stop();
-        await f?.app.close();
-        await pool.end();
-        await admin.query(`DROP DATABASE ${name}`);
-        await admin.end();
+        try {
+            await f?.loop.stop();
+            await f?.lifecycle.observer.stop();
+            await f?.alertsWorker.stop();
+            await f?.app.close();
+        } finally {
+            restore();
+            await pool.end();
+            await admin.query(`DROP DATABASE ${name}`);
+            await admin.end();
+        }
     }
 }
 async function setup(pool: Pool, instrumentId: string, faults: Faults = {}) {

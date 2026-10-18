@@ -24,6 +24,7 @@ const optionalTrimmedString = z.preprocess(
 // and logged at startup. Runtime enforcement lands in PR2..PR5.
 // -----------------------------------------------------------------------
 const rawSchema = z.object({
+  EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED: z.enum(["true", "false"]).default("false"),
   EXECUTION_ACCOUNTING_SOURCE_PATH: optionalTrimmedString,
   EXECUTION_ACCOUNTING_SOURCE_SHA256: optionalTrimmedString,
   EXECUTION_EXTERNAL_ORDERS_JSON: z.string().default("[]").transform(parseExternalOrders),
@@ -246,6 +247,11 @@ function validateExecutionSecurity(
     || data.EXECUTION_ACCOUNTING_SOURCE_SHA256 && !/^[a-f0-9]{64}$/.test(data.EXECUTION_ACCOUNTING_SOURCE_SHA256)
     || data.EXECUTION_ACCOUNTING_SOURCE_PATH && (data.IBKR_ENVIRONMENT !== "paper" || !data.EXECUTION_BROKER_TIME_ZONE)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["EXECUTION_ACCOUNTING_SOURCE_PATH"], message: "Accounting requires paired path/hash, Paper environment and explicit execution timezone" });
+  }
+  if (data.EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED === "true"
+    && (data.IBKR_ENVIRONMENT !== "paper" || !data.EXECUTION_ACCOUNTING_SOURCE_PATH || !data.EXECUTION_ACCOUNTING_SOURCE_SHA256)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED"],
+      message: "Automatic accounting clock recovery requires Paper and a configured accounting source" });
   }
   for (const key of ["EXECUTION_CLIENT_ID", "INGESTION_CLIENT_ID", "BACKTEST_INGESTION_CLIENT_ID", "IBKR_ES_ACQUISITION_CLIENT_ID"] as const) {
     if (data.IB_METADATA_CLIENT_ID === data[key]) {

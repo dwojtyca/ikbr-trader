@@ -1,20 +1,21 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { performance } from "node:perf_hooks";
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { runMigrations } from "../migrations.js";
 import { LifecycleAlertStore, LifecycleAlertWorker, type LifecycleTransport } from "./lifecycle-alerts.js";
 
 const connection = process.env.TEST_POSTGRES_URL;
 
-async function fixture() {
+async function fixture(max = 10) {
   const name = `alerts_${randomUUID().replaceAll("-", "")}`;
   const url = new URL(connection!);
   url.pathname = "/postgres";
   const admin = new Pool({ connectionString: url.toString() });
   await admin.query(`CREATE DATABASE ${name}`);
   url.pathname = `/${name}`;
-  const pool = new Pool({ connectionString: url.toString() });
+  const pool = new Pool({ connectionString: url.toString(), max });
   await runMigrations(pool);
   return { pool, store: new LifecycleAlertStore(pool), async close() { await pool.end(); await admin.query(`DROP DATABASE ${name}`); await admin.end(); } };
 }
@@ -40,6 +41,125 @@ describe("lifecycle fault outbox PostgreSQL", { skip: !connection }, () => {
       status = await f.store.readStatus(input.accountId);
       assert.equal(status.faults[0].delivery, "PENDING");
       assert.equal(status.probes.length, 1);
+    } finally { await f.close(); }
+  });
+
+  it("only confirmed accounting recovery resolves its fault without touching observer faults", async () => {
+    const f = await fixture();
+    try {
+      const account = "PAPER";
+      await f.store.recordFault({ accountId: account, proposalId: null, code: "ACCOUNTING_CLOCK_RECOVERY_REQUIRED", evidence: { attempt: 3 } });
+      await f.store.recordFault({ accountId: account, proposalId: null, code: "BROKER_STATE_STALE", evidence: {} });
+      await f.store.resolveScope(account, null, ["BROKER_STATE_STALE"]);
+      assert.equal((await f.store.readStatus(account)).faults.filter(x => x.active).length, 2);
+      let checks = 0;
+      await assert.rejects(f.store.resolveClockRecovery(account, () => {
+        if (++checks === 2) throw Error("recovery evidence changed before commit");
+      }), /evidence changed/);
+      assert.equal((await f.store.readStatus(account)).faults.filter(x => x.active).length, 2);
+      await f.store.resolveClockRecovery(account, () => {});
+      const active = (await f.store.readStatus(account)).faults.filter(x => x.active);
+      assert.deepEqual(active.map(x => x.code), ["BROKER_STATE_STALE"]);
+    } finally { await f.close(); }
+  });
+
+  it("clock alert acquisition refuses a saturated shared pool without queued or late work", async () => {
+    const f = await fixture(1), held = await f.pool.connect(); let released = false;
+    try {
+      const started = performance.now();
+      await assert.rejects(f.store.recordFault({ accountId: "DU-CLOCK", proposalId: null,
+        code: "ACCOUNTING_CLOCK_RECOVERY_REQUIRED", evidence: { episodeId: randomUUID() } }), /ACCOUNTING_CLOCK_RECOVERY_ALERT_BUSY/);
+      assert.ok(performance.now() - started < 500); assert.equal(f.pool.waitingCount, 0);
+      held.release(); released = true;
+      assert.equal((await f.store.readStatus("DU-CLOCK")).faults.length, 0);
+      await f.store.recordFault({ accountId: "DU-CLOCK", proposalId: null, code: "CLOSE_UNFILLED", evidence: {} });
+      assert.deepEqual((await f.store.readStatus("DU-CLOCK")).faults.map(row => row.code), ["CLOSE_UNFILLED"]);
+    } finally { if (!released) held.release(); await f.close(); }
+  });
+
+  it("a client acquired after the clock deadline is destroyed without running late SQL", async t => {
+    const f = await fixture();
+    let releaseAcquisition!: () => void;
+    const gate = new Promise<void>(resolve => { releaseAcquisition = resolve; });
+    const connect = f.pool.connect.bind(f.pool) as () => Promise<PoolClient>;
+    const delayed = t.mock.method(f.pool, 'connect', async () => { const client = await connect(); await gate; return client; });
+    try {
+      await assert.rejects(f.store.recordFault({ accountId: 'DU-LATE', proposalId: null,
+        code: 'ACCOUNTING_CLOCK_RECOVERY_REQUIRED', evidence: {} }), /ACCOUNTING_CLOCK_RECOVERY_ALERT_TIMEOUT/);
+      delayed.mock.restore(); releaseAcquisition();
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(f.pool.waitingCount, 0); assert.equal(f.pool.totalCount, f.pool.idleCount);
+      assert.equal((await f.store.readStatus('DU-LATE')).faults.length, 0);
+      await f.store.recordFault({ accountId: 'DU-LATE', proposalId: null, code: 'CLOSE_UNFILLED', evidence: {} });
+    } finally { delayed.mock.restore(); releaseAcquisition(); await f.close(); }
+  });
+
+  it("clock record and resolution release contested account locks without late mutation", async () => {
+    const f = await fixture(), blocker = await f.pool.connect();
+    try {
+      const accountId = "DU-CLOCK", input = { accountId, proposalId: null, code: "ACCOUNTING_CLOCK_RECOVERY_REQUIRED" as const, evidence: { episodeId: randomUUID() } };
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`snap:${accountId}`]);
+      let started = performance.now();
+      await assert.rejects(f.store.recordFault(input), error => (error as { code?: string }).code === '55P03');
+      assert.ok(performance.now() - started < 2000);
+      await blocker.query('ROLLBACK');
+      assert.equal((await f.store.readStatus(accountId)).faults.length, 0);
+      await f.store.recordFault(input);
+      await f.store.recordFault({ accountId, proposalId: null, code: 'BROKER_STATE_STALE', evidence: {} });
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT id FROM lifecycle_faults WHERE account_id=$1 AND code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED' FOR UPDATE", [accountId]);
+      started = performance.now();
+      await assert.rejects(f.store.resolveClockRecovery(accountId, () => {}), error => (error as { code?: string }).code === '55P03');
+      assert.ok(performance.now() - started < 2000);
+      const lock = await blocker.query("SELECT pg_try_advisory_xact_lock(hashtext($1)::bigint) AS held", [`snap:${accountId}`]);
+      assert.equal(lock.rows[0].held, true); await blocker.query('ROLLBACK');
+      assert.equal((await f.store.readStatus(accountId)).faults.filter(row => row.active).length, 2);
+      await f.store.recordFault({ accountId, proposalId: 7, code: 'CLOSE_UNFILLED', evidence: {} });
+      await f.store.resolveClockRecovery(accountId, () => {});
+      assert.deepEqual((await f.store.readStatus(accountId)).faults.filter(row => row.active).map(row => row.code).sort(), ['BROKER_STATE_STALE', 'CLOSE_UNFILLED']);
+      assert.equal(f.pool.waitingCount, 0);
+    } finally { await blocker.query('ROLLBACK'); blocker.release(); await f.close(); }
+  });
+
+  it("clock SQL and deferred COMMIT work time out without late committed fault or outbox", async () => {
+    const f = await fixture();
+    try {
+      for (const deferred of [false, true]) {
+        await f.pool.query(`CREATE OR REPLACE FUNCTION slow_clock_alert() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN IF NEW.code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED' THEN PERFORM pg_sleep(5); END IF; RETURN NEW; END $$`);
+        await f.pool.query(deferred
+          ? 'CREATE CONSTRAINT TRIGGER clock_delay AFTER INSERT ON lifecycle_faults DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION slow_clock_alert()'
+          : 'CREATE TRIGGER clock_delay BEFORE INSERT ON lifecycle_faults FOR EACH ROW EXECUTE FUNCTION slow_clock_alert()');
+        const started = performance.now();
+        await assert.rejects(f.store.recordFault({ accountId: 'DU-SLOW', proposalId: null, code: 'ACCOUNTING_CLOCK_RECOVERY_REQUIRED', evidence: { episodeId: randomUUID() } }), error => {
+          assert.ok(error instanceof Error);
+          // Under load the pg read deadline can win before server cancellation reaches the client.
+          const serverCancelled = (error as { code?: string }).code === '57014';
+          const clientDeadline = error.message === 'Query read timeout' || error.message === 'ACCOUNTING_CLOCK_RECOVERY_ALERT_TIMEOUT';
+          assert.ok(serverCancelled || clientDeadline, `unexpected timeout result: ${error.message}`);
+          assert.equal((error as { commitUnknown?: boolean }).commitUnknown, undefined);
+          return true;
+        });
+        assert.ok(performance.now() - started < 2100);
+        assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM lifecycle_faults WHERE account_id='DU-SLOW' AND code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED'")).rows[0].n, 0);
+        assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM lifecycle_alert_outbox o JOIN lifecycle_faults f ON f.id=o.fault_id WHERE f.account_id='DU-SLOW' AND f.code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED'")).rows[0].n, 0);
+        const independent = await f.pool.connect();
+        try {
+          await independent.query('BEGIN');
+          assert.equal((await independent.query("SELECT pg_try_advisory_xact_lock(hashtext('snap:DU-SLOW')::bigint) AS held")).rows[0].held, true);
+          await independent.query('ROLLBACK');
+        } finally { independent.release(); }
+        await f.store.recordFault({ accountId: 'DU-SLOW', proposalId: null, code: 'CLOSE_UNFILLED', evidence: {} });
+        await f.pool.query('DROP TRIGGER clock_delay ON lifecycle_faults');
+        // Removing the trigger waits for any old transaction's relation locks to end.
+        // Recheck afterward so an eventual late commit cannot hide behind an early snapshot.
+        assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM lifecycle_faults WHERE account_id='DU-SLOW' AND code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED'")).rows[0].n, 0);
+        assert.equal((await f.pool.query("SELECT count(*)::int AS n FROM lifecycle_alert_outbox o JOIN lifecycle_faults f ON f.id=o.fault_id WHERE f.account_id='DU-SLOW' AND f.code='ACCOUNTING_CLOCK_RECOVERY_REQUIRED'")).rows[0].n, 0);
+      }
+      const status = await f.store.readStatus('DU-SLOW');
+      assert.equal(status.faults.length, 1); assert.equal(status.faults[0].code, 'CLOSE_UNFILLED'); assert.equal(status.faults[0].occurrences, 2);
+      assert.equal(f.pool.waitingCount, 0);
     } finally { await f.close(); }
   });
 
@@ -112,6 +232,21 @@ describe("lifecycle fault outbox PostgreSQL", { skip: !connection }, () => {
       await restart.start();
       assert.equal(sent.length, 3);
       await restart.stop();
+    } finally { await f.close(); }
+  });
+
+  it("clock alerts deduplicate per episode even when previous recovery resolution was missed", async () => {
+    const f = await fixture();
+    try {
+      const accountId = "DU-CLOCK", first = randomUUID(), second = randomUUID();
+      const record = (episodeId: string) => f.store.recordFault({ accountId, proposalId: null,
+        code: "ACCOUNTING_CLOCK_RECOVERY_REQUIRED", evidence: { episodeId, attemptCount: 3, raw: "secret" } });
+      await record(first); await record(first); await record(second); await record(second);
+      const status = await f.store.readStatus(accountId);
+      assert.equal(status.faults.length, 2);
+      assert.equal(status.faults.filter(fault => fault.active).length, 1);
+      assert.equal(status.faults.find(fault => fault.active)?.evidence.episodeId, second);
+      assert.ok(status.faults.every(fault => fault.occurrences === 2 && fault.delivery === "PENDING" && fault.evidence.raw === "[REDACTED]"));
     } finally { await f.close(); }
   });
 

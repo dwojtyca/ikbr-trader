@@ -1,3 +1,5 @@
+import { AccountingSourceOwner } from "./source-owner.js";
+import { recoveryStatus, type ClockEpisode } from "./clock-recovery-store.js";
 import { randomUUID } from "node:crypto";
 import { performance } from 'node:perf_hooks';
 import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
@@ -9,10 +11,15 @@ import { parseQualification } from "./config.js";
 import { AccountingSourceCollector, type AccountingSocket, type CollectorObservation } from "./source-collector.js";
 import { AccountingSourceStore, type SourceControl, type SourceObservation } from "./source-store.js";
 import { accountingError, accountingHash, accountingNumber, accountingReference, type AccountingBarrier, type AccountingCapture, type AccountingCaptureReference,
-  type ClockRecoveryReceipt, type AccountingLane, type CanonicalExecution, type CanonicalCommission, type SourceInspection, type SourceSettingsV1, type StoredQualification } from "./types.js";
+  type AutomaticClockRecoveryStatus, type ClockRecoveryReceipt, type ClockRecoveryReservation, type AccountingLane, type CanonicalExecution, type CanonicalCommission, type SourceInspection, type SourceSettingsV1, type StoredQualification } from "./types.js";
 
 export interface ExecutionSourceIdentity { connected: boolean; accountId: string | null; sessionId: string; generation: number }
 export class AccountingSourceService {
+  private readonly owner: AccountingSourceOwner;
+  private episode: ClockEpisode | null = null;
+  private recoveryUnknown = false;
+  private recoveryPersistence: { remaining: number; abort: AbortController } | undefined;
+  private rejectedClock: AutomaticClockRecoveryStatus["rejectedClock"] = null;
   readonly collector: AccountingSourceCollector;
   private control: SourceControl | undefined;
   private qualification: StoredQualification | null = null;
@@ -28,11 +35,17 @@ export class AccountingSourceService {
   private diagnosticRunId: number | undefined;
   constructor(readonly store: AccountingSourceStore, readonly settings: SourceSettingsV1, readonly settingsHash: string,
     private readonly executionIdentity: () => ExecutionSourceIdentity, socketFactory?: () => AccountingSocket,
-    private readonly diagnostics?: BrokerPhaseDiagnostics) {
-    this.collector = new AccountingSourceCollector(settings, { observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory,
+    private readonly diagnostics?: BrokerPhaseDiagnostics,
+    private readonly options: { automaticClockRecoveryEnabled?: boolean; owner?: AccountingSourceOwner } = {}) {
+    this.owner = options.owner ?? new AccountingSourceOwner(store.pool,settings,() => {
+      this.recoveryUnknown = true; this.gap = true; this.latest = undefined; this.collector.close();
+    });
+    store.owner = this.owner;
+    this.collector = new AccountingSourceCollector(settings, { socketEndpoint: () => this.owner.endpoint(), assertOwner: () => this.owner.assertCurrent(), observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory,
       diagnostics && { ...diagnostics, emit: event => diagnostics.emit({ ...event, ...(this.diagnosticRunId === undefined ? {} : { runId: this.diagnosticRunId }) }) });
   }
   async initialize(): Promise<void> {
+    await this.owner.acquire();
     this.control = await this.store.begin(this.settings.accountId, this.settingsHash);
     this.qualification = await this.store.qualification();
     for (const row of await this.store.latestValues()) {
@@ -40,10 +53,17 @@ export class AccountingSourceService {
       if (row.kind === "execution") { const value = row.value as CanonicalExecution; this.executions.set(value.execId, value); }
       else { const value = row.value as CanonicalCommission; this.commissions.set(value.execId, value); }
     }
+    await this.store.recovery.initialize();
+    this.episode = await this.store.recovery.latest();
+    this.rejectedClock = await this.store.rejectedClock();
     this.initialized = true;
   }
   start() { if (!this.initialized) throw accountingError("SOURCE_UNINITIALIZED"); this.collector.connect(); }
-  async close() { this.collector.close(); await this.drain(); }
+  async close() {
+    const acknowledged = await this.collector.retire();
+    try { await this.persisted(); }
+    finally { try { await this.owner.retire(acknowledged); } finally { await this.owner.release(); } }
+  }
   private enqueue(job: () => Promise<void>): void {
     if (this.failed) return;
     if (this.pending >= 10_000) {
@@ -81,10 +101,10 @@ export class AccountingSourceService {
       this.lanes[lane].persisted = sequence; this.lanes[lane].pending--;
     });
   }
-  private observe(event: CollectorObservation) { this.append("accounting", event.kind, event.value, "raw" in event ? event.raw : undefined, "requestId" in event ? event.requestId : undefined); }
+  private observe(event: CollectorObservation) { if(event.kind === "clock_rejected") this.rejectedClock={...event.value as NonNullable<AutomaticClockRecoveryStatus["rejectedClock"]>,generation:this.collector.identity().generation}; this.append("accounting", event.kind, event.value, "raw" in event ? event.raw : undefined, "requestId" in event ? event.requestId : undefined); }
   private markGap(generation: number, hold?: string) {
     this.gapEpoch++; this.gap = true; this.latest = undefined;
-    this.enqueue(async () => { if (!this.initialized) throw accountingError("SOURCE_UNINITIALIZED"); this.control = await this.store.gap(generation, hold); });
+    this.enqueue(async () => { if (!this.initialized) throw accountingError("SOURCE_UNINITIALIZED"); this.control = await this.store.gap(generation, hold); this.episode = await this.store.recovery.latest(); });
   }
   observeIngressFailure(kind: "execution" | "commission", raw: unknown): void {
     this.markGap(this.collector.identity().generation, "ACCOUNTING_IDENTITY_INVALID");
@@ -133,6 +153,8 @@ export class AccountingSourceService {
       semanticRevision: Number(this.control?.semantic_revision ?? -1), lanes: structuredClone(this.lanes) };
   }
   private assertDrained(allowClockHold = false) {
+    this.owner.assertHeld();
+    if (this.recoveryUnknown) throw accountingError("CLOCK_RECOVERY_OUTCOME_UNKNOWN");
     if (!this.initialized || this.failed) throw accountingError("PERSISTENCE_FAILED");
     if (this.pending || Object.values(this.lanes).some(lane => lane.pending || lane.received !== lane.persisted)) throw accountingError("PERSISTENCE_PENDING");
     if (this.control?.hold && !(allowClockHold && this.control.hold === "ACCOUNTING_CLOCK_INVALID")) throw accountingError(this.control.hold);
@@ -148,7 +170,9 @@ export class AccountingSourceService {
     if (q.input.settingsSha256 !== this.settingsHash || q.protocolVersion !== this.collector.identity().protocolVersion || accountingHash(q.settings) !== accountingHash(this.settings)) throw accountingError("SETTINGS_MISMATCH");
   }
   assertCurrent(reference = this.latest): void {
-    this.assertDrained(); this.assertIdentity(); this.assertQualified();
+    this.owner.assertCurrent();
+    this.assertDrained();
+    if (this.episode && this.episode.state !== "RECOVERED") throw accountingError("CLOCK_RECOVERY_" + this.episode.state); this.assertIdentity(); this.assertQualified();
     if (this.gap || !reference || reference.qualificationId !== this.qualification!.id || Date.now() - Date.parse(reference.coveredThrough) >= 10_000
       || Date.parse(reference.coveredThrough) > Date.now() || reference.accountDate !== paperAccountDate(Date.now())) throw accountingError("EVIDENCE_STALE");
     const current = this.barrier(), expected = reference.barrier;
@@ -175,6 +199,7 @@ export class AccountingSourceService {
     return { executions: executions.sort((a, b) => a.execId.localeCompare(b.execId)), commissions: commissions.sort((a, b) => a.execId.localeCompare(b.execId)) };
   }
   private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false): Promise<SourceInspection> {
+    if(signal.aborted) throw accountingError("REPLAY_INCOMPLETE");
     this.requestObservations.clear(); this.endIds.clear();
     this.collector.connect(); const epoch = this.gapEpoch, execution = this.executionIdentity();
     const deadline = Date.now() + Math.min(timeoutMs, 10_000);
@@ -187,7 +212,7 @@ export class AccountingSourceService {
     try {
       while (true) {
         phase = 'accounting.drain'; const drainStarted = performance.now();
-        try { await this.drain(); this.assertDrained(allowClockHold); this.assertIdentity(); }
+        try { await this.persisted(signal); this.assertDrained(allowClockHold); this.assertIdentity(); }
         finally { drainMs += performance.now() - drainStarted; }
         if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())) throw accountingError("SOURCE_GAP");
         phase = 'accounting.cost_wait';
@@ -214,42 +239,151 @@ export class AccountingSourceService {
       }) ? "OBSERVED" : "NOT_OBSERVED" };
     if (!inspection.replayEndId) throw accountingError("REPLAY_INCOMPLETE");
     this.append("accounting", "inspection", inspection, undefined, undefined, undefined, inspection.id);
-    await brokerPhase(this.diagnostics, 'accounting.inspection_persistence', metadata, () => this.drain());
+    await brokerPhase(this.diagnostics, 'accounting.inspection_persistence', metadata, () => this.persisted(signal));
     return inspection;
   }
   async inspect(timeoutMs = 9000, signal = new AbortController().signal): Promise<SourceInspection> {
     if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
     try { return await this.inspectInternal(timeoutMs, signal); } finally { this.busy = false; }
   }
+  private async persistence<T>(job:()=>Promise<T>):Promise<T> {
+    const budget=this.recoveryPersistence;
+    if(!budget) return job();
+    if(budget.remaining<=0) {budget.abort.abort();throw accountingError('PERSISTENCE_TIMEOUT');}
+    const started=performance.now();let timer:ReturnType<typeof setTimeout>|undefined;
+    try{return await Promise.race([job(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{budget.abort.abort();this.recoveryUnknown=true;reject(accountingError('PERSISTENCE_TIMEOUT'));},budget.remaining);})]);}
+    finally{clearTimeout(timer);budget.remaining-=performance.now()-started;}
+  }
+  private async persisted(signal?: AbortSignal): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abort: (()=>void) | undefined;
+    const cancelled = new Promise<never>((_,reject) => {
+      abort=()=>reject(accountingError('PERSISTENCE_TIMEOUT'));
+      if(signal?.aborted) abort(); else signal?.addEventListener('abort',abort,{once:true});
+      timer=setTimeout(abort,2000);
+    });
+    try { await this.persistence(()=>Promise.race([this.drain(),cancelled])); }
+    finally { clearTimeout(timer); if(abort) signal?.removeEventListener('abort',abort); }
+  }
+
+  async refreshRecoveryState(): Promise<void> {
+    const state = await this.persistence(()=>this.store.transaction(async db => ({control:await this.store.control(db),episode:await this.store.recovery.latest(db),rejectedClock:await this.store.rejectedClock(db)})));
+    this.control=state.control; this.episode=state.episode; this.rejectedClock=state.rejectedClock;
+  }
+  async recoveryDatabaseTime(): Promise<number> {
+    return this.store.transaction(async db => new Date((await db.query("SELECT clock_timestamp() AS now")).rows[0].now).getTime());
+  }
+  async verificationExpired(databaseNow: number): Promise<boolean> { return !!this.episode?.verifying_at && databaseNow-this.episode.verifying_at.getTime()>=60000; }
+  recoveryIdentity() { return { ...this.executionIdentity(),settingsHash:this.settingsHash }; }
+  async requireRecoveryOperator(reason: string): Promise<void> {
+    await this.store.recovery.requireOperator(reason); await this.refreshRecoveryState();
+  }
+  async automaticRecovery(signal: AbortSignal): Promise<ClockRecoveryReceipt | null> {
+    if (!this.options.automaticClockRecoveryEnabled) return null;
+    const abort=new AbortController();
+    const operation=AbortSignal.any([signal,abort.signal]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([this.recover(false,9000,operation),new Promise<never>((_,reject) => {
+      timer=setTimeout(() => { this.recoveryUnknown=true; this.gap=true; this.latest=undefined; abort.abort(); this.collector.close(); reject(accountingError('CLOCK_RECOVERY_OUTCOME_UNKNOWN')); },13000);
+    })]); } finally { clearTimeout(timer); }
+  }
   async recoverClock(timeoutMs = 9000, signal = new AbortController().signal): Promise<ClockRecoveryReceipt> {
+    const receipt = await this.recover(true,timeoutMs,signal);
+    if (!receipt) throw accountingError("CLOCK_RECOVERY_LIMIT");
+    return receipt;
+  }
+  private async recover(manual: boolean, timeoutMs: number, signal: AbortSignal): Promise<ClockRecoveryReceipt | null> {
     if (this.settings.environment !== "paper") throw accountingError("CLOCK_RECOVERY_REQUIRES_DISABLED_PAPER");
     if (this.busy || this.pending) throw accountingError("SOURCE_BUSY");
     this.assertDrained(true); this.busy = true;
-    let acquisitionStarted = false;
+    let reservation: ClockRecoveryReservation | null = null;
+    this.recoveryPersistence={remaining:2000,abort:new AbortController()};
+    const wholeOperation = AbortSignal.any([signal,this.recoveryPersistence.abort.signal,AbortSignal.timeout(11000)]);
+    const attemptId=randomUUID();
     try {
-      this.control = await this.store.control(); this.assertDrained(true);
-      if (this.control.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
-      acquisitionStarted = true;
-      this.collector.close(); this.connectionObservations.clear(); this.collector.connect();
-      await this.drain(); this.assertDrained(true);
-      const inspection = await this.inspectInternal(timeoutMs, signal, true);
-      await this.drain(); this.assertDrained(true); this.assertIdentity();
+      await this.refreshRecoveryState(); this.assertDrained(true);
+      if (!this.control!.hold && manual && this.episode) return await this.completeManualRecovery();
+      if (this.control!.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
+      if (!manual) {
+        if (!this.qualification) throw accountingError("QUALIFICATION_REQUIRED");
+        if (Date.parse(this.qualification.expiresAt)<=Date.now()) throw accountingError("QUALIFICATION_EXPIRED");
+        if (this.qualification.input.settingsSha256!==this.settingsHash) throw accountingError("SETTINGS_MISMATCH");
+      }
+      try { reservation = await this.persistence(()=>this.store.recovery.claim(this.settings.accountId,this.settingsHash,!manual,attemptId)); }
+      catch(error) {
+        try { reservation=await this.store.recovery.resolveClaim(attemptId,this.settings.accountId,this.settingsHash,!manual); }
+        catch { this.recoveryUnknown=true; }
+        throw error;
+      }
+      await this.refreshRecoveryState();
+      if (!reservation) return null;
+      if(wholeOperation.aborted) throw accountingError("REPLAY_INCOMPLETE");
+      const acknowledged = await this.collector.retire();
+      await this.persisted(wholeOperation); await this.owner.retire(acknowledged);
+      if (!acknowledged) throw accountingError("CLOCK_RECOVERY_OUTCOME_UNKNOWN");
+      if(wholeOperation.aborted) throw accountingError("REPLAY_INCOMPLETE");
+      await this.owner.activate();
+      if(wholeOperation.aborted) throw accountingError("REPLAY_INCOMPLETE");
+      this.connectionObservations.clear();
+      const operation = AbortSignal.any([wholeOperation,AbortSignal.timeout(Math.max(1,Math.min(timeoutMs,9000)))]);
+      const inspection = await this.inspectInternal(Math.min(timeoutMs,9000), operation, true);
+      await this.persisted(operation); this.assertDrained(true); this.assertIdentity();
+      if (!manual) this.assertQualified();
       const barrier = this.barrier(), epoch = this.gapEpoch, through = Date.parse(inspection.brokerTime);
       if (inspection.executionIds.some(id => !this.executions.has(id) || Date.parse(this.executions.get(id)!.executedAt) > through)) throw accountingError("REVISION_CHANGED");
       const rows = this.costs(inspection.executionIds, paperAccountDayStart(through), through);
       const observationIds = rows.commissions.map(fee => this.valueObservations.get(`commission:${fee.execId}`)!);
       if (observationIds.some(id => !id)) throw accountingError("CLOCK_RECOVERY_EVIDENCE_INVALID");
-      const result = await this.store.recoverClock({ id: randomUUID(), inspection, barrier, gapEpoch: epoch,
+      const result = await this.persistence(()=>this.store.recoverClock({ id: reservation!.attemptId, inspection, barrier, gapEpoch: epoch,
         accountId: this.settings.accountId, settingsHash: this.settingsHash, ...rows, observationIds }, () => {
         this.assertDrained(true); this.assertIdentity();
-        if (signal.aborted || this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("CLOCK_RECOVERY_CHANGED");
-      });
+        if (operation.aborted || this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("CLOCK_RECOVERY_CHANGED");
+      },reservation!));
       this.control = result.control; this.gap = true; this.latest = undefined;
+      this.episode = await this.persistence(()=>this.store.recovery.latest());
       return result.receipt;
     } catch (error) {
-      if (acquisitionStarted) { this.collector.close(); await this.drain(); }
+      this.recoveryPersistence=undefined;
+      emitBrokerPhase(this.diagnostics,"accounting.clock_recovery","error",{},undefined,error);
+      if (reservation) {
+        const code = error instanceof Error && /^ACCOUNTING_[A-Z_]+$/.test(error.message) ? error.message : "ACCOUNTING_CLOCK_RECOVERY_PERSISTENCE_FAILED";
+        emitBrokerPhase(this.diagnostics,'accounting.clock_recovery','error',{reason:code},undefined,error);
+        const commitUnknown = !!(error && typeof error === "object" && "commitUnknown" in error);
+        if (commitUnknown) {
+          const resolution = await this.store.recovery.resolve(reservation).catch(() => 'unknown' as const);
+          if (resolution === 'committed') {
+            await this.refreshRecoveryState(); this.gap=true; this.latest=undefined;
+            return this.store.recoveryReceipt(reservation.attemptId);
+          }
+          if (resolution === 'unknown') this.recoveryUnknown=true;
+        }
+        const acknowledged = await this.collector.retire();
+        await this.persisted().catch(() => { this.recoveryUnknown=true; });
+        if (!acknowledged) this.recoveryUnknown=true;
+        await this.owner.retire(acknowledged).catch(()=>{this.recoveryUnknown=true;});
+        let cause: AutomaticClockRecoveryStatus['originalCause']=null;
+        emitBrokerPhase({emit:event=>{cause=event.cause;},privacy:this.diagnostics?.privacy},'accounting.clock_recovery','error',{},undefined,error);
+        await this.store.recovery.fail(reservation,code,acknowledged,this.recoveryUnknown,cause).catch(() => { this.recoveryUnknown=true; });
+        await this.refreshRecoveryState().catch(() => { this.recoveryUnknown=true; });
+      }
       throw error;
-    } finally { this.busy = false; }
+    } finally { this.busy = false; this.recoveryPersistence=undefined; }
+  }
+  private async completeManualRecovery(): Promise<ClockRecoveryReceipt> {
+    const reference = this.latest;
+    if (!reference || !this.episode?.receipt_id || this.episode.state !== 'OPERATOR_REQUIRED') throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
+    this.assertIdentity(); this.assertQualified(); this.assertDrained();
+    if (this.gap || Date.now()-Date.parse(reference.coveredThrough)>=10000 || Date.parse(reference.coveredThrough)>Date.now()) throw accountingError('EVIDENCE_STALE');
+    const epoch=this.gapEpoch;
+    try { await this.store.transaction(async db => {
+      const {capture,control,qualification}=await this.store.readCapture(db,reference.captureId,true);
+      if (!qualification || control.hold || control.gap || control.qualification_id!==capture.qualificationId || Number(control.semantic_revision)!==capture.barrier.semanticRevision
+        || accountingHash(capture.barrier)!==accountingHash(this.barrier())) throw accountingError('REVISION_CHANGED');
+      await this.store.recovery.complete(db,capture.captureId,true);
+    },() => { this.assertIdentity(); this.assertQualified(); this.assertDrained(); if(this.gapEpoch!==epoch) throw accountingError('REVISION_CHANGED'); }); }
+    catch(error) { if(error && typeof error==='object' && 'commitUnknown' in error) this.recoveryUnknown=true; throw error; }
+    this.episode=await this.store.recovery.latest();
+    return this.store.recoveryReceipt(this.episode!.receipt_id!);
   }
   async qualify(value: unknown): Promise<{ qualificationId: string; expiresAt: string; settingsHash: string; corroboration: string }> {
     if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
@@ -295,10 +429,12 @@ export class AccountingSourceService {
     return { configured: true, sourceId: this.store.sourceId, qualificationId: this.qualification?.id ?? null,
       expiresAt: this.qualification?.expiresAt ?? null, sourceGeneration: this.collector.identity().generation,
       semanticRevision: Number(this.control?.semantic_revision ?? 0), pending: this.pending, hold, captureId: this.latest?.captureId ?? null,
-      settingsHash: this.settingsHash, brokerReadOnly: true };
+      settingsHash: this.settingsHash, brokerReadOnly: true, automaticClockRecovery: {...recoveryStatus(!!this.options.automaticClockRecoveryEnabled,this.episode,this.recoveryUnknown),rejectedClock:this.rejectedClock} };
   }
   async join(snapshot: BrokerReconciliationSnapshot, input: { runId: number; positionGeneration: number; recoveryStart: Date; timeoutMs: number; abortSignal: AbortSignal }): Promise<BrokerReconciliationSnapshot> {
-    if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
+    if (this.busy) throw accountingError("SOURCE_BUSY");
+    if (this.control?.hold === "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_INVALID");
+    this.busy = true;
     this.diagnosticRunId = input.runId;
     try {
       const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal);
@@ -319,12 +455,15 @@ export class AccountingSourceService {
           .filter((id): id is string => id !== undefined), replayId: inspection.replayId, replayEndId: inspection.replayEndId };
       capture.fingerprint = accountingHash({ ...capture, fingerprint: undefined });
       const epoch = this.gapEpoch;
+      this.gap=true; this.latest=undefined;
       await brokerPhase(this.diagnostics, 'accounting.publication', { runId: input.runId, requestId: inspection.replayId, generation: inspection.connectionGeneration }, () => this.store.publish(capture, () => {
         this.assertDrained(); this.assertIdentity(); this.assertQualified();
         if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("REVISION_CHANGED");
       }));
       this.gap = false; this.latest = capture;
-      this.assertCurrent(capture);
+      this.episode = await this.store.recovery.latest();
+      // Captures remain available for an audited manual completion while entry stays fenced.
+      if (this.episode?.state !== "OPERATOR_REQUIRED") this.assertCurrent(capture);
       const accounting = accountingReference(capture);
       return { ...snapshot, accounting, capturedAt: new Date(capture.capturedAt), executions: fullExecutions.map(e => ({ ...e, executedAt: new Date(e.executedAt) })),
         sourceCoverage: { ...snapshot.sourceCoverage, executions: { ...snapshot.sourceCoverage.executions, count: fullExecutions.length,
@@ -334,6 +473,7 @@ export class AccountingSourceService {
   async readCapture(db: Pick<Pool | PoolClient, "query">, reference: AccountingCaptureReference, lock = false): Promise<AccountingCapture> {
     this.assertCurrent(reference);
     const { capture, control, qualification } = await this.store.readCapture(db, reference.captureId, lock);
+    if (await this.store.recovery.active(db)) throw accountingError("CLOCK_RECOVERY_ACTIVE");
     if (accountingHash(accountingReference(capture)) !== accountingHash(reference) || capture.accountId !== this.settings.accountId || control.gap || control.hold
       || Number(control.semantic_revision) !== capture.barrier.semanticRevision || control.qualification_id !== capture.qualificationId
       || !qualification || Date.parse(qualification.expiresAt) <= Date.now()) throw accountingError("REVISION_CHANGED");

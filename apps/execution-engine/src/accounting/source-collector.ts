@@ -1,3 +1,4 @@
+import { Socket } from "node:net";
 import { IBApi } from "@stoqey/ib";
 import { performance } from 'node:perf_hooks';
 import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
@@ -9,6 +10,36 @@ export interface AccountingSocket {
   on(event: string, callback: (...args: unknown[]) => void): unknown;
   connect(): unknown; disconnect(): unknown; reqManagedAccts(): unknown; reqCurrentTime(): unknown;
   reqExecutions(requestId: number, filter: { clientId: number; acctCode: string; time: string; symbol: string; secType: string; exchange: string; side: string }): unknown;
+}
+// @stoqey/ib 1.6.10 emits disconnected on TCP EOF as well as close. Only the
+// captured native transport's close event can certify retirement.
+export function accountingSocketWithTransportClose(api: AccountingSocket): AccountingSocket {
+  let transport: Socket | undefined;
+  const closed = new Set<() => void>();
+  return {
+    get serverVersion() { return api.serverVersion; },
+    on(event, callback) { if (event === "transportClosed") { closed.add(callback); return; } return api.on(event, callback); },
+    connect() {
+      api.connect();
+      const candidate = (api as unknown as { controller?: { socket?: { client?: unknown } } }).controller?.socket?.client;
+      if (!(candidate instanceof Socket)) {
+        api.disconnect(); throw accountingError("SOURCE_TRANSPORT_UNSUPPORTED");
+      }
+      transport = candidate;
+      let notified = false;
+      const notify = () => { if (!notified) { notified = true; for (const callback of closed) callback(); } };
+      transport.once("close", notify);
+      if (transport.closed) notify();
+    },
+    disconnect() {
+      // API disconnected after EOF may suppress its own disconnect command.
+      // Destroy still requires the separate close acknowledgement.
+      try { api.disconnect(); } finally { transport?.destroy(); }
+    },
+    reqManagedAccts() { return api.reqManagedAccts(); },
+    reqCurrentTime() { return api.reqCurrentTime(); },
+    reqExecutions(requestId, filter) { return api.reqExecutions(requestId, filter); },
+  };
 }
 export type CollectorObservation = { kind: "execution"; value: CanonicalExecution; raw: unknown; requestId: number }
   | { kind: "commission"; value: CanonicalCommission; raw: unknown }
@@ -38,6 +69,9 @@ export class AccountingSourceCollector {
   private socket: AccountingSocket | undefined;
   private readonly socketFactory: () => AccountingSocket;
   private readonly usedSockets = new WeakSet<AccountingSocket>();
+  private retiring: AccountingSocket | undefined;
+  private transportClosed = new WeakSet<AccountingSocket>();
+  private retirementWaiters = new Set<() => void>();
   private ready = false; private upstream = true; private connecting = false;
   private accounts: string[] = []; private protocol = 0; private generation = 0; private requestId = 0;
   private waiters = new Set<() => void>();
@@ -45,15 +79,21 @@ export class AccountingSourceCollector {
   private active: { requestId: number; executionIds: Set<string>; ended: boolean; brokerTime?: number; clockWaiting: boolean; clockRequestedAt?: string; error?: Error;
     started: number; phase: 'ready' | 'clock' | 'replay_end'; clockSent: boolean; clockReceived: boolean } | undefined;
   constructor(readonly settings: SourceSettingsV1, private readonly callbacks: {
-    observe: (value: CollectorObservation) => void; gap: (generation: number, code?: string) => void;
+    observe: (value: CollectorObservation) => void; gap: (generation: number, code?: string) => void; assertOwner?: () => void; socketEndpoint?: () => SourceSettingsV1["endpoint"];
   }, socketFactory?: () => AccountingSocket, private readonly diagnostics?: BrokerPhaseDiagnostics) {
-    this.socketFactory = socketFactory ?? (() => new IBApi({ ...settings.endpoint, clientId: 0 }) as unknown as AccountingSocket);
+    this.socketFactory = socketFactory ?? (() => accountingSocketWithTransportClose(new IBApi({ ...(callbacks.socketEndpoint?.() ?? settings.endpoint), clientId: 0 }) as unknown as AccountingSocket));
   }
   private bindSocket(socket: AccountingSocket, generation: number): void {
     const settings = this.settings;
+    // Transport retirement acknowledgements survive the data-generation fence.
+    socket.on("transportClosed", () => {
+      this.transportClosed.add(socket);
+      if (this.retiring === socket) this.retiring = undefined;
+      for (const wake of this.retirementWaiters) wake();
+    });
     const listen = (event: string, fn: (...args: unknown[]) => void) => socket.on(event, (...args) => {
       if (this.socket !== socket || this.generation !== generation) return;
-      try { fn(...args); } catch (error) {
+      try { this.callbacks.assertOwner?.(); fn(...args); } catch (error) {
         const failure = error instanceof Error && error.message.startsWith("ACCOUNTING_") ? error : accountingError("IDENTITY_INVALID");
         emitBrokerPhase(this.diagnostics, 'accounting.callback', 'error', { generation, requestId: this.active?.requestId, reason: failure.message }, undefined, error);
         if (this.active) this.active.error ??= failure;
@@ -123,8 +163,10 @@ export class AccountingSourceCollector {
   private notify() { for (const wake of this.waiters) wake(); }
   identity() { return { generation: this.generation, protocolVersion: this.protocol, accounts: [...this.accounts], ready: this.ready && this.upstream && this.accounts.includes(this.settings.accountId) }; }
   connect() {
+    this.callbacks.assertOwner?.();
     if (this.ready || this.connecting) return;
-    const old = this.socket; this.socket = undefined; old?.disconnect();
+    if (this.socket) this.close();
+    if (this.retiring) throw accountingError("SOURCE_RETIREMENT_UNKNOWN");
     const socket = this.socketFactory();
     if (this.usedSockets.has(socket)) throw accountingError("SOCKET_REUSED");
     this.usedSockets.add(socket); this.socket = socket;
@@ -139,7 +181,24 @@ export class AccountingSourceCollector {
     const socket = this.socket; this.socket = undefined;
     this.ready = false; this.connecting = false; this.accounts = [];
     if (this.active) this.active.error ??= accountingError("SOURCE_GAP");
-    this.callbacks.gap(this.generation); socket?.disconnect(); this.notify();
+    this.callbacks.gap(this.generation);
+    if (socket && !this.transportClosed.has(socket)) {
+      this.retiring = socket;
+      try { socket.disconnect(); } catch (error) {
+        emitBrokerPhase(this.diagnostics, 'accounting.disconnect', 'error', { generation: this.generation }, undefined, error);
+      }
+    }
+    this.notify();
+  }
+  async retire(timeoutMs = 2000): Promise<boolean> {
+    this.close();
+    if (!this.retiring) return true;
+    return new Promise(resolve => {
+      const finish = (acknowledged: boolean) => { clearTimeout(timer); this.retirementWaiters.delete(check); resolve(acknowledged); };
+      const check = () => { if (!this.retiring) finish(true); };
+      const timer = setTimeout(() => finish(false), Math.max(0, Math.min(2000, timeoutMs)));
+      this.retirementWaiters.add(check); check();
+    });
   }
   private wait(predicate: () => boolean, deadline: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -159,6 +218,7 @@ export class AccountingSourceCollector {
     });
   }
   async replay(timeoutMs: number, signal: AbortSignal): Promise<{ requestId: number; brokerTime: string; executionIds: string[]; generation: number }> {
+    this.callbacks.assertOwner?.();
     if (this.active) throw accountingError("SOURCE_BUSY");
     const deadline = Date.now() + Math.min(10_000, timeoutMs);
     this.active = { requestId: ++this.requestId, executionIds: new Set(), ended: false, clockWaiting: false,
@@ -174,15 +234,16 @@ export class AccountingSourceCollector {
       active.phase = 'clock';
       emitBrokerPhase(this.diagnostics, 'accounting.clock_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
       await brokerPhase(this.diagnostics, 'accounting.clock_wait', { generation, requestId: active.requestId }, async () => {
-        this.socket!.reqCurrentTime(); await this.wait(() => active.brokerTime !== undefined, deadline, signal);
+        this.callbacks.assertOwner?.(); this.socket!.reqCurrentTime(); await this.wait(() => active.brokerTime !== undefined, deadline, signal);
       });
       this.callbacks.observe({ kind: "replay_start", value: { requestId: active.requestId }, requestId: active.requestId });
       active.phase = 'replay_end';
       emitBrokerPhase(this.diagnostics, 'accounting.replay_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
       await brokerPhase(this.diagnostics, 'accounting.replay_end_wait', { generation, requestId: active.requestId }, async () => {
-        this.socket!.reqExecutions(active.requestId, { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" });
+        this.callbacks.assertOwner?.(); this.socket!.reqExecutions(active.requestId, { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" });
         await this.wait(() => active.ended, deadline, signal);
       });
+      this.callbacks.assertOwner?.();
       if (!this.identity().ready || generation !== this.generation) throw accountingError("SOURCE_GAP");
       emitBrokerPhase(this.diagnostics, 'accounting.replay_total', 'ok', { generation, requestId: active.requestId }, performance.now() - active.started);
       return { requestId: active.requestId, brokerTime: new Date(active.brokerTime!).toISOString(), executionIds: [...active.executionIds], generation };

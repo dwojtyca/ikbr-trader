@@ -88,6 +88,7 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 import { loadAccountingSettings } from "./accounting/config.js";
 import { AccountingSourceStore } from "./accounting/source-store.js";
 import { AccountingSourceService } from "./accounting/source-service.js";
+import { AccountingClockRecoveryCoordinator } from "./accounting/clock-recovery-coordinator.js";
 import { accountingHash } from "./accounting/types.js";
 import { registerAccountingRoutes } from "./accounting/routes.js";
 
@@ -364,7 +365,8 @@ const notificationCheckpoint:LifecycleNotificationCheckpoint = new LifecycleNoti
 if (loadedAccounting) accountingSource = new AccountingSourceService(
   new AccountingSourceStore(pool, accountingHash({ account: loadedAccounting.settings.accountId, kind: "tws-accounting" }), EXECUTION_PROCESS_OWNER_ID),
   loadedAccounting.settings, loadedAccounting.sha256, () => ({ connected: tws.isConnected(), accountId: lastActiveAccountId,
-    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }), undefined, brokerDiagnostics);
+    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }), undefined, brokerDiagnostics,
+  { automaticClockRecoveryEnabled: config.EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED === "true" });
 
 // PR15 — production reconciliation wiring. Uses the REAL
 // `IbBrokerReconciliationAdapter` backed by the same `tws`
@@ -1646,6 +1648,21 @@ async function loadStockMetadata(bound: BoundInstrument, accountId: string) {
   } : null });
 }
 
+const accountingClockRecovery = accountingSource ? new AccountingClockRecoveryCoordinator({
+  source: accountingSource,
+  requestFreshCapture: () => reconScheduler.triggerFresh(),
+  onState: async state => {
+    const source = accountingSource!;
+    app.log.info({ accountingClockRecovery: state }, "Stan automatycznego odzyskiwania rozliczeń zegara");
+    if (state.state === "OPERATOR_REQUIRED" || state.state === "OUTCOME_UNKNOWN") {
+      await lifecycleAlerts.recordFault({ accountId: source.settings.accountId, proposalId: null,
+        code: "ACCOUNTING_CLOCK_RECOVERY_REQUIRED", evidence: { episodeId: state.episodeId, attemptCount: state.attemptCount } });
+    } else if (state.state === "RECOVERED") {
+      await lifecycleAlerts.resolveClockRecovery(source.settings.accountId, () => source.assertCurrent());
+    }
+  },
+}) : undefined;
+
 const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
   durableFaults: true,
   assertManagementAllowed: assertLifecycleManagement,
@@ -1785,7 +1802,7 @@ app.get("/execution/lifecycle/supervision", async () => {
   assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
   const rows = await pool.query("SELECT * FROM lifecycle_supervision WHERE account_id=$1 ORDER BY original_proposal_id DESC LIMIT 100", [lastActiveAccountId]);
   return { observer: lifecycleObserver.status(), automationEnabled: config.EXECUTION_LIFECYCLE_AUTOMATION_ENABLED === "true",
-    tradingEnabled: config.tradingEnabled, positions: rows.rows, alerts: await lifecycleAlerts.readStatus(lastActiveAccountId!, EXECUTION_PROCESS_OWNER_ID) };
+    tradingEnabled: config.tradingEnabled, accounting: accountingSource?.status() ?? null, positions: rows.rows, alerts: await lifecycleAlerts.readStatus(lastActiveAccountId!, EXECUTION_PROCESS_OWNER_ID) };
 });
 const diagnosticPool = new Pool({ connectionString: config.POSTGRES_URL, max: 2, connectionTimeoutMillis: 2000, query_timeout: 3000, statement_timeout: 2500 });
 const diagnosticRepository = new ExecutionRepository(diagnosticPool);
@@ -1989,6 +2006,7 @@ async function main(): Promise<void> {
   // RUNNING → final status via two short `snap:<account>` xact
   // locks around Phase B broker reads.
   reconScheduler.start();
+  accountingClockRecovery?.start();
   lifecycleObserver.start();
   void lifecycleAlertWorker.start().catch(() => {
     lifecycleLocallyHealthy = false;
@@ -2030,6 +2048,7 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, async () => {
     configurationRuntime.stopHeartbeat();
     try {
+      await accountingClockRecovery?.stop();
       await lifecycleObserver.stop();
       await lifecycleAlertWorker.stop();
       await reconScheduler.stop();

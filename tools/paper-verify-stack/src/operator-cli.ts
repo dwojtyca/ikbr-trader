@@ -50,12 +50,41 @@ export function renderBoundedExport(input:DiagnosticReport,json:boolean,timeZone
 export function appendLiveSupervision(report:DiagnosticReport,raw:unknown):DiagnosticReport {
   const object=(v:unknown):Record<string,unknown>|null=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:null;
   const value=object(raw),observer=object(value?.observer);
+  const recovery=object(value?.accounting)?.automaticClockRecovery;
+  const clock=object(recovery);
+  const states=['IDLE','WAITING','RECOVERING','VERIFYING','RECOVERED','BACKOFF','OPERATOR_REQUIRED','OUTCOME_UNKNOWN'] as const;
+  const validClock=Boolean(clock&&typeof clock.enabled==='boolean'&&(typeof clock.episodeId==='string'||clock.episodeId===null));
+  const state=clock&&states.includes(clock.state as typeof states[number])?clock.state as typeof states[number]:null;
+  const bounded=(input:unknown,max=240):string|null=>typeof input==='string'?safeDiagnosticText(input).slice(0,max):null;
+  const optionalText=(input:unknown,max=160):string|null=>input===null?null:bounded(input,max);
+  const safeClock=clock!==null&&validClock&&state!==null&&Number.isInteger(clock.attemptCount)&&Number(clock.attemptCount)>=0&&Number(clock.attemptCount)<=3&&clock.attemptLimit===3&&
+    (clock.nextAttemptAt===null||typeof clock.nextAttemptAt==='string')&&(clock.firstErrorAt===null||typeof clock.firstErrorAt==='string')&&
+    (clock.lastError===null||typeof clock.lastError==='string')&&(clock.receiptId===null||typeof clock.receiptId==='string')&&(clock.captureId===null||typeof clock.captureId==='string')&&typeof clock.entryBlocked==='boolean';
+  const cause=safeClock?object(clock?.originalCause):null, rejected=safeClock?object(clock?.rejectedClock):null;
+  const phaseLabels:Record<typeof states[number],string>={IDLE:'bez aktywnego holda',WAITING:'oczekuje na próbę',RECOVERING:'odzyskiwanie w toku',VERIFYING:'oczekuje na weryfikację capture',RECOVERED:'odzyskano rozliczenia; gotowość niepotwierdzona',BACKOFF:'oczekuje po błędzie',OPERATOR_REQUIRED:'wymaga operatora',OUTCOME_UNKNOWN:'wynik nieznany'};
   report.sections.push({id:'live-supervision',title:'Bieżący nadzór PP5',instrumentId:null,fields:[
     {key:'healthy',label:'Zdrowie obserwatora',value:typeof observer?.healthy==='boolean'?observer.healthy:null},
     {key:'reason',label:'Powód nadzoru',value:typeof observer?.reason==='string'?observer.reason:null,sensitivity:'untrusted'},
     {key:'running',label:'Trwa obserwacja',value:typeof observer?.running==='boolean'?observer.running:null},
     {key:'tradingEnabled',label:'Zapisy master',value:typeof value?.tradingEnabled==='boolean'?value.tradingEnabled:null},
     {key:'automationEnabled',label:'Automatyczne wyjścia',value:typeof value?.automationEnabled==='boolean'?value.automationEnabled:null},
+    {key:'clockRecoveryEnabled',label:'Automatyczne odzyskiwanie zegara — włączone',value:safeClock&&typeof clock?.enabled==='boolean'?clock.enabled:null},
+    {key:'clockRecoveryEpisodeId',label:'Epizod odzyskiwania zegara',value:safeClock?optionalText(clock!.episodeId):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryState',label:'Faza odzyskiwania zegara',value:safeClock?phaseLabels[state!]:null},
+    {key:'clockRecoveryAttempt',label:'Próba odzyskiwania',value:safeClock?`${clock!.attemptCount}/3`:null},
+    {key:'clockRecoveryNextAttemptAt',label:'Następna próba od',value:safeClock?optionalText(clock!.nextAttemptAt):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryFirstErrorAt',label:'Pierwszy błąd od',value:safeClock?optionalText(clock!.firstErrorAt):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryLastError',label:'Ostatnia przyczyna',value:safeClock?optionalText(clock!.lastError):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryCauseName',label:'Oryginalna nazwa błędu',value:optionalText(cause?.name),sensitivity:'untrusted'},
+    {key:'clockRecoveryCauseCode',label:'Oryginalny kod błędu',value:optionalText(cause?.code),sensitivity:'untrusted'},
+    {key:'clockRecoveryCauseMessage',label:'Oryginalny opis błędu',value:optionalText(cause?.message),sensitivity:'untrusted'},
+    {key:'clockRecoveryClockRequested',label:'Żądanie czasu',value:optionalText(rejected?.requestedAt),sensitivity:'untrusted'},
+    {key:'clockRecoveryClockReceived',label:'Odbiór czasu',value:optionalText(rejected?.receivedAt),sensitivity:'untrusted'},
+    {key:'clockRecoveryClockReported',label:'Odrzucona wartość czasu',value:optionalText(rejected?.reportedSeconds),sensitivity:'untrusted'},
+    {key:'clockRecoveryClockSkewMs',label:'Odchylenie zegara (ms)',value:typeof rejected?.skewMs==='number'&&Number.isFinite(rejected.skewMs)?rejected.skewMs:null},
+    {key:'clockRecoveryReceiptId',label:'Identyfikator potwierdzenia',value:safeClock?optionalText(clock!.receiptId):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryCaptureId',label:'Identyfikator capture',value:safeClock?optionalText(clock!.captureId):null,sensitivity:'untrusted'},
+    {key:'clockRecoveryEntryBlocked',label:'Blokada wejść przez recovery',value:safeClock&&typeof clock?.entryBlocked==='boolean'?clock.entryBlocked:null},
   ]});
   report.coverage.push({source:'live_supervision',status:observer?'PARTIAL':'UNAVAILABLE',observedAt:report.generatedAt,earliestAvailableAt:null,reasons:['CURRENT_PROCESS_OBSERVATION_NOT_BROKER_PROOF']});
   return sanitizeDiagnosticReport(report);

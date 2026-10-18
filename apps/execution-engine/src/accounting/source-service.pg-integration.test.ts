@@ -24,7 +24,7 @@ class Socket extends EventEmitter implements AccountingSocket {
   feesAfterEnd = false; omitEnd = false; afterReplay?: () => void;
   constructor(readonly account: string) { super(); }
   connect() { this.emit("server", 178, "test server time"); this.emit("nextValidId", 1); }
-  disconnect() { this.emit("disconnected"); }
+  disconnect() { this.emit("disconnected"); this.emit("transportClosed"); }
   reqManagedAccts() { this.emit("managedAccounts", this.account); }
   reqCurrentTime() { this.emit("currentTime", Math.floor(Date.now() / 1000)); }
   reqExecutions(id: number) {
@@ -46,10 +46,11 @@ test("F1 durable production source, qualification, capture and admission", { ski
   connection.pathname = `/${database}`;
   const pool = new Pool({ connectionString: connection.href, max: 6 });
   let created = false;
-  async function fixture() {
+  let endpointPort=20000;
+  async function fixture(automaticClockRecoveryEnabled=false) {
     const account = "F1_" + randomUUID(), process = "session_" + randomUUID();
     const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: "ibkr-tws-seven-day-v1", environment: "paper", accountId: account,
-      endpoint: { host: "test.invalid", port: 1 }, sourceClientId: 0, executionTimeZone: "UTC" };
+      endpoint: { host: "127.0.0.1", port: endpointPort++ }, sourceClientId: 0, executionTimeZone: "UTC" };
     let socket = new Socket(account), initialSocket = true;
     const next = { configure: (_socket: Socket) => {} };
     const identity = { connected: true, accountId: account, sessionId: process, generation: 1 };
@@ -57,7 +58,7 @@ test("F1 durable production source, qualification, capture and admission", { ski
       if (initialSocket) initialSocket = false;
       else { const replacement = new Socket(account); replacement.fills = socket.fills; socket = replacement; next.configure(socket); }
       return socket;
-    });
+    },undefined,{automaticClockRecoveryEnabled});
     await service.initialize(); service.start();
     await pool.query(`INSERT INTO broker_snapshot_syncs(account_id,session_id,observed_at,complete,generation) VALUES($1,$2,clock_timestamp(),true,1)`, [account, process]);
     const qualify = async () => {
@@ -303,7 +304,7 @@ test("F1 durable production source, qualification, capture and admission", { ski
         const receipt = await f.service.recoverClock();
         assert.notEqual(old, f.socket); assert.equal(receipt.qualificationId, q); assert.equal(receipt.gap, true);
         const control = await f.store.control(); assert.equal(control.hold, null); assert.equal(control.gap, true); assert.equal(control.qualification_id, q);
-        assert.throws(() => f.service.assertCurrent(), qualified ? /EVIDENCE_STALE/ : /QUALIFICATION_REQUIRED/);
+        assert.throws(() => f.service.assertCurrent(), /CLOCK_RECOVERY_VERIFYING/);
         assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "1");
         await assert.rejects(f.service.recoverClock(), /HOLD_MISMATCH/);
         if (qualified) assert.equal((await f.capture()).day.ok, true);
@@ -356,9 +357,9 @@ test("F1 durable production source, qualification, capture and admission", { ski
         await f.drained(); if (mode === "correction") f.socket.fills = [f.socket.fill("race.01")];
         await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
         let entered!: () => void; const atLock = new Promise<void>(resolve => { entered = resolve; });
-        f.store.recoverClock = async (e, guard) => {
+        f.store.recoverClock = async (e, guard, reservation) => {
           await holder.query("BEGIN"); await holder.query("SELECT 1 FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE", [f.store.sourceId]);
-          entered(); return original(e, guard);
+          entered(); return original(e, guard,reservation);
         };
         try {
           const operation = f.service.recoverClock(), rejection = assert.rejects(operation);
@@ -400,7 +401,7 @@ test("F1 durable production source, qualification, capture and admission", { ski
       await assert.rejects(replacement.inspect(), /CLOCK_INVALID/);
       const receipt = await replacement.recoverClock();
       assert.equal(receipt.qualificationId, q); assert.equal((await store.control()).hold, null);
-      assert.throws(() => replacement.assertCurrent(), /EVIDENCE_STALE/); await replacement.close();
+      assert.throws(() => replacement.assertCurrent(), /CLOCK_RECOVERY_VERIFYING/); await replacement.close();
     });
     await t.test("a callback immediately before recovery commit prevents a stale clear", async () => {
       const f = await fixture(); await f.drained(); await f.store.gap(f.service.status().sourceGeneration, "ACCOUNTING_CLOCK_INVALID");
@@ -430,6 +431,206 @@ test("F1 durable production source, qualification, capture and admission", { ski
       finally { Date.now = now; }
       assert.equal((await f.store.control()).hold, "ACCOUNTING_CLOCK_INVALID");
       assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'", [f.store.sourceId])).rows[0].count, "0");
+      await f.service.close();
+    });
+    await t.test("automatic recovery charges once, keeps arbiter fast and gates entry through joined capture", async () => {
+      const f=await fixture(true); await f.qualify(); await f.capture(); await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,"ACCOUNTING_CLOCK_INVALID");
+      let release!:()=>void, entered!:()=>void;
+      const started=new Promise<void>(resolve=>{entered=resolve;});
+      f.next.configure=socket=>{const read=socket.reqExecutions.bind(socket);socket.reqExecutions=id=>{release=()=>read(id);entered();};};
+      const recovering=f.service.automaticRecovery(new AbortController().signal);
+      await started;
+      const before=Date.now();
+      await assert.rejects(f.service.inspect(),/SOURCE_BUSY/);
+      await assert.rejects(f.service.recoverClock(),/SOURCE_BUSY/);
+      await assert.rejects(f.capture(),/REPLAY_INCOMPLETE/);
+      assert.ok(Date.now()-before<500);
+      assert.throws(()=>f.service.assertCurrent());
+      release(); const receipt=await recovering; assert.ok(receipt);
+      assert.equal(f.service.status().automaticClockRecovery.state,'VERIFYING');
+      assert.throws(()=>f.service.assertCurrent(),/CLOCK_RECOVERY_VERIFYING/);
+      f.socket.reqExecutions=id=>f.socket.emit('execDetailsEnd',id);
+      assert.equal((await f.capture()).day.ok,true);
+      assert.equal(f.service.status().automaticClockRecovery.state,'RECOVERED');
+      assert.equal(f.service.status().automaticClockRecovery.attemptCount,1);
+      await f.service.close();
+    });
+    await t.test("three failed automatic attempts exhaust durably; manual proof preserves automatic budget", async () => {
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      f.next.configure=socket=>{socket.reqCurrentTime=()=>socket.emit('currentTime',NaN);};
+      let episodeId:string|null=null;
+      for(let count=1;count<=3;count++) {
+        await assert.rejects(f.service.automaticRecovery(new AbortController().signal),/CLOCK_INVALID/);
+        const status=f.service.status().automaticClockRecovery;
+        episodeId ??=status.episodeId; assert.equal(status.episodeId,episodeId);assert.equal(status.attemptCount,count);
+        assert.equal(status.state,count===3?'OPERATOR_REQUIRED':'BACKOFF');
+        if(count<3) {
+          const remaining=Date.parse(status.nextAttemptAt!)-Date.now();assert.ok(remaining>(count===1?29000:119000));
+          await pool.query("UPDATE broker_accounting_clock_episodes SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE id=$1",[episodeId]);
+        }
+      }
+      assert.equal(await f.service.automaticRecovery(new AbortController().signal),null);
+      f.next.configure=()=>{};
+      await f.service.recoverClock(); await f.capture();
+      assert.equal(f.service.status().automaticClockRecovery.attemptCount,3);
+      assert.equal(f.service.status().automaticClockRecovery.state,'RECOVERED');
+      assert.equal((await pool.query('SELECT count(*) FROM broker_accounting_clock_attempts WHERE source_id=$1',[f.store.sourceId])).rows[0].count,'4');
+      await assert.rejects(pool.query('UPDATE broker_accounting_clock_attempts SET automatic=false WHERE source_id=$1',[f.store.sourceId]),/immutable/i);
+      await f.service.close();
+    });
+    await t.test("rolling source cap spans recovered episodes and refuses seventh acquisition", async () => {
+      const f=await fixture(true);await f.qualify();await f.drained();
+      for(let n=0;n<6;n++) {
+        await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+        assert.ok(await f.service.automaticRecovery(new AbortController().signal));await f.capture();
+      }
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      assert.equal(await f.service.automaticRecovery(new AbortController().signal),null);
+      assert.equal(f.service.status().automaticClockRecovery.state,'OPERATOR_REQUIRED');
+      await assert.rejects(f.service.recoverClock(),/LIMIT/);
+      assert.equal((await pool.query('SELECT count(*) FROM broker_accounting_clock_attempts WHERE source_id=$1',[f.store.sourceId])).rows[0].count,'6');
+      await f.service.close();
+    });
+    await t.test("lost claim response resolves charged attempt without another socket or uncharged retry", async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      const before=f.socket,claim=f.store.recovery.claim.bind(f.store.recovery);
+      f.store.recovery.claim=async(...args)=>{await claim(...args);throw Object.assign(new Error('lost claim response'),{commitUnknown:true});};
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal),/lost claim/);
+      assert.equal(f.socket,before);assert.equal(f.service.status().automaticClockRecovery.attemptCount,1);
+      assert.equal(f.service.status().automaticClockRecovery.state,'OPERATOR_REQUIRED');
+      assert.equal((await pool.query('SELECT count(*) FROM broker_accounting_clock_attempts WHERE source_id=$1',[f.store.sourceId])).rows[0].count,'1');
+      await f.service.close();
+    });
+    await t.test("lost receipt COMMIT resolves stable attempt to VERIFYING with no second recovery",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      const recover=f.store.recoverClock.bind(f.store);
+      f.store.recoverClock=async(...args)=>{await recover(...args);throw Object.assign(new Error('lost receipt response'),{commitUnknown:true});};
+      const receipt=await f.service.automaticRecovery(new AbortController().signal);assert.ok(receipt);
+      assert.equal(f.service.status().automaticClockRecovery.state,'VERIFYING');
+      assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'",[f.store.sourceId])).rows[0].count,'1');
+      await f.capture();assert.equal(f.service.status().automaticClockRecovery.state,'RECOVERED');await f.service.close();
+    });
+    await t.test("manual evidence-only completion requires current capture and never opens a socket or resets limits",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      const receipt=await f.service.automaticRecovery(new AbortController().signal);
+      await f.service.requireRecoveryOperator('ACCOUNTING_CLOCK_RECOVERY_VERIFY_TIMEOUT');
+      await assert.rejects(f.service.recoverClock(),/HOLD_MISMATCH/);
+      assert.equal((await f.capture()).day.ok,false);
+      assert.throws(()=>f.service.assertCurrent(),/OPERATOR_REQUIRED/);
+      const socket=f.socket,done=await f.service.recoverClock();
+      assert.equal(done.id,receipt!.id);assert.equal(f.socket,socket);
+      assert.equal(f.service.status().automaticClockRecovery.attemptCount,1);
+      assert.equal(f.service.status().automaticClockRecovery.state,'RECOVERED');
+      await f.capture();await f.service.close();
+    });
+    await t.test("invalid clock in VERIFYING preserves episode and applies second-attempt backoff",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      await f.service.automaticRecovery(new AbortController().signal);
+      const episode=f.service.status().automaticClockRecovery.episodeId;
+      f.socket.emit('currentTime',NaN);await f.drained();
+      assert.equal(f.service.status().automaticClockRecovery.state,'BACKOFF');
+      await pool.query("UPDATE broker_accounting_clock_episodes SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE id=$1",[episode]);
+      await f.service.automaticRecovery(new AbortController().signal);
+      f.socket.emit('currentTime',NaN);await f.drained();
+      const state=f.service.status().automaticClockRecovery;
+      assert.equal(state.episodeId,episode);assert.equal(state.attemptCount,2);
+      assert.ok(Date.parse(state.nextAttemptAt!)-Date.now()>119000);
+      await f.service.close();
+    });
+    await t.test("lifetime endpoint owner prevents a second service from begin even with automatic flag disabled",async()=>{
+      const f=await fixture(false);await f.drained();const original=(await f.store.control()).process_session_id;
+      let sockets=0;
+      const otherStore=new AccountingSourceStore(pool,f.store.sourceId,randomUUID());
+      const other=new AccountingSourceService(otherStore,f.settings,'a'.repeat(64),()=>f.identity,()=>{sockets++;return new Socket(f.account);});
+      await assert.rejects(other.initialize(),/SOURCE_OWNER_CONFLICT/);
+      assert.equal(sockets,0);assert.equal((await f.store.control()).process_session_id,original);
+      await f.service.close();
+    });
+    await t.test("disabled automatic recovery cannot spend an attempt and restart preserves exhaustion",async()=>{
+      const disabled=await fixture(false);await disabled.qualify();await disabled.drained();
+      await disabled.store.gap(disabled.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      assert.equal(await disabled.service.automaticRecovery(new AbortController().signal),null);
+      assert.equal((await pool.query('SELECT count(*) FROM broker_accounting_clock_attempts WHERE source_id=$1',[disabled.store.sourceId])).rows[0].count,'0');
+      await disabled.service.close();
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      f.next.configure=socket=>{socket.reqCurrentTime=()=>socket.emit('currentTime',NaN);};
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal));
+      const episode=f.service.status().automaticClockRecovery.episodeId;await f.service.close();
+      const restarted=new AccountingSourceService(new AccountingSourceStore(pool,f.store.sourceId,randomUUID()),f.settings,'a'.repeat(64),()=>f.identity,()=>new Socket(f.account),undefined,{automaticClockRecoveryEnabled:true});
+      await restarted.initialize();
+      assert.equal(restarted.status().automaticClockRecovery.episodeId,episode);
+      assert.equal(restarted.status().automaticClockRecovery.state,'OPERATOR_REQUIRED');
+      assert.equal(await restarted.automaticRecovery(new AbortController().signal),null);
+      await restarted.close();
+    });
+    await t.test("uncertain receipt result stays OUTCOME_UNKNOWN and cannot silently rearm",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      f.store.recoverClock=async()=>{throw Object.assign(new Error('connection lost'),{commitUnknown:true});};
+      f.store.recovery.resolve=async()=> 'unknown';
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal),/connection lost/);
+      assert.equal(f.service.status().automaticClockRecovery.state,'OUTCOME_UNKNOWN');
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal),/OUTCOME_UNKNOWN/);
+      await assert.rejects(f.service.recoverClock(),/OUTCOME_UNKNOWN/);
+      assert.equal((await pool.query('SELECT count(*) FROM broker_accounting_clock_attempts WHERE source_id=$1',[f.store.sourceId])).rows[0].count,'1');
+      await f.service.close();
+    });
+    await t.test("database lock delay is bounded and cannot publish receipt after its transaction deadline",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      const holder=await pool.connect(),recover=f.store.recoverClock.bind(f.store);
+      f.store.recoverClock=async(...args)=>{await holder.query('BEGIN');await holder.query('SELECT 1 FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE',[f.store.sourceId]);return recover(...args);};
+      const start=Date.now();
+      const operation=f.service.automaticRecovery(new AbortController().signal);
+      const release=setTimeout(()=>void holder.query('ROLLBACK'),2500);
+      try {await assert.rejects(operation);assert.ok(Date.now()-start<5000);}
+      finally {clearTimeout(release);await holder.query('ROLLBACK');holder.release();}
+      assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND kind='clock_recovery'",[f.store.sourceId])).rows[0].count,'0');
+      assert.throws(()=>f.service.assertCurrent());
+      await f.service.close();
+    });
+    await t.test("late capture cannot automatically complete expired VERIFYING; current proof permits manual closure",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      await f.service.automaticRecovery(new AbortController().signal);
+      const episode=f.service.status().automaticClockRecovery.episodeId;
+      await pool.query("UPDATE broker_accounting_clock_episodes SET verifying_at=clock_timestamp()-interval '61 seconds' WHERE id=$1",[episode]);
+      const capture=await f.capture();assert.equal(capture.day.ok,false);
+      assert.equal(f.service.status().automaticClockRecovery.state,'OPERATOR_REQUIRED');
+      assert.throws(()=>f.service.assertCurrent(),/OPERATOR_REQUIRED/);
+      await f.service.recoverClock();assert.equal(f.service.status().automaticClockRecovery.state,'RECOVERED');
+      await f.service.close();
+    });
+    await t.test("retired socket keeps lifetime owner for concurrent execution persistence and next bounded acquisition",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      f.next.configure=socket=>{socket.reqCurrentTime=()=>socket.emit('currentTime',NaN);};
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal),/CLOCK_INVALID/);
+      let legacy=0;
+      f.service.observeExecution({execId:'after-retirement',accountId:f.account,conid:'123',symbol:'TEST',secType:'STK',currency:'USD',exchange:'NASDAQ',side:'BUY',shares:1,price:100,orderId:1,executedAt:new Date(Date.now()-60000).toISOString()},async()=>{legacy++;});
+      f.service.observeCommission({execId:'after-retirement',currency:'USD',commission:1,realizedPnL:-2},async()=>{});
+      await f.drained();assert.equal(legacy,1);assert.notEqual(f.service.status().hold,'ACCOUNTING_PERSISTENCE_FAILED');
+      assert.equal((await pool.query("SELECT count(*) FROM broker_accounting_observations WHERE source_id=$1 AND lane='execution' AND kind='execution'",[f.store.sourceId])).rows[0].count,'1');
+      assert.equal(f.service.status().automaticClockRecovery.state,'BACKOFF');
+      assert.throws(()=>f.service.assertCurrent(),/SOURCE_OWNER_LOST/);
+      await f.service.close();
+    });
+    await t.test("clock diagnostics retain observed timing and sanitized original failure cause",async()=>{
+      const f=await fixture(true);await f.qualify();await f.drained();
+      await f.store.gap(f.service.status().sourceGeneration,'ACCOUNTING_CLOCK_INVALID');
+      f.next.configure=socket=>{socket.reqCurrentTime=()=>socket.emit('currentTime',NaN);};
+      await assert.rejects(f.service.automaticRecovery(new AbortController().signal));
+      const status=f.service.status().automaticClockRecovery;
+      assert.equal(status.rejectedClock?.reportedSeconds,'NaN');assert.equal(status.rejectedClock?.skewMs,undefined);
+      assert.ok(status.rejectedClock?.requestedAt);assert.ok(status.rejectedClock?.receivedAt);
+      assert.equal(status.originalCause?.name,'Error');assert.equal(status.originalCause?.message,'ACCOUNTING_CLOCK_INVALID');assert.equal(status.originalCause?.code,null);
       await f.service.close();
     });
     await t.test("reconnect reuses unchanged unexpired settings only after new full replay; revocation is immediate", async () => {
