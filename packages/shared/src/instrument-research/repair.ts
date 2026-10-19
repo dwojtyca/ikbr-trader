@@ -72,6 +72,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
       const marketauxState = marketauxStates.find(s => s.sourceId === source.id);
       if (marketauxState) row.marketauxRefresh = marketauxState;
       const deny = (reason: string) => { row.state = "HOLD"; row.reasons.push(reason); hold(reason); };
+      for(const recovery of [marketauxState?.recovery,wshState?.recovery])if(recovery?.state==='PREPARED')deny(recovery.reason??'RESEARCH_RECOVERY_MAINTENANCE_HOLD');
       if (source.automation !== "PERMITTED" || source.retention !== "FACTS_AND_REFERENCES") deny("RESEARCH_PERMISSION_UNVERIFIED");
       const kind = source.parserConfig.kind;
       const supported = role === "reports" ? (source.adapter === "sec-json" && kind === "sec-json") || (source.adapter === "issuer-document" && ["issuer-xhtml", "issuer-pdf-table"].includes(String(kind)))

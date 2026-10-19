@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Candle } from './index.js';
-import { buildInstrumentSessionIdentity, canonicalSessionTimeZone, checkSessionWindow, matchesSessionSlot, evaluateSessionCandles, expectedSessionSlot, filterClosedSessionCandles, parseBrokerSessionSchedule, requireSessionSchedule, requireSessionHistorySchedule, sessionCandleSlots, sessionLocalMidnight, sessionLocalTime, sessionNativeSource, shiftSessionDate, type InstrumentSessionIdentity, type SessionSchedule, type SessionScheduleEvidence, type SessionTimeframe } from './instrument-sessions.js';
+import { classifySessionHistoryPreparation, sessionHistoryCoverageBounds, parseBrokerContractSessionHours, buildInstrumentSessionIdentity, canonicalSessionTimeZone, checkSessionWindow, matchesSessionSlot, evaluateSessionCandles, expectedSessionSlot, filterClosedSessionCandles, parseBrokerSessionSchedule, requireSessionSchedule, requireSessionHistorySchedule, sessionCandleSlots, sessionLocalMidnight, sessionLocalTime, sessionNativeSource, shiftSessionDate, type InstrumentSessionIdentity, type SessionSchedule, type SessionScheduleEvidence, type SessionTimeframe } from './instrument-sessions.js';
 
 function fixture(zone = 'Europe/Warsaw', hour = 9, minute = 0, overrides: Partial<InstrumentSessionIdentity> = {}) {
   const identity: InstrumentSessionIdentity = { instrumentId: 'arbitrary_registered_contract', conId: 998877, symbol: 'OTHER', secType: 'STK', exchange: 'TEST', currency: 'PLN', useRTH: true, timeZone: zone, ...overrides };
@@ -233,4 +233,74 @@ test('weekly alias and Monday finality use local dates across DST instead of fix
   const row = candle(f.identity, '1w', slot.alternativeStarts![0]);
   assert.deepEqual(filterClosedSessionCandles([row], '1w', f.schedule, Date.parse(slot.end) - 1), []);
   assert.equal(filterClosedSessionCandles([row], '1w', f.schedule, Date.parse(slot.end)).length, 1);
+});
+
+function partialMondayFixture() {
+  const f = fixture('America/New_York', 9, 30);
+  const now = Date.parse('2026-10-19T07:23:43.347Z');
+  const receivedAt = new Date(now).toISOString(), requestedAt = '2026-10-19T07:23:42.887Z';
+  // The observed envelope and endpoints are exact; interior dates are explicit test data.
+  const dates = ['20260929', '20260930', '20261001', '20261002', '20261005', '20261006', '20261007',
+    '20261008', '20261009', '20261012', '20261013', '20261014', '20261015', '20261016'];
+  const schedule = parseBrokerSessionSchedule({ startDateTime: '20260929-09:30:00', endDateTime: '20261016-16:00:00', timeZone: 'US/Eastern',
+    sessions: dates.map(date => ({ refDate: date, startDateTime: `${date}-09:30:00`, endDateTime: `${date}-16:00:00` })) }, f.identity, requestedAt, receivedAt);
+  schedule.currentHours = parseBrokerContractSessionHours({ timeZoneId: 'US/Eastern', liquidHours: '20261019:0930-1600' }, f.identity, requestedAt, requestedAt);
+  return { identity: f.identity, schedule, now, evidence: { generation: 4, status: 'READY' as const, updatedAt: receivedAt, schedule } };
+}
+test('observed Monday preopen envelope prepares partial history without changing entry or weekly finality', () => {
+  const f = partialMondayFixture();
+  const original = JSON.stringify(f.evidence);
+  assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'PARTIAL');
+  assert.throws(() => requireSessionHistorySchedule(f.evidence, f.identity, f.now), /coverage_missing/);
+  assert.throws(() => requireSessionSchedule(f.evidence, f.identity, f.now), /coverage_missing/);
+  assert.throws(() => checkSessionWindow(f.evidence, f.identity, f.now, f.now, f.now + 60000), /coverage_missing/);
+  assert.equal(evaluateSessionCandles([], '1m', f.evidence, f.identity, f.now).reason, 'session_schedule_coverage_missing');
+  assert.equal(expectedSessionSlot('1w', f.schedule, f.now)?.end, '2026-10-12T04:00:00.000Z');
+  assert.equal(JSON.stringify(f.evidence), original);
+  const holiday = partialMondayFixture(); holiday.schedule.currentHours!.days[0].intervals = [];
+  assert.equal(classifySessionHistoryPreparation(holiday.evidence, holiday.identity, holiday.now).state, 'PARTIAL');
+  const short = partialMondayFixture(); short.schedule.sessions.at(-1)!.end = short.schedule.coverageEnd = '2026-10-16T17:00:00.000Z';
+  assert.equal(classifySessionHistoryPreparation(short.evidence, short.identity, short.now).state, 'PARTIAL');
+});
+for (const mutation of ['missing-hours', 'wrong-date', 'stale-hours', 'future-hours', 'hours-identity', 'overlap', 'open',
+  'late-start', 'old-end', 'failed', 'refreshing', 'generation', 'stale', 'future', 'bad-session'] as const)
+  test(`partial preparation rejects unavailable proof: ${mutation}`, () => {
+    const f = partialMondayFixture(), h = f.schedule.currentHours!;
+    if (mutation === 'missing-hours') delete f.schedule.currentHours;
+    if (mutation === 'wrong-date') h.days[0].date = '2026-10-20';
+    if (mutation === 'stale-hours') h.requestedAt = h.receivedAt = '2026-10-18T00:00:00.000Z';
+    if (mutation === 'future-hours') h.receivedAt = '2026-10-19T08:00:00.000Z';
+    if (mutation === 'hours-identity') h.identity.conId++;
+    if (mutation === 'overlap') h.days[0].intervals.push({ ...h.days[0].intervals[0] });
+    if (mutation === 'open') h.days[0].intervals[0].start = '2026-10-19T04:00:00.000Z';
+    if (mutation === 'late-start') { f.schedule.coverageStart = '2026-10-12T04:00:00.000Z'; f.schedule.sessions = f.schedule.sessions.filter(x => x.date >= '2026-10-12'); }
+    if (mutation === 'old-end') { f.schedule.coverageEnd = '2026-10-09T20:00:00.000Z'; f.schedule.sessions = f.schedule.sessions.filter(x => x.date <= '2026-10-09'); }
+    if (mutation === 'failed') f.evidence.status = 'FAILED' as never;
+    if (mutation === 'refreshing') f.evidence.status = 'REFRESHING' as never;
+    if (mutation === 'generation') f.evidence.generation = 0;
+    if (mutation === 'stale') f.now += 7 * 3600000;
+    if (mutation === 'future') f.now -= 1;
+    if (mutation === 'bad-session') f.schedule.sessions[0].end = f.schedule.sessions[0].start;
+    assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'UNAVAILABLE');
+  });
+test('partial bounds retain exact inclusivity and complete readiness at Monday boundary', () => {
+  const f = partialMondayFixture(), bounds = sessionHistoryCoverageBounds(f.identity, f.now);
+  f.schedule.sessions = f.schedule.sessions.filter(x => x.date === '2026-10-09');
+  f.schedule.coverageStart = bounds.priorSunday;
+  f.schedule.sessions = [{ date: '2026-10-11', start: '2026-10-11T14:00:00.000Z', end: '2026-10-11T20:00:00.000Z' }];
+  f.schedule.coverageEnd = bounds.previousMonday;
+  assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'PARTIAL');
+  f.schedule.coverageEnd = new Date(Date.parse(bounds.previousMonday) - 1).toISOString();
+  assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'UNAVAILABLE');
+  f.schedule.coverageEnd = bounds.currentMonday;
+  assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'COMPLETE');
+  f.schedule.coverageStart = new Date(Date.parse(bounds.priorSunday) + 1).toISOString();
+  assert.equal(classifySessionHistoryPreparation(f.evidence, f.identity, f.now).state, 'UNAVAILABLE');
+});
+test('history preparation bounds follow separate US and Polish DST dates', () => {
+  const us = partialMondayFixture().identity;
+  assert.deepEqual(sessionHistoryCoverageBounds(us, Date.parse('2026-11-02T08:00:00Z')), {
+    priorSunday: '2026-10-25T04:00:00.000Z', previousMonday: '2026-10-26T04:00:00.000Z', currentMonday: '2026-11-02T05:00:00.000Z' });
+  assert.deepEqual(sessionHistoryCoverageBounds({ ...us, timeZone: 'Europe/Warsaw' }, Date.parse('2026-10-26T08:00:00Z')), {
+    priorSunday: '2026-10-17T22:00:00.000Z', previousMonday: '2026-10-18T22:00:00.000Z', currentMonday: '2026-10-25T23:00:00.000Z' });
 });

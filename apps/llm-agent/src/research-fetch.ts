@@ -65,12 +65,14 @@ const TRANSIENT_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ECONNR
 function transientCode(error: unknown): boolean {
   return error instanceof Error && "code" in error && typeof error.code === "string" && TRANSIENT_CODES.has(error.code);
 }
+export interface ResearchDispatchGuard { assertActive(): void; signal?: AbortSignal }
 type ResearchFetchDeps = {
   resolveAddress?: typeof resolvePublicResearchAddress;
   httpsRequest?: typeof request;
   readJsonError?: boolean;
   privacy?: DiagnosticPrivacy;
   monotonicDeadlineMs?: number;
+  dispatchGuard?: ResearchDispatchGuard;
 };
 
 export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, accept: string,
@@ -80,23 +82,35 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
   const remaining = deps.monotonicDeadlineMs === undefined ? Date.parse(deadlineAt) - Date.now() : deps.monotonicDeadlineMs - performance.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > RESEARCH_SOURCE_TIMEOUT_MS) throw new Error("RESEARCH_SOURCE_DEADLINE_INVALID");
   const controller = new AbortController();
-  let timedOut = false;
+  let timedOut = false, dispatchClosed = false;
+  const shutdown = () => { dispatchClosed = true; controller.abort(); };
+  deps.dispatchGuard?.signal?.addEventListener('abort', shutdown, { once: true });
+  if (deps.dispatchGuard?.signal?.aborted) shutdown();
+  const assertDispatch = () => {
+    if (dispatchClosed || controller.signal.aborted) throw controller.signal.reason ?? new Error('RESEARCH_REFRESH_ABORTED');
+    deps.dispatchGuard?.assertActive();
+    const remainingNow = deps.monotonicDeadlineMs === undefined ? Date.parse(deadlineAt) - Date.now() : deps.monotonicDeadlineMs - performance.now();
+    if (!Number.isFinite(remainingNow) || remainingNow <= 0) {
+      timedOut = true; dispatchClosed = true; controller.abort(); throw controller.signal.reason;
+    }
+  };
   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, remaining);
   const failure = (error: unknown) => new ResearchSourceFailure(timedOut ? "RESEARCH_SOURCE_TIMEOUT" :
     error instanceof ResearchSourceFailure ? error.message : transientCode(error) ? "RESEARCH_SOURCE_TRANSPORT_TRANSIENT" : "RESEARCH_SOURCE_ACQUISITION_FAILED", error, deps.privacy);
   try {
+    assertDispatch();
     const selected = await Promise.race([
       (deps.resolveAddress ?? resolvePublicResearchAddress)(url.hostname),
       new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true })),
     ]);
-    if (controller.signal.aborted) throw controller.signal.reason;
+    assertDispatch();
     return await new Promise<ResearchFetchResult>((resolve, reject) => {
       let settled = false;
       let req: ReturnType<typeof request> | undefined;
       let httpDetails: ResearchSourceHttpDetails | undefined;
       const finishError = (error: unknown) => {
         if (settled) return;
-        settled = true;
+        settled = true; dispatchClosed = true;
         const wrapped = httpDetails ? new ResearchSourceFailure(`RESEARCH_SOURCE_HTTP_${httpDetails.httpStatus}`, undefined, deps.privacy, httpDetails) : failure(error);
         req?.destroy();
         reject(wrapped);
@@ -107,6 +121,7 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
         lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
       } satisfies RequestOptions & { autoSelectFamily: boolean };
       try {
+        assertDispatch();
         req = (deps.httpsRequest ?? request)(url, options, response => {
           if (settled) { response.destroy(); return; }
           if (timedOut) { finishError(controller.signal.reason); response.destroy(); return; }
@@ -159,21 +174,26 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
             if (settled) return;
             if (timedOut) { finishError(controller.signal.reason); return; }
             const payload = Buffer.concat(chunks);
-            settled = true;
+            settled = true; dispatchClosed = true;
             resolve({ payload, contentHash: createHash("sha256").update(payload).digest("hex"), contentType: String(response.headers["content-type"] ?? "") });
           });
           response.on("close", () => { if (!settled) finishError(new ResearchSourceFailure("RESEARCH_SOURCE_TRANSPORT_TRANSIENT", undefined)); });
         });
         req.on("error", finishError);
+        req.on("close", () => {
+          dispatchClosed = true;
+          if (!settled) finishError(new ResearchSourceFailure('RESEARCH_SOURCE_TRANSPORT_TRANSIENT', undefined));
+        });
         controller.signal.addEventListener("abort", () => {
           // Native request errors run first; the fallback also terminates silent transports.
           queueMicrotask(() => { if (!settled) finishError(controller.signal.reason); });
         }, { once: true });
+        assertDispatch();
         req.end();
       } catch (error) { finishError(error); }
     });
   } catch (error) {
     if (error instanceof ResearchSourceFailure) throw error;
     throw failure(error);
-  } finally { clearTimeout(timeout); }
+  } finally { dispatchClosed = true; clearTimeout(timeout); deps.dispatchGuard?.signal?.removeEventListener('abort', shutdown); }
 }

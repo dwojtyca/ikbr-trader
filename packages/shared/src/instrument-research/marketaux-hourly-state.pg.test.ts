@@ -10,7 +10,7 @@ import { researchHash } from './validation.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any,advance:(ms:number)=>Promise<void>)=>Promise<void>) {
- const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432' || process.env.CI==='true' && url.port==='5432' && url.pathname==='/ikbr_trader_ci'));url.pathname='/postgres';
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432' || url.port==='55434' && url.pathname==='/ikbr_startup_recovery_test' || process.env.CI==='true' && url.port==='5432' && url.pathname==='/ikbr_trader_ci'));url.pathname='/postgres';
  const admin=new Pool({connectionString:url.href}),name='marketaux_state_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href,options:'-c search_path=public,pg_catalog'});
  try {

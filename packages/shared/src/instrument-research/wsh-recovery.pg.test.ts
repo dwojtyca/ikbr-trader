@@ -15,7 +15,7 @@ import type {WshAttemptResult,WshAttemptTicket} from './wsh-refresh.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any)=>Promise<void>){
- const url=new URL(connection!);assert.equal(url.port,'55432','Only isolated PostgreSQL allowed');url.pathname='/postgres';
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
  const admin=new Pool({connectionString:url.href}),name='wsh_recovery_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href});try{const dir=new URL('../../../../infra/sql/migrations/',import.meta.url);for(const f of readdirSync(dir).filter(f=>f.endsWith('.sql')).sort())await pool.query(readFileSync(new URL(f,dir),'utf8'));await run(pool);}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }

@@ -32,6 +32,7 @@ export interface WshAttemptDiagnostic {
   sourceError?: ResearchSourceError; providerError?: ResearchProviderError;
 }
 export interface WshRefreshState {
+  recovery?: import("./startup-recovery.js").ResearchRecoveryDiagnostic;
   sourceId: string; lastSuccessfulAt: string | null; expiresAt: string | null; retained: boolean;
   latestAttempt: WshAttemptDiagnostic | null; latestFailure: WshAttemptDiagnostic | null;
   nextRetryAt: string | null; nextRegularAt: string | null; blocksCachedEvidence: boolean;

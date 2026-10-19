@@ -146,6 +146,27 @@ export function requireSessionHistorySchedule(evidence: SessionScheduleEvidence 
   if (isoMs(schedule.coverageStart) > priorSunday || isoMs(schedule.coverageEnd) < currentMonday) return fail('session_schedule_coverage_missing');
   return schedule;
 }
+export function sessionHistoryCoverageBounds(identity: InstrumentSessionIdentity, nowMs: number): { priorSunday: string; previousMonday: string; currentMonday: string } {
+  const current = monday(sessionDateAt(nowMs, identity.timeZone));
+  const instant = (days: number) => new Date(sessionLocalMidnight(shiftSessionDate(current, days), identity.timeZone)).toISOString();
+  return { priorSunday: instant(-8), previousMonday: instant(-7), currentMonday: instant(0) };
+}
+export type SessionHistoryPreparation =
+  | { state: 'COMPLETE' | 'PARTIAL'; schedule: SessionSchedule }
+  | { state: 'UNAVAILABLE'; reason: string };
+export function classifySessionHistoryPreparation(evidence: SessionScheduleEvidence | null | undefined, identity: InstrumentSessionIdentity, nowMs: number): SessionHistoryPreparation {
+  try { return { state: 'COMPLETE', schedule: requireSessionHistorySchedule(evidence, identity, nowMs) }; }
+  catch (error) {
+    const reason = error instanceof Error ? error.message : 'session_schedule_invalid';
+    if (reason !== 'session_schedule_coverage_missing') return { state: 'UNAVAILABLE', reason };
+    const schedule = evidence!.schedule!;
+    const bounds = sessionHistoryCoverageBounds(identity, nowMs);
+    if (schedule.coverageStart <= bounds.priorSunday && schedule.coverageEnd >= bounds.previousMonday
+      && schedule.coverageEnd < bounds.currentMonday && schedule.currentHours
+      && classifySessionAvailability(evidence, identity, nowMs).kind === 'CLOSED') return { state: 'PARTIAL', schedule };
+    return { state: 'UNAVAILABLE', reason };
+  }
+}
 export function requireSessionSchedule(evidence: SessionScheduleEvidence | null | undefined, identity: InstrumentSessionIdentity, nowMs: number): SessionSchedule {
   const schedule = requireSessionHistorySchedule(evidence, identity, nowMs);
   if (isoMs(schedule.coverageEnd) < nowMs) return fail('session_schedule_coverage_missing');

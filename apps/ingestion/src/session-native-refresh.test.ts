@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { expectedSessionSlot, sessionNativeSource, sessionLocalMidnight, shiftSessionDate, type Candle, type InstrumentSessionIdentity } from '@ikbr/shared';
+import { expectedSessionSlot, sessionNativeSource, sessionLocalMidnight, shiftSessionDate, type SessionTimeframe, type Candle, type InstrumentSessionIdentity } from '@ikbr/shared';
 import { SessionNativeRefresh, SESSION_POLLING_CAPACITY } from './session-native-refresh.js';
 import { sessionIdentityFixture, sessionEvidenceFixture } from './session-fixture.js';
 const at = Date.parse('2026-09-24T18:00:00Z');
@@ -353,3 +353,113 @@ test('schedule generation changing after persistence does not qualify a rapid re
   clock = start + 60000; await refresh.run(sub);
   assert.equal(calls, 2);
 });
+
+function mondayEvidence(identity: InstrumentSessionIdentity, now: number, complete = false) {
+  const stamp = new Date(now).toISOString(), requested = new Date(now - 1).toISOString();
+  const schedule = { source: 'ibkr_session_schedule_v1' as const, identity,
+    coverageStart: '2026-09-29T13:30:00.000Z', coverageEnd: complete ? '2026-10-19T20:00:00.000Z' : '2026-10-16T20:00:00.000Z',
+    requestedAt: requested, receivedAt: stamp,
+    sessions: [{ date: '2026-10-16', start: '2026-10-16T13:30:00.000Z', end: '2026-10-16T20:00:00.000Z' }],
+    currentHours: { source: 'ibkr_contract_hours_v1' as const, identity: { ...identity }, requestedAt: requested, receivedAt: requested,
+      days: [{ date: '2026-10-19', intervals: [{ start: '2026-10-19T13:30:00.000Z', end: '2026-10-19T20:00:00.000Z' }] }] },
+  };
+  if (complete) schedule.sessions.push({ date: '2026-10-19', start: '2026-10-19T13:30:00.000Z', end: '2026-10-19T20:00:00.000Z' });
+  return { generation: complete ? 2 : 1, status: 'READY' as const, updatedAt: stamp, schedule };
+}
+test('partial Monday preloads five genuine timeframes, leaves weekly unmeasured, and completes on normal opening refresh', async () => {
+  const identity = sessionIdentityFixture(), f = fixture([identity]);
+  let now = Date.parse('2026-10-19T07:23:43.347Z'), complete = false;
+  const rows = new Map<SessionTimeframe, Candle[]>();
+  f.deps.now = () => now;
+  f.deps.schedule = f.deps.readSchedule = async () => mondayEvidence(identity, now, complete);
+  f.deps.read = async (_identity, tf) => rows.get(tf) ?? [];
+  f.deps.fetch = async (_sub, identity, tf) => {
+    f.calls.push(tf);
+    const slot = expectedSessionSlot(tf, mondayEvidence(identity, now, complete).schedule, now)!;
+    return [{ conid: String(identity.conId), symbol: identity.symbol, timeframe: tf, ts: new Date(slot.start),
+      open: 100, high: 101, low: 99, close: 100, volume: 1, source: sessionNativeSource(identity) }];
+  };
+  f.deps.write = async row => { f.writes.push(row); rows.set(row.timeframe as SessionTimeframe, [row]); };
+  const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);
+  assert.deepEqual(f.calls, ['1m', '5m', '1h', '4h', '1d']); assert.equal(f.writes.length, 5);
+  for (const status of refresh.status.values()) {
+    assert.equal(status.preparationState, 'WAITING'); assert.equal(status.historyCoverage, 'PARTIAL');
+    assert.equal(status.countsMeasured, status.timeframe !== '1w');
+    assert.equal(status.preparationReason, status.timeframe === '1w' ? 'session_weekly_coverage_pending' : 'session_history_partial');
+  }
+  complete = true; now = Date.parse('2026-10-19T13:30:30Z'); await refresh.run(f.subscriptions);
+  assert.ok(f.calls.includes('1w'));
+  const minute = [...refresh.status.values()].find(s => s.timeframe === '1m')!;
+  assert.equal(minute.historyCoverage, 'COMPLETE'); assert.equal(minute.preparationState, 'WAITING');
+  assert.ok(minute.latest! < '2026-10-19T13:30:00.000Z');
+  now = Date.parse('2026-10-19T13:31:30Z'); await refresh.run(f.subscriptions);
+  assert.equal([...refresh.status.values()].find(s => s.timeframe === '1m')!.latest, '2026-10-19T13:30:00.000Z');
+});
+test('partial history still rejects generation changes and invalid candle values before persistence', async () => {
+  for (const failure of ['generation', 'values'] as const) {
+    const identity = sessionIdentityFixture(), f = fixture([identity]); const now = Date.parse('2026-10-19T07:23:43.347Z');
+    f.deps.now = () => now; f.deps.schedule = async () => mondayEvidence(identity, now);
+    f.deps.readSchedule = async () => ({ ...mondayEvidence(identity, now), generation: failure === 'generation' ? 2 : 1 });
+    f.deps.fetch = async (_sub, _identity, tf) => {
+      const slot = expectedSessionSlot(tf, mondayEvidence(identity, now).schedule, now)!;
+      return [{ conid: String(identity.conId), symbol: identity.symbol, timeframe: tf, ts: new Date(slot.start),
+        open: 100, high: 90, low: 99, close: 100, volume: 1, source: sessionNativeSource(identity) }];
+    };
+    const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);
+    assert.equal(f.writes.length, 0);
+    for (const status of refresh.status.values()) if (status.timeframe !== '1w') {
+      assert.equal(status.preparationState, 'HOLD');
+      assert.equal(status.error, failure === 'generation' ? 'session_schedule_generation_changed' : 'session_candle_values_invalid');
+    }
+  }
+});
+
+test('a partial instrument cannot block independent complete-history preparation', async () => {
+  const a = sessionIdentityFixture(), b = sessionIdentityFixture({ instrumentId: 'second', conId: 77 });
+  const f = fixture([a, b]), now = Date.parse('2026-10-19T07:23:43.347Z'); f.deps.now = () => now;
+  f.deps.schedule = f.deps.readSchedule = async identity => mondayEvidence(identity, now, identity.instrumentId === b.instrumentId);
+  const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);
+  assert.equal(f.calls.filter(x => x.startsWith(`${a.instrumentId}:`)).length, 5);
+  assert.equal(f.calls.filter(x => x.startsWith(`${b.instrumentId}:`)).length, 6);
+  assert.equal([...refresh.status.values()].find(s => s.instrumentId === b.instrumentId && s.timeframe === '1w')?.historyCoverage, 'COMPLETE');
+});
+test('partial history that becomes stale during fetch cannot persist late results', async () => {
+  const identity = sessionIdentityFixture(), f = fixture([identity]); let now = Date.parse('2026-10-19T07:23:43.347Z');
+  const evidence = mondayEvidence(identity, now); f.deps.now = () => now;
+  f.deps.schedule = f.deps.readSchedule = async () => evidence;
+  f.deps.fetch = async (_sub, _identity, tf) => {
+    now += 7 * 3600000;
+    return [{ conid: String(identity.conId), symbol: identity.symbol, timeframe: tf, ts: new Date('2026-10-16T19:59:00Z'),
+      open: 100, high: 101, low: 99, close: 100, volume: 1, source: sessionNativeSource(identity) }];
+  };
+  const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);
+  assert.equal(f.writes.length, 0);
+  for (const status of refresh.status.values()) { assert.equal(status.preparationState, 'HOLD'); assert.equal(status.error, 'session_schedule_stale'); }
+});
+
+for (const stage of ['fetch', 'final-read', 'between-writes'] as const)
+  test(`older valid partial evidence cannot hide clock regression at ${stage}`, async () => {
+    const identity = sessionIdentityFixture(), f = fixture([identity]);
+    const receivedAt = Date.parse('2026-10-19T07:23:00Z');
+    let now = Date.parse('2026-10-19T07:24:00Z'), minuteReads = 0, minuteWrites = 0;
+    const evidence = mondayEvidence(identity, receivedAt);
+    f.deps.now = () => now;
+    f.deps.schedule = f.deps.readSchedule = async () => evidence;
+    f.deps.read = async (_identity, tf) => {
+      if (tf === '1m' && ++minuteReads === 2 && stage === 'final-read') now -= 1000;
+      return [];
+    };
+    f.deps.fetch = async (_sub, _identity, tf) => {
+      if (tf !== '1m') return [];
+      if (stage === 'fetch') now -= 1000;
+      return minuteRows(identity, Date.parse('2026-10-16T20:00:00Z'), stage === 'between-writes' ? 2 : 1);
+    };
+    f.deps.write = async candle => {
+      if (candle.timeframe === '1m') { minuteWrites++; if (stage === 'between-writes') now -= 1000; }
+    };
+    const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);
+    const status = [...refresh.status.values()].find(s => s.timeframe === '1m')!;
+    assert.equal(status.error, 'session_timestamp_invalid'); assert.equal(status.preparationState, 'HOLD');
+    assert.equal(status.historyCoverage, 'UNAVAILABLE'); assert.equal(status.countsMeasured, false);
+    assert.equal(minuteWrites, stage === 'fetch' ? 0 : 1);
+  });

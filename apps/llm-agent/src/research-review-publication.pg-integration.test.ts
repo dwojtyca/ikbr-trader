@@ -12,7 +12,7 @@ const connection = process.env.TEST_POSTGRES_URL;
 test("AI preparation and hourly publication lock ledger before head and bind the new committed snapshot", { skip: !connection }, async () => {
   const url = new URL(connection!);
   assert.ok(["127.0.0.1", "localhost"].includes(url.hostname) &&
-    (url.port === "55432" || process.env.CI === "true" && url.port === "5432" && url.pathname === "/ikbr_trader_ci"));
+    (url.port === "55432" || url.port === "55434" && url.pathname === "/ikbr_startup_recovery_test" || process.env.CI === "true" && url.port === "5432" && url.pathname === "/ikbr_trader_ci"));
   url.pathname = "/postgres";
   const admin = new Pool({ connectionString: url.href }), name = `research_ai_publish_${randomUUID().replaceAll("-", "")}`;
   await admin.query(`CREATE DATABASE ${name}`); url.pathname = `/${name}`;

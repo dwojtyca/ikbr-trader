@@ -13,11 +13,11 @@ import type {WshAttemptResult} from './wsh-refresh.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any)=>Promise<void>,before34=false){
- const url=new URL(connection!);assert.equal(url.port,'55432','Only isolated PostgreSQL allowed');url.pathname='/postgres';
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
  const admin=new Pool({connectionString:url.href}),name='wsh_hourly_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href});try{const dir=new URL('../../../../infra/sql/migrations/',import.meta.url);for(const f of readdirSync(dir).filter(f=>f.endsWith('.sql')&&(!before34||f<'000034')).sort())await pool.query(readFileSync(new URL(f,dir),'utf8'));await run(pool);}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }
-async function seed(pool:any,omitNews=false){
+async function seed(pool:any,omitNews=false,historicalSchema=false){
  const f=wshResearchFixture();
 
  f.source.parserConfig.maxAgeMs=86400000;f.snapshot.manifestHash=researchHash(f.manifest);f.snapshot.mappingHash=researchHash(f.policy);
@@ -26,7 +26,11 @@ async function seed(pool:any,omitNews=false){
  await store.registerManifest({manifest:f.manifest,configuration:f.config,tradingEnabled:false,adopt:true});
  for(const service of ['execution-engine','llm-agent'] as const)await store.observe({configHash:f.configHash,manifestHash:f.snapshot.manifestHash,service,processId:service,tradingEnabled:false});
  if(omitNews)f.snapshot.coverage=f.snapshot.coverage.filter(c=>c.role!=='news');
- await store.storeSnapshot(f.snapshot);
+ if(historicalSchema){
+  // Seed actual pre34 bytes without invoking a current store against an old schema.
+  const {canonicalJson}=await import('../trading-configuration/identity.js');
+  await pool.query('INSERT INTO research_snapshots(id,snapshot_hash,config_hash,manifest_hash,instrument_id,sequence,canonical_json) VALUES($1,$2,$3,$4,$5,1,$6)',[randomUUID(),researchHash(f.snapshot),f.snapshot.configHash,f.snapshot.manifestHash,f.snapshot.instrumentId,canonicalJson(f.snapshot)]);
+ }else await store.storeSnapshot(f.snapshot);
  const identity={configHash:f.configHash,manifestHash:f.snapshot.manifestHash,instrumentId:f.policy.instrumentId,sourceId:f.source.id,accountId:'DU_TEST'};
  let fixtureSessionId='';
  const claim=async(lease:WshEndpointLease,kind:'regular'|'retry'='regular')=>{const result=await store.claimWshAttempt(lease,{...identity,sessionId:randomUUID()},kind);if(result.state==='CLAIMED'){await store.confirmWshPreflight(lease,result.ticket);fixtureSessionId=result.ticket.sessionId;}return result;};
@@ -45,7 +49,7 @@ async function adopt(pool:any,h:Awaited<ReturnType<typeof seed>>,interval:number
  for(const service of ['execution-engine','llm-agent'] as const)await h.store.observe({...h.identity,service,processId:randomUUID(),tradingEnabled:false});
 }
 test('migration34 preserves pre34 cycles and exact canonical json source bytes/hash', {skip:!connection},()=>isolated(async pool=>{
- const h=await seed(pool);const start=new Date(Date.now()-120000);await cycle(pool,h,start);
+ const h=await seed(pool,false,true);const start=new Date(Date.now()-120000);await cycle(pool,h,start);
  const cycleId=(await pool.query('SELECT id FROM research_wsh_refresh_cycles')).rows[0].id;
  await pool.query(`INSERT INTO research_wsh_refresh_attempts(id,cycle_id,ordinal,endpoint_id,session_id,started_at,deadline_at,state) VALUES($1,$2,0,'fixture-endpoint',$3,$4,$5,'STARTED')`,[randomUUID(),cycleId,randomUUID(),start,new Date(start.getTime()+35000)]);
  await legacyAcquisition(pool,h,start);

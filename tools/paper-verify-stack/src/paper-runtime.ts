@@ -64,7 +64,7 @@ async function resolveProofPath(root: string, path: string): Promise<string> {
   return absolute;
 }
 
-async function verifyProof(root: string, proofFile: string): Promise<ReleaseProof> {
+export async function verifyProof(root: string, proofFile: string): Promise<ReleaseProof> {
   let raw: unknown;
   try { const rel = relative(root, proofFile).split(sep).join('/'); await resolveProofPath(root, rel); const b = await readFile(proofFile); if (b.byteLength > 100_000) throw new Error(); raw = JSON.parse(b.toString('utf8')); } catch { throw new PaperRuntimeError('PAPER_CONFIG_CHANGED'); }
   const proof = proofSchema(raw);
@@ -83,7 +83,7 @@ function envMap(service: Record<string, unknown>): Record<string, string> {
   return Object.fromEntries(Object.entries(e).map(([k, v]) => [k, String(v ?? '')]));
 }
 function mounts(service: Record<string, unknown>): Array<Record<string, unknown>> { return Array.isArray(service.volumes) ? service.volumes.map(obj).filter((v): v is Record<string, unknown> => !!v) : []; }
-export async function validateRenderedCompose(value: unknown, proof: ReleaseProof, root: string): Promise<{ accountId: string; instrumentIds: string[] }> {
+export async function validateRenderedCompose(value: unknown, proof: ReleaseProof, root: string, maintenance = false): Promise<{ accountId: string; instrumentIds: string[] }> {
   const config = obj(value), services = obj(config?.services); if (!services) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
   const accountSet = new Set<string>(); let bundlePath = '', bundleHash = '';
   const appEnvironments: Record<string, Record<string, string>> = {};
@@ -110,7 +110,7 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
       'signal-engine': { TRADING_ENABLED: 'true', TRADING_LOOP_ENABLED: 'true' },
       'llm-agent': { TRADING_ENABLED: 'true', LLM_AGENT_ENABLED: 'true', RESEARCH_CONFIG_PATH: '/app/private-config/continuous-research.json' },
     };
-    for (const [k, v] of Object.entries(expected[name])) if (e[k] !== v) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
+    for (const [k, v] of Object.entries(expected[name])) if (e[k] !== v && !(maintenance && k === 'TRADING_ENABLED' && e[k] === 'false')) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     if (name === 'execution-engine' || name === 'llm-agent') {
       if (!/^[a-f0-9]{64}$/.test(e.RESEARCH_CONFIG_EXPECTED_HASH || '') || e.RESEARCH_BUDGET_ACCOUNT_ID !== e.IBKR_ACCOUNT_ID ||
           e.RESEARCH_CONFIG_PATH !== '/app/private-config/continuous-research.json') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
@@ -198,6 +198,67 @@ function controlShape(value: unknown, requireProtocol = true): RuntimeControl {
 function checkAbort(signal?: AbortSignal): void { if (signal?.aborted) throw new PaperRuntimeError('PAPER_START_INTERRUPTED'); }
 const pauseReason = (id: string) => `paper-start:${id}`;
 const delay = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+export function formatResearchRecovery(value: unknown, privacy: { secrets: string[]; accountIds: string[] }): string | null {
+  const row = obj(value);
+  if (!row || !['WAITING', 'OPERATOR_REQUIRED', 'PREPARED', 'RECOVERED'].includes(String(row.state))) return null;
+  const actions: Record<string, string> = { STOP_PRODUCERS: 'Zatrzymaj producentów przez pnpm stop i użyj paper:research-recovery.',
+    OBSERVE_LOCAL_GATEWAY_RESTART: 'Wymagany obserwowany ręczny restart TWS/Gateway przez paper:research-recovery.',
+    COMPLETE_RECONNECT_PROOF: 'Dokończ dowód ponownego połączenia w paper:research-recovery.', UNSUPPORTED_ENDPOINT: 'Endpoint nie obsługuje lokalnego dowodu recovery.' };
+  if (row.operatorAction !== null && (typeof row.operatorAction !== 'string' || !Object.hasOwn(actions, row.operatorAction))) return null;
+  const id = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(v) ? safeDiagnosticText(v, privacy) : null;
+  const next = typeof row.nextCheckAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(row.nextCheckAt)
+    && Number.isFinite(Date.parse(row.nextCheckAt)) && new Date(row.nextCheckAt).toISOString() === row.nextCheckAt ? row.nextCheckAt : null;
+  return `Recovery ${row.state}; ${row.state === 'RECOVERED' ? 'dowód zapisany; świeżość danych ocenia zwykła kontrola gotowości' : 'gotowość danych niepotwierdzona'}${next ? `; następne sprawdzenie ${next}` : ''}${id(row.challengeId) ? `; challenge ${id(row.challengeId)}` : ''}${id(row.lastRecoveryId) ? `; dowód ${id(row.lastRecoveryId)}` : ''}.${row.operatorAction ? ` ${actions[String(row.operatorAction)]}` : ''}`;
+}
+
+const sessionPreparationReasons = new Set([
+  'insufficient_native_closed_candles', 'session_binding_identity_invalid', 'session_binding_required',
+  'session_candle_alignment_invalid', 'session_candle_duplicate', 'session_candle_duplicate_period',
+  'session_candle_identity_invalid', 'session_candle_values_invalid', 'session_closed',
+  'session_current_interval_minute_missing', 'session_date_invalid', 'session_dst_invalid',
+  'session_expected_candle_missing', 'session_expected_slot_unavailable', 'session_history_partial',
+  'session_hours_date_unavailable', 'session_hours_invalid', 'session_hours_stale',
+  'session_hours_timezone_invalid', 'session_hours_unavailable', 'session_identity_invalid',
+  'session_invalidation_failed', 'session_mode_conflict', 'session_mode_invalid',
+  'session_native_refresh_failed', 'session_polling_capacity_exceeded', 'session_refresh_queued',
+  'session_schedule_coverage_missing', 'session_schedule_envelope_invalid', 'session_schedule_failed',
+  'session_schedule_generation_changed', 'session_schedule_identity_invalid', 'session_schedule_intervals_invalid',
+  'session_schedule_invalid', 'session_schedule_stale', 'session_schedule_timestamp_order_invalid',
+  'session_schedule_timezone_invalid', 'session_schedule_unavailable', 'session_slot_invalid',
+  'session_timeframe_unsupported', 'session_timestamp_invalid', 'session_timezone_invalid',
+  'session_weekly_coverage_pending', 'session_weekly_label_ambiguous', 'session_window_invalid',
+]);
+
+function formatSessionWarmups(value: unknown, expectedInstruments: string[], privacy: { secrets: string[]; accountIds: string[] }): string[] {
+  const timeframes = ['1m', '5m', '1h', '4h', '1d', '1w'] as const;
+  const rows = Array.isArray(value) ? value.map(obj) : [];
+  const instant = (v: unknown): v is string => typeof v === 'string' &&
+    /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(v) && Number.isFinite(Date.parse(v));
+  const count = (v: unknown): v is number => Number.isSafeInteger(v) && Number(v) >= 0;
+  return expectedInstruments.map(instrumentId => {
+    const label = safeDiagnosticText(instrumentId.slice(0, 100), privacy);
+    const details = timeframes.map(timeframe => {
+      const matches = rows.filter(candidate => candidate?.instrumentId === instrumentId && candidate.timeframe === timeframe);
+      const row = matches.length === 1 ? matches[0] : null;
+      if (!row || !['READY', 'WAITING', 'HOLD'].includes(String(row.preparationState)) ||
+          !['COMPLETE', 'PARTIAL', 'UNAVAILABLE'].includes(String(row.historyCoverage)) || typeof row.countsMeasured !== 'boolean')
+        return `${timeframe}: unavailable`;
+      const measured = row.countsMeasured && count(row.available) && count(row.nativeClosed) && count(row.required) &&
+        Number(row.required) > 0 && Number(row.nativeClosed) <= Number(row.available);
+      const ready = row.preparationState === 'READY' && row.historyCoverage === 'COMPLETE' && measured && Number(row.nativeClosed) >= Number(row.required);
+      if (row.preparationState === 'READY' && !ready) return `${timeframe}: unavailable`;
+      const counts = measured ? ` ${row.nativeClosed}/${row.required} zamkniętych${row.available !== row.nativeClosed ? ` (wiersze ${row.available})` : ''}` : ' liczby niezmierzone';
+      const state = ready ? 'READY' : row.preparationState === 'HOLD' ? 'HOLD' : 'WAITING';
+      const coverage = String(row.historyCoverage);
+      const reason = typeof row.preparationReason === 'string' && sessionPreparationReasons.has(row.preparationReason)
+        ? safeDiagnosticText(row.preparationReason, privacy) : ready ? '' : 'powód niedostępny';
+      const next = instant(row.nextCheckAt) ? `; następne sprawdzenie ${new Date(row.nextCheckAt).toISOString()}` : '';
+      return `${timeframe}: ${state}, historia ${coverage},${counts}${reason ? `; ${reason}` : ''}${next}`;
+    });
+    return `${label}: rozgrzewka sesyjna — ${details.join('; ')}.`;
+  });
+}
 
 function stoppedProducerRecords(raw: string): void {
   let records: unknown[];
@@ -357,11 +418,11 @@ export class PaperRuntime {
       await this.assertStart(generation, accountId, pausedRevision);
       await this.compose(['up', '-d', '--no-build', '--pull', 'never', ...PAPER_SERVICES]);
       await this.assertStart(generation, accountId, pausedRevision);
-      await this.prepareBootstrap(generation, accountId, pausedRevision);
+      await this.prepareBootstrap(generation, accountId, pausedRevision, validated.instrumentIds);
       await this.waitPreparation(generation, accountId, pausedRevision, validated.instrumentIds);
       await this.resume(reason, pausedRevision, accountId, generation, validated.instrumentIds);
       await this.assertStart(generation);
-      return 'Paper działa w Dockerze. Użyj pnpm stop, aby zatrzymać nowe wejścia, oraz pnpm logs, aby obserwować pracę.';
+      return 'Paper działa w Dockerze; uruchomienie usług nie potwierdza gotowości wejścia dla każdego instrumentu. Użyj pnpm stop, aby zatrzymać nowe wejścia, oraz pnpm logs, aby obserwować pracę.';
     } catch (e) {
       const interrupted = this.options.adapters.signal?.aborted || e instanceof PaperRuntimeError && e.code === 'PAPER_START_CANCELLED';
       if (interrupted) {
@@ -392,7 +453,7 @@ export class PaperRuntime {
       await this.assertStart(generation); this.assertAccount(current, accountId); revision(current); return current;
     }
   }
-  private async prepareBootstrap(generation: string, accountId: string, expectedRevision: number): Promise<void> {
+  private async prepareBootstrap(generation: string, accountId: string, expectedRevision: number, expectedInstruments: string[]): Promise<void> {
     for (;;) {
       await this.assertStart(generation, accountId, expectedRevision);
       try { await this.http('http://ingestion/health'); break; }
@@ -411,23 +472,28 @@ export class PaperRuntime {
       for (;;) {
         await this.assertStart(generation, accountId, expectedRevision);
         if (outcome.state === 'rejected') throw outcome.error;
-        let health: Record<string, unknown> | null = null, progress: Record<string, unknown> | null = null;
+        let health: Record<string, unknown> | null = null, progressResponse: Record<string, unknown> | null = null;
         try {
           health = obj(await this.http('http://ingestion/health'));
           await this.assertStart(generation, accountId, expectedRevision);
-          progress = obj(obj(await this.http('http://ingestion/backfill-progress'))?.progress);
+          progressResponse = obj(await this.http('http://ingestion/backfill-progress'));
         } catch (e) {
           if (e instanceof PaperRuntimeError && ['PAPER_START_INTERRUPTED', 'PAPER_START_CANCELLED', 'PAPER_START_SUPERSEDED', 'PAPER_ACCOUNT_MISMATCH'].includes(e.code)) throw e;
           if (e instanceof PaperHttpError && e.status < 500) throw e;
         }
         await this.assertStart(generation, accountId, expectedRevision);
+        const progress = obj(progressResponse?.progress);
         const automatic = obj(health?.automaticBootstrap);
         if (outcome.state !== 'pending' && (automatic?.manuallyStopped === true || automatic?.shuttingDown === true || automatic?.error)) throw new PaperRuntimeError('PAPER_BOOTSTRAP_HOLD');
         if (outcome.state !== 'pending' && progress?.phase === 'completed' && Array.isArray(progress.failedTimeframes) && progress.failedTimeframes.length) throw new PaperRuntimeError('PAPER_BOOTSTRAP_HOLD');
         if (health?.connected === true && health.bootstrapped === true && health.bootstrapping === false &&
             automatic?.initialized === true && automatic.manuallyStopped === false && automatic.inFlight === false &&
             automatic.recoveryNeeded === false && automatic.shuttingDown === false && automatic.error === null &&
-            progress?.phase === 'completed' && Array.isArray(progress.failedTimeframes) && progress.failedTimeframes.length === 0) return;
+            progress?.phase === 'completed' && Array.isArray(progress.failedTimeframes) && progress.failedTimeframes.length === 0) {
+          for (const line of formatSessionWarmups(progressResponse?.sessionWarmup, expectedInstruments, { secrets: [this.options.token], accountIds: [accountId] }))
+            this.options.adapters.log?.(line);
+          return;
+        }
         const phase = ['connecting', 'one_minute', 'native_tf', 'completed'].includes(String(progress?.phase)) ? String(progress?.phase) : 'unavailable';
         const status = `${outcome.state}:${phase}`;
         if (status !== lastStatus) { this.options.adapters.log?.(`WAITING: automatyczne przygotowanie: historia cen i subskrypcje (${status.replace(/[^a-z_:]/gi, '')}).`); lastStatus = status; }
@@ -479,6 +545,11 @@ export class PaperRuntime {
         for (const source of (Array.isArray(item?.sources) ? item.sources : []).slice(0, 100)) {
           const row = obj(source), refresh = obj(row?.wshRefresh);
           const news = obj(row?.marketauxRefresh), newsFailure = obj(news?.latestFailure);
+          const recovery = formatResearchRecovery(news?.recovery ?? refresh?.recovery, { secrets: [this.options.token], accountIds: [accountId] });
+          if (recovery && typeof item?.instrumentId === 'string' && typeof row?.sourceId === 'string') {
+            const label = safeDiagnosticText(`${item.instrumentId.slice(0, 100)} / ${row.sourceId.slice(0, 100)}`, { secrets: [this.options.token], accountIds: [accountId] });
+            wshDiagnostics.push(`${label}: ${recovery}`);
+          }
           const instant = (value: unknown): value is string => typeof value === 'string' &&
             /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value));
           if (row?.role === 'news' && row.state === 'READY' && typeof row.sourceId === 'string' && typeof item?.instrumentId === 'string' &&

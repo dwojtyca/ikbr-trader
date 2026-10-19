@@ -115,20 +115,22 @@ export function twoSourceResearchFixture(now = Date.now(), instrumentId = "aapl_
   return { ...f, manifest, manifestHash, snapshot, policy, source, newsConfig, wshSource, now, slot, window, acquisition };
 }
 
-export async function seedTwoSourceResearchStore(pool: import("./types.js").ResearchPool, options: { accountId?: string; instrumentId?: string; publishWsh?: boolean; publishNews?: boolean; configureManifest?: (manifest: import("./types.js").TwoSourceResearchManifest) => void } = {}) {
+export async function seedTwoSourceResearchStore(pool: import("./types.js").ResearchPool, options: { recoveryClock?: import("./startup-recovery.js").ResearchRecoveryClock; accountId?: string; instrumentId?: string; publishWsh?: boolean; publishNews?: boolean; configureManifest?: (manifest: import("./types.js").TwoSourceResearchManifest) => void } = {}) {
   const { ResearchStore } = await import('./store.js');
   const { TradingConfigurationStore } = await import('../trading-configuration/store.js');
   const { loadTradingConfiguration } = await import('../trading-configuration/loader.js');
   const { randomUUID } = await import('node:crypto');
   const now = Date.parse(String((await pool.query('SELECT clock_timestamp() AS now')).rows[0].now));
-  const f = twoSourceResearchFixture(now, options.instrumentId), store = new ResearchStore(pool), accountId = options.accountId ?? 'DU_TEST';
+  let fixtureOffset=now-Date.now();
+  const fixtureClock=options.recoveryClock??{wallNow:()=>Date.now()+fixtureOffset,monotonicNow:()=>performance.now()+fixtureOffset,domainId:()=> 'd'.repeat(64)};
+  const f = twoSourceResearchFixture(now, options.instrumentId), store = new ResearchStore(pool,fixtureClock), accountId = options.accountId ?? 'DU_TEST';
   options.configureManifest?.(f.manifest);
   f.manifestHash = researchHash(f.manifest);
   const loaded = loadTradingConfiguration({ TRADING_CONFIG_MODE: 'bundle', TRADING_CONFIG_PATH: '/fixture.json', TRADING_CONFIG_EXPECTED_HASH: f.configHash }, { readFile: () => readFileSync(new URL('../../src/trading-configuration/fixtures/valid-generic.json',import.meta.url),'utf8') });
   await new TradingConfigurationStore(pool).register({ service: 'execution-engine', processId: randomUUID(), loaded, tradingEnabled: false });
   await store.registerManifest({ manifest:f.manifest, configuration:f.config, tradingEnabled:false, adopt:true });
   const identity = { accountId, configHash:f.configHash, manifestHash:f.manifestHash, instrumentId:f.policy.instrumentId, sourceId:f.source.id };
-  const observe = async () => { for (const service of ['execution-engine','llm-agent'] as const) await store.observe({ ...identity,service,processId:service,tradingEnabled:false }); };
+  const observe = async () => { if(!options.recoveryClock)fixtureOffset=Date.parse(String((await pool.query('SELECT clock_timestamp() AS now')).rows[0].now))-Date.now(); await pool.query("UPDATE trading_configuration_observations SET observed_at=clock_timestamp(),expires_at=clock_timestamp()+interval '30 seconds'"); for (const service of ['execution-engine','llm-agent'] as const) await store.observe({ ...identity,service,processId:service,tradingEnabled:false }); };
   await observe();
   const empty = (at: string): import('./types.js').TwoSourceResearchSnapshot => ({ schemaVersion:2,researchPolicy:'TWO_SOURCE_HOURLY_V1',configHash:f.configHash,manifestHash:f.manifestHash,instrumentId:f.policy.instrumentId,mappingHash:researchHash(f.policy),createdAt:at,coverage:[],evidence:[],news:[],events:[] });
   const clock = async () => { const value = (await pool.query('SELECT clock_timestamp() AS now')).rows[0].now; return value instanceof Date ? value.getTime() : Date.parse(String(value)); };

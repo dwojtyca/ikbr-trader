@@ -1,7 +1,7 @@
 import { ResearchSourceFailure, captureResearchSourceError, isTwoSourceResearch, researchAssert, type ResearchSourceError, parseResearchSnapshot, researchHash, researchRefreshSlot, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore, type MarketauxAttemptTicket } from "@ikbr/shared/instrument-research";
 import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
-import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult } from "./research-fetch.js";
+import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult, type ResearchDispatchGuard } from "./research-fetch.js";
 import { extractResearchPdf } from "./research-pdf-extractor.js";
 import { parseIssuerPdfMapping } from "./research-pdf-mapping.js";
 import { createHash } from "node:crypto";
@@ -11,7 +11,7 @@ import { marketauxRecordSetHash, parseMarketauxPage, type MarketauxNewsRecord } 
 import { emptyResearchSnapshot } from "./research-empty-snapshot.js";
 
 type Role = "reports" | "news" | "calendar";
-type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot"> & Partial<Pick<ResearchStore, "dueRepairs" | "prepareRepair" | "claimMarketauxAttempt" | "reserveMarketauxCall" | "recordMarketauxCallOutcome" | "finalizeMarketauxSuccess" | "finishMarketauxFailure">>;
+type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot"> & Partial<Pick<ResearchStore, "dueRepairs" | "prepareRepair" | "claimMarketauxAttempt" | "reserveMarketauxCall" | "recordMarketauxCallOutcome" | "finalizeMarketauxSuccess" | "finishMarketauxFailure" | "recoverMarketauxAttempts">>;
 type Fetch = (source: ResearchSource, url: string, deadlineAt: string) => Promise<ResearchFetchResult>;
 const REFRESH_INTERVAL_MS: Record<Role, number> = { reports: 86400000, news: 900000, calendar: 86400000 };
 const RETRYABLE_HTTP = /^RESEARCH_SOURCE_HTTP_(429|500|502|503|504)$/;
@@ -77,7 +77,7 @@ export class ResearchRefreshScheduler {
   constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; marketauxOnDemand?: boolean; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[] }) {
     if (isTwoSourceResearch(options.manifest)) {
       researchAssert(options.marketauxOnDemand === false, "RESEARCH_MARKETAUX_ON_DEMAND_POLICY_MISMATCH");
-      for (const method of ["claimMarketauxAttempt", "reserveMarketauxCall", "recordMarketauxCallOutcome", "finalizeMarketauxSuccess", "finishMarketauxFailure"] as const)
+      for (const method of ["claimMarketauxAttempt", "reserveMarketauxCall", "recordMarketauxCallOutcome", "finalizeMarketauxSuccess", "finishMarketauxFailure", "recoverMarketauxAttempts"] as const)
         researchAssert(typeof options.store[method] === "function", "RESEARCH_MARKETAUX_ATTEMPT_STORE_REQUIRED");
     }
     options.signal?.addEventListener("abort", () => this.stop(), { once: true });
@@ -124,6 +124,22 @@ export class ResearchRefreshScheduler {
     this.repairInFlight = true;
     try {
       const errors: unknown[] = [];
+      if (isTwoSourceResearch(manifest)) for (const policy of manifest.instruments) {
+        if (this.stopped) break;
+        if (policy.assetClass === 'etf') continue;
+        const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId: policy.instrumentId };
+        try {
+          await store.withRefreshLock(identity, async () => {
+            this.assertActive();
+            let recovered = false;
+            for (const source of policy.sources.filter(source => source.adapter === 'marketaux-news')) {
+              const result = await store.recoverMarketauxAttempts!({ ...identity, sourceId: source.id });
+              this.assertActive(); recovered ||= result.state === 'RECOVERED';
+            }
+            if (recovered) await store.prepareRepair?.(identity);
+          });
+        } catch (error) { errors.push(error); }
+      }
       if (manifest.instruments.some(policy => policy.sources.some(source => source.adapter === 'ibkr-wsh'))) {
         const due = await store.dueWshAttempts({ configHash: manifest.configHash, manifestHash, accountId });
         for (const attempt of due) {
@@ -282,7 +298,11 @@ export class ResearchRefreshScheduler {
     const config = parseMarketauxNewsConfig(source, policy);
     let ticket: MarketauxAttemptTicket | undefined;
     if (isTwoSourceResearch(manifest)) {
-      const claim = await store.claimMarketauxAttempt!({ configHash: manifest.configHash, manifestHash, accountId, instrumentId: policy.instrumentId, sourceId: source.id });
+      const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId: policy.instrumentId, sourceId: source.id };
+      const recovery = await store.recoverMarketauxAttempts!(identity);
+      this.assertActive();
+      if (recovery.state === 'WAITING' || recovery.state === 'OPERATOR_REQUIRED') return;
+      const claim = await store.claimMarketauxAttempt!(identity);
       if (!claim.claimed) return;
       ticket = claim.ticket;
     }
@@ -351,11 +371,18 @@ export class ResearchRefreshScheduler {
           const reservation = { accountId, provider: source.provider, kind: "source" as const, configHash: manifest.configHash, manifestHash,
             callKey: identity.callKey, requestHash: identity.requestHash, reservedCostMicros, maxRequestsPerDay, maxCostMicrosPerDay };
           let deadlineAt: string, callMonotonicDeadline: number | undefined;
+          let dispatchGuard: ResearchDispatchGuard | undefined, dispatchRetired = false;
           if (ticket) {
             const admitted = await store.reserveMarketauxCall!(ticket, descriptor, reservation);
             callMonotonicDeadline = Math.min(admitted.monotonicDeadlineMs, ticket.monotonicDeadlineMs);
             checkpoint(callMonotonicDeadline);
-            deadlineAt = new Date(Date.now() + Math.max(0, Math.floor(callMonotonicDeadline - performance.now()))).toISOString();
+            researchAssert(typeof admitted.assertActive === 'function', 'RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED');
+            dispatchGuard = { signal: this.controller.signal, assertActive: () => {
+              this.assertActive();
+              if (dispatchRetired) throw new Error('RESEARCH_MARKETAUX_DEADLINE_EXPIRED');
+              admitted.assertActive();
+            } };
+            deadlineAt = admitted.deadlineAt;
           } else {
             deadlineAt = new Date(Math.min(now() + 10000, admissionDeadline)).toISOString();
             await store.reserveCall({ ...reservation, deadlineAt });
@@ -364,7 +391,8 @@ export class ResearchRefreshScheduler {
           try {
             checkpoint(callMonotonicDeadline);
             if (!ticket && now() >= Date.parse(deadlineAt)) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
-            result = await fetch(source, descriptor, deadlineAt, Math.min(10 * 1024 * 1024, remainingBytes), callMonotonicDeadline);
+            dispatchGuard?.assertActive();
+            result = await fetch(source, descriptor, deadlineAt, Math.min(10 * 1024 * 1024, remainingBytes), callMonotonicDeadline, dispatchGuard);
           } catch (error) {
             const outcome = /^RESEARCH_SOURCE_HTTP_\d{3}$/.test(sanitizeMarketauxError(error)) ? "FAILED" : "UNKNOWN";
             if (ticket) {
@@ -372,7 +400,7 @@ export class ResearchRefreshScheduler {
               await recordOutcome(identity.callKey, { outcome });
             } else await store.recordCallOutcome(identity.callKey, outcome);
             throw error;
-          }
+          } finally { dispatchRetired = true; }
           const contentHash = createHash("sha256").update(result.payload).digest("hex");
           const fetchedAt = ticket
             ? (await recordOutcome(identity.callKey, { outcome: "SUCCEEDED", contentHash })).recordedAt

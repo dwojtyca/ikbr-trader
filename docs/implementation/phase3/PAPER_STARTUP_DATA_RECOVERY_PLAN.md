@@ -1,8 +1,9 @@
 # Plan naprawy przygotowania danych przy starcie Paper
 
-Data: 2026-10-19. Status: plan etapowy przyjęty w niezależnej recenzji; implementacja niewykonana.
+Data: 2026-10-19. Status: plan i kontrakty przyjęte w niezależnej recenzji; implementacja przyjęta; wymagane lokalne kontrole zakończone pozytywnie.
 Baza: `7df517dfbabb3d809eaa27de6ae2934c52ced77f`.
-Zakres zgody w tej rozmowie: przygotowanie planu, nie implementacja tego pakietu.
+Właściciel zatwierdził implementację 2026-10-19 po publikacji planu (`5564c12`).
+Etap 0 i jego niezależna recenzja nadal poprzedzają zmiany runtime.
 
 ## Cel i granice
 
@@ -239,5 +240,35 @@ Sprawdzono sześć linków względnych, wskazane pliki i fakty kodu. Obserwacje
 operacyjne pochodzą z odczytów lead; recenzent nie wykonywał operacji na brokerze.
 Actual model/effort telemetry, token usage i pełny czas: unavailable.
 Naprawy po pierwszej recenzji: 0; eskalacje: 0.
-To dokument planistyczny; kod, migracje, testy awarii i wdrożenie nie są wykonane.
+Historyczny status publikacji samego planu (`5564c12`): kod, migracje, testy awarii i wdrożenie nie były wtedy wykonane.
 Dokument-only: walidacja faktów, linków i diff; bez uruchamiania runtime test suites.
+
+## Etap 0 — dowody z wykonania 2026-10-19
+
+Odczyt transakcji READ ONLY operacyjnego PostgreSQL potwierdził:
+
+- Marketaux PKO: UNKNOWN z 2026-10-15T16:15:28Z, deadline 16:17:28Z,
+  pierwsza strona pierwszego przebiegu ma wynik UNKNOWN.
+- Marketaux AAPL: STARTED z 2026-10-15T18:19:11Z, deadline 18:21:11Z;
+  sześć stron pierwszego przebiegu SUCCEEDED, strona 1 drugiego przebiegu
+  ma rezerwację z deadline 18:19:28.898Z i brak wyniku.
+- WSH PKO: UNKNOWN, początek 2026-10-15T22:17:04Z,
+  `RESEARCH_WSH_ABANDONED_ATTEMPT`, cleanup UNKNOWN, verified_local_closure=false.
+- PKO odzyskało READY kalendarza o 2026-10-19T07:00:43Z; AAPL pozostaje FAILED.
+
+Jednorazowy niepauzujący logpoint obserwował normalne żądanie ingestion, bez
+dodatkowego pobrania i poza jakąkolwiek ścieżką zleceń. Debugger pozostał lokalny
+w kontenerze, logpoint usunięto, zamknięcie portu inspectora potwierdzono.
+Zaobserwowana odpowiedź AAPL z 2026-10-19T07:23:43.347Z na żądanie
+07:23:42.887Z: strefa US/Eastern, 14 sesji, początek 20260929-09:30:00,
+koniec 20261016-16:00:00, ostatnia data sesji 20261016. Są to wyłącznie
+granice publicznego kalendarza kontraktu, bez danych rachunku.
+
+Odrzucenie jest więc odtworzone: odpowiedź kończy się w piątek o 20:00Z,
+przed wymaganą granicą poniedziałku 2026-10-19T04:00Z. Nie jest to awaria
+sieci ani brak automatycznego fetchera. Odpowiedź nie daje dowodu coverage
+weekendu; nie wolno dopisać brakujących dat ani przyspieszać finalności tygodnia.
+Kontrakty [sesji](PAPER_STARTUP_SESSION_RECOVERY_CONTRACT.md) i
+[research recovery](PAPER_STARTUP_RESEARCH_RECOVERY_CONTRACT.md) zostały dołączone
+i niezależnie przyjęte. Aktualny status implementacji, recenzji i walidacji zawiera
+[raport wykonania](PAPER_STARTUP_DATA_RECOVERY_REPORT.md).

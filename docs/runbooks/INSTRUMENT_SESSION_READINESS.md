@@ -34,6 +34,23 @@ Historical warming may use fresh broker calendars ending at the last close.
 That does not extend coverage or make the instrument entry-ready. Runtime and
 execution always require fresh current-time coverage and an active interval.
 
+A Monday preopening SCHEDULE can end at the prior Friday close. With matching,
+fresh contract hours explicitly proving the current market CLOSED and a bounded
+recent history envelope, ingestion prepares native 1m/5m/1h/4h/1d history as
+PARTIAL. It retains the original coverage and reports WAITING. Weekly preparation
+waits for authoritative coverage through the current Monday; contract hours do not
+fill that historical gap. The normal paced refresh completes the remaining work
+when a sufficient schedule arrives. Missing, stale or contradictory current hours
+remain unavailable. No candle or weekly finality rule is relaxed.
+
+`sessionWarmup` adds `preparationState`, `historyCoverage`, `countsMeasured`,
+`preparationReason` and `nextCheckAt`. Zero legacy counters with
+`countsMeasured=false` mean unmeasured history, not an empty database.
+`sessionScheduleDiagnostics` describes the latest normal attempt and its actual
+response bounds separately from retained DB evidence. A COMPLETE calendar is not
+itself trade readiness; current market, native counts/freshness and all entry
+checks still apply. `bootstrapped=true` establishes subscriptions, not these gates.
+
 The current native polling design admits at most two concurrent bound instruments:
 50 requests/10 minutes minus 20 reserved for schedules/higher bars/startup, with 12
 requests per instrument for minute/five-minute maintenance. Above capacity it

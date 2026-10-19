@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { computeTradingConfigurationHash, parseTradingConfiguration } from '@ikbr/shared/trading-config';
 import { researchFixture, twoSourceResearchFixture } from '@ikbr/shared/instrument-research-testfixture';
 import { researchHash as hashResearch } from '@ikbr/shared/instrument-research';
-import { canonicalJson, PaperHttpError, PaperRuntime, PaperRuntimeError, validateRenderedCompose, type ReleaseProof, type RuntimeControl, type RuntimeAdapters } from './paper-runtime.js';
+import { canonicalJson, PaperHttpError, PaperRuntime, formatResearchRecovery, PaperRuntimeError, validateRenderedCompose, type ReleaseProof, type RuntimeControl, type RuntimeAdapters } from './paper-runtime.js';
 
 const readyHealth = () => ({ connected: true, bootstrapped: true, bootstrapping: false, automaticBootstrap: { initialized: true, manuallyStopped: false, inFlight: false, recoveryNeeded: false, shuttingDown: false, error: null } });
 
@@ -94,8 +94,8 @@ test('runtime validates pinned research contents and legacy scheduling policy be
   }
 });
 
-async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lost' | 'unchanged' | 'transient' | 'server' | 'abort'; waitThenPause?: boolean; abort?: AbortController } = {}) {
-  const f = await fixture(); const calls: string[] = []; let control: RuntimeControl['control'] = { account_id: 'DU123456', paused: true, revision: 1 };
+async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lost' | 'unchanged' | 'transient' | 'server' | 'abort'; waitThenPause?: boolean; abort?: AbortController; sessionWarmup?: unknown } = {}) {
+  const f = await fixture(); const calls: string[] = [], logs: string[] = []; let control: RuntimeControl['control'] = { account_id: 'DU123456', paused: true, revision: 1 };
   let events: RuntimeControl['events'] = [{ revision: 1, paused: true, reason: 'before' }]; let pauseCalls = 0, resumeCalls = 0, preparedCalls = 0, healthRetries = 0;
   const mutate = (paused: boolean, reason: string, expectedRevision: number) => { control = { ...control!, paused, revision: expectedRevision + 1 }; events = [...events, { revision: control.revision, paused, reason }]; };
   const compose = async (args: string[]) => { calls.push(`compose:${args.slice(-5).join(' ')}`); return args.includes('config') ? JSON.stringify(f.rendered) : args.includes('ps') ? '[]' : ''; };
@@ -103,7 +103,7 @@ async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lo
     calls.push(`${body === undefined ? 'get' : 'post'}:${path}`);
     if (path === '/health') return { ok: true };
     if (path === 'http://ingestion/health') { if (healthRetries++ < 2) throw new Error('starting'); return readyHealth(); }
-    if (path === 'http://ingestion/backfill-progress') return { progress: { phase: 'completed', failedTimeframes: [] } };
+    if (path === 'http://ingestion/backfill-progress') return { progress: { phase: 'completed', failedTimeframes: [] }, ...(options.sessionWarmup === undefined ? {} : { sessionWarmup: options.sessionWarmup }) };
     if (path === '/execution/entry-control') return { startupProtocolVersion: 1, control, events };
     if (path === '/execution/entry-control/pause') {
       pauseCalls++; const v = body as { reason: string; expectedRevision: number };
@@ -132,15 +132,76 @@ async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lo
     }
     throw new Error('unexpected fixture request');
   };
-  const adapters: RuntimeAdapters = { compose, inspectImage: async id => id, http, sleep: async () => undefined, signal: options.abort?.signal };
+  const adapters: RuntimeAdapters = { compose, inspectImage: async id => id, http, sleep: async () => undefined, signal: options.abort?.signal, log: message => logs.push(message) };
   const runtime = new PaperRuntime({ root: f.root, token: 'fixture', adapters });
-  return { f, runtime, calls, adapters, get control() { return control; }, get events() { return events; }, get pauseCalls() { return pauseCalls; }, get resumeCalls() { return resumeCalls; } };
+  return { f, runtime, calls, logs, adapters, get control() { return control; }, get events() { return events; }, get pauseCalls() { return pauseCalls; }, get resumeCalls() { return resumeCalls; } };
 }
+
+test('completed bootstrap reports independent partial PKO and failed AAPL session warmup without changing resume', async () => {
+  const timeframes = ['1m', '5m', '1h', '4h', '1d', '1w'];
+  const warmup = [
+    ...timeframes.map(timeframe => ({ instrumentId: 'pko_wse', timeframe, preparationState: 'WAITING', historyCoverage: 'PARTIAL', countsMeasured: true, available: 40, nativeClosed: 8, required: 20, nextCheckAt: '2026-10-19T08:00:00.000Z', preparationReason: 'session_history_partial' })),
+    ...timeframes.map(timeframe => ({ instrumentId: 'aapl_smart', timeframe, preparationState: 'HOLD', historyCoverage: 'UNAVAILABLE', countsMeasured: false, available: 0, nativeClosed: 0, required: 20, preparationReason: 'session_schedule_failed' })),
+  ];
+  const h = await runScenario({ sessionWarmup: warmup });
+  try {
+    const result = await h.runtime.start();
+    const report = h.logs.join('\n');
+    assert.match(report, /pko_wse:.*1m: WAITING, historia PARTIAL/);
+    assert.match(report, /aapl_smart:.*1m: HOLD, historia UNAVAILABLE, liczby niezmierzone/);
+    assert.equal(h.resumeCalls, 1);
+    assert.match(result, /Paper działa w Dockerze/);
+    assert.match(result, /nie potwierdza gotowości wejścia dla każdego instrumentu/);
+  } finally { await h.f.cleanup(); }
+});
+
+test('missing or malformed session warmup diagnostics are unavailable and hostile text is omitted', async () => {
+  const h = await runScenario({ sessionWarmup: [
+    { instrumentId: 'pko_wse', timeframe: '1m', preparationState: 'READY', historyCoverage: 'PARTIAL', countsMeasured: true, available: 99, nativeClosed: 99, required: 1, preparationReason: 'SECRET DU123456 raw provider response' },
+    { instrumentId: 'pko_wse', timeframe: '5m', preparationState: 'WAITING', historyCoverage: 'PARTIAL', countsMeasured: false, available: 0, nativeClosed: 0, required: 20 },
+    { instrumentId: 'pko_wse', timeframe: '5m', preparationState: 'WAITING', historyCoverage: 'PARTIAL', countsMeasured: false, available: 0, nativeClosed: 0, required: 20 },
+  ] });
+  try {
+    await h.runtime.start();
+    const report = h.logs.join('\n');
+    assert.match(report, /pko_wse:.*1m: unavailable/);
+    assert.match(report, /pko_wse:.*5m: unavailable/);
+    assert.match(report, /aapl_smart:.*1m: unavailable/);
+    assert.doesNotMatch(report, /SECRET|DU123456|raw provider response/);
+    assert.equal(h.resumeCalls, 1);
+  } finally { await h.f.cleanup(); }
+});
+
+test('session diagnostics omit secret-shaped and unknown controlled-looking reasons', async () => {
+  const reasons = ['fixture', 'abcdefghijklmnopqrstuvwxyzabcdef', 'session_unrecognized_secret'];
+  const h = await runScenario({ sessionWarmup: reasons.map((preparationReason, i) => ({
+    instrumentId: 'pko_wse', timeframe: ['1m', '5m', '1h'][i], preparationState: 'HOLD',
+    historyCoverage: 'UNAVAILABLE', countsMeasured: false, preparationReason,
+  })) });
+  try {
+    await h.runtime.start();
+    const report = h.logs.join('\n');
+    for (const reason of reasons) assert.equal(report.includes(reason), false);
+    assert.match(report, /powód niedostępny/);
+  } finally { await h.f.cleanup(); }
+});
 
 test('rendered Paper profile validates fixed command, image, account and private readonly mounts', async () => {
   const f = await fixture();
   try { assert.deepEqual(await validateRenderedCompose(f.rendered, f.proof, f.root), { accountId: 'DU123456', instrumentIds: ['pko_wse', 'aapl_smart'] }); }
   finally { await f.cleanup(); }
+});
+
+test('maintenance profile permits pinned disabled master without relaxing normal startup validation', async () => {
+  const f = await fixture();
+  try {
+    const disabled = structuredClone(f.rendered) as { services: Record<string, { environment: Record<string, string> }> };
+    for (const service of ['execution-engine', 'signal-engine', 'llm-agent']) disabled.services[service].environment.TRADING_ENABLED = 'false';
+    await assert.rejects(validateRenderedCompose(disabled, f.proof, f.root));
+    assert.equal((await validateRenderedCompose(disabled, f.proof, f.root, true)).accountId, 'DU123456');
+    disabled.services['execution-engine'].environment.IBKR_ENVIRONMENT = 'live';
+    await assert.rejects(validateRenderedCompose(disabled, f.proof, f.root, true));
+  } finally { await f.cleanup(); }
 });
 
 test('profile drift in a producer command or Paper environment fails closed', async () => {
@@ -807,4 +868,12 @@ test('retained Marketaux cache shows its original expiry and sanitized failure w
     assert.match(output, /Temporarily unavailable/);
     assert.doesNotMatch(output, /DU123456/);
   } finally { await h.f.cleanup(); }
+});
+
+test('recovery diagnostics distinguish proof from readiness and ignore untrusted payload text', () => {
+  const row = { state: 'RECOVERED', operatorAction: null, challengeId: '12345678-1234-4123-8123-123456789abc', lastRecoveryId: null, nextCheckAt: null, reason: 'secret raw payload' };
+  const message = formatResearchRecovery(row, { secrets: ['secret'], accountIds: [] });
+  assert.match(message!, /świeżość danych ocenia zwykła kontrola gotowości/); assert.doesNotMatch(message!, /secret|payload|READY/);
+  assert.equal(formatResearchRecovery({ ...row, operatorAction: 'arbitrary_secret' }, { secrets: [], accountIds: [] }), null);
+  assert.equal(formatResearchRecovery({ ...row, state: 'READY' }, { secrets: [], accountIds: [] }), null);
 });

@@ -162,3 +162,6 @@ Uruchomienie Paper wymaga aktualnego preflight i zwykłego sygnału strategii we
 [runbooka PKO](GPW_PAPER_ROUND_TRIP.md). Testy tej integracji nie dowodzą wykonanej
 transakcji. Wycofanie wdrożenia zatrzymuje odświeżanie i nowe wejścia, zachowując
 historię V2; nie usuwa tabel ani nie przywraca po cichu starej zgody AI.
+
+Odzyskiwanie przerwanych pobrań przy starcie oraz procedura dla starego UNKNOWN:
+[Paper startup research recovery](PAPER_STARTUP_RESEARCH_RECOVERY.md).

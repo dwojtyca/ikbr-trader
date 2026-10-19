@@ -8,6 +8,7 @@ export interface MarketauxAttemptTicket extends MarketauxAttemptIdentity {
 export type MarketauxAttemptClaim = { claimed: true; ticket: MarketauxAttemptTicket }
   | { claimed: false; reason: string; nextCheckAt: string | null };
 export interface MarketauxRefreshState {
+  recovery?: import("./startup-recovery.js").ResearchRecoveryDiagnostic;
   sourceId: string; lastSuccessfulAt: string | null; expiresAt: string | null;
   nextRegularAt: string | null; activeAttemptId: string | null; holdReasons: string[];
   latestFailure: { attemptId: string; recordedAt: string; reason: string; sourceError?: ResearchSourceError;

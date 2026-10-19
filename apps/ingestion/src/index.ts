@@ -266,6 +266,7 @@ app.get("/backfill-progress", async () => ({
   progress: backfillProgress,
   sessionWarmup: Array.from(sessionRefresh.status.values()),
   sessionPollingCapacity: SESSION_POLLING_CAPACITY,
+  sessionScheduleDiagnostics: Array.from(scheduleCoordinators.values(), coordinator => coordinator.lastAttemptDiagnostic).filter(Boolean),
   sessionScheduleErrors: Array.from(scheduleCoordinators.entries(), ([key, coordinator]) => ({ key, error: coordinator.lastError })),
 }));
 

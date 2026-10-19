@@ -1,3 +1,4 @@
+import { MARKETAUX_RECOVERY_PROTOCOL, RECOVERY_CLOCK_TOLERANCE_MS, RECOVERY_EXPIRY_MARGIN_MS, systemResearchRecoveryClock, parseRecoveryIdentity, parseRecoveryEvidence, isRecoveryUuid, type ResearchRecoveryClock, type RecoveryIdentity, type RecoveryChallenge, type RecoveryPredecessor, type RecoveryCommit, type RecoveryReceipt, type RecoverySupersede, type MarketauxRecoveryResult, type ResearchRecoveryDiagnostic } from './startup-recovery.js';
 import { isTwoSourceResearch } from "./policy.js";
 import type { MarketauxAttemptIdentity, MarketauxAttemptTicket, MarketauxAttemptClaim, MarketauxAttemptFailure, MarketauxRefreshState } from "./marketaux-refresh.js";
 import { earliestSourceValidityExpiry } from "./source-validity.js";
@@ -21,12 +22,32 @@ class ResearchBudgetExhausted extends Error {
 }
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : String(v);
 export class ResearchStore {
-  private readonly marketauxTickets = new WeakMap<MarketauxAttemptTicket, { deadline: number; ticketHash: string; failureDeadline?: number }>();
+  private readonly marketauxTickets = new WeakMap<MarketauxAttemptTicket, { deadline: number; ticketHash: string; failureDeadline?: number; wall: number; mono: number; invalid: boolean }>();
   private marketauxBudget(ticket: MarketauxAttemptTicket, failure = false): number {
     const budget = this.marketauxTickets.get(ticket);
     researchAssert(budget && budget.ticketHash === researchHash(ticket), 'RESEARCH_MARKETAUX_TICKET_INVALID');
+    if (!failure) this.assertMarketauxClock(ticket);
     if (failure) budget.failureDeadline ??= performance.now() + 3000;
     return failure ? budget.failureDeadline! : budget.deadline;
+  }
+  private assertMarketauxClock(ticket: MarketauxAttemptTicket, wallDeadline?: number, monoDeadline?: number): void {
+    const b=this.marketauxTickets.get(ticket);
+    researchAssert(b && b.ticketHash===researchHash(ticket),'RESEARCH_MARKETAUX_TICKET_INVALID');
+    const wall=this.recoveryClock.wallNow(),mono=this.recoveryClock.monotonicNow();
+    if(b.invalid || Math.abs((wall-b.wall)-(mono-b.mono))>RECOVERY_CLOCK_TOLERANCE_MS || wall>=Math.min(b.wall+120000,wallDeadline??Infinity)
+      || mono>=b.mono+120000 || performance.now()>=Math.min(b.deadline,monoDeadline??Infinity)){
+      b.invalid=true;throw new Error('RESEARCH_MARKETAUX_CLOCK_OR_DEADLINE_INVALID');
+    }
+  }
+  private async recoveryClockSample(db:ResearchDb,ticket?:MarketauxAttemptTicket):Promise<{db:number;wall:number}> {
+    const before=this.recoveryClock.monotonicNow(),wallBefore=this.recoveryClock.wallNow();
+    const now=await this.now(db),wall=this.recoveryClock.wallNow(),after=this.recoveryClock.monotonicNow();
+    if(Math.abs(now-wall)>RECOVERY_CLOCK_TOLERANCE_MS || after-before>RECOVERY_CLOCK_TOLERANCE_MS || wall-wallBefore>RECOVERY_CLOCK_TOLERANCE_MS
+      || after<before || wall<wallBefore || Math.abs((wall-wallBefore)-(after-before))>RECOVERY_CLOCK_TOLERANCE_MS){
+      const b=ticket&&this.marketauxTickets.get(ticket);if(b)b.invalid=true;
+      throw new Error('RESEARCH_RECOVERY_CLOCK_UNPROVED');
+    }
+    if(ticket)this.assertMarketauxClock(ticket);return {db:now,wall};
   }
   // Marketaux writers lock the attempt table before authority SHARE, attempt rows and snapshot head.
   // Admission readers take authority SHARE, then attempt-table SHARE, then head; authority SHAREs
@@ -36,6 +57,7 @@ export class ResearchStore {
     const bounded = await connectWshBounded(this.pool, undefined, deadline);
     try {
       const db = bounded.db; await db.query('BEGIN');
+      await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
       if (!readOnly) await db.query('LOCK TABLE research_marketaux_attempts IN ROW EXCLUSIVE MODE');
       const result = await run(db); await db.query('COMMIT'); return result;
     } catch (error) { bounded.destroy(); throw error; }
@@ -55,33 +77,36 @@ export class ResearchStore {
     return row;
   }
   async claimMarketauxAttempt(identity: MarketauxAttemptIdentity): Promise<MarketauxAttemptClaim> {
-    const deadline = performance.now() + 120000;
+    const deadline = performance.now() + 120000, wall=this.recoveryClock.wallNow(),mono=this.recoveryClock.monotonicNow();
     return this.marketauxTransaction(async db => {
       researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), 'RESEARCH_ACCOUNT_INVALID');
       await this.assertAuthority(identity, db);
       const { source, config, ledger, policy } = await this.marketauxSource(identity, db);
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`research-marketaux-issuer:${identity.accountId}:${ledger}`]);
       await this.assertAuthority(identity, db);
-      const now = await this.now(db); marketauxQualificationDeadline(config, now);
+      const sample=await this.recoveryClockSample(db),now=sample.db; marketauxQualificationDeadline(config, now);
+      await this.assertRecoveryAdmission(identity,db);
       researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now, "RESEARCH_PERMISSION_UNVERIFIED");
       const prior = (await db.query('SELECT * FROM research_marketaux_attempts WHERE account_id=$1 AND ledger_key=$2 ORDER BY started_at DESC', [identity.accountId, ledger])).rows;
-      const unresolved = prior.find(r => ['STARTED','FINALIZING','UNKNOWN'].includes(String(r.state)));
+      const recovered=new Set((await db.query('SELECT attempt_id FROM research_marketaux_recoveries WHERE account_id=$1 AND ledger_key=$2',[identity.accountId,ledger])).rows.map(r=>r.attempt_id));
+      const unresolved = prior.find(r => ['STARTED','FINALIZING','UNKNOWN'].includes(String(r.state)) && !recovered.has(r.id));
       if (unresolved) return { claimed: false, reason: 'RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED', nextCheckAt: unresolved.state === 'STARTED' && now < researchTime(iso(unresolved.deadline_at)) ? iso(unresolved.deadline_at) : null };
       const next = prior.length ? researchTime(iso(prior[0].started_at)) + 3600000 : null;
       if (next !== null && now < next) return { claimed: false, reason: 'RESEARCH_MARKETAUX_SLOT_TOO_EARLY', nextCheckAt: new Date(next).toISOString() };
       const slot = Math.floor(now / 3600000), window = marketauxWindow(slot, config);
       const ticket: MarketauxAttemptTicket = { ...identity, attemptId: randomUUID(), sourceHash: researchHash(source), slot, startedAt: new Date(now).toISOString(), deadlineAt: new Date(now + 120000).toISOString(), ...window, monotonicDeadlineMs: deadline };
-      await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED')`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt]);
-      this.marketauxTickets.set(ticket, { deadline, ticketHash: researchHash(ticket) }); return { claimed: true, ticket };
+      await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state,recovery_protocol,clock_domain_id,clock_db_at,clock_wall_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED',$13,$14,$15,$16)`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt,MARKETAUX_RECOVERY_PROTOCOL,this.recoveryClock.domainId(),new Date(sample.db),new Date(sample.wall)]);
+      this.marketauxTickets.set(ticket, { deadline, ticketHash: researchHash(ticket),wall,mono,invalid:false }); return { claimed: true, ticket };
     }, deadline);
   }
-  async reserveMarketauxCall(ticket: MarketauxAttemptTicket, request: MarketauxRequest, reservation: Omit<ResearchCallReservation, 'deadlineAt'>): Promise<{ deadlineAt: string; monotonicDeadlineMs: number }> {
-    const budget = this.marketauxBudget(ticket), entered = performance.now();
+  async reserveMarketauxCall(ticket: MarketauxAttemptTicket, request: MarketauxRequest, reservation: Omit<ResearchCallReservation, 'deadlineAt'>): Promise<{ deadlineAt: string; monotonicDeadlineMs: number; assertActive:()=>void }> {
+    const budget = this.marketauxBudget(ticket), entered = performance.now(), wallEntered=this.recoveryClock.wallNow();
     const result = await this.marketauxTransaction(async db => {
       await this.assertAuthority(ticket, db);
       const { source, config, policy } = await this.marketauxSource(ticket, db);
       await this.marketauxTicketRow(ticket, db, ['STARTED']);
+      await this.assertRecoveryAdmission(ticket,db); await this.recoveryClockSample(db,ticket);
       researchAssert('kind' in request && request.kind === 'marketaux-news-v2' && request.attemptId === ticket.attemptId && request.slot === ticket.slot && request.windowStart === ticket.windowStart && request.asOf === ticket.asOf, 'RESEARCH_MARKETAUX_REQUEST_INVALID');
       const expected = marketauxCallIdentity(ticket.manifestHash, ticket.instrumentId, source, request), now = await this.now(db), expiry = marketauxQualificationDeadline(config, now);
       researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now, "RESEARCH_PERMISSION_UNVERIFIED");
@@ -100,10 +125,11 @@ export class ResearchStore {
         return { denied: true as const };
       }
       await db.query('INSERT INTO research_marketaux_attempt_calls(call_key,attempt_id,pass,page) VALUES($1,$2,$3,$4)', [expected.callKey,ticket.attemptId,request.pass,request.page]);
-      return { deadlineAt, monotonicDeadlineMs: Math.min(budget, entered + remaining) };
+      return { deadlineAt, monotonicDeadlineMs: Math.min(budget, entered + remaining),wallDeadline:wallEntered+remaining };
     }, budget);
     if ("denied" in result) throw new Error("RESEARCH_BUDGET_EXHAUSTED");
-    return result;
+    const assertActive=()=>this.assertMarketauxClock(ticket,result.wallDeadline,result.monotonicDeadlineMs);
+    assertActive(); return {deadlineAt:result.deadlineAt,monotonicDeadlineMs:result.monotonicDeadlineMs,assertActive};
   }
   async recordMarketauxCallOutcome(ticket: MarketauxAttemptTicket, callKey: string, result: { outcome: 'SUCCEEDED'; contentHash: string } | { outcome: 'FAILED' | 'UNKNOWN' }): Promise<{ recordedAt: string }> {
     const deadline = this.marketauxBudget(ticket, result.outcome !== 'SUCCEEDED');
@@ -114,16 +140,19 @@ export class ResearchStore {
       const call = (await db.query(`SELECT r.* FROM research_marketaux_attempt_calls c JOIN research_call_reservations r USING(call_key) WHERE c.attempt_id=$1 AND c.call_key=$2`, [ticket.attemptId,callKey])).rows[0];
       researchAssert(call, 'RESEARCH_MARKETAUX_CALL_INVALID');
       const now = await this.now(db);
+      if (result.outcome === 'SUCCEEDED') { await this.recoveryClockSample(db,ticket); await this.assertRecoveryAdmission(ticket,db); }
       if (result.outcome === 'SUCCEEDED') researchAssert(isResearchHash(result.contentHash) && now < researchTime(iso(call.deadline_at)) && now < researchTime(ticket.deadlineAt), 'RESEARCH_MARKETAUX_CALL_EXPIRED');
       const stamp = new Date(now).toISOString();
       await db.query('INSERT INTO research_call_outcomes(call_key,outcome,recorded_at) VALUES($1,$2,$3)', [callKey,result.outcome,stamp]);
       await db.query('INSERT INTO research_marketaux_response_receipts(call_key,content_hash,recorded_at) VALUES($1,$2,$3)', [callKey,result.outcome === 'SUCCEEDED' ? result.contentHash : null,stamp]);
+      if(result.outcome==='SUCCEEDED')researchAssert((await this.recoveryClockSample(db,ticket)).db<researchTime(iso(call.deadline_at)),'RESEARCH_MARKETAUX_CALL_EXPIRED');
       return { recordedAt: stamp };
     }, deadline);
   }
   private async marketauxFinalizeFence(ticket: MarketauxAttemptTicket, deadline: number): Promise<void> {
     await this.marketauxTransaction(async db => {
       await this.assertAuthority(ticket, db); await this.marketauxTicketRow(ticket, db, ['STARTED']);
+      await this.assertRecoveryAdmission(ticket,db);
       await db.query("UPDATE research_marketaux_attempts SET state='FINALIZING' WHERE id=$1", [ticket.attemptId]);
     }, deadline);
   }
@@ -162,7 +191,7 @@ export class ResearchStore {
       await this.marketauxTicketRow(ticket, db, ['FINALIZING']);
       await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[ticket.configHash,ticket.manifestHash,ticket.instrumentId]);
       await this.latestSnapshot(ticket,db,true);
-      const now = await this.now(db); marketauxQualificationDeadline(config, now);
+      const now = (await this.recoveryClockSample(db,ticket)).db; marketauxQualificationDeadline(config, now);
       researchAssert(source.automation === 'PERMITTED' && source.retention === 'FACTS_AND_REFERENCES' && policy.verification.outcome === 'VERIFIED' && researchTime(policy.verification.verifiedAt) <= now, 'RESEARCH_PERMISSION_UNVERIFIED');
       researchAssert(now < researchTime(ticket.deadlineAt), 'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
       const completedAt = new Date(now).toISOString(), incoming = build(completedAt);
@@ -178,6 +207,7 @@ export class ResearchStore {
       }
       const stored = await this.persistSnapshot(snapshot, researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot), ticket.deadlineAt, db, undefined, ticket.attemptId);
       await db.query(`UPDATE research_marketaux_attempts SET state='SUCCEEDED',finished_at=$2,snapshot_id=$3,projection_hash=$4 WHERE id=$1`, [ticket.attemptId,completedAt,stored.id,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId))]);
+      researchAssert((await this.recoveryClockSample(db,ticket)).db<researchTime(ticket.deadlineAt),'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
       return stored;
     }, deadline);
   }
@@ -192,7 +222,10 @@ export class ResearchStore {
       await this.latestSnapshot(ticket,db,true);
       const calls = await this.marketauxCalls(ticket, db), now = await this.now(db), stamp = new Date(now).toISOString();
       const known = calls.every(c => ['SUCCEEDED','FAILED'].includes(String(c.outcome)) && c.recorded_at && c.receipt_at && iso(c.recorded_at) === iso(c.receipt_at));
-      if (failure.outcome === 'UNKNOWN' || !known) {
+      try { await this.recoveryClockSample(db,ticket); } catch(error) {
+        if(!(error instanceof Error)||!['RESEARCH_RECOVERY_CLOCK_UNPROVED','RESEARCH_MARKETAUX_CLOCK_OR_DEADLINE_INVALID'].includes(error.message))throw error;
+      }
+      if (failure.outcome === 'UNKNOWN' || this.marketauxTickets.get(ticket)?.invalid || !known) {
         await db.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=$2,failure_class='UNKNOWN',failure_reason=$3,source_error=$4 WHERE id=$1", [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null]);
         return { retained: false, snapshot: null };
       }
@@ -218,6 +251,7 @@ export class ResearchStore {
       }
       researchAssert(stored, 'RESEARCH_MARKETAUX_PUBLICATION_INVALID');
       await db.query(`UPDATE research_marketaux_attempts SET state='FAILED',finished_at=$2,failure_reason=$3,source_error=$4,snapshot_id=$5,retained=$6,projection_hash=$7,failure_class=$8 WHERE id=$1`, [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null,stored.id,retained,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId)),transient ? 'TRANSIENT' : budget ? 'BUDGET' : 'HARD']);
+      await this.recoveryClockSample(db,ticket);
       return { retained, snapshot: stored };
     }, deadline);
   }
@@ -297,20 +331,294 @@ export class ResearchStore {
       const failure = own.find(r => r.state === 'FAILED' || r.state === 'UNKNOWN'), active = rows.find(r => r.state === 'STARTED' || r.state === 'FINALIZING');
       const holdReasons = await this.marketauxAdmissionReasons(identity,db);
       const now = await this.now(db);
-      if (rows.some(r => r.state === 'UNKNOWN' || r.state === 'FINALIZING' || r.state === 'STARTED' && researchTime(iso(r.deadline_at)) <= now) && !holdReasons.length) holdReasons.push('RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED');
-      return { sourceId:identity.sourceId,lastSuccessfulAt:success === null ? null : new Date(success).toISOString(), expiresAt:success === null ? null : new Date(Math.min(success+config.maxAgeMs,expiry ?? success+config.maxAgeMs)).toISOString(),
+      const recovered=new Set((await db.query('SELECT attempt_id FROM research_marketaux_recoveries WHERE account_id=$1 AND ledger_key=$2',[identity.accountId,ledger])).rows.map(r=>r.attempt_id));
+      if (rows.filter(r=>!recovered.has(r.id)).some(r => r.state === 'UNKNOWN' || r.state === 'FINALIZING' || r.state === 'STARTED' && researchTime(iso(r.deadline_at)) <= now) && !holdReasons.length) holdReasons.push('RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED');
+      return { recovery:await this.recoveryDiagnostic(identity,ledger,null,db),sourceId:identity.sourceId,lastSuccessfulAt:success === null ? null : new Date(success).toISOString(), expiresAt:success === null ? null : new Date(Math.min(success+config.maxAgeMs,expiry ?? success+config.maxAgeMs)).toISOString(),
         nextRegularAt:rows.length ? new Date(researchTime(iso(rows[0].started_at))+3600000).toISOString() : null, activeAttemptId:active ? String(active.id) : null, holdReasons,
         latestFailure:failure ? { attemptId:String(failure.id),recordedAt:iso(failure.finished_at),reason:String(failure.failure_reason),...(failure.source_error ? { sourceError:failure.source_error as ResearchSourceError } : {}),retainedSnapshotId:failure.retained ? String(failure.snapshot_id) : null,retainedProjectionHash:failure.retained ? String(failure.projection_hash) : null } : null };
     };
     return existing ? read(existing) : this.marketauxTransaction(read,performance.now()+3000,true);
   }
 
+  private async assertRecoveryAdmission(identity:ResearchIdentity & {instrumentId:string;accountId?:string},db:ResearchDb):Promise<void> {
+    await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
+    const manifest=await this.readManifest(identity,db),policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId);
+    researchAssert(policy,'RESEARCH_RECOVERY_SCOPE_INVALID');
+    for(const source of policy.sources){
+      let ledger:string,endpoint:string|null=null;
+      if(source.adapter==='ibkr-wsh'){const c=parseWshConfig(source,policy);ledger=wshLedgerKey(c.isin);endpoint=c.endpointId;}
+      else if(source.adapter==='marketaux-news'){const c=parseMarketauxNewsConfig(source,policy);ledger='marketaux:ibkr-conid:'+c.qualification.conId;}
+      else continue;
+      const held=(await db.query('SELECT research_recovery_held($1,$2,$3) AS held',[identity.accountId??null,ledger,endpoint])).rows[0]?.held;
+      researchAssert(!held,'RESEARCH_RECOVERY_MAINTENANCE_HOLD');
+    }
+  }
+  private marketauxPredecessor(row:Record<string,unknown>):RecoveryPredecessor {
+    const identity={id:row.id,accountId:row.account_id,configHash:row.config_hash,manifestHash:row.manifest_hash,instrumentId:row.instrument_id,
+      sourceId:row.source_id,sourceHash:row.source_hash,ledgerKey:row.ledger_key,startedAt:iso(row.started_at),deadlineAt:iso(row.deadline_at)};
+    return {kind:'MARKETAUX_ATTEMPT',id:String(row.id),identityHash:researchHash(identity),state:String(row.state),endpointId:null,ledgerKey:String(row.ledger_key),sessionId:null,generation:null};
+  }
+  private async appendMarketauxRecovery(row:Record<string,unknown>,db:ResearchDb,proof:{id:string;challengeId?:string;evidenceHash:string;wall?:number}):Promise<void> {
+    await db.query(`INSERT INTO research_marketaux_recoveries(id,attempt_id,account_id,ledger_key,identity_hash,original_state,method,original_deadline,original_protocol,clock_domain_id,clock_wall_at,challenge_id,evidence_hash)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[proof.id,row.id,row.account_id,row.ledger_key,this.marketauxPredecessor(row).identityHash,row.state,
+      proof.challengeId?'OPERATOR_PRODUCERS_STOPPED':'EXPIRED_FENCED_DEADLINE',row.deadline_at,row.recovery_protocol,proof.challengeId?null:this.recoveryClock.domainId(),proof.wall===undefined?null:new Date(proof.wall),proof.challengeId??null,proof.evidenceHash]);
+    await db.query(`INSERT INTO research_call_outcomes(call_key,outcome) SELECT c.call_key,'UNKNOWN' FROM research_marketaux_attempt_calls c
+      WHERE c.attempt_id=$1 AND NOT EXISTS(SELECT 1 FROM research_call_outcomes o WHERE o.call_key=c.call_key)`,[row.id]);
+    if(row.state!=='UNKNOWN')await db.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=clock_timestamp(),failure_class='UNKNOWN',failure_reason='RESEARCH_MARKETAUX_RECOVERED_ABANDONED_ATTEMPT' WHERE id=$1 AND state IN ('STARTED','FINALIZING')",[row.id]);
+  }
+  async recoverMarketauxAttempts(identity:MarketauxAttemptIdentity):Promise<MarketauxRecoveryResult> {
+    const deadline=performance.now()+3000,wall=this.recoveryClock.wallNow(),mono=this.recoveryClock.monotonicNow(),planned:string[]=[];
+    try{return await this.marketauxTransaction(async db=>{
+      await this.assertAuthority(identity,db);await this.assertRecoveryAdmission(identity,db);
+      const {ledger}=await this.marketauxSource(identity,db);
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-marketaux-issuer:${identity.accountId}:${ledger}`]);
+      const rows=(await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE account_id=$1 AND ledger_key=$2 AND state IN ('STARTED','FINALIZING','UNKNOWN')
+        AND NOT EXISTS(SELECT 1 FROM research_marketaux_recoveries r WHERE r.attempt_id=a.id) ORDER BY started_at FOR UPDATE`,[identity.accountId,ledger])).rows;
+      if(!rows.length)return {state:'NOT_REQUIRED',reason:null,nextCheckAt:null,recoveryIds:[]};
+      const now=await this.now(db);
+      const waiting=rows.find(r=>researchTime(iso(r.deadline_at))+RECOVERY_EXPIRY_MARGIN_MS>now);
+      if(waiting)return {state:'WAITING',reason:'RESEARCH_MARKETAUX_ATTEMPT_ACTIVE',nextCheckAt:new Date(researchTime(iso(waiting.deadline_at))+RECOVERY_EXPIRY_MARGIN_MS).toISOString(),recoveryIds:[]};
+      const domain=this.recoveryClock.domainId();
+      if(rows.some(r=>r.recovery_protocol!==MARKETAUX_RECOVERY_PROTOCOL || !domain || r.clock_domain_id!==domain || !r.clock_db_at || !r.clock_wall_at
+        || Math.abs(researchTime(iso(r.clock_db_at))-researchTime(iso(r.clock_wall_at)))>RECOVERY_CLOCK_TOLERANCE_MS))
+        return {state:'OPERATOR_REQUIRED',reason:'RESEARCH_MARKETAUX_PRODUCER_QUIESCENCE_REQUIRED',nextCheckAt:null,recoveryIds:[]};
+      const sample=await this.recoveryClockSample(db),ids:string[]=[];
+      for(const row of rows){const id=randomUUID();planned.push(id);await this.appendMarketauxRecovery(row,db,{id,wall:sample.wall,evidenceHash:researchHash({protocol:MARKETAUX_RECOVERY_PROTOCOL,domain,attemptId:row.id,deadlineAt:iso(row.deadline_at),db:sample.db,wall:sample.wall})});ids.push(id);}
+      await this.recoveryClockSample(db);
+      researchAssert(Math.abs((this.recoveryClock.wallNow()-wall)-(this.recoveryClock.monotonicNow()-mono))<=RECOVERY_CLOCK_TOLERANCE_MS,'RESEARCH_RECOVERY_CLOCK_UNPROVED');
+      return {state:'RECOVERED',reason:null,nextCheckAt:null,recoveryIds:ids};
+    },deadline);}catch(error){
+      if(error instanceof Error&&error.message==='RESEARCH_RECOVERY_CLOCK_UNPROVED')return {state:'OPERATOR_REQUIRED',reason:error.message,nextCheckAt:null,recoveryIds:[]};
+      if(planned.length&&performance.now()<deadline){
+        try{const bounded=await connectWshBounded(this.pool,undefined,deadline);try{
+          const rows=(await bounded.db.query('SELECT id FROM research_marketaux_recoveries WHERE id=ANY($1::uuid[]) AND account_id=$2',[planned,identity.accountId])).rows;
+          if(rows.length===planned.length)return {state:'RECOVERED',reason:null,nextCheckAt:null,recoveryIds:planned};
+        }finally{bounded.destroy();}}catch{/* Unknown readback retains the original scheduling hold. */}
+      }
+      throw error;
+    }
+  }
+  async readMarketauxAttemptResult(attemptId:string):Promise<{attemptId:string;state:string;snapshotId:string|null;verified:boolean}|null>{
+    researchAssert(isRecoveryUuid(attemptId),'RESEARCH_RECOVERY_ID_INVALID');
+    return this.marketauxTransaction(async db=>{
+      const row=(await db.query('SELECT * FROM research_marketaux_attempts WHERE id=$1',[attemptId])).rows[0];if(!row)return null;
+      await this.assertAuthority({configHash:String(row.config_hash),manifestHash:String(row.manifest_hash)},db);
+      let verified=false;
+      if(row.state==='SUCCEEDED'){
+        const snapshot=await this.readSnapshot(String(row.snapshot_id),db);researchAssert(snapshot,'RESEARCH_MARKETAUX_PROVENANCE_INVALID');
+        await this.assertMarketauxSnapshotProvenance(snapshot.snapshot,db);
+        researchAssert(researchHash(this.marketauxProjection(snapshot.snapshot,String(row.source_id)))===row.projection_hash,'RESEARCH_MARKETAUX_PROVENANCE_INVALID');verified=true;
+      }
+      return {attemptId,state:String(row.state),snapshotId:row.snapshot_id?String(row.snapshot_id):null,verified};
+    },performance.now()+3000,true);
+  }
+  private async recoveryDiagnostic(identity:MarketauxAttemptIdentity|WshAttemptIdentity,ledger:string,endpoint:string|null,db:ResearchDb):Promise<ResearchRecoveryDiagnostic>{
+    const base:ResearchRecoveryDiagnostic={state:'NOT_REQUIRED',reason:null,nextCheckAt:null,operatorAction:null,challengeId:null,lastRecoveryId:null};
+    const hold=(await db.query(`SELECT id FROM research_recovery_challenges c WHERE state='PREPARED' AND
+      ((kind='MARKETAUX_PRODUCER_QUIESCENCE' AND account_id=$1 AND ledger_key=$2) OR
+       (kind='WSH_ENDPOINT_RESET' AND (endpoint_id=$3 OR ledger_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(predecessors) p WHERE p->>'ledgerKey'=$2)))) ORDER BY created_at LIMIT 1`,[identity.accountId,ledger,endpoint])).rows[0];
+    if(hold)return {...base,state:'PREPARED',reason:'RESEARCH_RECOVERY_MAINTENANCE_HOLD',challengeId:String(hold.id),operatorAction:endpoint?'COMPLETE_RECONNECT_PROOF':'STOP_PRODUCERS'};
+    if(endpoint){
+      const pending=(await db.query(`SELECT 1 FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
+        WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND (a.state='STARTED' AND a.deadline_at<=clock_timestamp() OR a.cleanup_state='UNKNOWN')
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id)
+        UNION ALL SELECT 1 FROM research_wsh_acquisitions a WHERE (endpoint_id=$1 OR ledger_key=$2) AND state IN ('PENDING','UNKNOWN')
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_refresh_attempts t WHERE t.acquisition_id=a.id)
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.acquisition_id=a.id) LIMIT 1`,[endpoint,ledger])).rows.length;
+      const last=(await db.query(`SELECT r.id FROM research_wsh_recovery_receipts r WHERE r.endpoint_id=$1 ORDER BY recorded_at DESC LIMIT 1`,[endpoint])).rows[0];
+      return {...base,state:pending?'OPERATOR_REQUIRED':last?'RECOVERED':'NOT_REQUIRED',reason:pending?'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED':null,operatorAction:pending?'OBSERVE_LOCAL_GATEWAY_RESTART':null,lastRecoveryId:last?String(last.id):null};
+    }
+    const last=(await db.query('SELECT id FROM research_marketaux_recoveries WHERE account_id=$1 AND ledger_key=$2 ORDER BY recorded_at DESC LIMIT 1',[identity.accountId,ledger])).rows[0];
+    const rows=(await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE account_id=$1 AND ledger_key=$2 AND state IN ('STARTED','FINALIZING','UNKNOWN')
+      AND NOT EXISTS(SELECT 1 FROM research_marketaux_recoveries r WHERE r.attempt_id=a.id)`,[identity.accountId,ledger])).rows;
+    if(!rows.length)return {...base,state:last?'RECOVERED':'NOT_REQUIRED',lastRecoveryId:last?String(last.id):null};
+    const domain=this.recoveryClock.domainId(),now=await this.now(db);
+    const proved=rows.every(r=>r.recovery_protocol===MARKETAUX_RECOVERY_PROTOCOL&&domain!==null&&r.clock_domain_id===domain)&&Math.abs(now-this.recoveryClock.wallNow())<=RECOVERY_CLOCK_TOLERANCE_MS;
+    return {...base,state:proved?'WAITING':'OPERATOR_REQUIRED',reason:proved?'RESEARCH_RECOVERY_DEADLINE_WAIT':'RESEARCH_RECOVERY_CLOCK_UNPROVED',operatorAction:proved?null:'STOP_PRODUCERS',
+      nextCheckAt:proved?new Date(Math.max(now,...rows.map(r=>researchTime(iso(r.deadline_at))+RECOVERY_EXPIRY_MARGIN_MS))).toISOString():null,lastRecoveryId:last?String(last.id):null};
+  }
+  async readResearchRecoveryReceipt(challengeId:string,operationId:string):Promise<RecoveryReceipt|null>{
+    researchAssert(isRecoveryUuid(operationId),'RESEARCH_RECOVERY_ID_INVALID');
+    const deadline=performance.now()+3000,c=await this.recoveryChallengeById(challengeId,deadline);if(!c)return null;
+    return this.recoveryTransaction(this.recoveryIdentity(c),async db=>{
+      const audit=(await db.query("SELECT * FROM research_recovery_audit WHERE operation_id=$1 AND challenge_id=$2 AND action='COMMIT'",[operationId,challengeId])).rows[0];if(!audit)return null;
+      const current=(await db.query('SELECT state,receipt_id FROM research_recovery_challenges WHERE id=$1',[challengeId])).rows[0];
+      const result=audit.result_json as RecoveryReceipt;
+      researchAssert(typeof audit.evidence_json==='string'&&researchHash(JSON.parse(audit.evidence_json))===audit.evidence_hash&&result.evidenceHash===audit.evidence_hash
+        &&result.id===current.receipt_id&&current.state==='COMMITTED'&&result.challengeId===challengeId&&result.kind===c.kind,'RESEARCH_RECOVERY_RECEIPT_INVALID');
+      return result;
+    },c.executionProcessId,deadline);
+  }
+  private async recoveryScope(identity:RecoveryIdentity,db:ResearchDb):Promise<{ledger:string;endpoint:string|null}> {
+    if(identity.kind==='MARKETAUX_PRODUCER_QUIESCENCE')return {ledger:(await this.marketauxSource(identity,db)).ledger,endpoint:null};
+    const {config}=await this.wshSource(identity,db,false);return {ledger:wshLedgerKey(config.isin),endpoint:config.endpointId};
+  }
+  private async assertRecoveryMaintenanceAuthority(identity:RecoveryIdentity,db:ResearchDb,expectedProcess?:string):Promise<string>{
+    await db.query('SELECT pg_advisory_xact_lock(hashtext($1))',[`snap:${identity.accountId}`]);
+    const control=(await db.query('SELECT paused,revision FROM execution_entry_controls WHERE account_id=$1 FOR UPDATE',[identity.accountId])).rows[0];
+    researchAssert(control?.paused===true&&Number(control.revision)===identity.pauseRevision,'RESEARCH_RECOVERY_PAUSE_CHANGED');
+    await this.readManifest(identity,db);
+    const adopted=(await db.query('SELECT manifest_hash FROM research_authority WHERE config_hash=$1 FOR SHARE',[identity.configHash])).rows[0];
+    researchAssert(adopted?.manifest_hash===identity.manifestHash&&(await db.query('SELECT bundle_latched FROM trading_configuration_rollout WHERE singleton')).rows[0]?.bundle_latched===true,'RESEARCH_AUTHORITY_MISMATCH');
+    await db.query('LOCK TABLE research_observations IN SHARE MODE');
+    await db.query('LOCK TABLE trading_configuration_observations IN SHARE MODE');
+    const observations=(await db.query('SELECT * FROM research_observations WHERE observed_at<=clock_timestamp() AND expires_at>clock_timestamp()')).rows;
+    const execution=observations.filter(r=>r.service==='execution-engine');
+    researchAssert(execution.length===1&&observations.every(r=>r.config_hash===identity.configHash&&r.manifest_hash===identity.manifestHash)
+      &&(!expectedProcess||execution[0].process_id===expectedProcess),'RESEARCH_RECOVERY_EXECUTION_AUTHORITY_INVALID');
+    const configs=(await db.query('SELECT * FROM trading_configuration_observations WHERE observed_at<=clock_timestamp() AND expires_at>clock_timestamp()')).rows;
+    researchAssert(configs.some(r=>r.service==='execution-engine')&&configs.every(r=>r.mode==='bundle'&&r.effective_hash===identity.configHash),'RESEARCH_RECOVERY_EXECUTION_AUTHORITY_INVALID');
+    return String(execution[0].process_id);
+  }
+  private decodeRecovery(row:Record<string,unknown>):RecoveryChallenge {
+    researchAssert(typeof row.canonical_json==='string','RESEARCH_RECOVERY_CHALLENGE_INVALID');
+    const data=JSON.parse(row.canonical_json) as Omit<RecoveryChallenge,'challengeHash'>;
+    researchAssert(researchHash(data)===row.challenge_hash&&data.id===row.id,'RESEARCH_RECOVERY_CHALLENGE_INVALID');
+    return {...data,challengeHash:String(row.challenge_hash),state:row.state as RecoveryChallenge['state'],receiptId:row.receipt_id?String(row.receipt_id):null};
+  }
+  private async recoveryTransaction<T>(identity:RecoveryIdentity,run:(db:ResearchDb,scope:{ledger:string;endpoint:string|null},execution:string)=>Promise<T>,expectedProcess?:string,deadline=performance.now()+3000):Promise<T>{
+    const discovery=await connectWshBounded(this.pool,undefined,deadline);let scope:{ledger:string;endpoint:string|null};
+    try{scope=await this.recoveryScope(identity,discovery.db);}finally{discovery.destroy();}
+    const work=async(db:ResearchDb)=>{
+      await db.query('BEGIN');
+      const execution=await this.assertRecoveryMaintenanceAuthority(identity,db,expectedProcess);
+      await db.query('LOCK TABLE research_recovery_challenges IN ROW EXCLUSIVE MODE');
+      if(scope.endpoint){await db.query('INSERT INTO research_wsh_endpoints(endpoint_id) VALUES($1) ON CONFLICT DO NOTHING',[scope.endpoint]);await db.query('SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE',[scope.endpoint]);}
+      else await db.query('LOCK TABLE research_marketaux_attempts IN ROW EXCLUSIVE MODE');
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[scope.endpoint?`research-wsh-issuer:${scope.ledger}`:`research-marketaux-issuer:${identity.accountId}:${scope.ledger}`]);
+      const result=await run(db,scope,execution);
+      await this.assertRecoveryMaintenanceAuthority(identity,db,execution);
+      researchAssert(performance.now()<deadline,'RESEARCH_RECOVERY_TIMEOUT');await db.query('COMMIT');return result;
+    };
+    if(scope.endpoint){let result:T|undefined;
+      const locked=await this.withWshEndpointLock(scope.endpoint,async lease=>{
+        const bounded=this.wshBounds.get(lease)!;bounded.beginOperation(undefined,deadline);
+        try{result=await work(this.wshLeases.get(lease)!);}catch(error){bounded.destroy();throw error;}
+      });researchAssert(locked,'RESEARCH_WSH_ENDPOINT_BUSY');return result as T;
+    }
+    const bounded=await connectWshBounded(this.pool,undefined,deadline);
+    try{return await work(bounded.db);}catch(error){bounded.destroy();throw error;}finally{bounded.destroy();}
+  }
+  private async recoveryPredecessors(identity:RecoveryIdentity,scope:{ledger:string;endpoint:string|null},db:ResearchDb):Promise<RecoveryPredecessor[]>{
+    if(!scope.endpoint){
+      const rows=(await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE account_id=$1 AND ledger_key=$2 AND state IN ('STARTED','FINALIZING','UNKNOWN')
+       AND NOT EXISTS(SELECT 1 FROM research_marketaux_recoveries r WHERE r.attempt_id=a.id) ORDER BY id FOR UPDATE`,[identity.accountId,scope.ledger])).rows;
+      const now=await this.now(db);researchAssert(rows.every(r=>researchTime(iso(r.deadline_at))<=now),'RESEARCH_RECOVERY_ATTEMPT_ACTIVE');return rows.map(r=>this.marketauxPredecessor(r));
+    }
+    const attempts=(await db.query(`SELECT a.*,c.ledger_key,c.config_hash,c.manifest_hash,c.instrument_id,c.source_id,c.account_id,ac.generation
+      FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id LEFT JOIN research_wsh_acquisitions ac ON ac.id=a.acquisition_id
+      WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND (a.state='STARTED' OR a.cleanup_state='UNKNOWN')
+      AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id) ORDER BY a.id FOR UPDATE OF a`,[scope.endpoint,scope.ledger])).rows;
+    const acquisitions=(await db.query(`SELECT a.* FROM research_wsh_acquisitions a WHERE (endpoint_id=$1 OR ledger_key=$2) AND state IN ('PENDING','UNKNOWN')
+      AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.acquisition_id=a.id)
+      AND NOT EXISTS(SELECT 1 FROM research_wsh_refresh_attempts t WHERE t.acquisition_id=a.id) ORDER BY id FOR UPDATE`,[scope.endpoint,scope.ledger])).rows;
+    const now=await this.now(db);researchAssert(attempts.every(r=>r.state!=='STARTED'||researchTime(iso(r.deadline_at))<=now),'RESEARCH_RECOVERY_ATTEMPT_ACTIVE');
+    researchAssert([...attempts,...acquisitions].every(r=>r.endpoint_id===scope.endpoint),'RESEARCH_RECOVERY_OTHER_ENDPOINT_REQUIRED');
+    const make=(r:Record<string,unknown>,kind:'WSH_ATTEMPT'|'WSH_ACQUISITION'):RecoveryPredecessor=>{
+      const immutable={id:r.id,endpointId:r.endpoint_id,sessionId:r.session_id,ledgerKey:r.ledger_key,configHash:r.config_hash,manifestHash:r.manifest_hash,instrumentId:r.instrument_id,sourceId:r.source_id,startedAt:iso(r.started_at),generation:r.generation===null||r.generation===undefined?null:Number(r.generation)};
+      return {kind,id:String(r.id),identityHash:researchHash(immutable),state:String(r.state),endpointId:String(r.endpoint_id),ledgerKey:String(r.ledger_key),sessionId:String(r.session_id),generation:immutable.generation};
+    };
+    return [...attempts.map(r=>make(r,'WSH_ATTEMPT')),...acquisitions.map(r=>make(r,'WSH_ACQUISITION'))].sort((a,b)=>a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
+  }
+  private async insertRecoveryChallenge(identity:RecoveryIdentity,scope:{ledger:string;endpoint:string|null},execution:string,predecessors:RecoveryPredecessor[],db:ResearchDb,predecessorId?:string):Promise<RecoveryChallenge>{
+    researchAssert(predecessors.length>0&&predecessors.length<=256,'RESEARCH_RECOVERY_NOT_REQUIRED');
+    const now=await this.now(db),generation=scope.endpoint?Number((await db.query('SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1',[scope.endpoint])).rows[0].generation):null;
+    const data={...identity,id:randomUUID(),nonce:randomUUID(),executionProcessId:execution,createdAt:new Date(now).toISOString(),expiresAt:new Date(now+900000).toISOString(),state:'PREPARED' as const,
+      endpointId:scope.endpoint,endpointGeneration:generation,predecessors,predecessorHash:researchHash(predecessors),receiptId:null};
+    const challenge={...data,challengeHash:researchHash(data)};
+    await db.query(`INSERT INTO research_recovery_challenges(id,operation_id,kind,account_id,config_hash,manifest_hash,instrument_id,source_id,ledger_key,endpoint_id,endpoint_generation,pause_revision,execution_process_id,nonce,created_at,expires_at,predecessors,predecessor_hash,canonical_json,challenge_hash,predecessor_challenge_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,[data.id,identity.operationId,identity.kind,identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId,scope.ledger,scope.endpoint,generation,identity.pauseRevision,execution,data.nonce,data.createdAt,data.expiresAt,JSON.stringify(predecessors),data.predecessorHash,canonicalJson(data),challenge.challengeHash,predecessorId??null]);
+    return challenge;
+  }
+  async prepareResearchRecovery(raw:RecoveryIdentity):Promise<RecoveryChallenge>{
+    const identity=parseRecoveryIdentity(raw);
+    return this.recoveryTransaction(identity,async(db,scope,execution)=>{
+      const prior=(await db.query('SELECT * FROM research_recovery_challenges WHERE operation_id=$1',[identity.operationId])).rows[0];
+      if(prior){const c=this.decodeRecovery(prior);researchAssert(Object.entries(identity).every(([k,v])=>(c as unknown as Record<string,unknown>)[k]===v),'RESEARCH_RECOVERY_OPERATION_REUSED');return c;}
+      researchAssert(!(await db.query('SELECT research_recovery_held($1,$2,$3) AS held',[identity.accountId,scope.ledger,scope.endpoint])).rows[0]?.held,'RESEARCH_RECOVERY_MAINTENANCE_HOLD');
+      const predecessors=await this.recoveryPredecessors(identity,scope,db),c=await this.insertRecoveryChallenge(identity,scope,execution,predecessors,db);
+      await db.query("INSERT INTO research_recovery_audit(operation_id,challenge_id,action,actor,request_hash,result_json) VALUES($1,$2,'PREPARE',$3,$4,$5)",[identity.operationId,c.id,identity.actor,researchHash(identity),JSON.stringify(c)]);return c;
+    });
+  }
+  private async recoveryChallengeById(id:string,deadline=performance.now()+3000):Promise<RecoveryChallenge|null>{
+    researchAssert(isRecoveryUuid(id),'RESEARCH_RECOVERY_ID_INVALID');const bounded=await connectWshBounded(this.pool,undefined,deadline);
+    try{const row=(await bounded.db.query('SELECT * FROM research_recovery_challenges WHERE id=$1',[id])).rows[0];return row?this.decodeRecovery(row):null;}finally{bounded.destroy();}
+  }
+  private recoveryIdentity(c:RecoveryChallenge):RecoveryIdentity{return {kind:c.kind,accountId:c.accountId,instrumentId:c.instrumentId,sourceId:c.sourceId,configHash:c.configHash,manifestHash:c.manifestHash,pauseRevision:c.pauseRevision,actor:c.actor,operationId:c.operationId};}
+  async readResearchRecovery(id:string):Promise<RecoveryChallenge|null>{
+    const deadline=performance.now()+3000,c=await this.recoveryChallengeById(id,deadline);if(!c)return null;
+    return this.recoveryTransaction(this.recoveryIdentity(c),async db=>this.decodeRecovery((await db.query('SELECT * FROM research_recovery_challenges WHERE id=$1',[id])).rows[0]),c.executionProcessId,deadline);
+  }
+  async readResearchRecoveryReplacement(operationId:string,raw:RecoveryIdentity):Promise<RecoveryChallenge|null>{
+    const identity=parseRecoveryIdentity(raw);researchAssert(isRecoveryUuid(operationId)&&operationId===identity.operationId,'RESEARCH_RECOVERY_OPERATION_REUSED');
+    return this.recoveryTransaction(identity,async(db,scope)=>{const row=(await db.query('SELECT * FROM research_recovery_challenges WHERE operation_id=$1',[operationId])).rows[0];
+      if(!row)return null;const c=this.decodeRecovery(row);researchAssert(c.accountId===identity.accountId&&c.kind===identity.kind&&row.ledger_key===scope.ledger&&c.endpointId===scope.endpoint,'RESEARCH_RECOVERY_SCOPE_INVALID');return c;});
+  }
+  async supersedeResearchRecovery(input:RecoverySupersede):Promise<RecoveryChallenge>{
+    const identity=parseRecoveryIdentity(input.replacement),evidence=parseRecoveryEvidence(input.evidence,true);
+    researchAssert(evidence.kind==='PRODUCER_QUIESCENCE'&&isRecoveryUuid(input.challengeId)&&isResearchHash(input.challengeHash),'RESEARCH_RECOVERY_EVIDENCE_INVALID');
+    return this.recoveryTransaction(identity,async(db,scope,execution)=>{
+      const audit=(await db.query('SELECT * FROM research_recovery_audit WHERE operation_id=$1',[identity.operationId])).rows[0];
+      if(audit){researchAssert(audit.action==='SUPERSEDE'&&audit.request_hash===researchHash(input),'RESEARCH_RECOVERY_OPERATION_REUSED');return audit.result_json as RecoveryChallenge;}
+      const row=(await db.query('SELECT * FROM research_recovery_challenges WHERE id=$1 FOR UPDATE',[input.challengeId])).rows[0];researchAssert(row,'RESEARCH_RECOVERY_CHALLENGE_MISSING');
+      const old=this.decodeRecovery(row);
+      researchAssert(old.state==='PREPARED'&&old.challengeHash===input.challengeHash&&evidence.challengeId===old.id&&evidence.challengeHash===old.challengeHash&&evidence.nonce===old.nonce
+        &&old.accountId===identity.accountId&&old.kind===identity.kind&&row.ledger_key===scope.ledger&&old.endpointId===scope.endpoint,'RESEARCH_RECOVERY_REPLACEMENT_INVALID');
+      const current=await this.recoveryPredecessors(identity,scope,db);
+      researchAssert(old.predecessors.every(p=>current.some(n=>n.kind===p.kind&&n.id===p.id&&n.identityHash===p.identityHash)),'RESEARCH_RECOVERY_PREDECESSOR_CHANGED');
+      const next=await this.insertRecoveryChallenge(identity,scope,execution,current,db,old.id);
+      await db.query("UPDATE research_recovery_challenges SET state='CANCELLED',successor_challenge_id=$2 WHERE id=$1",[old.id,next.id]);
+      await db.query("INSERT INTO research_recovery_audit(operation_id,challenge_id,action,actor,request_hash,evidence_json,evidence_hash,result_json) VALUES($1,$2,'SUPERSEDE',$3,$4,$5,$6,$7)",[identity.operationId,next.id,identity.actor,researchHash(input),canonicalJson(evidence),researchHash(evidence),JSON.stringify(next)]);return next;
+    });
+  }
+  async commitResearchRecovery(input:RecoveryCommit):Promise<RecoveryReceipt>{
+    researchAssert(isRecoveryUuid(input.challengeId)&&isRecoveryUuid(input.operationId)&&isResearchHash(input.challengeHash)&&typeof input.actor==='string'&&/^[A-Za-z0-9_.:-]{1,80}$/.test(input.actor)&&Number.isSafeInteger(input.pauseRevision),'RESEARCH_RECOVERY_EVIDENCE_INVALID');
+    const deadline=performance.now()+3000,evidence=parseRecoveryEvidence(input.evidence),initial=await this.recoveryChallengeById(input.challengeId,deadline);researchAssert(initial,'RESEARCH_RECOVERY_CHALLENGE_MISSING');
+    const identity=this.recoveryIdentity(initial);identity.pauseRevision=input.pauseRevision;
+    return this.recoveryTransaction(identity,async(db,scope)=>{
+      const row=(await db.query('SELECT * FROM research_recovery_challenges WHERE id=$1 FOR UPDATE',[input.challengeId])).rows[0],c=this.decodeRecovery(row);
+      const prior=(await db.query('SELECT * FROM research_recovery_audit WHERE operation_id=$1',[input.operationId])).rows[0];
+      if(prior){researchAssert(prior.action==='COMMIT'&&prior.request_hash===researchHash(input),'RESEARCH_RECOVERY_OPERATION_REUSED');return prior.result_json as RecoveryReceipt;}
+      researchAssert(c.state==='PREPARED'&&c.challengeHash===input.challengeHash&&c.pauseRevision===input.pauseRevision&&evidence.challengeId===c.id&&evidence.challengeHash===c.challengeHash&&evidence.nonce===c.nonce&&evidence.kind===c.kind,'RESEARCH_RECOVERY_CHALLENGE_INVALID');
+      researchAssert(await this.now(db)<researchTime(c.expiresAt),'RESEARCH_RECOVERY_CHALLENGE_EXPIRED');
+      const predecessors=await this.recoveryPredecessors(identity,scope,db);researchAssert(researchHash(predecessors)===c.predecessorHash,'RESEARCH_RECOVERY_PREDECESSOR_CHANGED');
+      if(evidence.kind==='WSH_ENDPOINT_RESET')researchAssert(evidence.endpointId===scope.endpoint&&evidence.reconnect.accountId===c.accountId&&Number((await db.query('SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1',[scope.endpoint])).rows[0].generation)===c.endpointGeneration,'RESEARCH_RECOVERY_ENDPOINT_CHANGED');
+      const receipt:RecoveryReceipt={id:randomUUID(),challengeId:c.id,kind:c.kind,recordedAt:new Date(await this.now(db)).toISOString(),evidenceHash:researchHash(evidence),predecessorHash:c.predecessorHash,nextCheckAt:null};
+      await db.query("INSERT INTO research_recovery_audit(operation_id,challenge_id,action,actor,request_hash,evidence_json,evidence_hash,result_json) VALUES($1,$2,'COMMIT',$3,$4,$5,$6,$7)",[input.operationId,c.id,input.actor,researchHash(input),canonicalJson(evidence),receipt.evidenceHash,JSON.stringify(receipt)]);
+      if(!scope.endpoint){
+        for(const p of predecessors){const a=(await db.query('SELECT * FROM research_marketaux_attempts WHERE id=$1 FOR UPDATE',[p.id])).rows[0];await this.appendMarketauxRecovery(a,db,{id:randomUUID(),challengeId:c.id,evidenceHash:receipt.evidenceHash});}
+      }else{
+        researchAssert(evidence.kind==='WSH_ENDPOINT_RESET','RESEARCH_RECOVERY_EVIDENCE_INVALID');
+        await db.query(`INSERT INTO research_wsh_recovery_receipts(id,challenge_id,endpoint_id,prior_generation,resulting_generation,method,evidence_hash,reconnect_session_id,cleanup)
+          VALUES($1,$2,$3,$4,$5,'OPERATOR_OBSERVED_LOCAL_GATEWAY_RESTART',$6,$7,$8)`,[receipt.id,c.id,scope.endpoint,c.endpointGeneration,Number(c.endpointGeneration)+1,receipt.evidenceHash,evidence.reconnect.sessionId,JSON.stringify(evidence.reconnect.cleanup)]);
+        for(const p of predecessors){
+          let acquisitionId:string|null=p.kind==='WSH_ACQUISITION'?p.id:null;
+          if(p.kind==='WSH_ATTEMPT'){
+            const a=(await db.query('SELECT * FROM research_wsh_refresh_attempts WHERE id=$1 FOR UPDATE',[p.id])).rows[0];acquisitionId=a.acquisition_id?String(a.acquisition_id):null;
+            if(a.state==='STARTED')await db.query("UPDATE research_wsh_refresh_attempts SET state='UNKNOWN',finished_at=clock_timestamp(),failure_class='UNCERTAIN',failure_reason='RESEARCH_WSH_ABANDONED_ATTEMPT',failure_stage='cleanup',cleanup_state='UNKNOWN' WHERE id=$1",[p.id]);
+          }
+          if(acquisitionId){
+            const a=(await db.query('SELECT * FROM research_wsh_acquisitions WHERE id=$1 FOR UPDATE',[acquisitionId])).rows[0];
+            if(a?.state==='PENDING'){
+              researchAssert(a.endpoint_id===scope.endpoint&&Number(a.generation)===c.endpointGeneration,'RESEARCH_WSH_GENERATION_RETIRED');
+              await db.query(`INSERT INTO research_call_outcomes(call_key,outcome) SELECT call_key,'UNKNOWN' FROM research_wsh_acquisition_calls c WHERE acquisition_id=$1
+                AND NOT EXISTS(SELECT 1 FROM research_call_outcomes o WHERE o.call_key=c.call_key)`,[acquisitionId]);
+              await db.query("UPDATE research_wsh_acquisitions SET state='UNKNOWN',retired_at=clock_timestamp() WHERE id=$1",[acquisitionId]);
+            }
+          }
+          await db.query('INSERT INTO research_wsh_recovery_predecessors(receipt_id,attempt_id,acquisition_id,identity_hash) VALUES($1,$2,$3,$4)',[receipt.id,p.kind==='WSH_ATTEMPT'?p.id:null,p.kind==='WSH_ACQUISITION'?p.id:null,p.identityHash]);
+        }
+        await db.query('UPDATE research_wsh_endpoints SET generation=generation+1 WHERE endpoint_id=$1',[scope.endpoint]);
+      }
+      await db.query("UPDATE research_recovery_challenges SET state='COMMITTED',receipt_id=$2 WHERE id=$1",[c.id,receipt.id]);return receipt;
+    },initial.executionProcessId,deadline);
+  }
   private wshDueCursor = 0;
   private readonly wshTicketDeadlines=new WeakMap<WshAttemptTicket,number>();
   private budgetDiscovery: { identity: string; nextScanAt: number; cursor: string } | undefined;
   private readonly wshBounds = new WeakMap<WshEndpointLease,WshBoundedConnection>();
   private readonly wshLeases = new WeakMap<WshEndpointLease, ResearchConnection>();
-  constructor(private readonly pool: ResearchPool) {}
+  constructor(private readonly pool: ResearchPool, private readonly recoveryClock:ResearchRecoveryClock=systemResearchRecoveryClock) {}
   async withRefreshLock(identity: ResearchIdentity & { instrumentId: string }, run: () => Promise<void>): Promise<boolean> {
     const db = await this.pool.connect();
     const key = `research-refresh:${identity.configHash}:${identity.manifestHash}:${identity.instrumentId}`;
@@ -331,6 +639,7 @@ export class ResearchStore {
     return this.transaction(async db => {
       researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), "RESEARCH_ACCOUNT_INVALID");
       await this.assertAuthority(identity, db);
+      await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
       const manifest = await this.readManifest(identity, db), now = await this.now(db);
       if (isTwoSourceResearch(manifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
       const stored = await this.latestSnapshot(identity, db, true);
@@ -703,7 +1012,7 @@ export class ResearchStore {
   private async persistSnapshot(input: ResearchSnapshot, refreshSlot?: string, admissionDeadlineAt?: string, existing?: ResearchDb, publishingAcquisitionId?: string, publishingMarketauxId?: string): Promise<StoredResearchSnapshot> {
     if (admissionDeadlineAt !== undefined) researchTime(admissionDeadlineAt);
     return this.transaction(async db => {
-      await this.assertAuthority(input, db); const manifest = await this.readManifest(input, db), snapshot = parseResearchSnapshot(input, manifest);
+      await this.assertAuthority(input, db); await this.assertRecoveryAdmission(input,db); const manifest = await this.readManifest(input, db), snapshot = parseResearchSnapshot(input, manifest);
       await this.assertWshSnapshotProvenance(snapshot, db, publishingAcquisitionId);
       await this.assertMarketauxSnapshotProvenance(snapshot, db, publishingMarketauxId);
       researchAssert(researchTime(snapshot.createdAt) <= await this.now(db), "RESEARCH_FUTURE_SNAPSHOT");
@@ -763,6 +1072,7 @@ export class ResearchStore {
         canonicalJson(proposal.strategy_attribution) === canonicalJson(review.strategy_attribution) && canonicalJson(proposal.strategy_trigger) === canonicalJson(review.strategy_trigger) &&
         proposal.conid === review.conid && review.instrument_id === input.instrumentId && proposal.client_order_hash === input.clientOrderHash && proposal.instrument_id === input.instrumentId && proposal.strategy_configuration_hash === input.configHash && review.client_order_hash === input.clientOrderHash && review.status === "PENDING" && !review.decision_json && !review.decided_at && !review.delivery_started_at && !review.delivery_outcome && proposal.status === "PROPOSED" && !proposal.execution_attempted_at && !proposal.broker_order_id, "RESEARCH_PROPOSAL_BINDING_INVALID");
       await this.assertAuthority(input, db);
+      await this.assertRecoveryAdmission(input,db);
       if (!(await this.getBinding(input.proposalId, db))) {
         const manifest = await this.readManifest(input, db);
         if (isTwoSourceResearch(manifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
@@ -777,6 +1087,7 @@ export class ResearchStore {
   async validateBinding(input: ResearchBindingIdentity, existing?: ResearchDb, lockHead = true): Promise<ValidatedResearchBinding> {
     return this.transaction(async db => {
       await this.assertAuthority(input, db);
+      await this.assertRecoveryAdmission(input,db);
       const binding = await this.getBinding(input.proposalId, db);
       researchAssert(binding && binding.clientOrderHash === input.clientOrderHash && binding.configHash === input.configHash && binding.manifestHash === input.manifestHash && binding.instrumentId === input.instrumentId, "RESEARCH_BINDING_MISMATCH");
       const activeManifest = await this.readManifest(input, db);
@@ -843,7 +1154,7 @@ export class ResearchStore {
   private async wshTransaction<T>(lease: WshEndpointLease, fn: (db: ResearchDb) => Promise<T>): Promise<T> {
     const bounded=this.wshBounds.get(lease),db=this.wshLeases.get(lease);researchAssert(bounded&&db,'RESEARCH_WSH_LOCK_LOST');
     bounded.beginOperation();
-    try {await lease.assertHeld();await db.query('BEGIN');const result=await fn(db);await lease.assertHeld();await db.query('COMMIT');return result;}
+    try {await lease.assertHeld();await db.query('BEGIN');await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');const result=await fn(db);await lease.assertHeld();await db.query('COMMIT');return result;}
     catch(error){if(!bounded.closed){try{await db.query('ROLLBACK');}catch{bounded.destroy();}}throw error;}
     finally{bounded.endOperation();}
   }
@@ -883,7 +1194,7 @@ export class ResearchStore {
   }
   async claimWshAttempt(lease:WshEndpointLease,input:WshAttemptIdentity & {sessionId:string},kind:WshAttemptKind):Promise<WshAttemptClaim> {
     return this.wshTransaction(lease,async db=>{
-      await this.assertAuthority(input,db);const {source,config}=await this.wshSource(input,db,false);
+      await this.assertAuthority(input,db);const {source,config}=await this.wshSource(input,db,false);await this.assertRecoveryAdmission(input,db);
       researchAssert(config.endpointId===lease.endpointId && input.sessionId.length>0 && input.sessionId.length<=500,'RESEARCH_WSH_ATTEMPT_IDENTITY');
       const ledger=wshLedgerKey(config.isin);
       await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-wsh-issuer:${ledger}`]);
@@ -926,6 +1237,9 @@ export class ResearchStore {
       this.wshBounds.get(lease)!.startAttempt(WSH_ATTEMPT_MS-(performance.now()-observedAt));
       await db.query(`INSERT INTO research_wsh_refresh_attempts(id,cycle_id,ordinal,predecessor_id,endpoint_id,session_id,started_at,deadline_at,state)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,'STARTED')`,[id,cycle.id,ordinal,predecessor,lease.endpointId,input.sessionId,new Date(now),deadline]);
+      if(ordinal===0)await db.query(`INSERT INTO research_wsh_recovery_successors(receipt_id,attempt_id)
+        SELECT r.id,$1 FROM research_wsh_recovery_receipts r WHERE r.endpoint_id=$2 AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_successors s WHERE s.receipt_id=r.id)
+        ON CONFLICT DO NOTHING`,[id,lease.endpointId]);
       const ticket:WshAttemptTicket={...input,id,cycleId:String(cycle.id),ordinal:ordinal as 0|1|2,endpointId:lease.endpointId,
         startedAt:new Date(now).toISOString(),deadlineAt:deadline.toISOString(),nextRegularAt:iso(cycle.next_regular_at)};
       this.wshTicketDeadlines.set(ticket,observedAt+WSH_ATTEMPT_MS);return {state:'CLAIMED',ticket};
@@ -938,7 +1252,11 @@ export class ResearchStore {
   private async wshCleanupFence(endpointId:string,ledger:string,kind:WshAttemptKind,db:ResearchDb):Promise<true|string|null> {
     const rows=(await db.query(`SELECT a.verified_local_closure,c.next_regular_at,clock_timestamp() AS now
       FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
-      WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND a.state<>'STARTED' AND a.cleanup_state='UNKNOWN'`,[endpointId,ledger])).rows;
+      WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND a.state<>'STARTED' AND a.cleanup_state='UNKNOWN'
+      AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id AND (
+        ($3='regular' AND c.next_regular_at<=clock_timestamp()) OR EXISTS(
+          SELECT 1 FROM research_wsh_recovery_successors s JOIN research_wsh_refresh_attempts first_attempt ON first_attempt.id=s.attempt_id
+          WHERE s.receipt_id=p.receipt_id AND first_attempt.started_at<=clock_timestamp())))`,[endpointId,ledger,kind])).rows;
     if(rows.some(r=>r.verified_local_closure!==true))return true;
     if(rows.length&&kind==='retry')return true;
     const waits=rows.filter(r=>researchTime(iso(r.next_regular_at))>researchTime(iso(r.now)));
@@ -1027,6 +1345,20 @@ export class ResearchStore {
       researchAssert(updated.rows.length===1,'RESEARCH_WSH_ATTEMPT_EXPIRED');
     });
   }
+  private async wshRecoveryBlocks(identity:ResearchIdentity & {instrumentId:string},db:ResearchDb):Promise<boolean>{
+    const manifest=await this.readManifest(identity,db),policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId);
+    if(!policy)return true;
+    for(const source of policy.sources.filter(s=>s.adapter==='ibkr-wsh')){
+      const config=parseWshConfig(source,policy);
+      const rows=(await db.query(`SELECT 1 FROM research_wsh_recovery_receipts r JOIN research_wsh_recovery_predecessors p ON p.receipt_id=r.id
+        LEFT JOIN research_wsh_refresh_attempts a ON a.id=p.attempt_id LEFT JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
+        LEFT JOIN research_wsh_acquisitions ac ON ac.id=p.acquisition_id
+        WHERE coalesce(c.ledger_key,ac.ledger_key)=$1 AND NOT EXISTS(SELECT 1 FROM research_wsh_acquisitions good
+         WHERE good.state='PUBLISHED' AND good.config_hash=$2 AND good.manifest_hash=$3 AND good.instrument_id=$4 AND good.source_id=$5 AND good.started_at>r.recorded_at) LIMIT 1`,
+        [wshLedgerKey(config.isin),identity.configHash,identity.manifestHash,identity.instrumentId,source.id])).rows;
+      if(rows.length)return true;
+    }return false;
+  }
   private async assertWshRefreshAdmission(identity:ResearchIdentity & {instrumentId:string},db:ResearchDb):Promise<void> {
     const blocked=await db.query(`SELECT 1 FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
       LEFT JOIN research_wsh_acquisitions ac ON ac.id=a.acquisition_id
@@ -1036,7 +1368,7 @@ export class ResearchStore {
         LEFT JOIN research_wsh_acquisitions ga ON ga.id=good.acquisition_id
         WHERE gc.config_hash=c.config_hash AND gc.manifest_hash=c.manifest_hash AND gc.instrument_id=c.instrument_id AND gc.source_id=c.source_id AND gc.account_id=c.account_id
         AND good.started_at>a.started_at AND (good.state='SUCCEEDED' OR ga.state='PUBLISHED')) LIMIT 1`,[identity.configHash,identity.manifestHash,identity.instrumentId]);
-    researchAssert(!blocked.rows.length,'RESEARCH_WSH_ATTEMPT_UNRESOLVED');
+    researchAssert(!blocked.rows.length&&!await this.wshRecoveryBlocks(identity,db),'RESEARCH_WSH_ATTEMPT_UNRESOLVED');
   }
   async readWshRefreshState(identity:WshAttemptIdentity,existing?:ResearchDb):Promise<WshRefreshState> {
     const db=existing??this.pool,manifest=await this.readManifest(identity,db),policy=manifest.instruments.find(p=>p.instrumentId===identity.instrumentId);
@@ -1056,14 +1388,14 @@ export class ResearchStore {
     const good=(await db.query(`SELECT max(a.started_at) AS at ${base} AND (a.state='SUCCEEDED' OR ac.state='PUBLISHED')`,params)).rows[0]?.at;
     const since=good?iso(good):'1970-01-01T00:00:00.000Z';
     const failures=(await db.query(`SELECT a.* ${base} AND a.started_at>$6 AND a.state IN ('FAILED','UNKNOWN') ORDER BY a.started_at DESC,a.ordinal DESC LIMIT 1`,[...params,since])).rows;
-    const blocked=(await db.query(`SELECT 1 ${base} AND a.started_at>$6 AND
+    const blocked=await this.wshRecoveryBlocks(identity,db)||(await db.query(`SELECT 1 ${base} AND a.started_at>$6 AND
       ((a.state='STARTED' AND (NOT a.preflight_complete OR a.deadline_at<=clock_timestamp() AND ac.state IS DISTINCT FROM 'PUBLISHED')) OR a.failure_class IN ('HARD','UNCERTAIN')) LIMIT 1`,[...params,since])).rows.length>0;
     const baseline=await this.wshRegularNotBefore(wshLedgerKey(config.isin),config.refreshIntervalMs,db);
     const cleanupFence=await this.wshCleanupFence(config.endpointId,wshLedgerKey(config.isin),'regular',db);
     const effective=cleanupFence===true?null:Math.max(baseline??0,cleanupFence?researchTime(cleanupFence):0);
     const nextRegular=effective?new Date(effective).toISOString():null;
     const retry=last?.retry_due_at && last.state!=='STARTED' && now<researchTime(iso(last.next_regular_at))?iso(last.retry_due_at):null;
-    return {sourceId:identity.sourceId,lastSuccessfulAt:success===null?null:new Date(success).toISOString(),expiresAt:expiry===null?null:new Date(expiry).toISOString(),
+    return {recovery:await this.recoveryDiagnostic(identity,wshLedgerKey(config.isin),config.endpointId,db),sourceId:identity.sourceId,lastSuccessfulAt:success===null?null:new Date(success).toISOString(),expiresAt:expiry===null?null:new Date(expiry).toISOString(),
       retained:!!failures.length && success!==null && expiry!==null && now<expiry && !blocked,
       ...(cleanupFence?{acquisitionBlockedReason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED' as const}:{}),
       latestAttempt:last?this.wshDiagnostic(last):null,latestFailure:failures[0]?this.wshDiagnostic(failures[0]):null,nextRetryAt:retry,nextRegularAt:nextRegular,blocksCachedEvidence:blocked};
@@ -1091,6 +1423,7 @@ export class ResearchStore {
   }
   private async assertWshFence(lease: WshEndpointLease, acquisition: WshAcquisition, db: ResearchDb): Promise<void> {
     researchAssert(acquisition.endpointId === lease.endpointId, "RESEARCH_WSH_FENCE_MISMATCH");
+    await this.assertRecoveryAdmission(acquisition,db);
     const endpoint = (await db.query("SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE", [lease.endpointId])).rows[0];
     const row = (await db.query("SELECT * FROM research_wsh_acquisitions WHERE id=$1 FOR UPDATE", [acquisition.id])).rows[0];
     researchAssert(endpoint && Number(endpoint.generation) === acquisition.generation && row && Number(row.generation) === acquisition.generation && row.endpoint_id === acquisition.endpointId && row.session_id === acquisition.sessionId && row.source_id === acquisition.sourceId && row.instrument_id === acquisition.instrumentId && row.config_hash === acquisition.configHash && row.manifest_hash === acquisition.manifestHash && row.state === "PENDING" && row.retired_at === null, "RESEARCH_WSH_GENERATION_RETIRED");
@@ -1098,7 +1431,7 @@ export class ResearchStore {
   async beginWshAcquisition(lease: WshEndpointLease, input: ResearchIdentity & { instrumentId: string; sourceId: string; sessionId: string; reservation: ResearchCallReservation }, ticket?: WshAttemptTicket): Promise<WshAcquisition> {
     researchAssert(input.sessionId.length > 0 && input.sessionId.length <= 500);
     return this.wshTransaction(lease, async db => {
-      await this.assertAuthority(input, db); const { config } = await this.wshSource(input, db);
+      await this.assertAuthority(input, db); await this.assertRecoveryAdmission(input,db); const { config } = await this.wshSource(input, db);
       researchAssert(config.endpointId === lease.endpointId && input.reservation.kind === "source" && input.reservation.provider === "ibkr-wsh" && input.reservation.configHash === input.configHash && input.reservation.manifestHash === input.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
       await db.query("INSERT INTO research_wsh_endpoints(endpoint_id) VALUES($1) ON CONFLICT DO NOTHING", [lease.endpointId]);
       await db.query("SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE", [lease.endpointId]);
@@ -1127,7 +1460,7 @@ export class ResearchStore {
   }
   async reserveWshCall(lease: WshEndpointLease, acquisition: WshAcquisition, reservation: ResearchCallReservation): Promise<void> {
     await this.wshTransaction(lease, async db => {
-      await this.assertAuthority(acquisition, db); const { config } = await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
+      await this.assertAuthority(acquisition, db); await this.assertRecoveryAdmission(acquisition,db); const { config } = await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
       researchAssert(researchTime(reservation.deadlineAt) <= await this.now(db) + config.timeoutMs, "RESEARCH_WSH_CALL_DEADLINE_INVALID");
       researchAssert(reservation.kind === "source" && reservation.provider === "ibkr-wsh" && reservation.configHash === acquisition.configHash && reservation.manifestHash === acquisition.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
       const metadata = (await db.query(`SELECT o.outcome,o.recorded_at,r.deadline_at,r.account_id FROM research_wsh_acquisition_calls c

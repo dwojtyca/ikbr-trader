@@ -79,7 +79,7 @@ test("ongoing Marketaux rejects invalid operation deadlines and preserves provid
   assert.equal(calls, 1);
 });
 
-test("v2 transport uses its reserved monotonic budget despite host clock rollback and DB policy dates", async t => {
+test("v2 transport keeps DB deadlines opaque and uses its reserved monotonic budget and trusted dispatch guard", async t => {
   const f = marketauxFixture(Date.parse("2026-10-15T12:30:00.000Z"));
   Object.assign(f.source.parserConfig, { kind: "marketaux-news-v2", refreshIntervalMs: 3600000, maxAgeMs: 86400000, queryLookbackMs: 86400000 });
   const { marketauxWindow } = await import("@ikbr/shared/instrument-research");
@@ -96,8 +96,11 @@ test("v2 transport uses its reserved monotonic budget despite host clock rollbac
   const fetch = createMarketauxFetch("synthetic-secret", { resolveAddress: async () => ({ address: "8.8.8.8", family: 4 }), httpsRequest: fake });
   const derivedHostDate = new Date(f.now + 9000).toISOString();
   t.mock.method(Date, "now", () => f.now - 86400000 * 10);
-  await fetch(f.source, descriptor, derivedHostDate, 1024, performance.now() + 9000);
+  let checks = 0;
+  await fetch(f.source, descriptor, derivedHostDate, 1024, performance.now() + 9000, { assertActive: () => { checks++; } });
+  assert.equal(checks, 4);
   assert.equal(calls, 1);
+  await assert.rejects(fetch(f.source, descriptor, derivedHostDate, 1024, performance.now() + 9000), /RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED/);
   for (const deadline of [undefined, NaN, Infinity, performance.now() - 1])
     await assert.rejects(fetch(f.source, descriptor, derivedHostDate, 1024, deadline), /RESEARCH_SOURCE_DEADLINE_INVALID/);
   assert.equal(calls, 1);
@@ -113,6 +116,6 @@ test("v2 monotonic admission expires during DNS without sending a request", asyn
   let calls = 0;
   const fetch = createMarketauxFetch("synthetic-secret", { resolveAddress: async () => new Promise(resolve => setTimeout(() => resolve({ address: "8.8.8.8", family: 4 }), 50)),
     httpsRequest: (() => { calls++; throw new Error("unexpected HTTP request"); }) as unknown as typeof request });
-  await assert.rejects(fetch(f.source, descriptor, new Date(Date.now() + 9000).toISOString(), 1024, performance.now() + 20), /RESEARCH_SOURCE_TIMEOUT/);
+  await assert.rejects(fetch(f.source, descriptor, new Date(Date.now() + 9000).toISOString(), 1024, performance.now() + 20, { assertActive: () => {} }), /RESEARCH_SOURCE_TIMEOUT/);
   assert.equal(calls, 0);
 });

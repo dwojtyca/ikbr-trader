@@ -15,7 +15,7 @@ const { Pool } = createRequire(new URL('../../../../apps/llm-agent/package.json'
 const connection = process.env.TEST_POSTGRES_URL;
 async function isolated(run: (pool: any) => Promise<void>) {
   const url = new URL(connection!);
-  assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && (url.port === '55432'
+  assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) && (url.port === '55432' || url.port === '55434' && url.pathname === '/ikbr_startup_recovery_test'
     || process.env.CI === 'true' && url.port === '5432' && url.pathname === '/ikbr_trader_ci'), 'Only isolated PostgreSQL allowed');
   url.pathname = '/postgres';
   const admin = new Pool({ connectionString: url.href }), name = 'marketaux_hostile_' + randomUUID().replaceAll('-', '');

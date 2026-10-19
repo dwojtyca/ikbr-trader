@@ -155,3 +155,6 @@ do restartowania usług. Sprawdź `pnpm status` i
 [runbook rozliczeń](PAPER_ACCOUNTING_SOURCE.md#automatyczne-odzyskiwanie-zegara-w-paper).
 Pozostaw host pod zasilaniem, bez sleep i zamykania pokrywy; automat nie zastępuje
 ciągłej dostępności TWS i komputera.
+
+Odzyskiwanie przerwanych pobrań przy starcie oraz procedura dla starego UNKNOWN:
+[Paper startup research recovery](PAPER_STARTUP_RESEARCH_RECOVERY.md).

@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { researchFixture, twoSourceResearchFixture } from "@ikbr/shared/instrument-research-testfixture";
 import { marketauxCallIdentity, marketauxWindow, parseResearchSnapshot, researchHash, ResearchSourceFailure,
   type MarketauxRequest, type ResearchSnapshot, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
+import { createMarketauxFetch, type MarketauxFetch } from "./research-marketaux-fetch.js";
+import type { request } from "node:https";
 import { ResearchRefreshScheduler } from "./research-refresh.js";
 import { marketauxResponse } from "./research-marketaux.testfixture.js";
 import { emptyResearchSnapshot } from "./research-empty-snapshot.js";
@@ -12,7 +14,7 @@ function harness() {
   f.manifest.instruments = [f.policy]; f.manifestHash = researchHash(f.manifest); f.snapshot.manifestHash = f.manifestHash;
   let head: StoredResearchSnapshot = { id: "initial", hash: researchHash(f.snapshot), sequence: 1, snapshot: f.snapshot };
   const state = { dbNow: f.now, hostNow: f.now + 3 * 86400000, nextRegular: 0, claims: 0, attempts: 0, active: false,
-    requests: [] as MarketauxRequest[], outcomes: [] as { callKey: string; outcome: string; recordedAt: string; contentHash?: string }[],
+    recoveries: 0, dispatchChecks: 0, requests: [] as MarketauxRequest[], outcomes: [] as { callKey: string; outcome: string; recordedAt: string; contentHash?: string }[],
     successes: [] as ResearchSnapshot[], failures: [] as { failure: any; snapshot: ResearchSnapshot }[],
     response: (request: MarketauxRequest) => marketauxResponse([], request.page, 0), terminalError: false, negativeError: false,
   };
@@ -21,7 +23,8 @@ function harness() {
     withRefreshLock: async (_identity: unknown, run: () => Promise<void>) => { await run(); return true; },
     hasRefreshSlot: async () => true,
     latestSnapshot: unexpected, reserveCall: unexpected, recordCallOutcome: unexpected, storeSnapshot: unexpected,
-    withWshEndpointLock: unexpected,
+    withWshEndpointLock: unexpected, dueWshAttempts: async () => [],
+    recoverMarketauxAttempts: async () => { state.recoveries++; return { state: state.active ? 'WAITING' : 'NOT_REQUIRED', reason: null, nextCheckAt: null, recoveryIds: [] }; },
     claimMarketauxAttempt: async (identity: any) => {
       state.claims++;
       if (state.active || state.dbNow < state.nextRegular) return { claimed: false, reason: "not-due", nextCheckAt: new Date(state.nextRegular).toISOString() };
@@ -35,7 +38,7 @@ function harness() {
       assert.equal(reservation.callKey, marketauxCallIdentity(f.manifestHash, f.policy.instrumentId, f.source, request).callKey);
       assert.equal("deadlineAt" in reservation, false);
       assert.ok(ticket.monotonicDeadlineMs > performance.now());
-      return { deadlineAt: new Date(state.dbNow + 10000).toISOString(), monotonicDeadlineMs: performance.now() + 9000 };
+      return { deadlineAt: new Date(state.dbNow + 10000).toISOString(), monotonicDeadlineMs: performance.now() + 9000, assertActive: () => { assert.equal(state.active, true); state.dispatchChecks++; } };
     },
     recordMarketauxCallOutcome: async (_ticket: unknown, callKey: string, result: any) => {
       state.dbNow += 100;
@@ -60,14 +63,14 @@ function harness() {
       return { retained: false, snapshot: null };
     },
   };
-  const make = (marketauxOnDemand: boolean | undefined = false) => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash,
+  const make = (marketauxOnDemand: boolean | undefined = false, fetch?: MarketauxFetch) => new ResearchRefreshScheduler({ manifest: f.manifest, manifestHash: f.manifestHash,
     accountId: "DU_SYNTHETIC", store, now: () => state.hostNow, marketauxOnDemand, marketauxApiKey: "synthetic-secret",
-    marketauxFetch: async (_source, request, deadlineAt, _maxBytes, monotonicDeadlineMs) => {
+    marketauxFetch: fetch ?? (async (_source, request, deadlineAt, _maxBytes, monotonicDeadlineMs, guard) => {
       assert.ok(monotonicDeadlineMs! > performance.now());
-      assert.ok(Date.parse(deadlineAt) <= Date.now() + 10000);
-      assert.ok(Date.parse(deadlineAt) > Date.now());
+      assert.equal(deadlineAt, new Date(state.dbNow + 10000).toISOString());
+      assert.ok(guard); guard.assertActive();
       state.requests.push(request); return state.response(request);
-    } });
+    }) });
   return { f, state, store, make };
 }
 
@@ -214,4 +217,49 @@ test("WSH first acquisition builds truthful two-source success and hard-negative
     assert.equal(snapshot.coverage[0].status, failed ? "ERROR" : "EMPTY");
     assert.equal(terminal.outcome, failed ? "FAILED" : "SUCCEEDED");
   }
+});
+
+test('v2 requires the recovery and synchronous dispatch capabilities', async () => {
+  const s = harness(); delete s.store.recoverMarketauxAttempts;
+  assert.throws(() => s.make(), /RESEARCH_MARKETAUX_ATTEMPT_STORE_REQUIRED/);
+  const missing = harness(); missing.store.reserveMarketauxCall = async () => ({ deadlineAt: new Date(missing.state.dbNow + 10000).toISOString(), monotonicDeadlineMs: performance.now() + 9000 });
+  await missing.make().tick(); assert.equal(missing.state.requests.length, 0); assert.equal(missing.state.successes.length, 0);
+  assert.equal(missing.state.failures[0].failure.reason, 'RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED');
+});
+for (const state of ['WAITING', 'OPERATOR_REQUIRED'] as const)
+  test(`recovery ${state} precedes claim and prevents provider sends`, async () => {
+    const s = harness(); let scanned = 0;
+    s.store.recoverMarketauxAttempts = async () => { scanned++; return { state, reason: 'fixture', nextCheckAt: null, recoveryIds: [] }; };
+    await s.make().tick(); assert.equal(scanned, 1); assert.equal(s.state.claims, 0); assert.equal(s.state.requests.length, 0);
+  });
+test('ordinary repair scans unresolved Marketaux despite HOLD and no due repair rows', async () => {
+  const s = harness(); let scanned = 0, prepared = 0;
+  s.store.recoverMarketauxAttempts = async () => { scanned++; return { state: 'RECOVERED', reason: null, nextCheckAt: null, recoveryIds: ['fixture'] }; };
+  s.store.dueRepairs = async () => [];
+  s.store.prepareRepair = async () => { prepared++; return { state: 'HOLD', sources: [], reasons: ['RESEARCH_WSH_ATTEMPT_UNRESOLVED'] }; };
+  await s.make().tickRepairs();
+  assert.equal(scanned, 1); assert.equal(prepared, 1); assert.equal(s.state.claims, 0); assert.equal(s.state.requests.length, 0);
+});
+test('recovered scheduling retains the regular floor and does not republish or reacquire fresh success', async () => {
+  const s = harness(); let recovery = 'RECOVERED';
+  s.store.recoverMarketauxAttempts = async () => ({ state: recovery, reason: null, nextCheckAt: null, recoveryIds: recovery === 'RECOVERED' ? ['fixture'] : [] });
+  await s.make().tick(); recovery = 'NOT_REQUIRED';
+  const successes = structuredClone(s.state.successes);
+  await s.make().tick(); await s.make().tick();
+  assert.deepEqual(s.state.successes, successes); assert.equal(s.state.requests.length, 2); assert.equal(s.state.attempts, 1);
+});
+test('scheduler retires call guards after transport and composes shutdown while DNS is pending', async () => {
+  const s = harness(); const guards: NonNullable<Parameters<MarketauxFetch>[5]>[] = [];
+  await s.make(false, async (_source, descriptor, _deadline, _bytes, _monotonic, guard) => {
+    assert.ok(guard); guard.assertActive(); guards.push(guard); return marketauxResponse([], descriptor.page, 0);
+  }).tick();
+  assert.equal(guards.length, 2);
+  for (const guard of guards) assert.throws(() => guard.assertActive(), /RESEARCH_MARKETAUX_DEADLINE_EXPIRED/);
+  const aborted = harness(); let release!: () => void, started!: () => void, requests = 0;
+  const barrier = new Promise<void>(resolve => { release = resolve; }), ready = new Promise<void>(resolve => { started = resolve; });
+  const fetch = createMarketauxFetch('synthetic-secret', { resolveAddress: async () => { started(); await barrier; return { address: '8.8.8.8', family: 4 }; },
+    httpsRequest: (() => { requests++; throw new Error('unexpected dispatch'); }) as unknown as typeof request });
+  const scheduler = aborted.make(false, fetch), pending = scheduler.tick();
+  await ready; scheduler.stop(); release(); await assert.rejects(pending, /RESEARCH_REFRESH_ABORTED/);
+  assert.equal(requests, 0); assert.equal(aborted.state.successes.length, 0); assert.equal(aborted.state.outcomes[0].outcome, 'UNKNOWN');
 });

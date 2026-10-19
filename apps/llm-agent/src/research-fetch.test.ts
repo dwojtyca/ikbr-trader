@@ -99,3 +99,42 @@ test('late response end during cancellation cannot publish success', async () =>
   await assert.rejects(fetchBoundedResearchUrl(new URL('https://api.marketaux.com'),new Date(Date.now()+40).toISOString(),'application/json',{resolveAddress:async()=>({address:'8.8.8.8',family:4}),httpsRequest:transport}),/RESEARCH_SOURCE_TIMEOUT/);
   assert.equal(requests,1);assert.equal(destroyed,true);
 });
+
+for (const stage of ['dns-monotonic', 'dns-wall', 'request-return', 'before-request', 'before-end', 'shutdown-dns', 'shutdown-request', 'request-close'] as const)
+  test(`dispatch guard rejects ${stage} without relying on timer callbacks`, async t => {
+    const { EventEmitter } = await import('node:events');
+    const wallStart = Date.now(), monoStart = performance.now();
+    let wall = wallStart, mono = monoStart, requests = 0, ends = 0, destroyed = 0, checks = 0;
+    const shutdown = new AbortController();
+    t.mock.method(Date, 'now', () => wall); t.mock.method(performance, 'now', () => mono);
+    const transport = ((_url: URL, _options: unknown, _callback: unknown) => {
+      requests++;
+      if (stage === 'request-return') mono += 10000;
+      if (stage === 'shutdown-request') shutdown.abort();
+      const req = new EventEmitter() as any;
+      req.destroy = () => { destroyed++; };
+      req.end = () => { ends++; throw new Error('unexpected end'); };
+      if (stage === 'request-close') {
+        const on = req.on.bind(req);
+        req.on = (event: string, callback: (...args: unknown[]) => void) => { on(event, callback); if (event === 'close') req.emit('close'); return req; };
+      }
+      return req;
+    }) as unknown as typeof request;
+    await assert.rejects(fetchBoundedResearchUrl(new URL('https://api.marketaux.com'), new Date(wallStart + 9000).toISOString(), 'application/json', {
+      monotonicDeadlineMs: monoStart + 9000,
+      dispatchGuard: { signal: shutdown.signal, assertActive: () => {
+        checks++;
+        if (wall >= wallStart + 9000 || stage === 'before-request' && checks === 3 || stage === 'before-end' && checks === 4)
+          throw new Error('RESEARCH_MARKETAUX_DEADLINE_EXPIRED');
+      } },
+      resolveAddress: async () => {
+        if (stage === 'dns-monotonic') mono += 10000;
+        if (stage === 'dns-wall') wall += 10000;
+        if (stage === 'shutdown-dns') shutdown.abort();
+        return { address: '8.8.8.8', family: 4 };
+      }, httpsRequest: transport,
+    }));
+    assert.equal(ends, 0);
+    assert.equal(requests, ['request-return', 'before-end', 'shutdown-request', 'request-close'].includes(stage) ? 1 : 0);
+    assert.equal(destroyed, requests);
+  });
