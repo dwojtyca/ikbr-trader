@@ -1,6 +1,6 @@
 # Plan naprawy przygotowania danych przy starcie Paper
 
-Data: 2026-10-19. Status: plan i kontrakty przyjęte w niezależnej recenzji; implementacja przyjęta; wymagane lokalne kontrole zakończone pozytywnie.
+Data: 2026-10-19. Status: plan i kontrakty przyjęte w niezależnej recenzji; implementacja i aneks księgowy przyjęte; pełna walidacja lokalna aneksu zakończona, w tym integracja w izolowanym Dockerze; publikacja i CI dokładnego commita pozostają bramką wydania.
 Baza: `7df517dfbabb3d809eaa27de6ae2934c52ced77f`.
 Właściciel zatwierdził implementację 2026-10-19 po publikacji planu (`5564c12`).
 Etap 0 i jego niezależna recenzja nadal poprzedzają zmiany runtime.
@@ -272,3 +272,12 @@ Kontrakty [sesji](PAPER_STARTUP_SESSION_RECOVERY_CONTRACT.md) i
 [research recovery](PAPER_STARTUP_RESEARCH_RECOVERY_CONTRACT.md) zostały dołączone
 i niezależnie przyjęte. Aktualny status implementacji, recenzji i walidacji zawiera
 [raport wykonania](PAPER_STARTUP_DATA_RECOVERY_REPORT.md).
+
+## Bounded CI follow-up — accounting owner release
+
+Two attempts of CI run39223023425 exposed an existing accounting ownership-release
+race during immediate service replacement after awaited close. The separate
+[release acknowledgement amendment](PAPER_STARTUP_ACCOUNTING_RELEASE_CONTRACT.md)
+defines the exact bounded change, failure invariants and deterministic regression
+coverage. Independent `research_plan_final` accepted the amendment; it does not
+change research recovery, broker retirement or accounting hold semantics.

@@ -1,7 +1,6 @@
 # Paper startup data recovery — implementation evidence
 
-Date: 2026-10-19. Status: implementation and independent reviews accepted; all required local
-checks passed. Publication and exact-commit CI are verified separately after this
+Date: 2026-10-19. Status: implementation and accounting amendment independently accepted; all required local checks of the amendment passed, including full integration in an isolated Docker environment. Publication and exact-commit CI are verified separately after this
 report is committed. No operational recovery acceptance is claimed.
 
 Owner authorization: implement the accepted [startup plan](PAPER_STARTUP_DATA_RECOVERY_PLAN.md)
@@ -115,3 +114,61 @@ ES/backtest work, untracked private configuration and credentials. `docker build
 explicit isolated database allowlist. Image:
 `sha256:688df57e13ba8f6baaf362345d56fe8956d5df7e0d79e1df32053d85f958a539`.
 No container was deployed from this image.
+
+## CI follow-up: accounting owner release race (implementation accepted)
+
+Source commit5648530 failed GitHub Actions run39223023425 attempts1 and2 in existing
+accounting service restart tests. Both failures occurred at replacement.initialize
+immediately after awaited service.close, reporting ACCOUNTING_SOURCE_OWNER_CONFLICT.
+Attempt1: corrections hold across restart; attempt2: old clock hold across restart.
+Local targeted tests passed37/37; another blind rerun was not used as a repair.
+CI Node24.21.0/Linux differs from local Node24.4.1/macOS. No accounting ownership
+source was changed by5648530.
+
+Inspection of source-owner.ts and installed pg8.20.0/pg-pool confirms that
+PoolClient.release(true) starts asynchronous connection teardown; its synchronous
+return does not acknowledge server-side advisory-lock release. A bounded
+[amendment](PAPER_STARTUP_ACCOUNTING_RELEASE_CONTRACT.md) specifies explicit
+same-session unlock acknowledgement and exact lock absence before successful
+normal retired-owner release. Unknown outcomes retain existing durable holds and
+never trigger retries or ownership takeover. Independent `research_plan_final` accepted the bounded amendment. Implementation
+changes source-owner.ts only: same-session conditional unlock acknowledgement,
+exact pg_locks absence proof, one 2000ms monotonic deadline, immediate local
+revocation, shared concurrent-release completion and exactly-once destruction.
+Late acquire, activate, retire and verifier completions cannot restore local
+ownership. NEW/LOST cleanup retains its earlier semantics and durable holds.
+
+Ten deterministic unit cases pass; three isolated PostgreSQL cases pass, including
+immediate replacement while the old database transport remains open. The existing
+service-close ordering and restart-hold assertions were not changed. One targeted
+unit repair added a post-await ownership check before an in-flight verifier could
+read the cleared client. Scoped ESLint and execution typecheck passed. The combined
+owner/service PostgreSQL regression and new release suites passed 52/52, including
+both previously failing immediate-restart cases with their retained-hold assertions
+unchanged. Independent `startup_document_review` accepted the implementation
+against the amendment after hostile review. The clean Docker build passed with
+image `sha256:ba4b53fe9f3515911935f49510c84b36d85330bfcc24a722cd6931080d379ad4`;
+no container was deployed from it. Repository-wide checks and exact-commit CI
+verification remain the publication gate.
+Requested worker/review route: Astra/high. Available actual model/effort and token
+telemetry: unavailable. Independent plan review ACCEPTED; publication remains
+incomplete until the repaired exact commit passes CI. No operational DB, broker/provider request,
+or deployment was used to investigate this race.
+
+
+Final amendment validation: `pnpm lint`, `pnpm typecheck`, `pnpm test` and
+`pnpm build` passed. An initial unit run under concurrent Docker build load failed
+two unchanged short-deadline fixtures; the complete run without that concurrent
+build passed, with no fixture or guard changes. The host full-integration run
+passed shared, execution and backtest suites but failed an unchanged llm entitlement
+fixture with `RESEARCH_FUTURE_SNAPSHOT` before its assertions. Clock skew was a
+hypothesis only; bounded host/database sampling did not establish it.
+
+The complete `pnpm test:integration` then passed in the clean image above, sharing
+the isolated PostgreSQL container's network: shared90, execution2076, backtest18,
+llm84, ingestion160 and signal574, zero failures. It used the disposable
+`ikbr_trader_ci` database in `ikbr-startup-recovery-test-20261019`, not operational
+PostgreSQL. This establishes the Docker test result, not the cause of the host
+failure. No runtime or test change was made for that host failure. The clean image
+contains the publication scope only and excludes unrelated working-tree changes.
+The repaired exact-commit GitHub CI remains the final release gate.
