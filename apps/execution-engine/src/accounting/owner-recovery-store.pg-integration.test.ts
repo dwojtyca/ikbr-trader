@@ -85,6 +85,47 @@ test('exact microsecond owner recovery commits immutable receipt and fences alia
   } finally { await observer.release(); }
 }));
 
+test('never-started inventory still requires reset, operator proof and closed handshake before immutable retirement', { skip: !url }, () => fixture(async f => {
+  const request = prepare(f.profile);
+  request.inventory.producers = OWNER_RECOVERY_SERVICES.map((service, index) => ({ containerId: String(index + 1).repeat(64), imageId: f.profile.imageId,
+    project: f.profile.project, service, state: 'created', createdAt: iso(Date.parse(request.inventory.observedAt) - 1000), startedAt: null, finishedAt: null }));
+  request.inventory.absentServices = [];
+  const op = await f.store.prepare(request, f.endpointKey);
+  const observer = await f.store.beginObserve({ version: 1, action: 'begin-observe', requestId: randomUUID(), operationId: op.operationId,
+    actor: request.actor, token: request.token, profile: request.profile, bindingDigest: op.bindingDigest }, f.endpointKey);
+  try {
+    const start = Date.now(); await new Promise(resolve => setTimeout(resolve, 20));
+    const proof = evidence(op, start);
+    proof.initialInventory.producers = structuredClone(request.inventory.producers); proof.initialInventory.absentServices = [];
+    proof.finalInventory.producers = structuredClone(request.inventory.producers); proof.finalInventory.absentServices = [];
+    const missingReset = structuredClone(proof); missingReset.stopped.observedAt = missingReset.before.observedAt;
+    await assert.rejects(observer.dispatch(randomUUID(), missingReset));
+    const missingOperator = structuredClone(proof); delete missingOperator.operatorEvidence.afterReset;
+    await assert.rejects(observer.dispatch(randomUUID(), missingOperator));
+    const commit = { version: 1 as const, action: 'finalize-observation' as const, requestId: randomUUID(), observerSessionId: observer.observerSessionId,
+      observedRequestId: randomUUID(), commitRequestId: randomUUID(), handshakeDigest: hash, evidence: proof };
+    await assert.rejects(observer.finalize(commit), /CLOSURE_UNKNOWN/);
+    assert.equal((await f.pool.query('SELECT retirement_state FROM accounting_source_owners')).rows[0].retirement_state, 'ACTIVE');
+    assert.equal((await f.pool.query('SELECT count(*) AS n FROM accounting_owner_recovery_receipts')).rows[0].n, '0');
+    const dispatchEventId = await observer.dispatch(randomUUID(), proof), now = iso();
+    await assert.rejects(observer.finalize(commit), /CLOSURE_UNKNOWN/);
+    const handshake = { sessionId: observer.observerSessionId, dispatchEventId, accountId: f.profile.accountId, clientId: 0 as const,
+      serverVersion: 180, connectedAt: now, readyAt: now, closedAt: now, socketCloseObserved: true as const };
+    await observer.handshakeClosed(handshake);
+    const end = Date.now(); proof.current.observedAt = iso(end); proof.finalInventory.observedAt = iso(end); proof.dockerEvents.checkedAt = iso(end);
+    proof.clock.wallCheckedAt = iso(end); proof.clock.monotonicElapsedMs = end - start; proof.clock.dbSampleAt = iso(end);
+    const result = await observer.finalize({ ...commit, handshakeDigest: ownerRecoveryHash(handshake) });
+    assert.equal(result.operation.state, 'COMMITTED'); assert.equal(result.receipt.owner.ownerId, f.ownerId);
+    await observer.release();
+    const status = await f.store.status({ version: 1, action: 'status', requestId: randomUUID(), operationId: op.operationId,
+      actor: request.actor, token: request.token, profile: request.profile, lookupRequestId: commit.commitRequestId });
+    assert.deepEqual(status.events.map(event => event.kind), ['PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED']);
+    assert.equal(status.lookup?.kind, 'COMMITTED'); assert.equal(status.receipt?.receiptId, result.receipt.receiptId);
+    assert.deepEqual((await f.pool.query('SELECT record FROM unrelated_safety_state')).rows[0].record, { budget: 7, hold: 'CLOCK', qualification: 'expired' });
+    assert.deepEqual((await f.pool.query('SELECT paused, revision FROM execution_entry_controls')).rows[0], { paused: true, revision: '3' });
+  } finally { await observer.release(); }
+}));
+
 test('supersession preserves hold, binds replacement and does not reset owner', { skip: !url }, () => fixture(async f => {
   const first = await f.store.prepare(prepare(f.profile), f.endpointKey), request = { ...prepare(f.profile), action: 'supersede' as const,
     operationId: first.operationId, replacementOperationId: randomUUID() };

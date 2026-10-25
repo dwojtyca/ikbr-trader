@@ -299,6 +299,18 @@ reset. A lost final response is resolved by exact commit request readback only.
 
 ## Host collection and transport boundary
 
+The [October 25 zero-start amendment](PAPER_ACCOUNTING_ZERO_START_DEPLOYMENT_PLAN.md)
+also accepts genuinely never-started containers on the exact pinned image. In
+addition to all identity/command/non-oneoff checks, require Docker state created,
+Running/Paused/Restarting false, Pid 0, both StartedAt/FinishedAt exactly
+`0001-01-01T00:00:00Z`, and valid nonfuture Created. Shared evidence records
+`state: created`, real `createdAt`, and null `startedAt`/`finishedAt`; exited/dead
+records keep their existing strict shape. Never synthesize start/stop timestamps.
+This variant changes no TWS reset, operator proof, event-watcher, maintenance or
+retirement requirement. It proves nothing about a previous owner's transport.
+Recreate containers only before observation, with matching host/backend versions;
+deployment changes invalidate pending proofs under existing rules.
+
 Prefer a minimal extension/factoring of `research-recovery-host.ts`; retain its
 existing research behavior/tests. Accounting profile requires every actual instance of all six app
 services (execution, ingestion, llm-agent, signal-engine, backtest-engine, UI)

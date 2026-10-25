@@ -37,6 +37,44 @@ test('prepare accepts pre-operation operator proof and detached copies only', ()
   assert.throws(() => parseOwnerRecoveryRequest({ ...request, force: true }));
   assert.throws(() => parseOwnerRecoveryRequest({ ...request, token: 'short' }));
 });
+test('created producer wire variant has explicit null process times and preserves exited/dead records', () => {
+  const producer = { containerId: hash, imageId: profile.imageId, project: profile.project, service: 'execution-engine' as const };
+  const request = { version: 1, action: 'prepare', requestId: id(5), operationId: id(2), actor: 'test', token: 'x'.repeat(32), profile,
+    operatorEvidence: operator(), inventory: { ...inventory(6), absentServices: OWNER_RECOVERY_SERVICES.filter(s => s !== producer.service),
+      producers: [{ ...producer, state: 'created', createdAt: time(0), startedAt: null, finishedAt: null }] } };
+  assert.deepEqual(parseOwnerRecoveryRequest(request), request);
+  for (const state of ['exited', 'dead']) {
+    const old = { ...request, inventory: { ...request.inventory, producers: [{ ...producer, state, startedAt: time(0), finishedAt: time(1) }] } };
+    assert.deepEqual(parseOwnerRecoveryRequest(old), old);
+    assert.throws(() => parseOwnerRecoveryRequest({ ...old, inventory: { ...old.inventory, producers: [{ ...old.inventory.producers[0], createdAt: time(0) }] } }));
+  }
+  const mutations: Array<(p: Record<string, unknown>) => void> = [
+    p => { p.startedAt = time(0); }, p => { p.finishedAt = time(1); }, p => { delete p.startedAt; }, p => { delete p.finishedAt; },
+    p => { delete p.createdAt; }, p => { p.createdAt = null; }, p => { p.createdAt = time(7); }, p => { p.createdAt = '2026-02-30T00:00:00.000Z'; },
+    p => { p.state = 'running'; }, p => { p.pid = 0; }, p => { p.state = 'exited'; },
+  ];
+  for (const mutate of mutations) {
+    const bad = structuredClone(request); mutate(bad.inventory.producers[0]);
+    assert.throws(() => parseOwnerRecoveryRequest(bad));
+  }
+  assert.throws(() => parseOwnerRecoveryRequest({ ...request, inventory: { ...request.inventory, absentServices: [...OWNER_RECOVERY_SERVICES] } }));
+});
+test('created producer evidence still requires unchanged inventory, full reset, watcher and operator proofs', () => {
+  const e = evidence();
+  const producers: OwnerRecoveryInventory['producers'] = OWNER_RECOVERY_SERVICES.map((service, index) => ({ containerId: String(index + 1).repeat(64),
+    imageId: profile.imageId, project: profile.project, service, state: 'created', createdAt: time(-1), startedAt: null, finishedAt: null }));
+  e.initialInventory = { ...e.initialInventory, producers, absentServices: [] };
+  e.finalInventory = { ...e.finalInventory, producers: structuredClone(producers), absentServices: [] };
+  assert.deepEqual(parseOwnerRecoveryHostEvidence(e), e);
+  const mutations: Array<(v: OwnerRecoveryHostEvidence) => void> = [
+    v => { v.finalInventory.producers[0].containerId = 'b'.repeat(64); },
+    v => { (v.finalInventory.producers[0] as Extract<typeof producers[number], { state: 'created' }>).createdAt = time(-2); },
+    v => { v.stopped.observedAt = v.before.observedAt; },
+    v => { (v.dockerEvents as unknown as Record<string, unknown>).continuous = false; },
+    v => { delete v.operatorEvidence.afterReset; },
+  ];
+  for (const mutate of mutations) { const bad = structuredClone(e); mutate(bad); assert.throws(() => parseOwnerRecoveryHostEvidence(bad)); }
+});
 test('operator proof rejects unknown fields, duplicate kinds, unsafe paths, false confirmations and impossible dates', () => {
   const mutations: Array<(v: OwnerRecoveryOperatorEvidence) => void> = [
     v => { v.artifacts[1].kind = v.artifacts[0].kind; }, v => { v.artifacts[0].relativePath = '../secret'; },

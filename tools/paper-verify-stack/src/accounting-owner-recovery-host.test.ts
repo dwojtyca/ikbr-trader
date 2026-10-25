@@ -35,13 +35,95 @@ test('one-shot requires actual ID image command labels and running identity; nam
   row.Config.Cmd = ['apps/execution-engine/dist/index.js'];
   await assert.rejects(inspectAccountingProducers(options, f.command, () => time, exception));
 });
-test('running, created, foreign project and unknown image instances cannot pass stopped inventory', async () => {
+test('running, contradictory created, foreign project and unknown image instances cannot pass stopped inventory', async () => {
   for (const change of ['running', 'created', 'foreign', 'image']) {
     const f = inventoryFixture(), row = f.containers.get(id(1))!;
     if (change === 'image') row.Image = `sha256:${'b'.repeat(64)}`;
     else if (change === 'foreign') ((row.Config as { Labels: Record<string, string> }).Labels)['com.docker.compose.project'] = 'elsewhere';
     else (row.State as Record<string, unknown>).Status = change;
     await assert.rejects(inspectAccountingProducers(options, f.command, () => time));
+  }
+});
+function createdInventoryFixture() {
+  const f = inventoryFixture();
+  for (const row of f.containers.values()) {
+    row.Created = '2026-10-19T11:59:59.123456789Z';
+    row.State = { Status: 'created', Running: false, Paused: false, Restarting: false, Pid: 0,
+      StartedAt: '0001-01-01T00:00:00Z', FinishedAt: '0001-01-01T00:00:00Z' };
+  }
+  return f;
+}
+test('never-started core and optional containers retain explicit creation evidence without fabricated process times', async () => {
+  const f = createdInventoryFixture();
+  for (const [index, service] of ACCOUNTING_APP_SERVICES.slice(4).entries()) {
+    const row = structuredClone(f.containers.get(id(1))!);
+    row.Id = id(index + 5);
+    const config = row.Config as { Labels: Record<string, string>; Cmd: string[] };
+    config.Labels['com.docker.compose.service'] = service;
+    config.Cmd = ['pnpm', '--filter', `@ikbr/${service}`, service === 'ui' ? 'dev' : 'start'];
+    f.containers.set(id(index + 5), row);
+  }
+  const result = await inspectAccountingProducers(options, f.command, () => time);
+  assert.equal(result.producers.length, 6); assert.deepEqual(result.absentServices, []);
+  for (const producer of result.producers) {
+    assert.equal(producer.state, 'created'); assert.equal(producer.startedAt, null); assert.equal(producer.finishedAt, null);
+    assert.ok(producer.state === 'created'); assert.equal(producer.createdAt, '2026-10-19T11:59:59.123Z');
+  }
+  const old = inventoryFixture().containers.get(id(1))!;
+  (old.State as Record<string, unknown>).Status = 'dead'; f.containers.set(id(1), old);
+  const mixed = await inspectAccountingProducers(options, f.command, () => time);
+  assert.equal(mixed.producers[0].state, 'dead'); assert.equal('createdAt' in mixed.producers[0], false);
+  f.containers.delete(id(2)); await assert.rejects(inspectAccountingProducers(options, f.command, () => time));
+});
+test('created Docker branch denies unknown or contradictory process, date and deployment evidence', async () => {
+  const mutations: Array<(row: Record<string, unknown>) => void> = [
+    row => { delete row.Created; }, row => { row.Created = null; }, row => { row.Created = '2026-10-19T12:00:01Z'; },
+    row => { row.Created = '2026-02-30T00:00:00Z'; }, row => { row.Created = 'not-a-date'; },
+    ...['Running', 'Paused', 'Restarting'].flatMap(key => [
+      (row: Record<string, unknown>) => { (row.State as Record<string, unknown>)[key] = true; },
+      (row: Record<string, unknown>) => { delete (row.State as Record<string, unknown>)[key]; },
+    ]),
+    row => { (row.State as Record<string, unknown>).Pid = 1; }, row => { (row.State as Record<string, unknown>).Pid = '0'; },
+    row => { delete (row.State as Record<string, unknown>).Pid; },
+    ...['StartedAt', 'FinishedAt'].flatMap(key => [
+      (row: Record<string, unknown>) => { (row.State as Record<string, unknown>)[key] = '2026-10-19T11:00:00Z'; },
+      (row: Record<string, unknown>) => { (row.State as Record<string, unknown>)[key] = '0001-01-01T00:00:00.000Z'; },
+      (row: Record<string, unknown>) => { (row.State as Record<string, unknown>)[key] = null; },
+      (row: Record<string, unknown>) => { delete (row.State as Record<string, unknown>)[key]; },
+    ]),
+    row => { (row.State as Record<string, unknown>).Status = 'unknown'; }, row => { (row.State as Record<string, unknown>).Status = 'exited'; },
+    row => { row.Image = `sha256:${'b'.repeat(64)}`; },
+    row => { ((row.Config as { Labels: Record<string, string> }).Labels)['com.docker.compose.project'] = 'other'; },
+    row => { ((row.Config as { Labels: Record<string, string> }).Labels)['com.docker.compose.service'] = 'unknown'; },
+    row => { ((row.Config as { Labels: Record<string, string> }).Labels)['com.docker.compose.oneoff'] = 'true'; },
+    row => { (row.Config as { Cmd: string[] }).Cmd = ['node', 'arbitrary.js']; },
+    row => { (row.Config as { Entrypoint: string[] }).Entrypoint = ['node']; },
+  ];
+  for (const mutate of mutations) {
+    const f = createdInventoryFixture(); mutate(f.containers.get(id(1))!);
+    await assert.rejects(inspectAccountingProducers(options, f.command, () => time));
+  }
+  const f = createdInventoryFixture(), duplicate = structuredClone(f.containers.get(id(1))!);
+  duplicate.Id = id(9); duplicate.Image = `sha256:${'b'.repeat(64)}`; f.containers.set(id(9), duplicate);
+  await assert.rejects(inspectAccountingProducers(options, f.command, () => time));
+});
+test('created container replacement and lifecycle events invalidate the existing observation', async () => {
+  const f = createdInventoryFixture();
+  const host = createAccountingRecoveryHost(options, { platform: 'darwin', now: () => new Date(time), run: async (file, args) => {
+    if (file === 'docker') return { stdout: await f.command(file, args), stderr: '', exitCode: 0 };
+    if (file === '/usr/sbin/lsof') return { stdout: '', stderr: '', exitCode: 1 };
+    if (file === '/usr/bin/shasum') return { stdout: `${hash}  /usr/bin/node\n`, stderr: '', exitCode: 0 };
+    return { stdout: args.at(-1) === 'pid=,args=' ? `${process.pid} node collector` : `${process.pid} 0 Mon Oct 19 10:00:00 2026 /usr/bin/node`, stderr: '', exitCode: 0 };
+  } });
+  const initial = await host.captureProducerInventory();
+  await host.verifyProducerInventory(initial);
+  const replacement = structuredClone(f.containers.get(id(1))!); replacement.Id = id(9);
+  f.containers.delete(id(1)); f.containers.set(id(9), replacement);
+  await assert.rejects(host.verifyProducerInventory(initial), /PRODUCER_REPLACED/);
+  for (const action of ['create', 'start', 'stop', 'destroy']) {
+    const watcher = createAccountingEventGuard(undefined);
+    watcher.consume(JSON.stringify({ Type: 'container', Action: action, Actor: { ID: id(1), Attributes: { name: 'created-producer' } } }));
+    assert.throws(watcher.check, /INVENTORY_UNAVAILABLE/);
   }
 });
 test('event guard detects start-stop between snapshots and pins provisional one-shot events retrospectively', () => {

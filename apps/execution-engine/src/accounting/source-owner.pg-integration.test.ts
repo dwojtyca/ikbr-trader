@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import { performance } from "node:perf_hooks";
+import { Pool, type QueryConfig } from "pg";
 import { AccountingSourceOwner, canonicalAccountingEndpoint } from "./source-owner.js";
 import type { SourceSettingsV1 } from "./types.js";
 
@@ -52,8 +53,33 @@ test("session ownership excludes other accounts and durable retirement prevents 
     await assert.rejects(create().acquire(), /SOURCE_OWNER_UNRETIRED/);
     await second.retire(true); await second.release();
     const third = create(); await third.acquire();
-    await assert.rejects(third.retire(false), /SOURCE_RETIREMENT_UNKNOWN/);
-    assert.throws(() => third.assertCurrent(), /SOURCE_OWNER_LOST/); assert.throws(() => third.assertHeld(), /SOURCE_OWNER_LOST/); await third.release();
+    const observation = await pool.connect();
+    try {
+      assert.equal(third.fence().endpointKey, firstFence.endpointKey);
+      const captureQuery: QueryConfig<string[]> & { query_timeout: number } = { text: `SELECT pid,database FROM pg_locks WHERE locktype='advisory' AND granted
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND classid=$1::oid AND objid=$2::oid AND objsubid=1`,
+      values: [(key >> 32n).toString(), (key & 0xffffffffn).toString()], query_timeout: 2000 };
+      const captured = await observation.query<{ pid: number; database: number }>(captureQuery);
+      assert.equal(captured.rowCount, 1);
+      const ownerLock = captured.rows[0];
+      assert.ok(Number.isSafeInteger(ownerLock.pid) && ownerLock.pid > 0 && Number.isSafeInteger(ownerLock.database) && ownerLock.database > 0);
+      await assert.rejects(third.retire(false), /SOURCE_RETIREMENT_UNKNOWN/);
+      assert.throws(() => third.assertCurrent(), /SOURCE_OWNER_LOST/); assert.throws(() => third.assertHeld(), /SOURCE_OWNER_LOST/); await third.release();
+      // Failed-owner release destroys the transport without acknowledging backend lock removal.
+      const deadline = performance.now() + 2000;
+      for (;;) {
+        const remaining = Math.floor(deadline - performance.now());
+        assert.ok(remaining > 0, 'failed owner backend did not relinquish its advisory lock before the deadline');
+        const observationQuery: QueryConfig<Array<number | string>> & { query_timeout: number } = { text: `SELECT NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
+          AND pid=$1 AND database=$2::oid AND classid=$3::oid AND objid=$4::oid AND objsubid=1) AS absent`,
+        values: [ownerLock.pid, ownerLock.database, (key >> 32n).toString(), (key & 0xffffffffn).toString()], query_timeout: remaining };
+        const result = await observation.query<{ absent: boolean }>(observationQuery);
+        assert.ok(performance.now() < deadline, 'failed owner backend observation exceeded its deadline');
+        if (result.rows[0]?.absent === true) break;
+        await new Promise(resolve => setTimeout(resolve, Math.min(5, Math.max(0, deadline - performance.now()))));
+      }
+    } finally { observation.release(); }
     await assert.rejects(create().acquire(), /SOURCE_OWNER_UNRETIRED/);
     // Only the acknowledged owner can persist proof that its socket has ended.
     await assert.rejects(second.retire(true), /SOURCE_OWNER_LOST/);

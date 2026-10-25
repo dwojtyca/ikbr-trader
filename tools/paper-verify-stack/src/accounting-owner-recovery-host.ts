@@ -236,7 +236,16 @@ export async function inspectAccountingProducers(options: AccountingRecoveryHost
     if (c.Id !== id || c.Image !== options.imageId || project !== options.project || !ACCOUNTING_APP_SERVICES.includes(service as typeof ACCOUNTING_APP_SERVICES[number]) ||
         String(labels['com.docker.compose.oneoff']).toLowerCase() !== 'false' || !equal(config.Entrypoint, ['docker-entrypoint.sh']) ||
         !equal(config.Cmd, ['pnpm', '--filter', `@ikbr/${service}`, service === 'ui' ? 'dev' : 'start'])) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
-    if (!['exited', 'dead'].includes(String(state.Status)) || state.Running !== false || state.Paused !== false || state.Restarting !== false || state.Pid !== 0) deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+    if (state.Running !== false || state.Paused !== false || state.Restarting !== false || state.Pid !== 0) deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+    if (state.Status === 'created') {
+      if (state.StartedAt !== '0001-01-01T00:00:00Z' || state.FinishedAt !== '0001-01-01T00:00:00Z') deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+      const createdAt = dockerInstant(c.Created);
+      if (typeof c.Created !== 'string' || createdAt.slice(0, 19) !== c.Created.slice(0, 19) || createdAt > timestamp()) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+      producers.push({ containerId: id, imageId: options.imageId, project: options.project, service: service as RecoveryProducer['service'],
+        createdAt, startedAt: null, finishedAt: null, state: 'created' });
+      continue;
+    }
+    if (!['exited', 'dead'].includes(String(state.Status))) deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
     const startedAt = dockerInstant(state.StartedAt), finishedAt = dockerInstant(state.FinishedAt);
     if (startedAt > finishedAt || finishedAt > timestamp()) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
     producers.push({ containerId: id, imageId: options.imageId, project: options.project, service: service as RecoveryProducer['service'], startedAt, finishedAt, state: state.Status as 'exited' | 'dead' });

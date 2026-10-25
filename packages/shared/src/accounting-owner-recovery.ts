@@ -33,10 +33,10 @@ export interface OwnerRecoveryOperatorEvidence {
   artifacts: OwnerRecoveryArtifact[];
   afterReset?: { operationId: string; nonce: string; process: OwnerRecoveryProcess };
 }
-export interface OwnerRecoveryProducer {
+export type OwnerRecoveryProducer = {
   containerId: string; imageId: string; project: string; service: OwnerRecoveryService;
-  startedAt: string; finishedAt: string; state: 'exited' | 'dead';
-}
+} & ({ startedAt: string; finishedAt: string; state: 'exited' | 'dead' }
+  | { createdAt: string; startedAt: null; finishedAt: null; state: 'created' });
 export interface OwnerRecoveryInventory {
   observedAt: string; producers: OwnerRecoveryProducer[]; absentServices: OwnerRecoveryService[];
   nativeProcesses: Array<OwnerRecoveryProcess & { argvHash: string; role: 'collector' | 'inspection' | 'tws' | 'recovery-child' }>;
@@ -168,8 +168,12 @@ const operatorEvidence: Validator = value => {
   check(artifacts.every(a => Date.parse(a.observedAt) <= Date.parse(value.observedAt as string)));
 };
 const producer: Validator = value => {
-  object(value, { containerId: hash, imageId, project: v => text(v, 63), service: enumeration(OWNER_RECOVERY_SERVICES),
-    startedAt: instant, finishedAt: instant, state: enumeration(['exited', 'dead']) });
+  const common = { containerId: hash, imageId, project: (v: unknown) => text(v, 63), service: enumeration(OWNER_RECOVERY_SERVICES) };
+  if (value !== null && typeof value === 'object' && (value as Record<string, unknown>).state === 'created') {
+    object(value, { ...common, createdAt: instant, startedAt: literal(null), finishedAt: literal(null), state: literal('created') });
+    return;
+  }
+  object(value, { ...common, startedAt: instant, finishedAt: instant, state: enumeration(['exited', 'dead']) });
   check(Date.parse(value.startedAt as string) <= Date.parse(value.finishedAt as string));
 };
 const inventory: Validator = value => {
@@ -182,7 +186,7 @@ const inventory: Validator = value => {
   const inv = value as unknown as OwnerRecoveryInventory;
   check(new Set(inv.producers.map(p => p.containerId)).size === inv.producers.length && new Set(inv.absentServices).size === inv.absentServices.length);
   check(new Set(inv.nativeProcesses.map(p => p.pid)).size === inv.nativeProcesses.length);
-  check(inv.producers.every(p => Date.parse(p.finishedAt) <= Date.parse(inv.observedAt) && !inv.absentServices.includes(p.service)));
+  check(inv.producers.every(p => Date.parse(p.state === 'created' ? p.createdAt : p.finishedAt) <= Date.parse(inv.observedAt) && !inv.absentServices.includes(p.service)));
   check(inv.nativeProcesses.every(p => Date.parse(p.startIdentity) <= Date.parse(inv.observedAt)));
   check(OWNER_RECOVERY_SERVICES.every(service => inv.absentServices.includes(service) || inv.producers.some(p => p.service === service)));
 };

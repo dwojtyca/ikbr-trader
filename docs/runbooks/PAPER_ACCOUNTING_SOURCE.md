@@ -219,10 +219,20 @@ Przed `prepare` hashe ustawień i wdrożenia należy odczytać z prywatnego,
 zweryfikowanego profilu. Po wymianie procesu `observe` wypisuje dokładny obiekt
 `afterReset` i najwcześniejszy dopuszczalny czas nowych dowodów.
 
-Kontenery opcjonalne w stanie `Created` oraz działające obce kontenery również
-powodują odmowę w tym ograniczonym trybie. Nie należy zatrzymywać obcych usług
-bez uzgodnienia ani przedstawiać tej odmowy jako dowodu awarii bota. Przed
-rzeczywistą procedurą trzeba przygotować obsługiwaną topologię hosta.
+Kontenery nowego, zatwierdzonego obrazu można przygotować bez uruchamiania usług
+przez `docker compose up --no-start --no-deps --no-build --pull never --force-recreate` z kompletem
+plików zatwierdzonego prywatnego profilu i jawną listą usług aplikacji. Najpierw
+potwierdź ich zatrzymanie, backup oraz brak trwającej procedury recovery; nie
+odtwarzaj kontenerów podczas obserwacji. `--no-deps` pozostawia bazę i Redis bez
+zmian. Nie uruchamiaj producentów tylko po to,
+żeby uzyskać stan zatrzymany. Nowy wariant obsługuje `Created` wyłącznie przy
+potwierdzonym PID 0, braku uruchomienia, zerowych czasach start/stop i zgodnej
+tożsamości obrazu oraz polecenia. Obserwacja przechowuje rzeczywisty czas utworzenia,
+a nie fikcyjne czasy startu. Wymaga kompatybilnego hosta i obrazu; starsza wersja
+narzędzia odrzuca ten stan. Nie zastępuje to resetu TWS ani dowodów rachunku.
+Działające obce kontenery nadal powodują odmowę w tym ograniczonym trybie.
+Nie zatrzymuj obcych usług bez uzgodnienia. Szczegóły:
+[plan wdrożenia bez uruchamiania](../implementation/phase3/PAPER_ACCOUNTING_ZERO_START_DEPLOYMENT_PLAN.md).
 
 Kolejność działań:
 
