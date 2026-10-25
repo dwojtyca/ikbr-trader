@@ -9,7 +9,7 @@ const connection = process.env.TEST_POSTGRES_URL;
 async function isolated(port: number, run: (pool: Pool, settings: SourceSettingsV1) => Promise<void>) {
   const url = new URL(connection!);
   assert.ok(['localhost', '127.0.0.1'].includes(url.hostname) &&
-    (url.port === '55434' && url.pathname === '/ikbr_startup_recovery_test' ||
+    (url.port === '55434' && url.pathname === '/ikbr_startup_recovery_test' || url.port === '55438' && url.pathname === '/ikbr_owner_recovery_test' ||
       process.env.CI === 'true' && url.port === '5432' && url.pathname === '/ikbr_trader_ci'));
   const schema = 'owner_release_' + randomUUID().replaceAll('-', '');
   const admin = new Pool({ connectionString: url.href });
@@ -19,6 +19,7 @@ async function isolated(port: number, run: (pool: Pool, settings: SourceSettings
     await pool.query(`CREATE TABLE accounting_source_owners(endpoint_key text PRIMARY KEY,owner_id uuid NOT NULL,generation bigint NOT NULL CHECK(generation>0),
       retirement_state text NOT NULL CHECK(retirement_state IN ('ACTIVE','RETIRED','UNKNOWN')),acquired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       retired_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp())`);
+    await pool.query('CREATE TABLE accounting_owner_recovery_maintenance(singleton boolean PRIMARY KEY,pending_operation_id uuid); INSERT INTO accounting_owner_recovery_maintenance VALUES(true,NULL)');
     await run(pool, { schemaVersion: 1, sourceKind: 'ibkr-tws-seven-day-v1', environment: 'paper', accountId: 'TEST-RELEASE',
       endpoint: { host: '127.0.0.1', port }, sourceClientId: 0, executionTimeZone: 'UTC' });
   } finally { await pool.end(); await admin.query(`DROP SCHEMA ${schema} CASCADE`); await admin.end(); }

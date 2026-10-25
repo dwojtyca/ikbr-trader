@@ -16,7 +16,8 @@
     "build": "tsc -p tsconfig.json",
     "ops": "node --import tsx -- src/operator-cli.ts",
     "runtime": "node --import tsx src/paper-runtime-cli.ts",
-    "research:recovery": "node --import tsx src/research-recovery-cli.ts"
+    "research:recovery": "node --import tsx src/research-recovery-cli.ts",
+    "accounting:owner-recovery": "node --import tsx src/accounting-owner-recovery-cli.ts"
   },
   "dependencies": {
     "zod": "^3.23",

@@ -6,7 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { accountingError, type SourceSettingsV1 } from "./types.js";
 
 export interface SourceOwnerFence { endpointKey: string; ownerId: string; generation: number }
-async function resolveAccountingEndpoint(endpoint: SourceSettingsV1["endpoint"]): Promise<{ key: string; endpoint: SourceSettingsV1["endpoint"] }> {
+export async function resolveAccountingEndpoint(endpoint: SourceSettingsV1["endpoint"]): Promise<{ key: string; endpoint: SourceSettingsV1["endpoint"] }> {
   const host = endpoint.host.trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
   if (!host || !Number.isSafeInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw accountingError("IDENTITY_INVALID");
   const addresses = isIP(host) ? [host] : (await lookup(host, { all: true })).map(value => value.address);
@@ -17,6 +17,10 @@ async function resolveAccountingEndpoint(endpoint: SourceSettingsV1["endpoint"])
 }
 export async function canonicalAccountingEndpoint(endpoint: SourceSettingsV1["endpoint"]): Promise<string> {
   return (await resolveAccountingEndpoint(endpoint)).key;
+}
+
+export function accountingOwnerLockKey(endpointKey: string): string {
+  return BigInt.asIntN(64, BigInt(`0x${createHash("sha256").update(endpointKey).digest("hex").slice(0, 16)}`)).toString();
 }
 
 /** A session lock authorizes ownership; the durable row prevents crash/lease takeover. */
@@ -62,7 +66,7 @@ export class AccountingSourceOwner {
     try {
       const resolved = await resolveAccountingEndpoint(this.settings.endpoint); this.assertAcquiring();
       const endpointKey = resolved.key; this.resolvedEndpoint = resolved.endpoint;
-      this.lockKey = BigInt.asIntN(64, BigInt(`0x${createHash("sha256").update(endpointKey).digest("hex").slice(0, 16)}`)).toString();
+      this.lockKey = accountingOwnerLockKey(endpointKey);
       client = await this.pool.connect(); this.assertAcquiring(); this.client = client;
       client.on("error", this.lose); client.on("end", this.lose);
       await client.query("SET statement_timeout = '2000ms'"); this.assertAcquiring();
@@ -70,6 +74,10 @@ export class AccountingSourceOwner {
       const lock = await client.query("SELECT pg_try_advisory_lock($1::bigint) AS locked", [this.lockKey]);
       this.assertAcquiring();
       if (lock.rows[0]?.locked !== true) throw accountingError("SOURCE_OWNER_CONFLICT");
+      await client.query("BEGIN"); this.assertAcquiring();
+      const maintenance = await client.query("SELECT pending_operation_id FROM accounting_owner_recovery_maintenance WHERE singleton FOR SHARE");
+      this.assertAcquiring();
+      if (maintenance.rowCount !== 1 || maintenance.rows[0].pending_operation_id !== null) throw accountingError("SOURCE_OWNER_MAINTENANCE_PENDING");
       const ownerId = randomUUID();
       const claimed = await client.query(`INSERT INTO accounting_source_owners(endpoint_key,owner_id,generation,retirement_state)
         VALUES($1,$2,1,'ACTIVE') ON CONFLICT(endpoint_key) DO UPDATE SET owner_id=EXCLUDED.owner_id,
@@ -79,6 +87,7 @@ export class AccountingSourceOwner {
       if (claimed.rowCount !== 1) throw accountingError("SOURCE_OWNER_UNRETIRED");
       const generation = Number(claimed.rows[0].generation);
       if (!Number.isSafeInteger(generation)) throw accountingError("SOURCE_OWNER_LOST");
+      await client.query("COMMIT"); this.assertAcquiring();
       this.current = { endpointKey, ownerId, generation }; this.state = "ACTIVE"; this.lastProof = performance.now();
       this.timer = setInterval(() => {
         if (this.checking || !["ACTIVE", "RETIRED"].includes(this.state)) return;
@@ -110,7 +119,8 @@ export class AccountingSourceOwner {
       await this.verifyLock(); this.assertHeld();
       const fence = this.current!;
       const query = { text: `SELECT 1 FROM accounting_source_owners WHERE endpoint_key=$1 AND owner_id=$2
-        AND generation=$3 AND retirement_state IN ('ACTIVE','RETIRED')`, values: [fence.endpointKey, fence.ownerId, fence.generation], query_timeout: 2000 };
+        AND generation=$3 AND retirement_state IN ('ACTIVE','RETIRED')
+        AND EXISTS(SELECT 1 FROM accounting_owner_recovery_maintenance WHERE singleton AND pending_operation_id IS NULL)`, values: [fence.endpointKey, fence.ownerId, fence.generation], query_timeout: 2000 };
       const row = await this.client!.query(query);
       this.assertHeld();
       if (row.rowCount !== 1) throw accountingError("SOURCE_OWNER_LOST");
@@ -120,7 +130,8 @@ export class AccountingSourceOwner {
   async assertInTransaction(db: Pick<PoolClient, "query">): Promise<void> {
     this.assertHeld(); const fence = this.current!;
     const row = await db.query(`SELECT 1 FROM accounting_source_owners WHERE endpoint_key=$1 AND owner_id=$2
-      AND generation=$3 AND retirement_state IN ('ACTIVE','RETIRED') FOR SHARE`, [fence.endpointKey, fence.ownerId, fence.generation]);
+      AND generation=$3 AND retirement_state IN ('ACTIVE','RETIRED')
+      AND EXISTS(SELECT 1 FROM accounting_owner_recovery_maintenance WHERE singleton AND pending_operation_id IS NULL) FOR SHARE`, [fence.endpointKey, fence.ownerId, fence.generation]);
     this.assertHeld(); if (row.rowCount !== 1) { this.lose(); throw accountingError("SOURCE_OWNER_LOST"); }
   }
   async retire(acknowledged: boolean): Promise<void> {

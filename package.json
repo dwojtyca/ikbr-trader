@@ -29,7 +29,8 @@
     "logs": "pnpm --filter @ikbr/paper-verify-stack runtime logs",
     "status": "pnpm --filter @ikbr/paper-verify-stack runtime status",
     "paper:runtime": "pnpm --filter @ikbr/paper-verify-stack runtime",
-    "paper:research-recovery": "pnpm --filter @ikbr/paper-verify-stack research:recovery"
+    "paper:research-recovery": "pnpm --filter @ikbr/paper-verify-stack research:recovery",
+    "paper:accounting-owner-recovery": "pnpm --filter @ikbr/paper-verify-stack accounting:owner-recovery"
   },
   "packageManager": "pnpm@9.5.0",
   "engines": {

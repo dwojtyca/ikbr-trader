@@ -174,3 +174,89 @@ pozostaje zablokowane. Wygaśnięcie locka/lease nie dowodzi rozłączenia broke
 Nie usuwać wierszy właściciela, epizodu ani prób. Eskalować nieznany wynik.
 Wdrożenie i rollback muszą zachować kompatybilny writer i trwałe entry fences.
 Szczegółowe kryteria są w [planie](../implementation/phase3/ACCOUNTING_AUTOMATIC_CLOCK_RECOVERY_PLAN.md).
+
+## Porzucony właściciel `ACCOUNTING_SOURCE_OWNER_UNRETIRED`
+
+Ta blokada powstaje przed startem HTTP execution. Nie rozwiązuje jej `recover-clock`
+ani sam restart Dockera. Nie usuwać ani ręcznie oznaczać jako zakończony wiersza
+`accounting_source_owners`: wolny lock PostgreSQL nie potwierdza zakończenia
+poprzedniego połączenia z TWS.
+
+Polecenie `pnpm paper:accounting-owner-recovery` służy do osobnej, nadzorowanej
+procedury offline. Wdrożenie kodu nie oznacza wykonania recovery ani zgody na
+handel. Wymagany jest opublikowany, przypięty obraz zawierający tę funkcję oraz
+migracja `000038_accounting_owner_recovery.sql` przez istniejący runner, po
+wykonaniu backupu. Nie uruchamiać starego obrazu przy oczekującym maintenance.
+
+Obsługiwany zakres to lokalny macOS, Docker Desktop przez lokalny socket, natywny
+TWS, jawny Paper i dokładnie jeden dozwolony rachunek. Wszystkie usługi aplikacji
+muszą być zatrzymane; brak opcjonalnego kontenera UI/backtest jest dopuszczalny.
+Master writes muszą być wyłączone, a istniejąca trwała pauza wejść potwierdzona.
+Pozostałych ustawień profilu nie należy zmieniać na potrzeby tej procedury.
+
+Pierwsza wersja obsługuje wyłącznie rachunek bez historii prób wysłania zleceń
+przez bota. Nawet historyczny, pozornie zakończony `execution_attempted_at`
+wyklucza ten zakres. Wykluczają go też rezerwacje i nierozstrzygnięte operacje.
+Nie kasować historii w celu spełnienia tego warunku. Rachunek musi być w całości
+bez pozycji i otwartych zleceń, także ręcznych lub dotyczących innych instrumentów.
+Brak ekspozycji sprawdza właściciel w TWS; lokalna baza nie zastępuje tego dowodu.
+
+Przygotować prywatny JSON dowodu operatora i trzy różne pliki potwierdzające
+rachunek/środowisko, pozycje oraz otwarte zlecenia. Katalog ma mieć tryb `0700`,
+pliki `0600`, bez symlinków. Obsługiwane są PNG, JPEG i UTF-8 TXT, do 5 MiB każdy.
+Dokładny schemat `OwnerRecoveryOperatorEvidence` jest w
+`packages/shared/src/accounting-owner-recovery.ts`. Dowód zawiera rzeczywiste
+identyfikatory rachunku, endpointu, hashe ustawień i przypiętego wdrożenia,
+tożsamość operatora, czas obserwacji i hashe plików. Potwierdzenia dotyczą także
+braku innych klientów brokera i zakazu ich uruchamiania w trakcie procedury.
+To jawna deklaracja operatora poparta integralnością plików, nie automatyczna
+interpretacja zrzutu ekranu. Nie tworzyć pozytywnych deklaracji z przykładu.
+
+W procesie wywołującym ustawić `OWNER_RECOVERY_OPERATOR` oraz niezależnie
+dostarczony `OWNER_RECOVERY_API_TOKEN`, zgodny z tokenem execution w przypiętym
+profilu. Nie wpisywać tokenu w argumentach polecenia ani w pliku dowodów.
+Przed `prepare` hashe ustawień i wdrożenia należy odczytać z prywatnego,
+zweryfikowanego profilu. Po wymianie procesu `observe` wypisuje dokładny obiekt
+`afterReset` i najwcześniejszy dopuszczalny czas nowych dowodów.
+
+Kontenery opcjonalne w stanie `Created` oraz działające obce kontenery również
+powodują odmowę w tym ograniczonym trybie. Nie należy zatrzymywać obcych usług
+bez uzgodnienia ani przedstawiać tej odmowy jako dowodu awarii bota. Przed
+rzeczywistą procedurą trzeba przygotować obsługiwaną topologię hosta.
+
+Kolejność działań:
+
+1. Po sprawdzeniu powyższych warunków wykonać
+   `pnpm paper:accounting-owner-recovery prepare --operator-evidence /absolute/private/before.json`.
+   Zapisać zwrócony identyfikator operacji. `PREPARED` utrwala maintenance:
+   zwykłe przejęcie właściciela pozostaje zabronione, również po upływie czasu.
+2. Uruchomić
+   `pnpm paper:accounting-owner-recovery observe --operation <uuid> --operator-evidence /absolute/private/after.json`.
+   **Ta komenda obejmuje obserwację i końcowy zapis recovery.** Nie istnieje
+   osobne polecenie `commit` przyjmujące zapisany wcześniej dowód.
+3. Dopiero po rozpoczęciu obserwacji ręcznie zamknąć cały TWS. Poczekać na
+   potwierdzenie zniknięcia procesu i nasłuchu; wtedy ręcznie uruchomić TWS.
+   Narzędzie nie steruje interfejsem brokera. Wcześniejszy restart nie spełnia
+   tego warunku.
+4. W nowej sesji TWS ponownie zweryfikować rachunek, brak pozycji i zleceń.
+   Zapisać świeży `after.json` z nowymi artefaktami i powiązaniem `afterReset`
+   z operacją, nonce i nową tożsamością procesu. Narzędzie sprawdza bieżący
+   dowód, wykonuje pojedynczy odczytowy handshake klienta 0 i czeka na faktyczne
+   zamknięcie tego socketu. Nie składa, nie anuluje ani nie ponawia zleceń.
+5. Sprawdzić niezmienny receipt przez
+   `pnpm paper:accounting-owner-recovery status --operation <uuid>`.
+   Potwierdzony `COMMITTED` dotyczy wyłącznie zakończenia starego właściciela.
+
+Cała operacja ma 15 minut od `PREPARED`, a dowody operatora muszą być świeższe
+niż pięć minut. Przerwanie komendy, utrata nadzoru, zmiana konfiguracji, start
+producenta lub niepewne zamknięcie pozostawiają blokadę. Nie ponawiać zapisu po
+timeout: odczytać dokładną operację i request ID. Brak odpowiedzi nie oznacza
+wycofania transakcji. `supersede --operation <uuid> --operator-evidence
+/absolute/private/new-before.json` tworzy audytowaną operację zastępczą przy
+świeżych dowodach, bez przerwy w maintenance; wymaga nowej pełnej obserwacji.
+
+Recovery nie odświeża kwalifikacji TWS, nie kasuje `ACCOUNTING_CLOCK_INVALID`,
+nie poprawia reconciliation, WSH/Marketaux ani budżetów. Następny zwykły start
+musi przejść własne bramki i pełny replay. Sam receipt nie wznawia wejść.
+Szczegóły dowodów, ograniczeń i stanów nieznanych zawiera
+[kontrakt recovery](../implementation/phase3/PAPER_ACCOUNTING_OWNER_RECOVERY_CONTRACT.md).

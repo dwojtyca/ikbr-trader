@@ -12,6 +12,7 @@ type Query={text:string;values?:unknown[];query_timeout?:number};
 class Client extends EventEmitter{
  releases=0;queries:Query[]=[];hook:((query:Query)=>Promise<ReturnType<typeof result>>|undefined)|undefined;
  async query(input:string|Query){const q=typeof input==='string'?{text:input}:input;this.queries.push(q);const intercepted=this.hook?.(q);if(intercepted)return intercepted;
+  if(q.text.includes('SELECT pending_operation_id'))return result({pending_operation_id:null});
   if(q.text.includes('pg_try_advisory_lock'))return result({locked:true});
   if(q.text.includes('INSERT INTO accounting_source_owners'))return result({generation:1});
   if(q.text.includes('pg_advisory_unlock'))return result({unlocked:true});

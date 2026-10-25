@@ -158,3 +158,9 @@ ciągłej dostępności TWS i komputera.
 
 Odzyskiwanie przerwanych pobrań przy starcie oraz procedura dla starego UNKNOWN:
 [Paper startup research recovery](PAPER_STARTUP_RESEARCH_RECOVERY.md).
+
+`ACCOUNTING_SOURCE_OWNER_UNRETIRED` blokuje start execution przed HTTP. Wymaga
+oddzielnej [procedury odzyskania właściciela](PAPER_ACCOUNTING_SOURCE.md#porzucony-właściciel-accounting_source_owner_unretired),
+zatrzymanych producentów i obserwowanego pełnego restartu TWS przez właściciela.
+Nie usuwać wiersza z bazy ani wielokrotnie wywoływać `pnpm start`. Potwierdzone
+recovery tego właściciela nie usuwa pozostałych blokad i nie wznawia handlu.

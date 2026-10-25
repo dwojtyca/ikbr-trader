@@ -26,6 +26,7 @@ test("session ownership excludes other accounts and durable retirement prevents 
     await pool.query(`CREATE TABLE accounting_source_owners(endpoint_key text PRIMARY KEY,owner_id uuid NOT NULL,generation bigint NOT NULL CHECK(generation>0),
       retirement_state text NOT NULL CHECK(retirement_state IN ('ACTIVE','RETIRED','UNKNOWN')),acquired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
       retired_at timestamptz,updated_at timestamptz NOT NULL DEFAULT clock_timestamp())`);
+    await pool.query('CREATE TABLE accounting_owner_recovery_maintenance(singleton boolean PRIMARY KEY,pending_operation_id uuid); INSERT INTO accounting_owner_recovery_maintenance VALUES(true,NULL)');
     const first = create(); await first.acquire(); const firstFence = first.fence();
     await assert.rejects(create("OTHER-ACCOUNT").acquire(), /SOURCE_OWNER_CONFLICT/);
     await new Promise(resolve => setTimeout(resolve, 600));
