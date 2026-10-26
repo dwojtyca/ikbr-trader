@@ -112,22 +112,20 @@ test('isolated real Compose v2 launch is accepted by native inventory only with 
       });
       assert.ok(child.pid);
       const launch: AccountingRecoveryNativeLaunch = { pid: child.pid, executable, args, startedAt };
-      const kept = new Set<number>([process.pid, child.pid]);
       let pluginObserved = false;
       const command: InspectCommand = async (file, argv) => {
         if (file === '/usr/sbin/lsof') return null; // No broker endpoint is inspected by this fixture.
         const result = await runRecoveryHostCommand(file, argv);
         assert.equal(result.exitCode, 0); assert.equal(result.stderr, ''); command.lastPid = result.pid;
         if (file !== '/bin/ps') return result.stdout;
-        const rows = result.stdout.trim().split('\n');
-        if (argv.at(-1) === 'pid=,ppid=,lstart=,comm=') {
-          for (const row of rows) {
-            const match = row.match(/^\s*(\d+)\s+(\d+)/);
-            if (match && Number(match[2]) === child.pid) { kept.add(Number(match[1])); pluginObserved ||= row.endsWith('/docker-compose'); }
-          }
+        const [header, ...rows] = result.stdout.split('\n');
+        const commandOffset = header.indexOf('C'.repeat(1024)), argvOffset = header.indexOf('ARGS');
+        assert.ok(commandOffset > 0); assert.equal(argvOffset - commandOffset, 1025);
+        for (const row of rows) {
+          const match = row.slice(0, commandOffset).match(/^\s*(\d+)\s+(\d+)/);
+          if (match && Number(match[2]) === child.pid) pluginObserved ||= row.slice(commandOffset, argvOffset - 1).trimEnd().endsWith('/docker-compose');
         }
-        // Exercise real ps/helper churn and launch identities without inspecting unrelated host clients.
-        return rows.filter(row => kept.has(Number(row.trim().split(/\s/)[0])) || Number(row.trim().split(/\s/)[0]) === result.pid).join('\n');
+        return result.stdout;
       };
       const options = { project, imageId, dockerHost: context, root: directory, host: 'host.docker.internal', port: 7497 };
       await assert.rejects(inspectAccountingNative(options, command, process.pid, null), /PRODUCERS_NOT_QUIESCENT/);

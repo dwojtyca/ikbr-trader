@@ -222,7 +222,8 @@ zweryfikowanego profilu. Po wymianie procesu `observe` wypisuje dokładny obiekt
 Kontenery nowego, zatwierdzonego obrazu można przygotować bez uruchamiania usług
 przez `docker compose up --no-start --no-deps --no-build --pull never --force-recreate` z kompletem
 plików zatwierdzonego prywatnego profilu i jawną listą usług aplikacji. Najpierw
-potwierdź ich zatrzymanie, backup oraz brak trwającej procedury recovery; nie
+potwierdź ich zatrzymanie, backup oraz brak aktywnego obserwatora i jego
+jednorazowego backendu; dla pozostawionej operacji PREPARED stosuj zasady poniżej. Nie
 odtwarzaj kontenerów podczas obserwacji. `--no-deps` pozostawia bazę i Redis bez
 zmian. Nie uruchamiaj producentów tylko po to,
 żeby uzyskać stan zatrzymany. Nowy wariant obsługuje `Created` wyłącznie przy
@@ -233,6 +234,16 @@ narzędzia odrzuca ten stan. Nie zastępuje to resetu TWS ani dowodów rachunku.
 Działające obce kontenery nadal powodują odmowę w tym ograniczonym trybie.
 Nie zatrzymuj obcych usług bez uzgodnienia. Szczegóły:
 [plan wdrożenia bez uruchamiania](../implementation/phase3/PAPER_ACCOUNTING_ZERO_START_DEPLOYMENT_PLAN.md).
+
+Odczyt procesów w poprawce z 26 października używa jednej kompletnej listy
+z zachowaniem pełnych argumentów. Błąd inwentaryzacji nadal przerywa obserwację;
+nie ponawiaj jej w tej samej operacji ani nie ignoruj nieznanych procesów.
+Po przerwaniu sprawdź dokładny status. Wdrożenie kolejnej zatwierdzonej poprawki
+jest dopuszczalne przy pozostawionej operacji PREPARED tylko po potwierdzeniu,
+że jej obserwator i jednorazowy backend już nie działają. Zachowaj maintenance,
+właściciela i pauzę. Zmieniony profil wymaga świeżego dowodu operatora i
+obsługiwanego `supersede`; stara obserwacja nie może być kontynuowana. Szczegóły:
+[naprawa inwentaryzacji](../implementation/phase3/PAPER_ACCOUNTING_NATIVE_INVENTORY_REPAIR_PLAN.md).
 
 Kolejność działań:
 

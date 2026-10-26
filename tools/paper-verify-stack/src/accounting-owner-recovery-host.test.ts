@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { createAccountingRecoveryHost, inspectAccountingProducers, inspectAccountingNative, createAccountingEventGuard, ACCOUNTING_APP_SERVICES } from './accounting-owner-recovery-host.js';
 const hash = 'a'.repeat(64), imageId = `sha256:${hash}`, id = (n: number) => n.toString(16).padStart(64, '0');
 const options = { project: 'fixture', imageId, dockerHost: 'unix:///var/run/docker.sock', root: '/repo', host: 'host.docker.internal', port: 7497 };
 const time = '2026-10-19T12:00:00.000Z';
 const executable = '/Users/operator/Applications/Trader Workstation/Trader Workstation.app/Contents/MacOS/JavaApplicationStub';
+const nativeFormat = `pid=PID,ppid=PPID,lstart=START,comm=${'C'.repeat(1024)},args=ARGS`;
+const nativeHeader = `  PID  PPID START${' '.repeat(24)}${'C'.repeat(1024)} ARGS`;
+type NativeRow = { ppid: number; start: string; command: string; argv: string };
+function nativeSnapshot(rows: Iterable<[number, NativeRow]>): string {
+  return [nativeHeader, ...[...rows].map(([pid, row]) => `${String(pid).padStart(5)} ${String(row.ppid).padStart(5)} ${row.start.padEnd(28)} ${row.command.padEnd(1024)} ${row.argv}`)].join('\n') + '\n';
+}
 function inventoryFixture() {
   const containers = new Map<string, Record<string, unknown>>(ACCOUNTING_APP_SERVICES.slice(0, 4).map((service, i) => [id(i + 1), {
     Id: id(i + 1), Image: imageId, Name: `/fixture-${service}`, Config: { Labels: { 'com.docker.compose.project': 'fixture', 'com.docker.compose.service': service, 'com.docker.compose.oneoff': 'False' },
@@ -113,7 +120,8 @@ test('created container replacement and lifecycle events invalidate the existing
     if (file === 'docker') return { stdout: await f.command(file, args), stderr: '', exitCode: 0 };
     if (file === '/usr/sbin/lsof') return { stdout: '', stderr: '', exitCode: 1 };
     if (file === '/usr/bin/shasum') return { stdout: `${hash}  /usr/bin/node\n`, stderr: '', exitCode: 0 };
-    return { stdout: args.at(-1) === 'pid=,args=' ? `${process.pid} node collector` : `${process.pid} 0 Mon Oct 19 10:00:00 2026 /usr/bin/node`, stderr: '', exitCode: 0 };
+    assert.deepEqual(args, ['-ww', '-axo', nativeFormat]);
+    return { stdout: nativeSnapshot([[process.pid, { ppid: 0, start: 'Mon Oct 19 10:00:00 2026', command: '/usr/bin/node', argv: 'node collector' }]]), stderr: '', exitCode: 0 };
   } });
   const initial = await host.captureProducerInventory();
   await host.verifyProducerInventory(initial);
@@ -165,15 +173,21 @@ test('pre-observation stop, Gateway product and unsupported host topology deny',
 test('native candidate and endpoint client recognition deny; unrelated Node argv is allowed', async () => {
   let args = 'node /tmp/editor.js', socket = '';
   const command = async (file: string, argv: readonly string[]) => {
-    if (file === '/bin/ps') return argv.at(-1) === 'pid=,args='
-      ? `1 node /repo/accounting-owner-recovery-cli.ts\n2 ${args}`
-      : '1 0 Mon Oct 19 10:00:00 2026 /usr/bin/node\n2 0 Mon Oct 19 10:00:00 2026 /usr/bin/node';
+    if (file === '/bin/ps') {
+      assert.deepEqual(argv, ['-ww', '-axo', nativeFormat]);
+      return nativeSnapshot([[1, { ppid: 0, start: 'Mon Oct 19 10:00:00 2026', command: '/usr/bin/node', argv: 'node /repo/accounting-owner-recovery-cli.ts' }],
+        [2, { ppid: 0, start: 'Mon Oct 19 10:00:00 2026', command: '/usr/bin/node', argv: args }]]);
+    }
     if (file === '/usr/bin/shasum') return `${hash}  /usr/bin/node\n`;
     if (file === '/usr/sbin/lsof') return socket || null;
     throw new Error('unexpected');
   };
   await inspectAccountingNative(options, command, 1, null);
-  args = 'python /tmp/ibapi/client.py'; await assert.rejects(inspectAccountingNative(options, command, 1, null));
+  for (const candidate of ['python /tmp/ibapi/client.py', 'node /repo/unrelated.js', 'pnpm --filter @ikbr/signal-engine start',
+    'node /tmp/execution-engine/dist/index.js', 'node /tmp/ingestion/src/main.ts', 'node /tmp/llm-agent/dist/index.js',
+    'node /tmp/backtest-engine/src/index.ts', 'node /tmp/@stoqey/ib/client.js']) {
+    args = candidate; await assert.rejects(inspectAccountingNative(options, command, 1, null), /PRODUCERS_NOT_QUIESCENT/);
+  }
   args = 'node /tmp/editor.js'; socket = 'p2\nf3\nn127.0.0.1:7497'; await assert.rejects(inspectAccountingNative(options, command, 1, null));
 });
 
@@ -190,8 +204,7 @@ function nativeComposeFixture() {
   ]);
   let digest = hash, socket: string | null = null;
   const command = async (file: string, args: readonly string[]) => {
-    if (file === '/bin/ps') return [...rows].map(([pid, row]) => args.at(-1) === 'pid=,args='
-      ? `${pid} ${row.argv}` : `${pid} ${row.ppid} ${row.start} ${row.command}`).join('\n');
+    if (file === '/bin/ps') { assert.deepEqual(args, ['-ww', '-axo', nativeFormat]); return nativeSnapshot(rows); }
     if (file === '/usr/bin/shasum') return `${digest}  ${args.at(-1)}\n`;
     if (file === '/usr/sbin/lsof') return socket;
     throw new Error('unexpected');
@@ -230,52 +243,108 @@ test('native Compose exemption rejects sibling spoofs, unknown descendants, wron
   }
 });
 
-test('only the exact spawned first ps helper may disappear between complete native views', async () => {
-  const { inspectAccountingNative } = await import('./accounting-owner-recovery-host.js');
-  const own = 101, first = 201, second = 202;
-  const command: import('./accounting-owner-recovery-host.js').InspectCommand = async (file, args) => {
-    if (file === '/bin/ps' && args.at(-1) === 'pid=,ppid=,lstart=,comm=') {
-      command.lastPid = first;
-      return `${own} 0 Mon Oct 19 10:00:00 2026 /usr/bin/node\n${first} ${own} Mon Oct 19 10:00:01 2026 /bin/ps`;
-    }
-    if (file === '/bin/ps') { command.lastPid = second; return `${own} node collector\n${second} /bin/ps -ww -axo pid=,args=`; }
-    if (file === '/usr/bin/shasum') return `${hash}  /usr/bin/node\n`;
-    if (file === '/usr/sbin/lsof') return null;
-    throw new Error('unexpected');
+test('one complete native snapshot preserves spaced paths, marker strings and trailing argv without a second global view', async () => {
+  const f = nativeComposeFixture();
+  const path = '/Applications/An application with a long path/Contents/MacOS/node';
+  const args = `${path} ARGS ${'C'.repeat(1024)} final argument  `;
+  f.rows.get(f.own)!.command = path; f.rows.get(f.own)!.argv = args;
+  let views = 0;
+  const command: typeof f.command = async (file, argv) => { if (file === '/bin/ps') views++; return f.command(file, argv); };
+  const result = await inspectAccountingNative(options, command, f.own, null, f.launch);
+  assert.equal(views, 1); assert.equal(result[0].argvHash, createHash('sha256').update(args).digest('hex'));
+});
+
+test('native framing rejects incomplete, ambiguous, saturated and oversized snapshots without ignoring any row', async () => {
+  const f = nativeComposeFixture(), original = nativeSnapshot(f.rows), rows = original.trimEnd().split('\n');
+  const mutations: Record<string, string> = {
+    'no-header': rows.slice(1).join('\n') + '\n',
+    'wrong-header': original.replace('START', 'OTHER'),
+    'duplicate-header': original + nativeHeader + '\n',
+    'no-rows': nativeHeader + '\n',
+    'missing-final-newline': original.slice(0, -1),
+    'duplicate-pid': original + rows[1] + '\n',
+    'missing-collector': [rows[0], ...rows.slice(2)].join('\n') + '\n',
+    'zero-pid': original.replace('  100', '    0'),
+    'negative-ppid': original.replace('  100     0', '  100    -1'),
+    'invalid-date': original.replace('Mon Oct 19', 'Mon Feb 30'),
+    'wrong-weekday': original.replace('Mon Oct 19', 'Tue Oct 19'),
+    'short-row': original + '  300\n',
+    'extra-blank-row': original + '\n',
+    'tab': original.replace('node', 'no\tde'),
+    'carriage-return': original.replace('node', 'no\rde'),
+    'nul': original.replace('node', 'no\0de'),
+    'multibyte-boundary': original.replace('node', 'nødé'),
+    'misaligned-separator': [rows[0], rows[1].slice(0, 1065) + 'X' + rows[1].slice(1066), ...rows.slice(2)].join('\n') + '\n',
+    'oversized-output': original + 'x'.repeat(2 * 1024 * 1024) + '\n',
   };
-  assert.equal((await inspectAccountingNative(options, command, own, null))[0].pid, own);
-  for (const mutation of ['unbound-first-pid', 'wrong-first-parent', 'wrong-first-executable', 'unbound-second-pid', 'wrong-second-argv']) {
-    const bad: typeof command = async (file, args, absent) => {
-      let value = await command(file, args, absent); bad.lastPid = command.lastPid;
-      if (file === '/bin/ps' && args.at(-1) === 'pid=,ppid=,lstart=,comm=') {
-        if (mutation === 'unbound-first-pid') bad.lastPid = 999;
-        if (mutation === 'wrong-first-parent') value = value!.replace(`${first} ${own}`, `${first} 999`);
-        if (mutation === 'wrong-first-executable') value = value!.replace('/bin/ps', '/usr/bin/python');
-      } else if (file === '/bin/ps') {
-        if (mutation === 'unbound-second-pid') bad.lastPid = 999;
-        if (mutation === 'wrong-second-argv') value = value!.replace('/bin/ps -ww -axo pid=,args=', '/bin/ps -E');
-      }
-      return value;
-    };
-    await assert.rejects(inspectAccountingNative(options, bad, own, null), /INVENTORY_UNAVAILABLE/, mutation);
+  for (const [name, output] of Object.entries(mutations)) {
+    const command: typeof f.command = async (file, args) => file === '/bin/ps' ? output : f.command(file, args);
+    await assert.rejects(inspectAccountingNative(options, command, f.own, null, f.launch), /INVENTORY_UNAVAILABLE/, name);
+  }
+  for (const mode of ['empty-command', 'empty-argv', 'saturated-command', 'oversized-command', 'leading-command-space']) {
+    const fixture = nativeComposeFixture(), own = fixture.rows.get(fixture.own)!;
+    if (mode === 'empty-command') own.command = '';
+    if (mode === 'empty-argv') own.argv = '   ';
+    if (mode === 'saturated-command') own.command = '/' + 'a'.repeat(1023);
+    if (mode === 'oversized-command') own.command = '/' + 'a'.repeat(1024);
+    if (mode === 'leading-command-space') own.command = ' /usr/bin/node';
+    await assert.rejects(inspectAccountingNative(options, fixture.command, fixture.own, null, fixture.launch), /INVENTORY_UNAVAILABLE/, mode);
   }
 });
 
-test('real macOS ps runner tolerates its own exact helper churn without broker inspection', { skip: process.env.OWNER_RECOVERY_NATIVE_TEST !== '1' || process.platform !== 'darwin' }, async () => {
-  const { runRecoveryHostCommand } = await import('./accounting-owner-recovery-host.js');
-  let firstPid: number | undefined, disappeared = false;
-  const command: import('./accounting-owner-recovery-host.js').InspectCommand = async (file, args) => {
-    if (file === '/usr/sbin/lsof') return null;
-    const result = await runRecoveryHostCommand(file, args);
-    assert.equal(result.exitCode, 0); assert.equal(result.stderr, ''); command.lastPid = result.pid;
-    if (file !== '/bin/ps') return result.stdout;
-    const rows = result.stdout.trim().split('\n');
-    if (args.at(-1) === 'pid=,ppid=,lstart=,comm=') firstPid = result.pid;
-    else disappeared = !rows.some(row => Number(row.trim().split(/\s/)[0]) === firstPid);
-    // Keep real collector and actual spawned helper rows; unrelated native clients
-    // are outside this isolated parser fixture, and no raw argv leaves this process.
-    return rows.filter(row => [process.pid, result.pid].includes(Number(row.trim().split(/\s/)[0]))).join('\n');
-  };
-  const result = await inspectAccountingNative({ ...options, root: '/isolated-native-fixture' }, command, process.pid, null);
-  assert.equal(disappeared, true); assert.equal(result.length, 1); assert.equal(result[0].pid, process.pid);
+test('padded oversized argv0 cannot acquire a launch or helper exception', async () => {
+  for (const mode of ['docker', 'plugin', 'helper-sibling', 'recovery-sibling']) {
+    const f = nativeComposeFixture();
+    if (mode === 'docker' || mode === 'plugin') {
+      const row = f.rows.get(mode === 'docker' ? f.docker : f.plugin)!;
+      row.argv = row.command + ' '.repeat(1100) + 'hidden-argv0 /repo/client';
+    } else {
+      f.rows.set(300, { ppid: 0, start: 'Mon Oct 19 10:00:00 2026', command: '/bin/ps',
+        argv: mode === 'helper-sibling' ? '/bin/ps /repo/client' : 'node /repo/accounting-owner-recovery-cli.ts' });
+    }
+    await assert.rejects(inspectAccountingNative(options, f.command, f.own, null, f.launch), /PROCESS_CHANGED|PRODUCERS_NOT_QUIESCENT/, mode);
+  }
 });
+
+test('real macOS unfiltered native snapshots survive unrelated process churn and preserve a spaced executable path',
+  { skip: process.env.OWNER_RECOVERY_NATIVE_TEST !== '1' || process.platform !== 'darwin', timeout: 30000 }, async () => {
+    const { runRecoveryHostCommand } = await import('./accounting-owner-recovery-host.js');
+    const { spawn } = await import('node:child_process');
+    const { mkdtemp, mkdir, realpath, symlink, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'owner-native-format-')));
+    const path = join(directory, 'long executable directory ' + 'a'.repeat(80), 'sleep with spaces');
+    await mkdir(join(path, '..')); await symlink('/bin/sleep', path);
+    const child = spawn(path, ['30'], { stdio: 'ignore' });
+    const exited = new Promise<void>((resolve, reject) => { child.once('error', reject); child.once('close', () => resolve()); });
+    let stop = false, churned = 0, snapshots = 0, minimumRows = Infinity;
+    const churn = (async () => {
+      while (!stop && churned < 1000) {
+        const process = spawn('/bin/sleep', ['0.01'], { stdio: 'ignore' });
+        await new Promise<void>((resolve, reject) => { process.once('error', reject); process.once('close', () => resolve()); });
+        churned++;
+      }
+    })();
+    try {
+      assert.ok(child.pid);
+      const command: import('./accounting-owner-recovery-host.js').InspectCommand = async (file, args) => {
+        if (file === '/usr/sbin/lsof') return null; // This parser fixture never inspects a broker endpoint.
+        const result = await runRecoveryHostCommand(file, args);
+        assert.equal(result.exitCode, 0); assert.equal(result.stderr, '');
+        if (file === '/bin/ps') {
+          assert.deepEqual(args, ['-ww', '-axo', nativeFormat]); snapshots++;
+          minimumRows = Math.min(minimumRows, result.stdout.split('\n').length - 2);
+        }
+        return result.stdout;
+      };
+      for (let sample = 0; sample < 8; sample++) {
+        const result = await inspectAccountingNative({ ...options, root: '/isolated-native-fixture' }, command, process.pid, child.pid);
+        assert.deepEqual(result.map(row => row.pid), [process.pid, child.pid]);
+        assert.equal(result[1].argvHash, createHash('sha256').update(`${path} 30`).digest('hex'));
+      }
+      assert.equal(snapshots, 8); assert.ok(minimumRows > 3); assert.ok(churned > 1);
+    } finally {
+      stop = true; await churn; child.kill('SIGTERM'); await exited; await rm(directory, { recursive: true, force: true });
+    }
+  });

@@ -188,6 +188,34 @@ test('inventory or watcher failure immediately after backend start cancels child
   }
 });
 
+test('inventory loss in the first active observer poll cancels observation before reset or handshake and retains maintenance', async () => {
+  const f = fixture(), originalStart = f.deps.start, originalHost = f.deps.host;
+  let active = false, cancelled = 0, closed = 0, stopChecks = 0;
+  f.deps.log = line => { if (line.startsWith('Obserwacja aktywna.')) active = true; };
+  f.deps.host = profile => {
+    const host = originalHost(profile), verify = host.verifyProducerInventory, stopped = host.assertGatewayStopped;
+    host.verifyProducerInventory = async previous => {
+      if (active) throw new Error('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+      return verify(previous);
+    };
+    host.assertGatewayStopped = async (...args) => { stopChecks++; return stopped(...args); };
+    return host;
+  };
+  f.deps.start = async (...args) => {
+    const session = await originalStart(...args);
+    if (!args[3]) { session.channel.cancel = () => { cancelled++; }; session.watcher.close = () => { closed++; }; }
+    return session;
+  };
+  await assert.rejects(executeAccountingRecovery({ action: 'observe', operationId: id(2), evidencePath: '/private/proof.json' }, f.deps), /INVENTORY_UNAVAILABLE/);
+  assert.equal(active, true); assert.equal(cancelled, 1); assert.equal(closed, 1); assert.equal(stopChecks, 0);
+  assert.deepEqual(f.requests.map(request => request.action), ['status', 'begin-observe']);
+  assert.deepEqual(f.records.map(record => record.action), ['begin-observe']);
+  const status = await executeAccountingRecovery({ action: 'status', operationId: id(2) }, f.deps);
+  assert.match(status, /PREPARED/); assert.match(status, /blokada konserwacyjna: aktywna/);
+  await assert.rejects(executeAccountingRecovery({ action: 'observe', operationId: id(2), evidencePath: '/private/proof.json' }, f.deps), /RESET_UNPROVEN/);
+  assert.equal(f.requests.filter(request => request.action === 'begin-observe').length, 1);
+});
+
 test('status displays exact operation, maintenance, bindings, deadline and sanitized event history', async () => {
   const f = fixture(), originalStart = f.deps.start;
   f.deps.start = async (...args) => {

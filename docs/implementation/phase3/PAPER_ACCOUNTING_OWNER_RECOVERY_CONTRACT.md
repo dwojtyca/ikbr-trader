@@ -331,6 +331,13 @@ unrelated Codex/editor/development processes without those matches or endpoint
 connections are outside the supported producer inventory. Store PID/start/argv
 hash for candidates, not broad raw command lines that could contain credentials.
 Truncation, unavailable complete argv or missing socket permissions denies.
+The [2026-10-26 native inventory amendment](PAPER_ACCOUNTING_NATIVE_INVENTORY_REPAIR_PLAN.md)
+collects each global native view with one ps invocation, avoiding a join between
+process lists taken at different times. Its strict byte framing uses an explicit
+1024-byte command field and complete final argv. Malformed/truncated/ambiguous
+output still denies; no inconsistent-view retry or arbitrary PID exemption is
+introduced. Command text remains ps-displayed argv[0], not kernel executable
+attestation. Existing exact command/argv/ancestry/start/hash checks remain required.
 The operator explicitly attests no other broker-capable native process, external
 client, scheduler or manual launch will run during the procedure. This is a
 bounded supported-topology assertion, not proof that arbitrary software cannot

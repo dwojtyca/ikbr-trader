@@ -258,28 +258,26 @@ export async function inspectAccountingProducers(options: AccountingRecoveryHost
 export type AccountingRecoveryNativeLaunch = { pid: number; executable: string; args: string[]; startedAt: string; identities?: string };
 export async function inspectAccountingNative(options: AccountingRecoveryHostOptions, command: InspectCommand, ownPid: number, twsPid: number | null,
   launch?: AccountingRecoveryNativeLaunch): Promise<OwnerRecoveryInventory['nativeProcesses']> {
-  // Separate complete ps views preserve executable paths and argv containing spaces.
-  const rows = (await command('/bin/ps', ['-ww', '-axo', 'pid=,ppid=,lstart=,comm=']))!.trim().split('\n');
-  const firstHelperPid = command.lastPid;
-  const argvRows = (await command('/bin/ps', ['-ww', '-axo', 'pid=,args=']))!.trim().split('\n');
-  const secondHelperPid = command.lastPid;
+  // A wide named comm field frames paths containing spaces; only final argv is unlimited.
+  const commandHeader = 'C'.repeat(1024);
+  const output = await command('/bin/ps', ['-ww', '-axo', `pid=PID,ppid=PPID,lstart=START,comm=${commandHeader},args=ARGS`]);
+  if (!output || Buffer.byteLength(output) > MAX_OUTPUT || /[^\x20-\x7e\n]/.test(output) || !output.endsWith('\n')) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+  const [header, ...rows] = output.slice(0, -1).split('\n');
+  if (header !== `  PID  PPID START${' '.repeat(24)}${commandHeader} ARGS` || !rows.length) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+  const commandOffset = header.indexOf(commandHeader), argvOffset = header.indexOf('ARGS');
   const argv = new Map<number, string>();
-  for (const row of argvRows) {
-    const m = row.match(/^\s*([1-9]\d*)\s+(.+)$/);
-    if (!m || argv.has(Number(m[1]))) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
-    argv.set(Number(m[1]), m[2]);
-  }
   const native = new Map<number, { ppid: number; command: string; startIdentity: string }>();
   for (const row of rows) {
-    const m = row.match(/^\s*([1-9]\d*)\s+(\d+)\s+([A-Z][a-z]{2} [A-Z][a-z]{2}\s+\d{1,2} \d\d:\d\d:\d\d \d{4})\s+(.+)$/);
-    if (!m || native.has(Number(m[1])) || !Number.isFinite(Date.parse(`${m[3]} UTC`))) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
-    if (!argv.has(Number(m[1]))) {
-      if (Number(m[1]) === firstHelperPid && Number(m[2]) === ownPid && m[4] === '/bin/ps') continue;
-      deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
-    }
-    native.set(Number(m[1]), { ppid: Number(m[2]), command: m[4], startIdentity: new Date(`${m[3]} UTC`).toISOString() });
+    const m = row.slice(0, commandOffset).match(/^( {0,4}[1-9]\d{0,4}) ( {0,4}\d{1,5}) ([A-Z][a-z]{2}) ([A-Z][a-z]{2}) ( \d|\d\d) (\d\d:\d\d:\d\d) (\d{4}) {5}$/);
+    const processCommand = row.slice(commandOffset, argvOffset - 1).trimEnd(), args = row.slice(argvOffset);
+    if (!m || m[1].length !== 5 || m[2].length !== 5 || row[argvOffset - 1] !== ' ' || !processCommand ||
+        processCommand.startsWith(' ') || processCommand.length >= 1024 || !args.trim() || native.has(Number(m[1]))) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+    const date = new Date(`${m[3]} ${m[4]} ${m[5]} ${m[6]} ${m[7]} UTC`);
+    if (!Number.isFinite(date.getTime()) || date.toUTCString() !== `${m[3]}, ${m[5].trim().padStart(2, '0')} ${m[4]} ${m[7]} ${m[6]} GMT`) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+    const pid = Number(m[1]);
+    argv.set(pid, args);
+    native.set(pid, { ppid: Number(m[2]), command: processCommand, startIdentity: date.toISOString() });
   }
-  for (const [pid, args] of argv) if (!native.has(pid) && !(pid === secondHelperPid && args === '/bin/ps -ww -axo pid=,args=')) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
   if (!native.has(ownPid)) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
   const launchPids = new Set<number>();
   if (launch) {
