@@ -128,11 +128,11 @@ test('isolated real Compose v2 launch is accepted by native inventory only with 
         return result.stdout;
       };
       const options = { project, imageId, dockerHost: context, root: directory, host: 'host.docker.internal', port: 7497 };
-      await assert.rejects(inspectAccountingNative(options, command, process.pid, null), /PRODUCERS_NOT_QUIESCENT/);
-      const result = await inspectAccountingNative(options, command, process.pid, null, launch);
+      await assert.rejects(inspectAccountingNative(options, command, process.pid), /PRODUCERS_NOT_QUIESCENT/);
+      const result = await inspectAccountingNative(options, command, process.pid, launch);
       assert.equal(pluginObserved, true); assert.equal(result.length, 1); assert.ok(launch.identities);
-      await inspectAccountingNative(options, command, process.pid, null, launch);
-      await assert.rejects(inspectAccountingNative(options, command, process.pid, null, { ...launch, pid: process.pid }), /PROCESS_CHANGED/);
+      await inspectAccountingNative(options, command, process.pid, launch);
+      await assert.rejects(inspectAccountingNative(options, command, process.pid, { ...launch, pid: process.pid }), /PROCESS_CHANGED/);
     } finally {
       await docker('rm', '-f', name).catch(() => undefined); child.kill('SIGTERM'); await exited;
       await rm(directory, { recursive: true, force: true });

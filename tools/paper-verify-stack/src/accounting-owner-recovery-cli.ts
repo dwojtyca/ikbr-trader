@@ -11,7 +11,7 @@ import { parseOwnerRecoveryRequest, parseOwnerRecoveryResponse, parseOwnerRecove
   type OwnerRecoveryHostEvidence, type OwnerRecoveryOperation, type OwnerRecoveryStatus } from '@ikbr/shared/accounting-owner-recovery';
 import { canonicalJson, verifyProof, validateRenderedCompose } from './paper-runtime.js';
 import { runDocker } from './paper-runtime-cli.js';
-import { createAccountingRecoveryHost, runRecoveryHostCommand, startAccountingDockerWatcher, ACCOUNTING_APP_SERVICES, AccountingRecoveryHostError,
+import { createAccountingRecoveryHost, runRecoveryHostCommand, startAccountingDockerWatcher, ACCOUNTING_APP_SERVICES, AccountingRecoveryHostError, ACCOUNTING_NATIVE_DIAGNOSTICS,
   type AccountingRecoveryException, type AccountingEventWatcher } from './accounting-owner-recovery-host.js';
 
 const sha = (v: string | Uint8Array) => createHash('sha256').update(v).digest('hex');
@@ -405,6 +405,9 @@ export async function runAccountingOwnerRecoveryCli(argv = process.argv.slice(2)
 export function accountingWatcherDiagnostic(error: unknown): string | null {
   if (!(error instanceof AccountingRecoveryHostError) || !error.cause || typeof error.cause !== 'object') return null;
   const cause = error.cause as { name?: unknown; code?: unknown };
+  for (const [phase, reasons] of Object.entries(ACCOUNTING_NATIVE_DIAGNOSTICS)) {
+    if (cause.name === `AccountingNativeInventory:${phase}` && typeof cause.code === 'string' && (reasons as readonly string[]).includes(cause.code)) return `${cause.name}/${cause.code}`;
+  }
   return typeof cause.name === 'string' && /^AccountingDockerEventWatcher:(bootstrap|replay|stream|guard|lifecycle)$/.test(cause.name) &&
     typeof cause.code === 'string' && /^[A-Z_]{1,64}$/.test(cause.code) ? `${cause.name}/${cause.code}` : null;
 }

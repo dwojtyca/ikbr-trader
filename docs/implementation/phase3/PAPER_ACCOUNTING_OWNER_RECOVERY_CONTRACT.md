@@ -338,6 +338,15 @@ process lists taken at different times. Its strict byte framing uses an explicit
 output still denies; no inconsistent-view retry or arbitrary PID exemption is
 introduced. Command text remains ps-displayed argv[0], not kernel executable
 attestation. Existing exact command/argv/ancestry/start/hash checks remain required.
+The [restart inventory repair](PAPER_ACCOUNTING_RESTART_INVENTORY_REPAIR_PLAN.md)
+derives each native inventory's listener and all endpoint socket owners from one
+complete `lsof -nP -iTCP:<port> -FpfnT -Ts` view. State-only reporting must follow
+field selection on the supported host. Strict process/file/address/state framing
+and a single supported listener remain required. Nonempty sockets without a
+listener, an additional endpoint owner, malformed output or an unrecognized TWS
+identity deny; no failed inventory is retried. Global process/identity checks and
+independent old/stop/new reset observations remain required. One command is not
+an atomic kernel snapshot or proof against hidden clients between samples.
 The operator explicitly attests no other broker-capable native process, external
 client, scheduler or manual launch will run during the procedure. This is a
 bounded supported-topology assertion, not proof that arbitrary software cannot

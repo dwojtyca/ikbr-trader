@@ -97,7 +97,7 @@ export function createAccountingRecoveryHost(options: AccountingRecoveryHostOpti
   }
   async function inspectProducers(): Promise<RecoveryProducerInventory> {
     const result = await inspectAccountingProducers(options, command, timestamp, exception);
-    result.nativeProcesses = await inspectAccountingNative(options, command, process.pid, await listener(), nativeLaunch);
+    result.nativeProcesses = await inspectAccountingNative(options, command, process.pid, nativeLaunch);
     return result;
   }
   let exception: AccountingRecoveryException | undefined;
@@ -109,7 +109,7 @@ export function createAccountingRecoveryHost(options: AccountingRecoveryHostOpti
   }
   function clearOneShot(): void { exception = undefined; nativeLaunch = undefined; }
   async function inspectNative() {
-    return inspectAccountingNative(options, command, process.pid, await listener(), nativeLaunch);
+    return inspectAccountingNative(options, command, process.pid, nativeLaunch);
   }
   async function captureProducerInventory(): Promise<RecoveryProducerInventory> {
     if (inventory) deny('ACCOUNTING_OWNER_RECOVERY_OBSERVATION_SEQUENCE');
@@ -152,7 +152,7 @@ export function createAccountingRecoveryHost(options: AccountingRecoveryHostOpti
     const pid = await listener();
     if (pid === null) return deny('ACCOUNTING_OWNER_RECOVERY_GATEWAY_UNAVAILABLE');
     const detail = await processDetails(pid);
-    if (!detail || !/^\/(?:Applications|Users\/[^/]+\/Applications)\/(?:(?:Trader Workstation[^/]*|TWS[^/]*)\/)?(?:Trader Workstation[^/]*|TWS[^/]*)\.app\/Contents\/[^\r\n]+\/(?:java|JavaApplicationStub|Trader Workstation)$/.test(detail.executable) || detail.executable.split('/').some(part => part === '..' || part === '.')) return deny('ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+    if (!detail || !isTwsExecutable(detail.executable)) return deny('ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
     const checksum = (await command('/usr/bin/shasum', ['-a', '256', '--', detail.executable]))!;
     const match = checksum.match(/^([a-f0-9]{64}) {2}(.+)\n?$/);
     if (!match || match[2] !== detail.executable) return deny();
@@ -256,8 +256,79 @@ export async function inspectAccountingProducers(options: AccountingRecoveryHost
 }
 
 export type AccountingRecoveryNativeLaunch = { pid: number; executable: string; args: string[]; startedAt: string; identities?: string };
-export async function inspectAccountingNative(options: AccountingRecoveryHostOptions, command: InspectCommand, ownPid: number, twsPid: number | null,
+const isTwsExecutable = (value: string) => /^\/(?:Applications|Users\/[^/]+\/Applications)\/(?:(?:Trader Workstation[^/]*|TWS[^/]*)\/)?(?:Trader Workstation[^/]*|TWS[^/]*)\.app\/Contents\/[^\r\n]+\/(?:java|JavaApplicationStub|Trader Workstation)$/.test(value) && !value.split('/').some(part => part === '..' || part === '.');
+export const ACCOUNTING_NATIVE_DIAGNOSTICS = {
+  socket: ['COMMAND_FAILED', 'MALFORMED_SOCKET_VIEW', 'SOCKETS_WITHOUT_LISTENER', 'UNEXPECTED_ENDPOINT_OWNER', 'AMBIGUOUS_LISTENER'],
+  process: ['NATIVE_PRODUCER'],
+  identity: ['NON_TWS_LISTENER', 'LISTENER_PROCESS_MISSING'],
+} as const;
+type NativePhase = keyof typeof ACCOUNTING_NATIVE_DIAGNOSTICS;
+function nativeFailure<P extends NativePhase>(phase: P, reason: typeof ACCOUNTING_NATIVE_DIAGNOSTICS[P][number], code: string, original?: unknown): AccountingRecoveryHostError {
+  const failure = new AccountingRecoveryHostError(code, { name: `AccountingNativeInventory:${phase}`, code: reason, message: `phase=${phase}; reason=${reason}` });
+  if (original !== undefined) {
+    const source = original instanceof Error ? original.cause ?? original : original;
+    const detail = source && typeof source === 'object' ? source as { name?: unknown; code?: unknown; message?: unknown } : {};
+    Object.assign(failure.cause as object, { original: {
+      name: typeof detail.name === 'string' ? safeDiagnosticText(detail.name) : null,
+      code: typeof detail.code === 'string' ? safeDiagnosticText(detail.code) : typeof detail.code === 'number' ? detail.code : null,
+      message: typeof detail.message === 'string' ? safeDiagnosticText(detail.message) : null,
+    } });
+  }
+  return failure;
+}
+type EndpointSocket = { pid: number; descriptor: number; address: string; state: string };
+export function parseAccountingEndpointSockets(output: string | null): EndpointSocket[] {
+  if (output === null) return [];
+  const malformed = (): never => { throw nativeFailure('socket', 'MALFORMED_SOCKET_VIEW', 'ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE'); };
+  if (!output || Buffer.byteLength(output) > MAX_OUTPUT || !output.endsWith('\n') || /[^\x20-\x7e\n]/.test(output)) return malformed();
+  const sockets: EndpointSocket[] = [], pids = new Set<number>(), descriptors = new Set<number>();
+  let pid: number | undefined, current: Partial<EndpointSocket> | undefined;
+  const finish = () => {
+    if (!current || current.pid === undefined || current.descriptor === undefined || current.address === undefined || current.state === undefined) return malformed();
+    sockets.push(current as EndpointSocket); current = undefined;
+  };
+  for (const line of output.slice(0, -1).split('\n')) {
+    if (/^p[1-9]\d*$/.test(line)) {
+      if (pid !== undefined) { if (!current) return malformed(); finish(); }
+      pid = Number(line.slice(1));
+      if (!Number.isSafeInteger(pid) || pids.has(pid)) return malformed();
+      pids.add(pid); descriptors.clear();
+    } else if (/^f\d+$/.test(line)) {
+      if (pid === undefined) return malformed();
+      if (current) finish();
+      const descriptor = Number(line.slice(1));
+      if (!Number.isSafeInteger(descriptor) || descriptors.has(descriptor)) return malformed();
+      descriptors.add(descriptor); current = { pid, descriptor };
+    } else if (line.startsWith('n') && current && current.address === undefined && line.length > 1) {
+      current.address = line.slice(1);
+    } else if (/^TST=[A-Z][A-Z0-9_]{0,31}$/.test(line) && current && current.state === undefined) {
+      current.state = line.slice(4);
+    } else return malformed();
+  }
+  finish();
+  return sockets;
+}
+async function inventoryListener(options: AccountingRecoveryHostOptions, command: InspectCommand): Promise<number | null> {
+  let output: string | null;
+  try { output = await command('/usr/sbin/lsof', ['-nP', `-iTCP:${options.port}`, '-FpfnT', '-Ts'], true); }
+  catch (error) {
+    const code = error instanceof AccountingRecoveryHostError ? error.code : 'ACCOUNTING_OWNER_RECOVERY_INSPECTION_UNAVAILABLE';
+    throw nativeFailure('socket', 'COMMAND_FAILED', code, error);
+  }
+  const sockets = parseAccountingEndpointSockets(output);
+  if (!sockets.length) return null;
+  const listeners = sockets.filter(socket => socket.state === 'LISTEN');
+  if (!listeners.length) throw nativeFailure('socket', 'SOCKETS_WITHOUT_LISTENER', 'ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+  if (listeners.length !== 1 || ![`*:${options.port}`, `127.0.0.1:${options.port}`, `[::1]:${options.port}`].includes(listeners[0].address)) {
+    throw nativeFailure('socket', 'AMBIGUOUS_LISTENER', 'ACCOUNTING_OWNER_RECOVERY_LISTENER_AMBIGUOUS');
+  }
+  if (sockets.some(socket => socket.pid !== listeners[0].pid)) throw nativeFailure('socket', 'UNEXPECTED_ENDPOINT_OWNER', 'ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+  return listeners[0].pid;
+}
+
+export async function inspectAccountingNative(options: AccountingRecoveryHostOptions, command: InspectCommand, ownPid: number,
   launch?: AccountingRecoveryNativeLaunch): Promise<OwnerRecoveryInventory['nativeProcesses']> {
+  const twsPid = await inventoryListener(options, command);
   // A wide named comm field frames paths containing spaces; only final argv is unlimited.
   const commandHeader = 'C'.repeat(1024);
   const output = await command('/bin/ps', ['-ww', '-axo', `pid=PID,ppid=PPID,lstart=START,comm=${commandHeader},args=ARGS`]);
@@ -279,6 +350,11 @@ export async function inspectAccountingNative(options: AccountingRecoveryHostOpt
     native.set(pid, { ppid: Number(m[2]), command: processCommand, startIdentity: date.toISOString() });
   }
   if (!native.has(ownPid)) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+  if (twsPid !== null) {
+    const tws = native.get(twsPid);
+    if (!tws) throw nativeFailure('identity', 'LISTENER_PROCESS_MISSING', 'ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
+    if (!isTwsExecutable(tws.command)) throw nativeFailure('identity', 'NON_TWS_LISTENER', 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+  }
   const launchPids = new Set<number>();
   if (launch) {
     const parent = native.get(launch.pid), children = [...native].filter(([, item]) => item.ppid === launch.pid);
@@ -313,7 +389,7 @@ export async function inspectAccountingNative(options: AccountingRecoveryHostOpt
     if (!candidate || pid === twsPid || pid === ownPid || launchPids.has(pid)) continue;
     if (ancestors.has(pid) && recoveryArg.test(args)) continue;
     if (item.ppid === ownPid && /^\/(?:usr\/sbin\/lsof|bin\/ps|usr\/sbin\/ioreg|usr\/bin\/shasum)$/.test(item.command)) continue;
-    deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+    throw nativeFailure('process', 'NATIVE_PRODUCER', 'ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT');
   }
   const identities: OwnerRecoveryInventory['nativeProcesses'] = [];
   for (const pid of [ownPid, ...(twsPid === null ? [] : [twsPid])]) {
@@ -321,14 +397,6 @@ export async function inspectAccountingNative(options: AccountingRecoveryHostOpt
     const hash = (await command('/usr/bin/shasum', ['-a', '256', '--', item.command]))!.match(/^([a-f0-9]{64}) {2}(.+)\n?$/);
     if (!hash || hash[2] !== item.command) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
     identities.push({ pid, startIdentity: item.startIdentity, executableHash: hash[1], argvHash: sha(argv.get(pid)!), role: pid === ownPid ? 'collector' : 'tws' });
-  }
-  const socket = await command('/usr/sbin/lsof', ['-nP', `-iTCP:${options.port}`, '-Fpfn'], true);
-  if (socket !== null) {
-    let pid = 0;
-    for (const line of socket.trim().split('\n')) {
-      if (/^p[1-9]\d*$/.test(line)) { pid = Number(line.slice(1)); if (pid !== twsPid) deny('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT'); }
-      else if (!pid || !/^(?:f\d+|n[^\r\n]+)$/.test(line)) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
-    }
   }
   return identities;
 }

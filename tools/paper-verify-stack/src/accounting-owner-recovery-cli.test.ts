@@ -230,3 +230,35 @@ test('status displays exact operation, maintenance, bindings, deadline and sanit
   for (const fragment of [id(2), id(4), id(11), id(12), iso(899000), hash, 'PREPARED', 'rewizja pauzy: 1']) assert.ok(text.includes(fragment), fragment);
   assert.ok(!text.includes('x'.repeat(32)));
 });
+
+test('replacement wait inventory refusal preserves its diagnostic and cancels before afterReset or handshake without retry', async () => {
+  const { AccountingRecoveryHostError } = await import('./accounting-owner-recovery-host.js');
+  const { accountingWatcherDiagnostic } = await import('./accounting-owner-recovery-cli.js');
+  const f = fixture(), originalStart = f.deps.start, originalHost = f.deps.host;
+  let waiting = false, cancelled = 0, closed = 0, failedInventories = 0, replacementChecks = 0;
+  const logs: string[] = [], failure = new AccountingRecoveryHostError('ACCOUNTING_OWNER_RECOVERY_PRODUCERS_NOT_QUIESCENT', {
+    name: 'AccountingNativeInventory:socket', code: 'UNEXPECTED_ENDPOINT_OWNER', message: 'fixed local cause',
+  });
+  f.deps.log = line => { logs.push(line); if (line.startsWith('Potwierdzono pełne zatrzymanie')) waiting = true; };
+  f.deps.host = profile => {
+    const host = originalHost(profile), verify = host.verifyProducerInventory, replacement = host.verifyGatewayReplacement;
+    host.verifyProducerInventory = async previous => { if (waiting) { failedInventories++; throw failure; } return verify(previous); };
+    host.verifyGatewayReplacement = async (...args) => { replacementChecks++; return replacement(...args); };
+    return host;
+  };
+  f.deps.start = async (...args) => {
+    const session = await originalStart(...args);
+    if (!args[3]) { session.channel.cancel = () => { cancelled++; }; session.watcher.close = () => { closed++; }; }
+    return session;
+  };
+  await assert.rejects(executeAccountingRecovery({ action: 'observe', operationId: id(2), evidencePath: '/private/proof.json' }, f.deps), error => {
+    assert.equal(error, failure); assert.equal(accountingWatcherDiagnostic(error), 'AccountingNativeInventory:socket/UNEXPECTED_ENDPOINT_OWNER'); return true;
+  });
+  assert.equal(waiting, true); assert.equal(cancelled, 1); assert.equal(closed, 1); assert.equal(failedInventories, 1); assert.equal(replacementChecks, 0);
+  assert.equal(logs.some(line => line.includes('afterReset')), false);
+  assert.deepEqual(f.requests.map(request => request.action), ['status', 'begin-observe']);
+  assert.deepEqual(f.records.map(record => record.action), ['begin-observe']);
+  const status = await executeAccountingRecovery({ action: 'status', operationId: id(2) }, f.deps);
+  assert.match(status, /PREPARED/); assert.match(status, /blokada konserwacyjna: aktywna/);
+  await assert.rejects(executeAccountingRecovery({ action: 'observe', operationId: id(2), evidencePath: '/private/proof.json' }, f.deps), /RESET_UNPROVEN/);
+});

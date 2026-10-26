@@ -253,6 +253,17 @@ historii między kontrolami nadal przerywają operację. Nie ignoruj tych błęd
 nie ponawiaj przerwanej obserwacji. Stan walidacji i wdrożenia opisuje
 [raport poprawki obserwatora](../implementation/phase3/PAPER_ACCOUNTING_EVENT_WATCHER_REPAIR_REPORT.md).
 
+Poprawka inwentaryzacji podczas restartu wyznacza nasłuch TWS i właścicieli
+połączeń z jednego pełnego odczytu gniazd. Nie porównuje nowego nasłuchu ze starym
+wynikiem „brak procesu”. Obce połączenie, niejednoznaczny nasłuch lub niepełny
+odczyt nadal przerywają obserwację. Lokalna diagnostyka rozróżnia przyczynę w
+formacie `AccountingNativeInventory:<etap>/<powód>`, bez wypisywania argumentów
+procesów ani danych konta. Sam kod `PRODUCERS_NOT_QUIESCENT` z wcześniejszego
+przerwania nie pozwala ustalić jego dokładnej przyczyny. Nie ponawiaj przerwanej
+obserwacji; obowiązują dokładny status, zachowanie maintenance oraz świeże dowody
+przy obsługiwanym `supersede`. Stan walidacji i wdrożenia:
+[raport poprawki restartu](../implementation/phase3/PAPER_ACCOUNTING_RESTART_INVENTORY_REPAIR_REPORT.md).
+
 Kolejność działań:
 
 1. Po sprawdzeniu powyższych warunków wykonać
