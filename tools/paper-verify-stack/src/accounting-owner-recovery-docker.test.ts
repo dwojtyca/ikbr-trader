@@ -16,7 +16,7 @@ test('real never-started app containers satisfy created inventory while replacem
     const imageId = (await docker('image', 'inspect', '--format', '{{.Id}}', process.env.OWNER_RECOVERY_TEST_IMAGE ?? 'node:24-bullseye-slim')).trim();
     const project = `owner-created-${randomUUID().slice(0, 8)}`, names: string[] = [], ids = new Map<string, string>();
     const options = { project, imageId, dockerHost: context, root: '/isolated-created-fixture', host: 'host.docker.internal', port: 7497 };
-    const watchers: ReturnType<typeof startAccountingDockerWatcher>[] = [];
+    const watchers: Awaited<ReturnType<typeof startAccountingDockerWatcher>>[] = [];
     const create = async (service: typeof ACCOUNTING_APP_SERVICES[number], suffix = '') => {
       const name = `${project}-${service}${suffix}`; names.push(name);
       return (await docker('create', '--network', 'none', '--name', name, '--label', `com.docker.compose.project=${project}`,
@@ -26,7 +26,7 @@ test('real never-started app containers satisfy created inventory while replacem
     try {
       for (const service of ACCOUNTING_APP_SERVICES) ids.set(service, await create(service));
       const command = async (_file: string, args: readonly string[]) => args[2] === 'ps' ? [...ids.values()].join('\n') : docker(...args);
-      const watcher = startAccountingDockerWatcher(options); watchers.push(watcher);
+      const watcher = await startAccountingDockerWatcher(options); watchers.push(watcher);
       const initial = await inspectAccountingProducers(options, command, () => new Date().toISOString());
       assert.equal(initial.producers.length, 6); assert.deepEqual(initial.absentServices, []);
       for (const producer of initial.producers) {
@@ -41,7 +41,7 @@ test('real never-started app containers satisfy created inventory while replacem
       await docker('rm', original); ids.set('execution-engine', await create('execution-engine', '-replacement'));
       assert.notEqual(ids.get('execution-engine'), original);
       await assert.rejects(watcher.flush(), /INVENTORY_UNAVAILABLE/); watcher.close();
-      const startWatcher = startAccountingDockerWatcher(options); watchers.push(startWatcher);
+      const startWatcher = await startAccountingDockerWatcher(options); watchers.push(startWatcher);
       const harmless = `${project}-harmless`; names.push(harmless);
       await docker('run', '--rm', '--network', 'none', '--name', harmless, '--entrypoint', 'node', imageId, '-e', 'process.exit(0)');
       await assert.rejects(startWatcher.flush(), /INVENTORY_UNAVAILABLE/); startWatcher.close();
@@ -61,7 +61,7 @@ test('isolated Docker fake TCP one-shot is pinned by actual identity; stream cat
   const project = `owner-fixture-${randomUUID().slice(0, 8)}`, hash = 'a'.repeat(64), now = new Date().toISOString();
   await writeFile(script, "import('node:net').then(({default:net})=>{const s=net.createServer(c=>c.end('fixture'));s.listen(0,'127.0.0.1',()=>{const c=net.connect(s.address().port,'127.0.0.1');c.on('data',()=>{});c.on('end',()=>process.stdout.write('FAKE_TCP_OK\\n'));});setTimeout(()=>{},20000);});", { mode: 0o600 });
   const options = { project, imageId, dockerHost: context, root: directory, host: 'host.docker.internal', port: 7497 };
-  const watcher = startAccountingDockerWatcher(options, () => undefined, name);
+  const watcher = await startAccountingDockerWatcher(options, () => undefined, name);
   try {
     const containerId = (await docker('run', '-d', '--network', 'none', '--workdir', '/app', '--name', name, '--label', `com.docker.compose.project=${project}`, '--label', 'com.docker.compose.service=execution-engine', '--label', 'com.docker.compose.oneoff=True',
       '--mount', `type=bind,src=${script},dst=/app/apps/execution-engine/dist/accounting/owner-recovery-cli.js,readonly`, '--entrypoint', 'node', imageId, 'apps/execution-engine/dist/accounting/owner-recovery-cli.js')).trim();

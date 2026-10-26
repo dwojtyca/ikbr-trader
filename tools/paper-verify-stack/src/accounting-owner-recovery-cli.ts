@@ -11,7 +11,7 @@ import { parseOwnerRecoveryRequest, parseOwnerRecoveryResponse, parseOwnerRecove
   type OwnerRecoveryHostEvidence, type OwnerRecoveryOperation, type OwnerRecoveryStatus } from '@ikbr/shared/accounting-owner-recovery';
 import { canonicalJson, verifyProof, validateRenderedCompose } from './paper-runtime.js';
 import { runDocker } from './paper-runtime-cli.js';
-import { createAccountingRecoveryHost, runRecoveryHostCommand, startAccountingDockerWatcher, ACCOUNTING_APP_SERVICES,
+import { createAccountingRecoveryHost, runRecoveryHostCommand, startAccountingDockerWatcher, ACCOUNTING_APP_SERVICES, AccountingRecoveryHostError,
   type AccountingRecoveryException, type AccountingEventWatcher } from './accounting-owner-recovery-host.js';
 
 const sha = (v: string | Uint8Array) => createHash('sha256').update(v).digest('hex');
@@ -255,15 +255,23 @@ export async function executeAccountingRecovery(command: AccountingRecoveryComma
 
 export async function startAccountingRecoveryBackend(profile: AccountingRecoveryLocalProfile, requestId: string, host: Host,
   signal?: AbortSignal, readOnly = false): Promise<{ channel: AccountingRecoveryChannel; watcher: AccountingEventWatcher; startedAt: string }> {
-  const name = `accounting-owner-recovery-${requestId}`, startedAt = new Date().toISOString();
+  const name = `accounting-owner-recovery-${requestId}`;
+  let startedAt = new Date().toISOString();
   let child: ReturnType<typeof spawn> | undefined, cancelled = false;
   const stop = () => { cancelled = true; child?.kill('SIGTERM'); };
   const options = { project: profile.wire.project, imageId: profile.wire.imageId, dockerHost: profile.wire.dockerHost,
     host: profile.wire.endpoint.host, port: profile.wire.endpoint.port, root: profile.root };
-  const watcher: AccountingEventWatcher = readOnly ? { check: () => undefined, flush: async () => undefined, allow: () => undefined, close: () => undefined } : startAccountingDockerWatcher(options, stop, name);
+  let watcher: AccountingEventWatcher = { check: () => undefined, flush: async () => undefined, allow: () => undefined, close: () => undefined };
   const cleanEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, LC_ALL: 'C' };
   try {
-    if (!readOnly) await createAccountingRecoveryHost(options).captureProducerInventory(); watcher.check();
+    check(!signal?.aborted);
+    if (!readOnly) {
+      const initialized = await startAccountingDockerWatcher(options, stop, name);
+      watcher = initialized; startedAt = initialized.startedAt;
+      check(!signal?.aborted);
+      await createAccountingRecoveryHost(options).captureProducerInventory();
+    }
+    watcher.check();
     const selectedDocker = await runRecoveryHostCommand('/usr/bin/which', ['docker']);
     check(selectedDocker.exitCode === 0 && !selectedDocker.stderr && /^\/[^\r\n]+\n?$/.test(selectedDocker.stdout), 'ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE');
     const dockerExecutable = await realpath(selectedDocker.stdout.trim());
@@ -276,7 +284,14 @@ export async function startAccountingRecoveryBackend(profile: AccountingRecovery
     check(processChild.stdin && processChild.stdout && processChild.stderr);
     let exited = false, exitCode: number | null = null, output = '', received = 0, sent = 0, stderr = 0;
     let waiting: { id: string; resolve(value: OwnerRecoveryResponse): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> } | undefined;
-    const fail = () => { stop(); if (waiting) { clearTimeout(waiting.timer); waiting.reject(new Error('ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN')); waiting = undefined; } };
+    const fail = () => {
+      stop();
+      if (waiting) {
+        let failure: Error = new Error('ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN');
+        try { watcher.check(); } catch (error) { if (error instanceof Error) failure = error; }
+        clearTimeout(waiting.timer); waiting.reject(failure); waiting = undefined;
+      }
+    };
     processChild.on('error', fail); processChild.stdin.on('error', fail);
     processChild.on('close', code => { exited = true; exitCode = code; if (waiting) fail(); });
     processChild.stderr.on('data', (part: Buffer) => { stderr += part.length; if (stderr > 65536) fail(); });
@@ -314,7 +329,7 @@ export async function startAccountingRecoveryBackend(profile: AccountingRecovery
     const cleanup = () => { clearTimeout(absoluteTimer); signal?.removeEventListener('abort', fail); };
     return { watcher, startedAt, channel: {
       request: async request => {
-        check(!waiting && !cancelled && !exited); await watcher.flush(); check(!cancelled && !exited);
+        watcher.check(); check(!waiting && !cancelled && !exited); await watcher.flush(); check(!cancelled && !exited);
         const line = JSON.stringify(parseOwnerRecoveryRequest(request)) + '\n'; sent += Buffer.byteLength(line);
         check(Buffer.byteLength(line) <= OWNER_RECOVERY_LIMITS.messageBytes && sent + received <= OWNER_RECOVERY_LIMITS.sessionBytes);
         return new Promise<OwnerRecoveryResponse>((resolveResponse, reject) => {
@@ -326,11 +341,15 @@ export async function startAccountingRecoveryBackend(profile: AccountingRecovery
       finish: async () => {
         processChild.stdin!.end(); const end = performance.now() + 5000;
         while (!exited && performance.now() < end) await new Promise(resolveWait => setTimeout(resolveWait, 25));
-        cleanup(); check(exited && exitCode === 0 && !cancelled && !output, 'ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN');
+        cleanup(); watcher.check(); check(exited && exitCode === 0 && !cancelled && !output, 'ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN');
       },
       cancel: () => { cleanup(); if (!exited) fail(); },
     } };
-  } catch (error) { stop(); watcher.close(); throw error; }
+  } catch (error) {
+    let failure = error;
+    try { watcher.check(); } catch (watcherError) { failure = watcherError; }
+    stop(); watcher.close(); throw failure;
+  }
 }
 
 async function accountingStateStore(root: string) {
@@ -377,7 +396,16 @@ export async function runAccountingOwnerRecoveryCli(argv = process.argv.slice(2)
     process.stdout.write(result + '\n'); return 0;
   } catch (error) {
     const code = error instanceof Error && /^ACCOUNTING_OWNER_RECOVERY_[A-Z_]+$/.test(error.message) ? error.message : 'ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN';
-    process.stderr.write(`${code}: Nie potwierdzono poprawnego zakończenia procedury. Sprawdź status dokładnego żądania; nie ponawiaj niepewnego zapisu.\n`); return 1;
+    process.stderr.write(`${code}: Nie potwierdzono poprawnego zakończenia procedury. Sprawdź status dokładnego żądania; nie ponawiaj niepewnego zapisu.\n`);
+    const diagnostic = accountingWatcherDiagnostic(error);
+    if (diagnostic) process.stderr.write(`Diagnostyka lokalna: ${diagnostic}.\n`);
+    return 1;
   } finally { process.removeListener('SIGINT', abort); process.removeListener('SIGTERM', abort); }
+}
+export function accountingWatcherDiagnostic(error: unknown): string | null {
+  if (!(error instanceof AccountingRecoveryHostError) || !error.cause || typeof error.cause !== 'object') return null;
+  const cause = error.cause as { name?: unknown; code?: unknown };
+  return typeof cause.name === 'string' && /^AccountingDockerEventWatcher:(bootstrap|replay|stream|guard|lifecycle)$/.test(cause.name) &&
+    typeof cause.code === 'string' && /^[A-Z_]{1,64}$/.test(cause.code) ? `${cause.name}/${cause.code}` : null;
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) void runAccountingOwnerRecoveryCli().then(code => { process.exitCode = code; }).catch(() => { process.stderr.write('Nieprawidłowe argumenty lub prywatna konfiguracja. Użyj --help.\n'); process.exitCode = 2; });

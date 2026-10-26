@@ -245,6 +245,14 @@ właściciela i pauzę. Zmieniony profil wymaga świeżego dowodu operatora i
 obsługiwanego `supersede`; stara obserwacja nie może być kontynuowana. Szczegóły:
 [naprawa inwentaryzacji](../implementation/phase3/PAPER_ACCOUNTING_NATIVE_INVENTORY_REPAIR_PLAN.md).
 
+Poprawka obserwatora zdarzeń z 26 października weryfikuje ciągłość krótkimi,
+powiązanymi punktami kontrolnymi. Kontrole zdrowia Postgres/Redis nie wymagają
+wyłączania: ich starsze zdarzenia mogą wypaść z historii dopiero po potwierdzeniu
+ciągłości. Utrata nasłuchu, brak poprzedniego punktu kontrolnego albo przepełnienie
+historii między kontrolami nadal przerywają operację. Nie ignoruj tych błędów ani
+nie ponawiaj przerwanej obserwacji. Stan walidacji i wdrożenia opisuje
+[raport poprawki obserwatora](../implementation/phase3/PAPER_ACCOUNTING_EVENT_WATCHER_REPAIR_REPORT.md).
+
 Kolejność działań:
 
 1. Po sprawdzeniu powyższych warunków wykonać

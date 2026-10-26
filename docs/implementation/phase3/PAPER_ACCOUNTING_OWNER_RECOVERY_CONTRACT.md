@@ -348,6 +348,15 @@ using the endpoint. Keep Docker lifecycle event observation from before initial
 inventory through final commit checks so an intervening start/stop is detected;
 reinspect immutable process/container identities before stop, after listener
 absence, after replacement, before handshake, before commit and after commit.
+The [event retention repair](PAPER_ACCOUNTING_EVENT_WATCHER_REPAIR_PLAN.md)
+establishes its initialized observation boundary before initial inventory. It
+requires both a live stream and serialized bounded unfiltered-global replays,
+linked by a unique exact retained event hash. One-second checkpoints advance
+that chain; explicit flush waits for a fresh checkpoint. Old healthcheck history
+may leave retention only after a verified checkpoint advances beyond it. Missing
+or ambiguous anchors, replay overflow, unavailable bootstrap evidence and stream
+loss still abort. A long operation is never certified by silently discarding a
+saturated replay or by filtering away events that consumed global retention.
 The only one-shot exception is this command's pinned image, exact entrypoint and
 request-bound identity. It never imports application `index.ts` or starts workers.
 No other native producer is supported. Native inspection is repeated snapshots,

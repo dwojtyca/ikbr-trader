@@ -334,11 +334,28 @@ export async function inspectAccountingNative(options: AccountingRecoveryHostOpt
 }
 
 export type AccountingEventWatcher = { check(): void; flush(): Promise<void>; allow(value: AccountingRecoveryException): void; close(): void };
+type EventPhase = 'bootstrap' | 'replay' | 'stream' | 'guard' | 'lifecycle';
+type EventFailure = 'MALFORMED_EVENT' | 'PRODUCER_ACTIVITY' | 'EXCEPTION_MISMATCH' | 'COMMAND_FAILED' | 'OUTPUT_LIMIT' |
+  'REPLAY_OVERFLOW' | 'ANCHOR_UNAVAILABLE' | 'ANCHOR_AMBIGUOUS' | 'STREAM_STDERR' | 'STREAM_ERROR' | 'STREAM_CLOSED' | 'WATCHER_CLOSED' | 'DEADLINE';
+function eventFailure(phase: EventPhase, reason: EventFailure, original?: unknown): AccountingRecoveryHostError {
+  const failure = new AccountingRecoveryHostError('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE', {
+    name: `AccountingDockerEventWatcher:${phase}`, code: reason, message: `phase=${phase}; reason=${reason}`,
+  });
+  const source = original instanceof Error ? original.cause ?? original : original;
+  if (source && typeof source === 'object') {
+    const detail = source as { name?: unknown; code?: unknown; message?: unknown };
+    Object.assign(failure.cause as object, { original: { name: typeof detail.name === 'string' ? safeDiagnosticText(detail.name) : null,
+      code: typeof detail.code === 'string' ? safeDiagnosticText(detail.code) : typeof detail.code === 'number' ? detail.code : null,
+      message: typeof detail.message === 'string' ? safeDiagnosticText(detail.message) : null } });
+  }
+  return failure;
+}
 export function createAccountingEventGuard(reservedName: string | undefined, onFailure: () => void = () => undefined) {
-  let failed = false, closed = false, exception: AccountingRecoveryException | undefined;
+  let failure: AccountingRecoveryHostError | undefined, closed = false, exception: AccountingRecoveryException | undefined;
   const pendingEvents: Array<{ id: string; name: string }> = [];
-  const fail = () => { if (!closed && !failed) { failed = true; onFailure(); } };
+  const fail = (error = eventFailure('guard', 'MALFORMED_EVENT')) => { if (!closed && !failure) { failure = error; onFailure(); } };
   const consume = (line: string) => {
+    if (closed || failure) return;
     try {
       const event = record(JSON.parse(line)), actor = record(event.Actor), attrs = record(actor.Attributes), action = String(event.Action ?? event.status ?? '');
       if (event.Type !== 'container' || typeof actor.ID !== 'string' || !/^[a-f0-9]{64}$/.test(actor.ID)) { fail(); return; }
@@ -346,37 +363,117 @@ export function createAccountingEventGuard(reservedName: string | undefined, onF
         const own = exception && actor.ID === exception.containerId && attrs.name === exception.name;
         if (!own) {
           if (!exception && attrs.name === reservedName && ['create', 'start'].includes(action)) pendingEvents.push({ id: actor.ID, name: String(attrs.name) });
-          else fail();
+          else fail(eventFailure('guard', 'PRODUCER_ACTIVITY'));
         }
       }
     } catch { fail(); }
   };
-  return { consume, fail, check: () => { if (failed || closed) deny('ACCOUNTING_OWNER_RECOVERY_INVENTORY_UNAVAILABLE'); },
-    allow: (value: AccountingRecoveryException) => { if (exception) deny('ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED'); exception = structuredClone(value); if (pendingEvents.some(e => e.id !== value.containerId || e.name !== value.name)) fail(); },
+  return { consume, fail, check: () => { if (failure) throw failure; if (closed) throw eventFailure('lifecycle', 'WATCHER_CLOSED'); },
+    allow: (value: AccountingRecoveryException) => { if (exception) deny('ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED'); exception = structuredClone(value); if (pendingEvents.some(e => e.id !== value.containerId || e.name !== value.name)) fail(eventFailure('guard', 'EXCEPTION_MISMATCH')); },
     close: () => { closed = true; } };
 }
-export function startAccountingDockerWatcher(options: AccountingRecoveryHostOptions, onFailure: () => void = () => undefined, reservedName?: string): AccountingEventWatcher {
-  const guard = createAccountingEventGuard(reservedName, onFailure), startedAt = new Date().toISOString();
-  let buffer = '', bytes = 0, closed = false;
-  const child = spawn('docker', ['--host', options.dockerHost, 'events', '--since', startedAt, '--filter', 'type=container', '--format', '{{json .}}'], {
-    stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME, LC_ALL: 'C' },
-  });
-  child.stdout.on('data', (part: Buffer) => {
-    bytes += part.length; if (bytes > 1024 * 1024) { guard.fail(); return; }
-    buffer += part.toString('utf8'); if (Buffer.byteLength(buffer) > 65536) { guard.fail(); return; }
-    for (;;) { const end = buffer.indexOf('\n'); if (end < 0) break; const line = buffer.slice(0, end); buffer = buffer.slice(end + 1); guard.consume(line); }
-  });
-  child.stderr.on('data', guard.fail); child.on('error', guard.fail); child.on('close', () => { if (!closed) guard.fail(); });
-  return { check: guard.check, allow: guard.allow,
-    flush: async () => {
-      guard.check();
-      // A finite replay closes the startup/backlog race in the streaming watcher.
-      const events = await runRecoveryHostCommand('docker', ['--host', options.dockerHost, 'events', '--since', startedAt, '--until', new Date().toISOString(), '--filter', 'type=container', '--format', '{{json .}}']);
-      if (events.exitCode !== 0 || events.stderr) guard.fail();
-      const lines = events.stdout.trim().split('\n').filter(Boolean);
-      if (lines.length >= 256) guard.fail();
-      for (const line of lines) guard.consume(line);
-      guard.check();
-    },
-    close: () => { closed = true; guard.close(); child.kill('SIGTERM'); } };
+export type AccountingDockerWatcherAdapters = {
+  run?: RecoveryHostCommandRunner;
+  spawnEvents?: (args: string[]) => ReturnType<typeof spawn>;
+  now?: () => number;
+  schedule?: typeof setTimeout;
+  unschedule?: typeof clearTimeout;
+};
+export async function startAccountingDockerWatcher(options: AccountingRecoveryHostOptions, onFailure: () => void = () => undefined,
+  reservedName?: string, adapters: AccountingDockerWatcherAdapters = {}): Promise<AccountingEventWatcher & { startedAt: string }> {
+  const run = adapters.run ?? runRecoveryHostCommand, now = adapters.now ?? Date.now;
+  const schedule = adapters.schedule ?? setTimeout, unschedule = adapters.unschedule ?? clearTimeout;
+  let buffer = '', bytes = 0, closed = false, timer: ReturnType<typeof setTimeout> | undefined, deadline: ReturnType<typeof setTimeout> | undefined;
+  let child: ReturnType<typeof spawn> | undefined, anchor: { hash: string; time: number } | undefined;
+  let inFlight: Promise<void> | undefined, flushing: Promise<void> | undefined;
+  const halt = () => { if (timer) unschedule(timer); if (deadline) unschedule(deadline); timer = deadline = undefined; child?.kill('SIGTERM'); };
+  const guard = createAccountingEventGuard(reservedName, () => { halt(); onFailure(); });
+  const fail = (phase: EventPhase, reason: EventFailure): never => { guard.fail(eventFailure(phase, reason)); guard.check(); throw eventFailure(phase, reason); };
+  const parseEvent = (line: string, phase: EventPhase) => {
+    let event: Record<string, unknown>;
+    try { event = record(JSON.parse(line)); } catch { return fail(phase, 'MALFORMED_EVENT'); }
+    if (typeof event.Type !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(event.Type) || !Number.isSafeInteger(event.time) || Number(event.time) <= 0 || Number(event.time) >= 253402300800 || Buffer.byteLength(line) > 65536) return fail(phase, 'MALFORMED_EVENT');
+    return { line, hash: sha(line), time: Number(event.time), type: event.Type };
+  };
+  const consume = (event: ReturnType<typeof parseEvent>) => { if (event.type === 'container') guard.consume(event.line); guard.check(); };
+  const replay = async (phase: 'bootstrap' | 'replay') => {
+    guard.check();
+    const since = anchor ? new Date((anchor.time - 1) * 1000).toISOString() : '1970-01-01T00:00:00.000Z';
+    let result: RecoveryHostCommandResult;
+    try { result = await run('docker', ['--host', options.dockerHost, 'events', '--since', since, '--until', new Date(now()).toISOString(), '--format', '{{json .}}']); }
+    catch (error) {
+      // Command errors already carry sanitized original diagnostics; never include event payloads.
+      guard.fail(eventFailure(phase, 'COMMAND_FAILED', error)); guard.check(); return [];
+    }
+    guard.check();
+    if (result.exitCode !== 0 || result.stderr) {
+      guard.fail(eventFailure(phase, 'COMMAND_FAILED', { name: null, code: result.exitCode, message: result.stderr || null })); guard.check();
+    }
+    if (Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) > MAX_OUTPUT) return fail(phase, 'OUTPUT_LIMIT');
+    if (result.stdout && !result.stdout.endsWith('\n')) return fail(phase, 'MALFORMED_EVENT');
+    const lines = result.stdout ? result.stdout.slice(0, -1).split('\n') : [];
+    if (lines.length > 256 || phase === 'replay' && lines.length >= 256) return fail(phase, 'REPLAY_OVERFLOW');
+    const events = lines.map(line => parseEvent(line, phase));
+    if (events.some((event, index) => index > 0 && event.time < events[index - 1].time)) return fail(phase, 'MALFORMED_EVENT');
+    const last = events.at(-1);
+    if (last && events.filter(event => event.hash === last.hash).length !== 1) return fail(phase, 'ANCHOR_AMBIGUOUS');
+    if (!anchor) {
+      if (!last) return fail(phase, 'ANCHOR_UNAVAILABLE');
+      anchor = { hash: last.hash, time: last.time };
+    } else {
+      const matches = events.flatMap((event, index) => event.hash === anchor!.hash ? [index] : []);
+      if (!matches.length) return fail(phase, 'ANCHOR_UNAVAILABLE');
+      if (matches.length !== 1) return fail(phase, 'ANCHOR_AMBIGUOUS');
+      for (const event of events.slice(matches[0] + 1)) consume(event);
+      anchor = { hash: last!.hash, time: last!.time };
+    }
+    return events;
+  };
+  const checkpoint = (): Promise<void> => {
+    if (inFlight) return inFlight;
+    const current = (async () => { await replay('replay'); guard.check(); })().catch(error => {
+      guard.fail(error instanceof AccountingRecoveryHostError ? error : eventFailure('replay', 'MALFORMED_EVENT')); guard.check();
+    }).finally(() => { if (inFlight === current) inFlight = undefined; });
+    inFlight = current; return current;
+  };
+  const tick = () => {
+    guard.check();
+    timer = schedule(() => {
+      timer = undefined;
+      void checkpoint().then(() => { if (!closed) tick(); }).catch(() => undefined);
+    }, 1000);
+  };
+  const close = () => { closed = true; guard.close(); halt(); };
+  try {
+    const streamStartedAt = new Date(now()).toISOString();
+    const args = ['--host', options.dockerHost, 'events', '--since', streamStartedAt, '--filter', 'type=container', '--format', '{{json .}}'];
+    child = adapters.spawnEvents ? adapters.spawnEvents(args) : spawn('docker', args, {
+      stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, HOME: process.env.HOME, LC_ALL: 'C' },
+    });
+    if (!child.stdout || !child.stderr) fail('stream', 'STREAM_ERROR');
+    child.stdout!.on('data', (part: Buffer) => {
+      if (closed) return;
+      try {
+        guard.check(); bytes += part.length; if (bytes > 4 * 1024 * 1024) fail('stream', 'OUTPUT_LIMIT');
+        buffer += part.toString('utf8'); if (Buffer.byteLength(buffer) > 65536) fail('stream', 'OUTPUT_LIMIT');
+        for (;;) { const end = buffer.indexOf('\n'); if (end < 0) break; const line = buffer.slice(0, end); buffer = buffer.slice(end + 1); consume(parseEvent(line, 'stream')); }
+      } catch { /* The first failure is latched and cancels the backend. */ }
+    });
+    child.stderr!.on('data', () => guard.fail(eventFailure('stream', 'STREAM_STDERR')));
+    child.on('error', error => guard.fail(eventFailure('stream', 'STREAM_ERROR', error)));
+    child.on('close', () => { if (!closed) guard.fail(eventFailure('stream', 'STREAM_CLOSED')); });
+    await replay('bootstrap'); guard.check();
+    const startedAt = new Date(now()).toISOString();
+    // The initial replay fences any gap while the mandatory stream was connecting.
+    await checkpoint(); guard.check(); tick();
+    deadline = schedule(() => guard.fail(eventFailure('lifecycle', 'DEADLINE')), 15 * 60_000);
+    return { startedAt, check: guard.check, allow: guard.allow, close,
+      flush: () => {
+        if (flushing) return flushing;
+        const previous = inFlight;
+        const current = (async () => { if (previous) await previous; guard.check(); await checkpoint(); })().finally(() => { if (flushing === current) flushing = undefined; });
+        flushing = current; return current;
+      },
+    };
+  } catch (error) { close(); throw error; }
 }
