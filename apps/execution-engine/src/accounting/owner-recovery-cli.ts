@@ -1,23 +1,24 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Readable, Writable } from 'node:stream';
 import { pathToFileURL } from 'node:url';
 import { Pool } from 'pg';
 import {
-  OWNER_RECOVERY_LIMITS, ownerRecoveryHash, parseOwnerRecoveryHandshake, parseOwnerRecoveryProfile,
+  OWNER_RECOVERY_LIMITS, ownerRecoveryHash, parseOwnerRecoveryHandshake, parseOwnerRecoveryProfile, parseOwnerRecoveryAccountProbe,
   parseOwnerRecoveryRequest, parseOwnerRecoveryResponse,
-  type OwnerRecoveryHandshake, type OwnerRecoveryProfile, type OwnerRecoveryRequest, type OwnerRecoveryResponse,
+  type OwnerRecoveryClosedProof, type OwnerRecoveryProfile, type OwnerRecoveryRequest, type OwnerRecoveryResponse,
 } from '@ikbr/shared/accounting-owner-recovery';
 import { safeDiagnosticText } from '@ikbr/shared/diagnostics';
 import { loadAccountingSettings } from './config.js';
 import { resolveAccountingEndpoint } from './source-owner.js';
 import { runMigrations } from '../migrations.js';
 import { AccountingOwnerRecoveryStore, type AccountingOwnerRecoveryObserver } from './owner-recovery-store.js';
-import { runOwnerRecoveryHandshake } from './owner-recovery-transport.js';
+import { runOwnerRecoveryHandshake, runOwnerRecoveryAccountProbe } from './owner-recovery-transport.js';
 
 type AuthenticatedRequest = Extract<OwnerRecoveryRequest, { token: string }>;
 type RecoveryObserver = Pick<AccountingOwnerRecoveryObserver, 'operation' | 'observerSessionId' | 'dbNow' | 'remainingMs'
-  | 'assertActive' | 'dispatch' | 'handshakeClosed' | 'finalize' | 'cancel' | 'release'>;
+  | 'assertActive' | 'dispatch' | 'handshakeClosed' | 'finalize' | 'cancel' | 'release'>
+  & Partial<Pick<AccountingOwnerRecoveryObserver, 'preDispatch' | 'preProbeClosed'>>;
 type RecoveryStore = Pick<AccountingOwnerRecoveryStore, 'prepare' | 'supersede' | 'status'> & {
   beginObserve: (request: Extract<OwnerRecoveryRequest, { action: 'begin-observe' }>, endpointKey: string) => Promise<RecoveryObserver>;
 };
@@ -31,6 +32,7 @@ export interface OwnerRecoveryCliDependencies {
   open: (action: AuthenticatedRequest['action']) => Promise<{ store: RecoveryStore; close: () => Promise<void> }>;
   resolveEndpoint?: typeof resolveAccountingEndpoint;
   handshake?: typeof runOwnerRecoveryHandshake;
+  probe?: typeof runOwnerRecoveryAccountProbe;
 }
 
 /** The launch profile is host-verified evidence; runtime settings and authorization are checked here independently. */
@@ -87,8 +89,8 @@ export async function runOwnerRecoveryCli(deps: OwnerRecoveryCliDependencies): P
   let observer: RecoveryObserver | undefined;
   let authenticated: AuthenticatedRequest | undefined;
   let pinned: Awaited<ReturnType<typeof validateOwnerRecoveryRuntime>>;
-  let handshake: OwnerRecoveryHandshake | undefined;
-  let phase: 'initial' | 'reset' | 'finalize' | 'done' = 'initial';
+  let handshake: OwnerRecoveryClosedProof | undefined;
+  let phase: 'initial' | 'pre-probe' | 'reset' | 'finalize' | 'done' = 'initial';
   let revoked = false, busy = false, finished = false, exitCode = 1, bytes = 0;
   let pending = Buffer.alloc(0), active: Promise<void> | undefined;
   let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
@@ -152,24 +154,50 @@ export async function runOwnerRecoveryCli(deps: OwnerRecoveryCliDependencies): P
         if (remaining <= 0) throw failure('OBSERVATION_EXPIRED');
         budget = { wall: Date.now(), monotonic: performance.now(), remaining };
         clearTimeout(deadlineTimer); deadlineTimer = setTimeout(revoke, remaining);
-        phase = 'reset';
+        phase = request.version === 2 ? 'pre-probe' : 'reset';
         await write({ version: 1, requestId: request.requestId, ok: true, action: 'observer-ready', result: {
           // Keep the database sample coherent; both peers deduct their own elapsed begin-observe time.
           operation: observer.operation, observerSessionId: observer.observerSessionId, dbNow: observer.dbNow, remainingMs: observer.remainingMs,
         } });
       }
+    } else if (phase === 'pre-probe' && request.action === 'pre-reset-probe' && request.observerSessionId === observer!.observerSessionId) {
+      await validateCurrent();
+      if (!observer!.preDispatch || !observer!.preProbeClosed || observer!.operation.version !== 2) throw failure('MUTATION_UNKNOWN');
+      if (budget!.remaining - (performance.now() - budget!.monotonic) < OWNER_RECOVERY_LIMITS.probeMs) throw failure('OBSERVATION_EXPIRED');
+      const dispatchEventId = await observer!.preDispatch(request.requestId, request.evidence); assertLive();
+      await validateCurrent();
+      if (budget!.remaining - (performance.now() - budget!.monotonic) < OWNER_RECOVERY_LIMITS.probeMs) throw failure('OBSERVATION_EXPIRED');
+      const result = await (deps.probe ?? runOwnerRecoveryAccountProbe)({ endpoint: pinned!.endpoint, accountId: authenticated!.profile.accountId,
+        signal: abort.signal, privacy: { secrets: [deps.env.EXECUTION_API_TOKEN ?? ''], accountIds: [authenticated!.profile.accountId] } });
+      assertLive();
+      const probe = parseOwnerRecoveryAccountProbe({ version: 2, probeId: randomUUID(), operationId: observer!.operation.operationId,
+        nonce: observer!.operation.nonce, sessionId: observer!.observerSessionId, dispatchEventId, phase: 'pre-reset', endpoint: authenticated!.profile.endpoint, result });
+      await validateCurrent(); await observer!.preProbeClosed(probe); assertLive();
+      if (probe.result.outcome !== 'FLAT') throw failure(probe.result.outcome === 'NONFLAT' ? 'ACCOUNT_NOT_FLAT' : 'ACCOUNT_PROBE_INCOMPLETE', probe.result.error?.cause);
+      phase = 'reset';
+      await write({ version: 1, requestId: request.requestId, ok: true, action: 'pre-reset-probe-closed', result: { probe, probeDigest: ownerRecoveryHash(probe) } });
     } else if (phase === 'reset' && request.action === 'reset-proof' && request.observerSessionId === observer!.observerSessionId) {
       await validateCurrent();
       const dispatchEventId = await observer!.dispatch(request.requestId, request.evidence); assertLive();
       await validateCurrent();
-      if (budget!.remaining - (performance.now() - budget!.monotonic) < OWNER_RECOVERY_LIMITS.handshakeMs) throw failure('OBSERVATION_EXPIRED');
-      const result = await (deps.handshake ?? runOwnerRecoveryHandshake)({ endpoint: pinned!.endpoint, accountId: authenticated!.profile.accountId,
-        signal: abort.signal, privacy: { secrets: [deps.env.EXECUTION_API_TOKEN ?? ''], accountIds: [authenticated!.profile.accountId] } });
-      assertLive();
-      if (result.accountId !== authenticated!.profile.accountId || result.clientId !== 0) throw failure('ACCOUNT_MISMATCH');
-      handshake = parseOwnerRecoveryHandshake({ sessionId: observer!.observerSessionId, dispatchEventId, accountId: result.accountId, clientId: result.clientId,
-        serverVersion: result.protocolVersion, connectedAt: result.connectedAt, readyAt: result.readyAt, closedAt: result.closedAt, socketCloseObserved: result.transportClosed });
+      const duration = request.version === 2 ? OWNER_RECOVERY_LIMITS.probeMs : OWNER_RECOVERY_LIMITS.handshakeMs;
+      if (budget!.remaining - (performance.now() - budget!.monotonic) < duration) throw failure('OBSERVATION_EXPIRED');
+      if (request.version === 2) {
+        const result = await (deps.probe ?? runOwnerRecoveryAccountProbe)({ endpoint: pinned!.endpoint, accountId: authenticated!.profile.accountId,
+          signal: abort.signal, privacy: { secrets: [deps.env.EXECUTION_API_TOKEN ?? ''], accountIds: [authenticated!.profile.accountId] } });
+        assertLive();
+        handshake = parseOwnerRecoveryAccountProbe({ version: 2, probeId: randomUUID(), operationId: observer!.operation.operationId,
+          nonce: observer!.operation.nonce, sessionId: observer!.observerSessionId, dispatchEventId, phase: 'post-reset', endpoint: authenticated!.profile.endpoint, result });
+      } else {
+        const result = await (deps.handshake ?? runOwnerRecoveryHandshake)({ endpoint: pinned!.endpoint, accountId: authenticated!.profile.accountId,
+          signal: abort.signal, privacy: { secrets: [deps.env.EXECUTION_API_TOKEN ?? ''], accountIds: [authenticated!.profile.accountId] } });
+        assertLive();
+        if (result.accountId !== authenticated!.profile.accountId || result.clientId !== 0) throw failure('ACCOUNT_MISMATCH');
+        handshake = parseOwnerRecoveryHandshake({ sessionId: observer!.observerSessionId, dispatchEventId, accountId: result.accountId, clientId: result.clientId,
+          serverVersion: result.protocolVersion, connectedAt: result.connectedAt, readyAt: result.readyAt, closedAt: result.closedAt, socketCloseObserved: result.transportClosed });
+      }
       await validateCurrent(); await observer!.handshakeClosed(handshake); assertLive();
+      if ('version' in handshake && handshake.result.outcome !== 'FLAT') throw failure(handshake.result.outcome === 'NONFLAT' ? 'ACCOUNT_NOT_FLAT' : 'ACCOUNT_PROBE_INCOMPLETE', handshake.result.error?.cause);
       phase = 'finalize';
       await write({ version: 1, requestId: request.requestId, ok: true, action: 'handshake-closed', result: { handshake, handshakeDigest: ownerRecoveryHash(handshake) } });
     } else if (phase === 'finalize' && request.action === 'finalize-observation' && request.observerSessionId === observer!.observerSessionId) {

@@ -5,10 +5,10 @@ import { constants } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
-import { parseOwnerRecoveryRequest, parseOwnerRecoveryResponse, parseOwnerRecoveryOperatorEvidence,
+import { parseOwnerRecoveryRequest, parseOwnerRecoveryResponse, parseOwnerRecoveryOperatorEvidence, parseOwnerRecoveryCoordination, parseOwnerRecoveryEnvironmentEvidence,
   ownerRecoveryHash, OWNER_RECOVERY_LIMITS, type OwnerRecoveryRequest, type OwnerRecoveryResponse,
   type OwnerRecoveryProfile, type OwnerRecoveryInventory, type OwnerRecoveryOperatorEvidence,
-  type OwnerRecoveryHostEvidence, type OwnerRecoveryOperation, type OwnerRecoveryStatus } from '@ikbr/shared/accounting-owner-recovery';
+  type OwnerRecoveryWitness, type OwnerRecoveryCoordination, type OwnerRecoveryEnvironmentEvidence, type OwnerRecoveryOperation, type OwnerRecoveryStatus } from '@ikbr/shared/accounting-owner-recovery';
 import { canonicalJson, verifyProof, validateRenderedCompose } from './paper-runtime.js';
 import { runDocker } from './paper-runtime-cli.js';
 import { createAccountingRecoveryHost, runRecoveryHostCommand, startAccountingDockerWatcher, ACCOUNTING_APP_SERVICES, AccountingRecoveryHostError, ACCOUNTING_NATIVE_DIAGNOSTICS,
@@ -19,7 +19,7 @@ function check(v: unknown, code = 'ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN'):
 const obj = (v: unknown): Record<string, unknown> => { check(v && typeof v === 'object' && !Array.isArray(v), 'ACCOUNTING_OWNER_RECOVERY_DEPLOYMENT_CHANGED'); return v as Record<string, unknown>; };
 const uuid = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(v);
 export type AccountingRecoveryLocalProfile = { wire: OwnerRecoveryProfile; compose: string[]; root: string };
-export type AccountingRecoveryCommand = { action: 'prepare' | 'observe' | 'status' | 'supersede'; operationId?: string; evidencePath?: string };
+export type AccountingRecoveryCommand = { action: 'prepare' | 'observe' | 'status' | 'supersede'; operationId?: string; evidencePath?: string; apiEvidence?: boolean; coordinationPath?: string; environmentEvidencePath?: string };
 export type AccountingRecoveryChannel = { request(value: OwnerRecoveryRequest): Promise<OwnerRecoveryResponse>; finish(): Promise<void>; cancel(): void };
 export type AccountingRecoverySaved = { version: 1; operationId: string; requestId: string; action: OwnerRecoveryRequest['action']; digest: string; commitRequestId?: string; observedRequestId?: string };
 type Host = ReturnType<typeof createAccountingRecoveryHost>;
@@ -28,6 +28,8 @@ export type AccountingRecoveryDependencies = {
   host(profile: AccountingRecoveryLocalProfile): Host;
   start(profile: AccountingRecoveryLocalProfile, requestId: string, host: Host, readOnly?: boolean): Promise<{ channel: AccountingRecoveryChannel; watcher: AccountingEventWatcher; startedAt: string }>;
   evidence(path: string): Promise<OwnerRecoveryOperatorEvidence>;
+  coordination(path: string): Promise<OwnerRecoveryCoordination>;
+  environment(path: string): Promise<OwnerRecoveryEnvironmentEvidence>;
   save(record: AccountingRecoverySaved): Promise<void>;
   load(operationId: string): Promise<AccountingRecoverySaved[]>;
   now(): number; monotonicNow(): number; sleep(ms: number): Promise<void>; log(text: string): void; signal?: AbortSignal;
@@ -44,8 +46,22 @@ export async function readAccountingPrivateFile(path: string, limit: number): Pr
 }
 export async function readAccountingOperatorEvidence(path: string): Promise<OwnerRecoveryOperatorEvidence> {
   const value = parseOwnerRecoveryOperatorEvidence(JSON.parse((await readAccountingPrivateFile(path, 65536)).toString('utf8')));
+  await validateAccountingArtifacts(path, value.artifacts);
+  return value;
+}
+export async function readAccountingEnvironmentEvidence(path: string): Promise<OwnerRecoveryEnvironmentEvidence> {
+  const value = parseOwnerRecoveryEnvironmentEvidence(JSON.parse((await readAccountingPrivateFile(path, 65536)).toString('utf8')));
+  await validateAccountingArtifacts(path, [value.artifact]);
+  return value;
+}
+export async function readAccountingCoordination(path: string): Promise<OwnerRecoveryCoordination> {
+  const value = parseOwnerRecoveryCoordination(JSON.parse((await readAccountingPrivateFile(path, 65536)).toString('utf8')));
+  await validateAccountingArtifacts(path, [value.environmentEvidence.artifact]);
+  return value;
+}
+async function validateAccountingArtifacts(path: string, artifacts: Array<{ relativePath: string; sha256: string }>): Promise<void> {
   let size = 0;
-  for (const artifact of value.artifacts) {
+  for (const artifact of artifacts) {
     const file = resolve(dirname(path), artifact.relativePath), rel = relative(dirname(path), file);
     check(!isAbsolute(artifact.relativePath) && rel === artifact.relativePath && !rel.startsWith('..') && /\.(png|jpe?g|txt)$/i.test(file), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
     const bytes = await readAccountingPrivateFile(file, 5 * 1024 * 1024); size += bytes.length;
@@ -54,7 +70,6 @@ export async function readAccountingOperatorEvidence(path: string): Promise<Owne
     if (/\.jpe?g$/i.test(file)) check(bytes[0] === 255 && bytes[1] === 216, 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
     if (/\.txt$/i.test(file)) new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   }
-  return value;
 }
 
 export async function readAccountingRecoveryProfile(root: string, token: string, statusOnly = false): Promise<AccountingRecoveryLocalProfile> {
@@ -143,17 +158,19 @@ export async function executeAccountingRecovery(command: AccountingRecoveryComma
     return lines.join('\n');
   }
   if (command.action === 'prepare' || command.action === 'supersede') {
-    check(command.evidencePath && (command.action === 'prepare' || uuid(command.operationId)));
+    check((command.apiEvidence ? command.coordinationPath : command.evidencePath) && (command.action === 'prepare' || uuid(command.operationId)));
     const id = randomUUID(), operationId = command.action === 'prepare' ? randomUUID() : command.operationId!;
     const replacementOperationId = command.action === 'supersede' ? randomUUID() : undefined;
     const session = await openSession(id);
     let dispatched = false;
     try {
-      const operatorEvidence = await deps.evidence(command.evidencePath); await unchanged();
+      const proof = command.apiEvidence ? { version: 2 as const, coordination: await deps.coordination(command.coordinationPath!) }
+        : { version: 1 as const, operatorEvidence: await deps.evidence(command.evidencePath!) };
+      await unchanged();
       const inventory = await session.host.verifyProducerInventory(session.inventory); await session.watcher.flush();
       const request: OwnerRecoveryRequest = command.action === 'prepare'
-        ? { ...authenticated(id), action: 'prepare', operationId, operatorEvidence, inventory }
-        : { ...authenticated(id), action: 'supersede', operationId, replacementOperationId: replacementOperationId!, operatorEvidence, inventory };
+        ? { ...authenticated(id), ...proof, action: 'prepare', operationId, inventory }
+        : { ...authenticated(id), ...proof, action: 'supersede', operationId, replacementOperationId: replacementOperationId!, inventory };
       await durable(request, operationId); deps.log(`Operacja ${operationId}; żądanie ${id}. Nie powtarzaj zapisu przy nieznanym wyniku.`);
       dispatched = true;
       const result = await response(session.channel, request);
@@ -170,12 +187,13 @@ export async function executeAccountingRecovery(command: AccountingRecoveryComma
       return `Potwierdzono zapis żądania ${id}; operacja ${status.operation?.successorOperationId ?? operationId}. Blokada pozostaje aktywna.`;
     } finally { session.channel.cancel(); session.watcher.close(); }
   }
-  check(command.action === 'observe' && uuid(command.operationId) && command.evidencePath);
+  check(command.action === 'observe' && uuid(command.operationId) && (command.apiEvidence ? command.environmentEvidencePath && command.coordinationPath : command.evidencePath));
   const operationId = command.operationId;
   const status = await exactStatus(operationId);
   check(status.operation?.state === 'PREPARED' && canonicalJson(status.operation.profile) === canonicalJson(wire), 'ACCOUNTING_OWNER_RECOVERY_OWNER_CHANGED');
+  check(status.operation.version === (command.apiEvidence ? 2 : 1), 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
   // Local dispatch history forbids a restarted collector from continuing observation.
-  check(!(await deps.load(operationId)).some(r => r.action === 'begin-observe' || r.action === 'reset-proof' || r.action === 'finalize-observation'), 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+  check(!(await deps.load(operationId)).some(r => r.action === 'begin-observe' || r.action === 'pre-reset-probe' || r.action === 'reset-proof' || r.action === 'finalize-observation'), 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
   const wallStart = deps.now(), monoStart = deps.monotonicNow(), collectorStartedAt = new Date(wallStart).toISOString();
   const id = randomUUID(), session = await openSession(id);
   let remaining = 0, dbSampleAt = '', dbRoundTripMs = 0, commitRequestId: string | undefined, evidenceDigest: string | undefined;
@@ -191,7 +209,7 @@ export async function executeAccountingRecovery(command: AccountingRecoveryComma
   };
   try {
     await unchanged();
-    const begin: OwnerRecoveryRequest = { ...authenticated(id), action: 'begin-observe', operationId, bindingDigest: status.operation.bindingDigest };
+    const begin: OwnerRecoveryRequest = { ...authenticated(id), version: command.apiEvidence ? 2 : 1, action: 'begin-observe', operationId, bindingDigest: status.operation.bindingDigest };
     await durable(begin, operationId);
     const dbStart = deps.monotonicNow();
     const ready = await response(session.channel, begin);
@@ -200,41 +218,110 @@ export async function executeAccountingRecovery(command: AccountingRecoveryComma
     remaining = ready.result.remainingMs + (dbStart - monoStart); dbSampleAt = ready.result.dbNow;
     check(Math.abs(Date.parse(dbSampleAt) - deps.now()) <= 1000 + dbRoundTripMs && ready.result.remainingMs <= Date.parse(ready.result.operation.expiresAt) - Date.parse(dbSampleAt), 'ACCOUNTING_OWNER_RECOVERY_CLOCK_UNCERTAIN');
     const operation = ready.result.operation, observerSessionId = ready.result.observerSessionId;
+    check(canonicalJson(operation) === canonicalJson(status.operation), 'ACCOUNTING_OWNER_RECOVERY_OWNER_CHANGED');
     bounded();
     const before = await session.host.captureGatewayProcess();
     const poll = async <T>(work: () => Promise<T>, pending: string): Promise<T> => {
       for (;;) { bounded(); await session.host.verifyProducerInventory(session.inventory); try { return await work(); } catch (error) { if (!(error instanceof Error) || error.message !== pending) throw error; } await deps.sleep(500); }
     };
+    const monitoredResponse = async (request: OwnerRecoveryRequest, monitor: () => Promise<void>) => {
+      bounded();
+      check(remaining - (deps.monotonicNow() - monoStart) >= OWNER_RECOVERY_LIMITS.probeMs, 'ACCOUNTING_OWNER_RECOVERY_OBSERVATION_EXPIRED');
+      let pending = true;
+      const resultPromise = response(session.channel, request).finally(() => { pending = false; });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        while (pending) {
+          await Promise.race([resultPromise, new Promise<void>(resolveWait => { timer = setTimeout(resolveWait, 250); })]);
+          if (timer) clearTimeout(timer);
+          await monitor();
+        }
+        return await resultPromise;
+      } catch (error) { session.channel.cancel(); void resultPromise.catch(() => undefined); throw error; }
+      finally { if (timer) clearTimeout(timer); }
+    };
+    let preResetProbeDigest: string | undefined;
+    if (command.apiEvidence) {
+      check(operation.version === 2 && operation.coordination, 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+      const coordination = operation.coordination;
+      check(canonicalJson(await deps.coordination(command.coordinationPath!)) === canonicalJson(coordination), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
+      const currentBefore = async () => {
+        bounded(); await unchanged();
+        check(canonicalJson(await deps.coordination(command.coordinationPath!)) === canonicalJson(coordination), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
+        await session.host.assertGatewayUnchanged(before);
+        await session.watcher.flush(); bounded();
+      };
+      await currentBefore();
+      const environmentEvidence = coordination.environmentEvidence;
+      check(deps.now() - Date.parse(environmentEvidence.artifact.observedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs && Date.parse(environmentEvidence.observedAt) <= deps.now(), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
+      check(remaining - (deps.monotonicNow() - monoStart) >= OWNER_RECOVERY_LIMITS.probeMs, 'ACCOUNTING_OWNER_RECOVERY_OBSERVATION_EXPIRED');
+      const probe: OwnerRecoveryRequest = { version: 2, action: 'pre-reset-probe', requestId: randomUUID(), observerSessionId, evidence: {
+        version: 2, operationId, nonce: operation.nonce, bindingDigest: operation.bindingDigest, profile: wire,
+        coordinationDigest: ownerRecoveryHash(coordination), before, inventory: await session.host.verifyProducerInventory(session.inventory), environmentEvidence,
+      } };
+      await durable(probe, operationId);
+      const closed = await monitoredResponse(probe, currentBefore);
+      await session.host.verifyProducerInventory(session.inventory);
+      check(closed.action === 'pre-reset-probe-closed', 'ACCOUNTING_OWNER_RECOVERY_CLOSURE_UNKNOWN');
+      const proof = closed.result.probe;
+      check(proof.sessionId === observerSessionId && proof.operationId === operationId && proof.nonce === operation.nonce &&
+        ownerRecoveryHash(proof.endpoint) === ownerRecoveryHash(wire.endpoint) && proof.result.accountId === wire.accountId &&
+        proof.result.outcome === 'FLAT' && proof.result.transportClosed && Date.parse(proof.result.closedAt) <= deps.now() &&
+        deps.now() - Date.parse(proof.result.closedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs, 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+      preResetProbeDigest = closed.result.probeDigest;
+      await currentBefore();
+    }
     deps.log('Obserwacja aktywna. Zamknij ręcznie cały TWS. Poczekaj na potwierdzenie zniknięcia procesu i nasłuchu.');
     const stopped = await poll(() => session.host.assertGatewayStopped(before), 'ACCOUNTING_OWNER_RECOVERY_GATEWAY_STILL_RUNNING');
     await session.host.verifyProducerInventory(session.inventory); bounded();
-    deps.log('Potwierdzono pełne zatrzymanie TWS. Uruchom ręcznie TWS i przygotuj nowy prywatny dowód stanu konta.');
+    deps.log(`Potwierdzono pełne zatrzymanie TWS. Uruchom ręcznie TWS i przygotuj nowy prywatny dowód ${command.apiEvidence ? 'środowiska Paper' : 'stanu konta'}.`);
     const after = await poll(() => session.host.verifyGatewayReplacement(before), 'ACCOUNTING_OWNER_RECOVERY_GATEWAY_NOT_STARTED');
-    deps.log(`Powiązanie afterReset do nowego dowodu operatora: ${JSON.stringify({ operationId, nonce: operation.nonce, process: after.process })}`);
-    deps.log(`Nowe obserwacje i artefakty muszą pochodzić z chwili ${after.observedAt} lub późniejszej. Zapisz prywatny plik: ${command.evidencePath}.`);
-    const operatorEvidence = await poll(async () => {
-      try { return await deps.evidence(command.evidencePath!); }
+    deps.log(`Powiązanie afterReset do nowego dowodu ${command.apiEvidence ? 'środowiska Paper' : 'operatora'}: ${JSON.stringify({ operationId, nonce: operation.nonce, process: after.process })}`);
+    deps.log(`Nowe obserwacje i artefakty muszą pochodzić z chwili ${after.observedAt} lub późniejszej. Zapisz prywatny plik: ${command.apiEvidence ? command.environmentEvidencePath : command.evidencePath}.`);
+    const readEvidence = () => command.apiEvidence ? deps.environment(command.environmentEvidencePath!) : deps.evidence(command.evidencePath!);
+    const collectedEvidence = await poll(async () => {
+      try { return await readEvidence(); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('EVIDENCE_PENDING'); throw error; }
     }, 'EVIDENCE_PENDING');
-    const witness = async (): Promise<OwnerRecoveryHostEvidence> => {
+    const witness = async (): Promise<OwnerRecoveryWitness> => {
       bounded(); await unchanged();
+      if (command.apiEvidence) check(canonicalJson(await deps.coordination(command.coordinationPath!)) === canonicalJson(operation.coordination), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
       const current = await session.host.verifyGatewayReplacement(before);
       check(canonicalJson(current.process) === canonicalJson(after.process), 'ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED');
-      check(canonicalJson(await deps.evidence(command.evidencePath!)) === canonicalJson(operatorEvidence), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
+      check(canonicalJson(await readEvidence()) === canonicalJson(collectedEvidence), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
       const finalInventory = await session.host.verifyProducerInventory(session.inventory); await session.watcher.flush(); bounded();
-      return { version: 1, operationId, nonce: operation.nonce, bindingDigest: operation.bindingDigest, profile: wire,
+      const common = { operationId, nonce: operation.nonce, bindingDigest: operation.bindingDigest, profile: wire,
         collectorStartedAt, before, stopped, after, current, initialInventory: session.inventory, finalInventory,
-        dockerEvents: { startedAt: session.startedAt, checkedAt: new Date(deps.now()).toISOString(), continuous: true, noProducerStarts: true },
-        clock: { wallStartedAt: collectorStartedAt, wallCheckedAt: new Date(deps.now()).toISOString(), monotonicElapsedMs: Math.floor(deps.monotonicNow() - monoStart), dbSampleAt, dbRoundTripMs }, operatorEvidence };
+        dockerEvents: { startedAt: session.startedAt, checkedAt: new Date(deps.now()).toISOString(), continuous: true as const, noProducerStarts: true as const },
+        clock: { wallStartedAt: collectorStartedAt, wallCheckedAt: new Date(deps.now()).toISOString(), monotonicElapsedMs: Math.floor(deps.monotonicNow() - monoStart), dbSampleAt, dbRoundTripMs } };
+      return command.apiEvidence
+        ? { ...common, version: 2, coordinationDigest: ownerRecoveryHash(operation.coordination), preResetProbeDigest: preResetProbeDigest!, environmentEvidence: collectedEvidence as OwnerRecoveryEnvironmentEvidence }
+        : { ...common, version: 1, operatorEvidence: collectedEvidence as OwnerRecoveryOperatorEvidence };
     };
-    const reset: OwnerRecoveryRequest = { version: 1, action: 'reset-proof', requestId: randomUUID(), observerSessionId, evidence: await witness() };
+    const resetEvidence = await witness();
+    const reset: OwnerRecoveryRequest = resetEvidence.version === 2
+      ? { version: 2, action: 'reset-proof', requestId: randomUUID(), observerSessionId, evidence: resetEvidence }
+      : { version: 1, action: 'reset-proof', requestId: randomUUID(), observerSessionId, evidence: resetEvidence };
     await durable(reset, operationId); bounded();
-    const closed = await response(session.channel, reset);
+    const closed = command.apiEvidence ? await monitoredResponse(reset, async () => {
+      bounded(); await unchanged();
+      check(canonicalJson(await deps.coordination(command.coordinationPath!)) === canonicalJson(operation.coordination), 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
+      check(canonicalJson((await session.host.verifyGatewayReplacement(before)).process) === canonicalJson(after.process), 'ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED');
+      await session.watcher.flush(); bounded();
+    }) : await response(session.channel, reset);
+    if (command.apiEvidence) await session.host.verifyProducerInventory(session.inventory);
     check(closed.action === 'handshake-closed' && closed.result.handshake.sessionId === observerSessionId, 'ACCOUNTING_OWNER_RECOVERY_CLOSURE_UNKNOWN');
+    if (command.apiEvidence) {
+      const proof = closed.result.handshake;
+      check('version' in proof && proof.version === 2 && proof.phase === 'post-reset' && proof.operationId === operationId && proof.nonce === operation.nonce &&
+        ownerRecoveryHash(proof.endpoint) === ownerRecoveryHash(wire.endpoint) && proof.result.accountId === wire.accountId && proof.result.outcome === 'FLAT' &&
+        proof.result.transportClosed && Date.parse(proof.result.closedAt) <= deps.now() && deps.now() - Date.parse(proof.result.closedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs, 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
+    } else check(!('version' in closed.result.handshake), 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN');
     const evidence = await witness(); evidenceDigest = ownerRecoveryHash({ evidence, handshake: closed.result.handshake });
     commitRequestId = randomUUID();
-    const finalize: OwnerRecoveryRequest = { version: 1, action: 'finalize-observation', requestId: randomUUID(), observerSessionId,
-      observedRequestId: randomUUID(), commitRequestId, handshakeDigest: closed.result.handshakeDigest, evidence };
+    const finalFields = { action: 'finalize-observation' as const, requestId: randomUUID(), observerSessionId,
+      observedRequestId: randomUUID(), commitRequestId, handshakeDigest: closed.result.handshakeDigest };
+    const finalize: OwnerRecoveryRequest = evidence.version === 2 ? { ...finalFields, version: 2, evidence } : { ...finalFields, version: 1, evidence };
     await durable(finalize, operationId); bounded();
     const result = await response(session.channel, finalize);
     check(result.action === 'committed' && result.result.receipt.operationId === operationId && result.result.receipt.commitRequestId === commitRequestId &&
@@ -333,7 +420,7 @@ export async function startAccountingRecoveryBackend(profile: AccountingRecovery
         const line = JSON.stringify(parseOwnerRecoveryRequest(request)) + '\n'; sent += Buffer.byteLength(line);
         check(Buffer.byteLength(line) <= OWNER_RECOVERY_LIMITS.messageBytes && sent + received <= OWNER_RECOVERY_LIMITS.sessionBytes);
         return new Promise<OwnerRecoveryResponse>((resolveResponse, reject) => {
-          const timer = setTimeout(fail, request.action === 'reset-proof' ? 15000 : 10000);
+          const timer = setTimeout(fail, request.action === 'pre-reset-probe' || request.version === 2 && request.action === 'reset-proof' ? OWNER_RECOVERY_LIMITS.probeMs + 5000 : request.action === 'reset-proof' ? 15000 : 10000);
           waiting = { id: request.requestId, resolve: resolveResponse, reject, timer };
           processChild.stdin!.write(line, error => { if (error) fail(); });
         });
@@ -360,12 +447,16 @@ async function accountingStateStore(root: string) {
 export async function runAccountingOwnerRecoveryCli(argv = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): Promise<number> {
   if (argv[0] === '--') argv = argv.slice(1);
   if (argv.length === 1 && ['--help', 'help'].includes(argv[0])) {
-    process.stdout.write('prepare --operator-evidence <prywatny plik>; observe --operation <uuid> --operator-evidence <nowy prywatny plik>; status --operation <uuid>; supersede --operation <uuid> --operator-evidence <prywatny plik>. Observe obserwuje pełny reset i zapisuje wynik w tym samym procesie; osobne commit nie istnieje. Token: OWNER_RECOVERY_API_TOKEN; operator: OWNER_RECOVERY_OPERATOR.\n'); return 0;
+    process.stdout.write('V2: prepare --api-evidence --coordination <prywatny plik>; supersede --operation <uuid> --api-evidence --coordination <prywatny plik>; observe --operation <uuid> --api-evidence --coordination <ten sam prywatny plik> --environment-evidence <nowy prywatny plik>. V1: prepare --operator-evidence <prywatny plik>; observe --operation <uuid> --operator-evidence <nowy prywatny plik>; status --operation <uuid>; supersede --operation <uuid> --operator-evidence <prywatny plik>. Observe obserwuje pełny reset i zapisuje wynik w tym samym procesie; osobne commit nie istnieje. Token: OWNER_RECOVERY_API_TOKEN; operator: OWNER_RECOVERY_OPERATOR.\n'); return 0;
   }
-  const { positionals, values } = parseArgs({ args: argv, allowPositionals: true, strict: true, options: { operation: { type: 'string' }, 'operator-evidence': { type: 'string' } } });
+  const { positionals, values } = parseArgs({ args: argv, allowPositionals: true, strict: true, options: { operation: { type: 'string' }, 'operator-evidence': { type: 'string' }, 'api-evidence': { type: 'boolean' }, coordination: { type: 'string' }, 'environment-evidence': { type: 'string' } } });
   check(positionals.length === 1 && ['prepare', 'observe', 'status', 'supersede'].includes(positionals[0]), 'ACCOUNTING_OWNER_RECOVERY_USAGE');
   const action = positionals[0] as AccountingRecoveryCommand['action'];
-  check(action === 'prepare' ? !values.operation && values['operator-evidence'] : uuid(values.operation) && (action === 'status' ? !values['operator-evidence'] : values['operator-evidence']), 'ACCOUNTING_OWNER_RECOVERY_USAGE');
+  const apiEvidence = values['api-evidence'] === true;
+  check(action === 'prepare' ? !values.operation : uuid(values.operation), 'ACCOUNTING_OWNER_RECOVERY_USAGE');
+  check(action === 'status' ? !apiEvidence && !values['operator-evidence'] && !values.coordination && !values['environment-evidence']
+    : apiEvidence ? !values['operator-evidence'] && (action === 'observe' ? values['environment-evidence'] && values.coordination : values.coordination && !values['environment-evidence'])
+      : values['operator-evidence'] && !values.coordination && !values['environment-evidence'], 'ACCOUNTING_OWNER_RECOVERY_USAGE');
   const root = await realpath(resolve(env.INIT_CWD ?? process.cwd())), token = env.OWNER_RECOVERY_API_TOKEN ?? '', actor = env.OWNER_RECOVERY_OPERATOR ?? '';
   check(token.length >= 32 && actor, 'ACCOUNTING_OWNER_RECOVERY_AUTH_REQUIRED');
   let directory: string;
@@ -373,10 +464,10 @@ export async function runAccountingOwnerRecoveryCli(argv = process.argv.slice(2)
   const stat = await lstat(directory); check(stat.isDirectory() && !stat.isSymbolicLink() && (stat.mode & 0o777) === 0o700 && await realpath(directory) === directory, 'ACCOUNTING_OWNER_RECOVERY_OPERATOR_EVIDENCE_INVALID');
   const controller = new AbortController(), abort = () => controller.abort(); process.once('SIGINT', abort); process.once('SIGTERM', abort);
   try {
-    const result = await executeAccountingRecovery({ action, operationId: values.operation, evidencePath: values['operator-evidence'] }, {
+    const result = await executeAccountingRecovery({ action, operationId: values.operation, evidencePath: values['operator-evidence'], apiEvidence, coordinationPath: values.coordination, environmentEvidencePath: values['environment-evidence'] }, {
       actor, token, profile: () => readAccountingRecoveryProfile(root, token, action === 'status'),
       host: p => createAccountingRecoveryHost({ ...p.wire, root: p.root, host: p.wire.endpoint.host, port: p.wire.endpoint.port }),
-      start: (p, id, host, readOnly) => startAccountingRecoveryBackend(p, id, host, controller.signal, readOnly), evidence: readAccountingOperatorEvidence,
+      start: (p, id, host, readOnly) => startAccountingRecoveryBackend(p, id, host, controller.signal, readOnly), evidence: readAccountingOperatorEvidence, coordination: readAccountingCoordination, environment: readAccountingEnvironmentEvidence,
       save: async record => {
         const file = resolve(directory, `${record.operationId}.${record.requestId}.json`), fd = await open(file, 'wx', 0o600);
         try { await fd.writeFile(JSON.stringify(record)); await fd.sync(); } finally { await fd.close(); }

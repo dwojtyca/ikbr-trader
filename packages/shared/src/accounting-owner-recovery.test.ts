@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { OWNER_RECOVERY_SERVICES, ownerRecoveryHash, parseOwnerRecoveryRequest, parseOwnerRecoveryResponse,
-  parseOwnerRecoveryHostEvidence, parseOwnerRecoveryOperation, parseOwnerRecoveryOperatorEvidence,
+  parseOwnerRecoveryHostEvidence, parseOwnerRecoveryOperation, parseOwnerRecoveryOperatorEvidence, parseOwnerRecoveryCoordination, parseOwnerRecoveryAccountProbe,
   type OwnerRecoveryProfile, type OwnerRecoveryOperatorEvidence, type OwnerRecoveryInventory, type OwnerRecoveryHostEvidence,
   type OwnerRecoveryOperation } from './accounting-owner-recovery.js';
 
@@ -135,4 +135,63 @@ test('status binds pending maintenance and exact request lookup to its bounded e
   assert.throws(() => parseOwnerRecoveryResponse({ ...response, result: { ...result, events: [] } }));
   assert.throws(() => parseOwnerRecoveryResponse({ ...response, result: { ...result, events: [event, event] } }));
   assert.throws(() => parseOwnerRecoveryResponse({ ...response, result: { ...result, lookup: { ...result.lookup, requestId: id(99) } } }));
+});
+
+function coordinationV2() {
+  const at = time(0), declaration = { confirmed: true, source: 'carried-owner-authorization', actor: 'owner', sourceReference: 'session-authority', observedAt: at };
+  return { version: 2, coordinationId: id(21), actor: operation().actor, accountId: profile.accountId, endpoint: profile.endpoint, settingsHash: hash, deploymentHash: hash,
+    recordedAt: at, authorizationReference: 'session-authority', declarations: { noPendingManualActionsOrDrafts: declaration,
+      noOtherNativeOrExternalClients: declaration, noChangesOrClientLaunchesUntilRecoveryEnds: declaration }, environmentEvidence: {
+      version: 2, inspectionId: id(22), accountId: profile.accountId, endpoint: profile.endpoint, settingsHash: hash, deploymentHash: hash,
+      actor: 'observing-agent', provenance: 'agent-ui-observation', observedAt: at, product: 'TWS', environment: 'paper', process: evidence().before.process,
+      artifact: { relativePath: 'paper.txt', sha256: hash, observedAt: at } } };
+}
+function probeV2() {
+  return { version: 2, probeId: id(23), operationId: id(2), nonce: id(3), sessionId: id(24), dispatchEventId: id(25), phase: 'pre-reset', endpoint: profile.endpoint,
+    result: { accountId: profile.accountId, clientId: 0, protocolVersion: 180, sdkVersion: '@stoqey/ib@1.6.10', connectedAt: time(0), readyAt: time(1),
+      positionsRequestedAt: time(2), openOrdersRequestedAt: time(2), positionsEndAt: time(3), openOrdersEndAt: time(3), completedAt: time(4), closedAt: time(5),
+      transportClosed: true, positionRows: 0, openOrderRows: 0, eventCount: 4, rowsDigest: hash, outcome: 'FLAT', error: null } };
+}
+test('V2 reserves explicit coordination provenance without inheriting V1 flat assertions', () => {
+  const c = parseOwnerRecoveryCoordination(coordinationV2());
+  assert.equal(c.environmentEvidence.actor, 'observing-agent');
+  const request = { version: 2, action: 'prepare', requestId: id(26), operationId: id(2), actor: c.actor, token: 'x'.repeat(32), profile, coordination: c, inventory: inventory(0) };
+  assert.deepEqual(parseOwnerRecoveryRequest(request), request);
+  assert.throws(() => parseOwnerRecoveryRequest({ ...request, operatorEvidence: operator() }));
+  assert.throws(() => parseOwnerRecoveryRequest({ ...request, version: 1 }));
+  assert.deepEqual(parseOwnerRecoveryOperation({ ...operation(), version: 2, coordination: c }).coordination, c);
+  assert.throws(() => parseOwnerRecoveryOperation({ ...operation(), version: 2 }));
+  assert.throws(() => parseOwnerRecoveryOperation({ ...operation(), version: 1, coordination: c }));
+  assert.throws(() => parseOwnerRecoveryOperation({ ...operation(), version: 2, coordination: { ...c, actor: 'different' } }));
+  for (const mutate of [
+    (v: ReturnType<typeof coordinationV2>) => { v.environmentEvidence.environment = 'live'; },
+    (v: ReturnType<typeof coordinationV2>) => { v.environmentEvidence.artifact.relativePath = '../outside.txt'; },
+    (v: ReturnType<typeof coordinationV2>) => { v.declarations.noOtherNativeOrExternalClients.confirmed = false; },
+    (v: ReturnType<typeof coordinationV2>) => { v.environmentEvidence.accountId = 'OTHER'; },
+  ]) { const v = coordinationV2(); mutate(v); assert.throws(() => parseOwnerRecoveryCoordination(v)); }
+});
+test('V2 account proof rejects false flat completeness, malformed closure and stale time ordering', () => {
+  assert.deepEqual(parseOwnerRecoveryAccountProbe(probeV2()), probeV2());
+  for (const mutate of [
+    (v: ReturnType<typeof probeV2>) => { v.result.openOrderRows = 1; },
+    (v: ReturnType<typeof probeV2>) => { v.result.transportClosed = false; },
+    (v: ReturnType<typeof probeV2>) => { v.result.positionsEndAt = time(1); },
+    (v: ReturnType<typeof probeV2>) => { v.result.closedAt = time(25); },
+    (v: ReturnType<typeof probeV2>) => { v.result.clientId = 1; },
+  ]) { const v = probeV2(); mutate(v); assert.throws(() => parseOwnerRecoveryAccountProbe(v)); }
+  const failed = { ...probeV2(), result: { ...probeV2().result, closedAt: time(25), outcome: 'INCOMPLETE', error: { code: 'ACCOUNTING_OWNER_RECOVERY_CLOCK_UNCERTAIN' } } };
+  assert.equal(parseOwnerRecoveryAccountProbe(failed).result.outcome, 'INCOMPLETE');
+  assert.throws(() => parseOwnerRecoveryAccountProbe({ ...failed, result: { ...failed.result, error: null } }));
+});
+test('V2 host witness binds fresh environment to new process and cannot mix V1 and V2 frame versions', () => {
+  const { operatorEvidence: _operator, ...old } = evidence(), c = coordinationV2();
+  const after = { ...c.environmentEvidence, observedAt: time(5), artifact: { ...c.environmentEvidence.artifact, observedAt: time(5) }, process: old.after.process,
+    afterReset: { operationId: old.operationId, nonce: old.nonce } };
+  const witness = { ...old, version: 2, coordinationDigest: ownerRecoveryHash(c), preResetProbeDigest: hash, environmentEvidence: after };
+  assert.deepEqual(parseOwnerRecoveryHostEvidence(witness), witness);
+  const frame = { version: 2, action: 'reset-proof', requestId: id(27), observerSessionId: id(24), evidence: witness };
+  assert.deepEqual(parseOwnerRecoveryRequest(frame), frame);
+  assert.throws(() => parseOwnerRecoveryRequest({ ...frame, version: 1 }));
+  assert.throws(() => parseOwnerRecoveryHostEvidence({ ...witness, environmentEvidence: { ...after, process: old.before.process } }));
+  assert.throws(() => parseOwnerRecoveryHostEvidence({ ...witness, environmentEvidence: { ...after, afterReset: { ...after.afterReset, nonce: id(28) } } }));
 });

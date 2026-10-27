@@ -4,28 +4,41 @@ import { mkdtemp, writeFile, chmod, symlink, rm, realpath } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { executeAccountingRecovery, readAccountingOperatorEvidence, readAccountingPrivateFile, runAccountingOwnerRecoveryCli,
+import { executeAccountingRecovery, readAccountingOperatorEvidence, readAccountingEnvironmentEvidence, readAccountingCoordination, readAccountingPrivateFile, runAccountingOwnerRecoveryCli,
   type AccountingRecoveryDependencies, type AccountingRecoverySaved } from './accounting-owner-recovery-cli.js';
 import { ownerRecoveryHash, OWNER_RECOVERY_SERVICES, type OwnerRecoveryProfile, type OwnerRecoveryInventory,
-  type OwnerRecoveryOperation, type OwnerRecoveryRequest, type OwnerRecoveryReceipt, type OwnerRecoveryOperatorEvidence } from '@ikbr/shared/accounting-owner-recovery';
+  type OwnerRecoveryOperation, type OwnerRecoveryRequest, type OwnerRecoveryReceipt, type OwnerRecoveryOperatorEvidence, type OwnerRecoveryCoordination, type OwnerRecoveryEnvironmentEvidence, type OwnerRecoveryAccountProbe } from '@ikbr/shared/accounting-owner-recovery';
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`, hash = 'a'.repeat(64);
 const start = Date.parse('2026-10-19T12:00:00.000Z'), iso = (n = 0) => new Date(start + n).toISOString();
 const profile: OwnerRecoveryProfile = { project: 'fixture', imageId: `sha256:${hash}`, deploymentHash: hash, dockerHost: 'unix:///var/run/docker.sock', hostIdHash: hash, settingsHash: hash, accountId: 'DU_TEST', endpoint: { host: 'host.docker.internal', port: 7497, clientId: 0 } };
 const operator = (): OwnerRecoveryOperatorEvidence => ({ version: 1, inspectionId: id(1), accountId: profile.accountId, endpoint: profile.endpoint, settingsHash: hash, deploymentHash: hash, operator: 'tester', observedAt: iso(), product: 'TWS', confirmations: { paperAccount: true, accountPositionsFlat: true, accountOpenOrdersAbsent: true, noPendingManualActions: true, otherClientsStopped: true, noChangesUntilRecoveryEnds: true, noOtherNativeOrExternalClients: true, noNativeClientLaunchUntilRecoveryEnds: true }, artifacts: ['account-environment', 'positions', 'open-orders'].map(kind => ({ kind: kind as 'positions', relativePath: `${kind}.txt`, sha256: hash, observedAt: iso() })) });
-function fixture() {
+const oldProcess = { pid: 101, startIdentity: iso(-10000), executableHash: hash };
+const environment = (): OwnerRecoveryEnvironmentEvidence => ({ version: 2, inspectionId: id(30), accountId: profile.accountId, endpoint: profile.endpoint,
+  settingsHash: hash, deploymentHash: hash, actor: 'agent', provenance: 'agent-ui-observation', observedAt: iso(-1000), product: 'TWS', environment: 'paper', process: { ...oldProcess },
+  artifact: { relativePath: 'environment.txt', sha256: hash, observedAt: iso(-1000) } });
+const coordination = (): OwnerRecoveryCoordination => {
+  const declaration = { confirmed: true as const, source: 'carried-owner-authorization' as const, actor: 'tester', sourceReference: 'session:test', observedAt: iso(-1000) };
+  return { version: 2, coordinationId: id(31), actor: 'tester', accountId: profile.accountId, endpoint: profile.endpoint, settingsHash: hash, deploymentHash: hash,
+    recordedAt: iso(-1000), authorizationReference: 'session:test', declarations: { noPendingManualActionsOrDrafts: declaration,
+      noOtherNativeOrExternalClients: declaration, noChangesOrClientLaunchesUntilRecoveryEnds: declaration }, environmentEvidence: environment() };
+};
+function fixture(v2 = false) {
   let handshakeResult: unknown;
   let now = start, receipt: OwnerRecoveryReceipt | null = null, lostFinalize = false, drift = false, changed = false;
   const records: AccountingRecoverySaved[] = [], requests: OwnerRecoveryRequest[] = [];
   const operation: OwnerRecoveryOperation = { version: 1, operationId: id(2), nonce: id(3), state: 'PREPARED', owner: { endpointKey: 'key', ownerId: id(4), generation: 1, retirementState: 'UNKNOWN', acquiredAt: iso(-10000), updatedAt: iso(-10000) }, profile, pauseRevision: 1, actor: 'tester', preparedAt: iso(-1000), expiresAt: iso(899000), bindingDigest: hash, evidenceDigest: null, successorOperationId: null, receiptId: null };
+  if (v2) { operation.version = 2; operation.coordination = coordination(); }
   const inventory = (): OwnerRecoveryInventory => ({ observedAt: new Date(now).toISOString(), producers: [], absentServices: [...OWNER_RECOVERY_SERVICES], nativeProcesses: [], unexpectedNativeCandidates: [], unexpectedSocketPids: [] });
   const newer = { pid: 202, startIdentity: iso(2000), executableHash: hash };
   const evidence = () => ({ ...operator(), observedAt: iso(4000), artifacts: operator().artifacts.map(a => ({ ...a, observedAt: iso(4000) })), afterReset: { operationId: id(2), nonce: id(3), process: newer } });
   const host = { captureProducerInventory: async () => inventory(), verifyProducerInventory: async () => inventory(), clearOneShot: () => undefined,
     captureGatewayProcess: async () => { now = start + 100; return { observedAt: iso(100), process: { pid: 101, startIdentity: iso(-10000), executableHash: hash } }; },
+    assertGatewayUnchanged: async () => ({ observedAt: new Date(now).toISOString(), process: oldProcess }),
     assertGatewayStopped: async () => { now = start + 1000; return { observedAt: iso(1000), processAbsent: true, listenerAbsent: true }; },
     verifyGatewayReplacement: async () => { now = Math.max(now + 10, start + 3000); return { observedAt: new Date(now).toISOString(), process: newer }; },
   } as unknown as ReturnType<AccountingRecoveryDependencies['host']>;
   const deps: AccountingRecoveryDependencies = { actor: 'tester', token: 'x'.repeat(32), profile: async () => ({ wire: { ...profile, deploymentHash: changed ? 'b'.repeat(64) : hash }, root: '/repo', compose: [] }), host: () => host,
+    coordination: async () => operation.coordination!, environment: async () => { now = Math.max(now, start + 4000); return { ...environment(), observedAt: iso(4000), artifact: { ...environment().artifact, observedAt: iso(4000) }, process: newer, afterReset: { operationId: id(2), nonce: id(3) } }; },
     evidence: async () => { now = Math.max(now, start + 4000); return evidence(); }, save: async r => { records.push(structuredClone(r)); }, load: async () => records,
     now: () => now, monotonicNow: () => now - start + 0.123 + (drift ? 2000 : 0), sleep: async ms => { now += ms; }, log: () => undefined,
     start: async (_profile, _id, _host, readOnly) => ({ startedAt: new Date(now).toISOString(), watcher: { check: () => undefined, flush: async () => undefined, allow: () => undefined, close: () => undefined }, channel: {
@@ -44,13 +57,24 @@ function fixture() {
         assert.ok(records.some(r => r.requestId === request.requestId), 'mutation identity must be durable before send');
         assert.ok(!JSON.stringify(records).includes('x'.repeat(32)));
         if (request.action === 'begin-observe') return { ...base, action: 'observer-ready', result: { operation, observerSessionId: id(6), dbNow: new Date(now).toISOString(), remainingMs: Date.parse(operation.expiresAt) - now } };
+        if (request.action === 'pre-reset-probe' || request.action === 'reset-proof' && v2) {
+          const time = new Date(now).toISOString();
+          const probe: OwnerRecoveryAccountProbe = { version: 2, probeId: id(32), operationId: operation.operationId, nonce: operation.nonce, sessionId: id(6), dispatchEventId: id(7),
+            phase: request.action === 'pre-reset-probe' ? 'pre-reset' : 'post-reset', endpoint: profile.endpoint,
+            result: { accountId: profile.accountId, clientId: 0, protocolVersion: 180, sdkVersion: '@stoqey/ib@1.6.10', connectedAt: time, readyAt: time,
+              positionsRequestedAt: time, openOrdersRequestedAt: time, positionsEndAt: time, openOrdersEndAt: time, completedAt: time, closedAt: time,
+              transportClosed: true, positionRows: 0, openOrderRows: 0, eventCount: 5, rowsDigest: hash, outcome: 'FLAT', error: null } };
+          if (request.action === 'pre-reset-probe') return { ...base, action: 'pre-reset-probe-closed', result: { probe, probeDigest: ownerRecoveryHash(probe) } };
+          handshakeResult = probe;
+          return { ...base, action: 'handshake-closed', result: { handshake: probe, handshakeDigest: ownerRecoveryHash(probe) } };
+        }
         if (request.action === 'reset-proof') {
           const handshake = { sessionId: id(6), dispatchEventId: id(7), accountId: 'DU_TEST', clientId: 0 as const, serverVersion: 180, connectedAt: new Date(now).toISOString(), readyAt: new Date(now).toISOString(), closedAt: new Date(now).toISOString(), socketCloseObserved: true as const };
           handshakeResult = handshake;
           return { ...base, action: 'handshake-closed', result: { handshake, handshakeDigest: ownerRecoveryHash(handshake) } };
         }
         if (request.action === 'finalize-observation') {
-          receipt = { version: 1, receiptId: id(8), operationId: id(2), commitRequestId: request.commitRequestId, owner: operation.owner, bindingDigest: hash, evidenceDigest: ownerRecoveryHash({ evidence: request.evidence, handshake: handshakeResult }), actor: 'tester', committedAt: new Date(now).toISOString(), retiredAt: new Date(now).toISOString(), retirementState: 'RETIRED', method: 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1' };
+          receipt = { version: v2 ? 2 : 1, receiptId: id(8), operationId: id(2), commitRequestId: request.commitRequestId, owner: operation.owner, bindingDigest: hash, evidenceDigest: ownerRecoveryHash({ evidence: request.evidence, handshake: handshakeResult }), actor: 'tester', committedAt: new Date(now).toISOString(), retiredAt: new Date(now).toISOString(), retirementState: 'RETIRED', method: v2 ? 'API_OBSERVED_LOCAL_TWS_RESET_V2' : 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1' };
           operation.state = 'COMMITTED'; operation.receiptId = receipt.receiptId; operation.evidenceDigest = receipt.evidenceDigest;
           if (lostFinalize) throw new Error('EOF');
           return { ...base, action: 'committed', result: { operation, receipt, unlockAcknowledged: true } };
@@ -59,7 +83,7 @@ function fixture() {
       },
     } }),
   };
-  return { deps, requests, records, lose: () => { lostFinalize = true; }, drift: () => { drift = true; }, changed: () => { changed = true; } };
+  return { deps, requests, records, operation, lose: () => { lostFinalize = true; }, drift: () => { drift = true; }, changed: () => { changed = true; } };
 }
 test('one live observer performs reset and finalizes once, with durable IDs, fractional monotonic clock and exact receipt readback', async () => {
   const f = fixture();
@@ -261,4 +285,231 @@ test('replacement wait inventory refusal preserves its diagnostic and cancels be
   const status = await executeAccountingRecovery({ action: 'status', operationId: id(2) }, f.deps);
   assert.match(status, /PREPARED/); assert.match(status, /blokada konserwacyjna: aktywna/);
   await assert.rejects(executeAccountingRecovery({ action: 'observe', operationId: id(2), evidencePath: '/private/proof.json' }, f.deps), /RESET_UNPROVEN/);
+});
+
+const observeV2 = { action: 'observe' as const, operationId: id(2), apiEvidence: true, coordinationPath: '/private/coordination.json', environmentEvidencePath: '/private/after.json' };
+test('V2 performs exactly two backend probes in the same live observer and binds both private observations', async () => {
+  const f = fixture(true), logs: string[] = []; f.deps.log = line => logs.push(line);
+  const result = await executeAccountingRecovery(observeV2, f.deps);
+  assert.match(result, /Potwierdzono/);
+  assert.deepEqual(f.requests.map(r => r.action), ['status', 'begin-observe', 'pre-reset-probe', 'reset-proof', 'finalize-observation', 'status']);
+  const pre = f.requests.find(r => r.action === 'pre-reset-probe')!, reset = f.requests.find(r => r.action === 'reset-proof')!, finalize = f.requests.find(r => r.action === 'finalize-observation')!;
+  assert.ok(pre.action === 'pre-reset-probe' && reset.action === 'reset-proof' && finalize.action === 'finalize-observation');
+  assert.equal(reset.version, 2); assert.equal(finalize.version, 2);
+  assert.deepEqual(pre.evidence.before, reset.evidence.before);
+  assert.equal('operatorEvidence' in reset.evidence, false);
+  assert.equal('environmentEvidence' in reset.evidence, true);
+  assert.equal('preResetProbeDigest' in reset.evidence && reset.evidence.preResetProbeDigest.length, 64);
+  assert.equal(pre.evidence.coordinationDigest, ownerRecoveryHash(coordination()));
+  assert.equal(logs.filter(line => line.startsWith('Obserwacja aktywna.')).length, 1);
+});
+
+test('V2 prepare and supersede send coordination instead of V1 account attestation', async () => {
+  for (const action of ['prepare', 'supersede'] as const) {
+    const f = fixture(true), original = f.deps.start;
+    f.deps.start = async (...args) => {
+      const session = await original(...args), send = session.channel.request;
+      session.channel.request = async request => {
+        if (request.action !== action) return send(request);
+        assert.equal(request.version, 2); assert.ok('coordination' in request); assert.equal('operatorEvidence' in request, false);
+        assert.ok(f.records.some(record => record.requestId === request.requestId));
+        return { version: 1, ok: true, requestId: request.requestId, action: action === 'prepare' ? 'prepared' : 'superseded',
+          result: { ...f.operation, operationId: request.action === 'prepare' ? request.operationId : request.replacementOperationId } };
+      };
+      return session;
+    };
+    assert.match(await executeAccountingRecovery({ action, ...(action === 'supersede' ? { operationId: id(2) } : {}), apiEvidence: true, coordinationPath: '/private/coordination.json' }, f.deps), /Przygotowano/);
+  }
+});
+
+test('V2 nonflat, incomplete, malformed, foreign or stale pre-probe never authorizes a TWS reset', async () => {
+  for (const failure of ['nonflat', 'incomplete', 'malformed', 'session', 'operation', 'nonce', 'endpoint', 'account', 'stale', 'digest', 'lost']) {
+    const f = fixture(true), original = f.deps.start, logs: string[] = []; f.deps.log = line => logs.push(line);
+    f.deps.start = async (...args) => {
+      const session = await original(...args), send = session.channel.request;
+      session.channel.request = async request => {
+        const result = await send(request);
+        if (result.ok && result.action === 'pre-reset-probe-closed') {
+          if (failure === 'lost') throw new Error('EOF');
+          const proof = result.result.probe;
+          if (failure === 'nonflat' || failure === 'incomplete') { proof.result.outcome = failure === 'nonflat' ? 'NONFLAT' : 'INCOMPLETE'; proof.result.error = { code: 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN' }; }
+          if (failure === 'malformed') proof.result.openOrdersEndAt = null;
+          if (failure === 'session') proof.sessionId = id(80);
+          if (failure === 'operation') proof.operationId = id(80);
+          if (failure === 'nonce') proof.nonce = id(80);
+          if (failure === 'endpoint') proof.endpoint = { ...proof.endpoint, port: 4002 };
+          if (failure === 'account') proof.result.accountId = 'DU_OTHER';
+          if (failure === 'stale') for (const field of ['connectedAt', 'readyAt', 'positionsRequestedAt', 'openOrdersRequestedAt', 'positionsEndAt', 'openOrdersEndAt', 'completedAt', 'closedAt'] as const) proof.result[field] = iso(-301000);
+          result.result.probeDigest = failure === 'digest' ? hash : ownerRecoveryHash(proof);
+        }
+        return result;
+      }; return session;
+    };
+    await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /./, failure);
+    assert.equal(logs.some(line => line.startsWith('Obserwacja aktywna.')), false, failure);
+    assert.equal(f.requests.some(request => request.action === 'reset-proof'), false, failure);
+  }
+});
+
+test('V2 stale, changed or mismatched coordination and restarted pre-probe history fail closed', async () => {
+  for (const failure of ['stale', 'changed', 'process', 'restarted', 'version']) {
+    const f = fixture(true), logs: string[] = []; f.deps.log = line => logs.push(line);
+    if (failure === 'stale') {
+      f.operation.coordination!.environmentEvidence.observedAt = iso(-301000);
+      f.operation.coordination!.environmentEvidence.artifact.observedAt = iso(-301000);
+      f.operation.coordination!.environmentEvidence.process.startIdentity = iso(-400000);
+    }
+    if (failure === 'changed') f.deps.coordination = async () => ({ ...coordination(), coordinationId: id(80) });
+    if (failure === 'process') f.operation.coordination!.environmentEvidence.process = { ...oldProcess, pid: 999 };
+    if (failure === 'restarted') f.records.push({ version: 1, operationId: id(2), requestId: id(80), action: 'pre-reset-probe', digest: hash });
+    if (failure === 'version') { f.operation.version = 1; delete f.operation.coordination; }
+    await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /./, failure);
+    assert.equal(f.requests.some(request => request.action === 'pre-reset-probe'), false, failure);
+    assert.equal(logs.some(line => line.startsWith('Obserwacja aktywna.')), false, failure);
+  }
+});
+
+test('V2 repeatedly monitors exact TWS and Docker watcher while probes run, with full inventory only outside their sockets', async () => {
+  const f = fixture(true), originalStart = f.deps.start, host = f.deps.host(await f.deps.profile());
+  let inFlight = false, inventoryCount = 0, processCount = 0, watcherCount = 0;
+  const inventory = host.verifyProducerInventory, before = host.assertGatewayUnchanged, after = host.verifyGatewayReplacement;
+  host.verifyProducerInventory = async previous => { assert.equal(inFlight, false, 'full endpoint inventory during owned socket'); inventoryCount++; return inventory(previous); };
+  host.assertGatewayUnchanged = async (...args) => { if (inFlight) processCount++; return before(...args); };
+  host.verifyGatewayReplacement = async (...args) => { if (inFlight) processCount++; return after(...args); };
+  f.deps.start = async (...args) => {
+    const session = await originalStart(...args), send = session.channel.request;
+    session.watcher.flush = async () => { if (inFlight) watcherCount++; };
+    session.channel.request = async request => {
+      if (request.action === 'pre-reset-probe' || request.action === 'reset-proof') {
+        inFlight = true; await new Promise(resolveWait => setTimeout(resolveWait, 550)); inFlight = false;
+      }
+      return send(request);
+    }; return session;
+  };
+  await executeAccountingRecovery(observeV2, f.deps);
+  assert.ok(processCount >= 4); assert.ok(watcherCount >= 4); assert.ok(inventoryCount >= 4);
+});
+
+test('V2 process or watcher change during either probe cancels without continuing reset or finalization', async () => {
+  for (const phase of ['pre-reset-probe', 'reset-proof'] as const) for (const failure of ['process', 'watcher']) {
+    const f = fixture(true), original = f.deps.start, host = f.deps.host(await f.deps.profile()), logs: string[] = [];
+    f.deps.log = line => logs.push(line);
+    let inFlight = false, cancelled = 0;
+    const before = host.assertGatewayUnchanged, after = host.verifyGatewayReplacement;
+    host.assertGatewayUnchanged = async (...args) => { if (inFlight && failure === 'process') throw new Error('PROCESS_CHANGED'); return before(...args); };
+    host.verifyGatewayReplacement = async (...args) => { if (inFlight && failure === 'process') throw new Error('PROCESS_CHANGED'); return after(...args); };
+    f.deps.start = async (...args) => {
+      const session = await original(...args), send = session.channel.request;
+      session.channel.cancel = () => { cancelled++; };
+      session.watcher.check = () => { if (inFlight && failure === 'watcher') throw new Error('WATCHER_FAILED'); };
+      session.channel.request = async request => { if (request.action === phase) { inFlight = true; await new Promise(resolveWait => setTimeout(resolveWait, 550)); inFlight = false; } return send(request); };
+      return session;
+    };
+    await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /PROCESS_CHANGED|WATCHER_FAILED/);
+    assert.ok(cancelled > 0); assert.equal(f.requests.some(request => request.action === 'finalize-observation'), false);
+    if (phase === 'pre-reset-probe') assert.equal(logs.some(line => line.startsWith('Obserwacja aktywna.')), false);
+    await new Promise(resolveWait => setTimeout(resolveWait, 350));
+  }
+});
+
+test('V2 private environment and coordination files preserve artifact hash, mode, path and provenance validation', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'owner-env-'))); await chmod(dir, 0o700);
+  try {
+    const proof = environment(), bytes = Buffer.from('Actual Paper UI observation'); proof.artifact.sha256 = createHash('sha256').update(bytes).digest('hex');
+    const artifact = join(dir, proof.artifact.relativePath), path = join(dir, 'environment.json'), coordinationPath = join(dir, 'coordination.json');
+    await writeFile(artifact, bytes, { mode: 0o600 }); await writeFile(path, JSON.stringify(proof), { mode: 0o600 });
+    await writeFile(coordinationPath, JSON.stringify({ ...coordination(), environmentEvidence: proof }), { mode: 0o600 });
+    assert.deepEqual(await readAccountingEnvironmentEvidence(path), proof); assert.equal((await readAccountingCoordination(coordinationPath)).environmentEvidence.inspectionId, proof.inspectionId);
+    await chmod(artifact, 0o644); await assert.rejects(readAccountingEnvironmentEvidence(path)); await assert.rejects(readAccountingCoordination(coordinationPath)); await chmod(artifact, 0o600);
+    await writeFile(artifact, 'changed'); await assert.rejects(readAccountingEnvironmentEvidence(path)); await assert.rejects(readAccountingCoordination(coordinationPath));
+    await writeFile(artifact, bytes); await writeFile(path, JSON.stringify({ ...proof, provenance: 'invented' })); await assert.rejects(readAccountingEnvironmentEvidence(path));
+    await writeFile(path, JSON.stringify({ ...proof, artifact: { ...proof.artifact, relativePath: '../environment.txt' } })); await assert.rejects(readAccountingEnvironmentEvidence(path));
+    await symlink(coordinationPath, join(dir, 'linked.json')); await assert.rejects(readAccountingCoordination(join(dir, 'linked.json')));
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('V2 command parsing rejects missing coordination, mixed V1 proofs and unrelated evidence options', async () => {
+  for (const args of [
+    ['observe', '--operation', id(2), '--api-evidence', '--environment-evidence', '/after.json'],
+    ['prepare', '--api-evidence', '--operator-evidence', '/manual.json'],
+    ['supersede', '--operation', id(2), '--api-evidence', '--coordination', '/coord.json', '--environment-evidence', '/after.json'],
+    ['status', '--operation', id(2), '--api-evidence'],
+    ['observe', '--operation', id(2), '--operator-evidence', '/manual.json', '--coordination', '/coord.json'],
+  ]) await assert.rejects(runAccountingOwnerRecoveryCli(args, {}), /USAGE/);
+});
+
+test('V2 post-reset proof failures cannot finalize, even when the pre-reset probe succeeded', async () => {
+  for (const failure of ['nonflat', 'incomplete', 'phase', 'session', 'operation', 'nonce', 'stale', 'digest', 'v1']) {
+    const f = fixture(true), original = f.deps.start;
+    f.deps.start = async (...args) => {
+      const session = await original(...args), send = session.channel.request;
+      session.channel.request = async request => {
+        const response = await send(request);
+        if (request.action === 'reset-proof' && response.ok && response.action === 'handshake-closed' && 'version' in response.result.handshake) {
+          const proof = response.result.handshake;
+          if (failure === 'nonflat' || failure === 'incomplete') { proof.result.outcome = failure === 'nonflat' ? 'NONFLAT' : 'INCOMPLETE'; proof.result.error = { code: 'ACCOUNTING_OWNER_RECOVERY_RESET_UNPROVEN' }; }
+          if (failure === 'phase') proof.phase = 'pre-reset';
+          if (failure === 'session') proof.sessionId = id(90);
+          if (failure === 'operation') proof.operationId = id(90);
+          if (failure === 'nonce') proof.nonce = id(90);
+          if (failure === 'stale') for (const field of ['connectedAt', 'readyAt', 'positionsRequestedAt', 'openOrdersRequestedAt', 'positionsEndAt', 'openOrdersEndAt', 'completedAt', 'closedAt'] as const) proof.result[field] = iso(-301000);
+          if (failure === 'v1') response.result.handshake = { sessionId: id(6), dispatchEventId: id(7), accountId: profile.accountId, clientId: 0, serverVersion: 180, connectedAt: iso(), readyAt: iso(), closedAt: iso(), socketCloseObserved: true };
+          response.result.handshakeDigest = failure === 'digest' ? hash : ownerRecoveryHash(response.result.handshake);
+        }
+        return response;
+      }; return session;
+    };
+    await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /./, failure);
+    assert.equal(f.requests.filter(request => request.action === 'pre-reset-probe').length, 1);
+    assert.equal(f.requests.some(request => request.action === 'finalize-observation'), false, failure);
+  }
+});
+
+test('V2 requires a fresh replacement-bound environment file and rechecks both private files through finalization', async () => {
+  for (const failure of ['missing-then-written', 'stale', 'process', 'nonce', 'environment-changed', 'coordination-changed']) {
+    const f = fixture(true), readEnvironment = f.deps.environment, readCoordination = f.deps.coordination;
+    let environmentReads = 0;
+    f.deps.environment = async path => {
+      environmentReads++;
+      if (failure === 'missing-then-written' && environmentReads === 1) throw Object.assign(new Error('not yet written'), { code: 'ENOENT' });
+      const proof = await readEnvironment(path);
+      if (failure === 'stale') { proof.observedAt = iso(-1000); proof.artifact.observedAt = iso(-1000); }
+      if (failure === 'process') proof.process = { ...oldProcess };
+      if (failure === 'nonce') proof.afterReset!.nonce = id(90);
+      if (failure === 'environment-changed' && environmentReads > 1) proof.inspectionId = id(90);
+      return proof;
+    };
+    f.deps.coordination = async path => {
+      const proof = await readCoordination(path);
+      return failure === 'coordination-changed' && environmentReads > 0 ? { ...proof, authorizationReference: 'changed' } : proof;
+    };
+    if (failure === 'missing-then-written') {
+      assert.match(await executeAccountingRecovery(observeV2, f.deps), /Potwierdzono/);
+      assert.ok(environmentReads > 2);
+    } else {
+      await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /./, failure);
+      assert.equal(f.requests.some(request => request.action === 'reset-proof'), false, failure);
+    }
+  }
+});
+
+test('V2 pre-probe dispatch requires the entire remaining budget and rejects late process replacement before reset permission', async () => {
+  for (const failure of ['budget', 'late-process']) {
+    const f = fixture(true), logs: string[] = []; f.deps.log = line => logs.push(line);
+    if (failure === 'budget') {
+      const host = f.deps.host(await f.deps.profile()), inventory = host.verifyProducerInventory;
+      host.verifyProducerInventory = async previous => { await f.deps.sleep(880000); return inventory(previous); };
+    }
+    else {
+      const host = f.deps.host(await f.deps.profile()), original = host.assertGatewayUnchanged;
+      host.assertGatewayUnchanged = async (...args) => {
+        if (f.requests.some(request => request.action === 'pre-reset-probe')) throw new Error('ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED');
+        return original(...args);
+      };
+    }
+    await assert.rejects(executeAccountingRecovery(observeV2, f.deps), /OBSERVATION_EXPIRED|PROCESS_CHANGED/);
+    assert.equal(logs.some(line => line.startsWith('Obserwacja aktywna.')), false);
+    assert.equal(f.requests.some(request => request.action === 'reset-proof'), false);
+    if (failure === 'budget') assert.equal(f.requests.some(request => request.action === 'pre-reset-probe'), false);
+  }
 });

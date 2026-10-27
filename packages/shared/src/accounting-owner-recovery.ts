@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 export const OWNER_RECOVERY_LIMITS = Object.freeze({
   messageBytes: 65_536, sessionBytes: 262_144, operationMs: 900_000,
   operatorEvidenceMs: 300_000, clockDriftMs: 1_000, databaseRoundTripMs: 2_000,
-  handshakeMs: 10_000, closureReserveMs: 2_000, producers: 64, nativeProcesses: 128,
+  handshakeMs: 10_000, probeMs: 20_000, closureReserveMs: 2_000, producers: 64, nativeProcesses: 128,
 });
 export const OWNER_RECOVERY_SERVICES = ['execution-engine', 'ingestion', 'llm-agent', 'signal-engine', 'backtest-engine', 'ui'] as const;
 export type OwnerRecoveryService = typeof OWNER_RECOVERY_SERVICES[number];
@@ -52,27 +52,82 @@ export interface OwnerRecoveryHostEvidence {
   clock: { wallStartedAt: string; wallCheckedAt: string; monotonicElapsedMs: number; dbSampleAt: string; dbRoundTripMs: number };
   operatorEvidence: OwnerRecoveryOperatorEvidence;
 }
+export interface OwnerRecoveryEnvironmentEvidence {
+  version: 2; inspectionId: string; accountId: string; endpoint: OwnerRecoveryEndpoint;
+  settingsHash: string; deploymentHash: string; actor: string;
+  provenance: 'agent-ui-observation' | 'owner-ui-observation'; observedAt: string;
+  product: 'TWS'; environment: 'paper'; process: OwnerRecoveryProcess;
+  artifact: { relativePath: string; sha256: string; observedAt: string };
+  afterReset?: { operationId: string; nonce: string };
+}
+export interface OwnerRecoveryCoordination {
+  version: 2; coordinationId: string; actor: string; accountId: string; endpoint: OwnerRecoveryEndpoint;
+  settingsHash: string; deploymentHash: string; recordedAt: string; authorizationReference: string;
+  declarations: {
+    noPendingManualActionsOrDrafts: OwnerRecoveryDeclaration;
+    noOtherNativeOrExternalClients: OwnerRecoveryDeclaration;
+    noChangesOrClientLaunchesUntilRecoveryEnds: OwnerRecoveryDeclaration;
+  };
+  environmentEvidence: OwnerRecoveryEnvironmentEvidence;
+}
+export interface OwnerRecoveryDeclaration {
+  confirmed: true; source: 'carried-owner-authorization' | 'owner-attestation' | 'agent-observation';
+  actor: string; sourceReference: string; observedAt: string;
+}
+export interface OwnerRecoveryProbeResult {
+  accountId: string; clientId: 0; protocolVersion: number | null; sdkVersion: '@stoqey/ib@1.6.10';
+  connectedAt: string | null; readyAt: string | null; positionsRequestedAt: string | null;
+  openOrdersRequestedAt: string | null; positionsEndAt: string | null; openOrdersEndAt: string | null;
+  completedAt: string | null; closedAt: string; transportClosed: true;
+  positionRows: number; openOrderRows: number; eventCount: number; rowsDigest: string;
+  outcome: 'FLAT' | 'NONFLAT' | 'INCOMPLETE';
+  error: null | { code: string; cause?: { name: string | null; code: string | null; message: string | null } };
+}
+export interface OwnerRecoveryAccountProbe {
+  version: 2; probeId: string; operationId: string; nonce: string; sessionId: string;
+  dispatchEventId: string; phase: 'pre-reset' | 'post-reset'; endpoint: OwnerRecoveryEndpoint;
+  result: OwnerRecoveryProbeResult;
+}
+export interface OwnerRecoveryPreProbeEvidence {
+  version: 2; operationId: string; nonce: string; bindingDigest: string;
+  profile: OwnerRecoveryProfile; coordinationDigest: string;
+  before: OwnerRecoveryProcessObservation; inventory: OwnerRecoveryInventory;
+  environmentEvidence: OwnerRecoveryEnvironmentEvidence;
+}
+export interface OwnerRecoveryHostEvidenceV2 extends Omit<OwnerRecoveryHostEvidence, 'version' | 'operatorEvidence'> {
+  version: 2; coordinationDigest: string; preResetProbeDigest: string;
+  environmentEvidence: OwnerRecoveryEnvironmentEvidence;
+}
+export type OwnerRecoveryWitness = OwnerRecoveryHostEvidence | OwnerRecoveryHostEvidenceV2;
+export type OwnerRecoveryClosedProof = OwnerRecoveryHandshake | OwnerRecoveryAccountProbe;
 export interface OwnerRecoveryHandshake {
   sessionId: string; dispatchEventId: string; accountId: string; clientId: 0;
   serverVersion: number; connectedAt: string; readyAt: string; closedAt: string;
   socketCloseObserved: true;
 }
 export interface OwnerRecoveryOperation {
-  version: 1; operationId: string; nonce: string; state: OwnerRecoveryState;
+  version: 1 | 2; coordination?: OwnerRecoveryCoordination; operationId: string; nonce: string; state: OwnerRecoveryState;
   owner: OwnerRecoveryOwner; profile: OwnerRecoveryProfile; pauseRevision: number;
   actor: string; preparedAt: string; expiresAt: string; bindingDigest: string;
   evidenceDigest: string | null; successorOperationId: string | null; receiptId: string | null;
 }
 export interface OwnerRecoveryReceipt {
-  version: 1; receiptId: string; operationId: string; commitRequestId: string;
+  version: 1 | 2; receiptId: string; operationId: string; commitRequestId: string;
   owner: OwnerRecoveryOwner; bindingDigest: string; evidenceDigest: string; actor: string;
   committedAt: string; retiredAt: string; retirementState: 'RETIRED';
-  method: 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1';
+  method: 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1' | 'API_OBSERVED_LOCAL_TWS_RESET_V2';
 }
 interface OwnerRecoveryAuthenticated {
   version: 1; requestId: string; actor: string; token: string; profile: OwnerRecoveryProfile;
 }
+type OwnerRecoveryV2Authenticated = Omit<OwnerRecoveryAuthenticated, 'version'> & { version: 2 };
 export type OwnerRecoveryRequest =
+  | (OwnerRecoveryV2Authenticated & { action: 'prepare'; operationId: string; coordination: OwnerRecoveryCoordination; inventory: OwnerRecoveryInventory })
+  | (OwnerRecoveryV2Authenticated & { action: 'supersede'; operationId: string; replacementOperationId: string; coordination: OwnerRecoveryCoordination; inventory: OwnerRecoveryInventory })
+  | (OwnerRecoveryV2Authenticated & { action: 'begin-observe'; operationId: string; bindingDigest: string })
+  | { version: 2; action: 'pre-reset-probe'; requestId: string; observerSessionId: string; evidence: OwnerRecoveryPreProbeEvidence }
+  | { version: 2; action: 'reset-proof'; requestId: string; observerSessionId: string; evidence: OwnerRecoveryHostEvidenceV2 }
+  | { version: 2; action: 'finalize-observation'; requestId: string; observerSessionId: string; observedRequestId: string; commitRequestId: string; handshakeDigest: string; evidence: OwnerRecoveryHostEvidenceV2 }
   | (OwnerRecoveryAuthenticated & { action: 'prepare'; operationId: string; operatorEvidence: OwnerRecoveryOperatorEvidence; inventory: OwnerRecoveryInventory })
   | (OwnerRecoveryAuthenticated & { action: 'status'; operationId: string; lookupRequestId?: string })
   | (OwnerRecoveryAuthenticated & { action: 'supersede'; operationId: string; replacementOperationId: string; operatorEvidence: OwnerRecoveryOperatorEvidence; inventory: OwnerRecoveryInventory })
@@ -80,21 +135,22 @@ export type OwnerRecoveryRequest =
   | { version: 1; action: 'reset-proof'; requestId: string; observerSessionId: string; evidence: OwnerRecoveryHostEvidence }
   | { version: 1; action: 'finalize-observation'; requestId: string; observerSessionId: string; observedRequestId: string; commitRequestId: string; handshakeDigest: string; evidence: OwnerRecoveryHostEvidence };
 export interface OwnerRecoveryEventMetadata {
-  eventId: string; requestId: string; kind: 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED';
+  eventId: string; requestId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED';
   actor: string; recordedAt: string; bindingDigest: string; evidenceDigest: string | null;
 }
 export interface OwnerRecoveryStatus {
   pendingOperationId: string | null; events: OwnerRecoveryEventMetadata[];
   operation: OwnerRecoveryOperation | null; maintenancePending: boolean;
   receipt: OwnerRecoveryReceipt | null;
-  lookup: null | { requestId: string; operationId: string; kind: 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED'; evidenceDigest: string | null };
+  lookup: null | { requestId: string; operationId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED'; evidenceDigest: string | null };
 }
 export type OwnerRecoveryResponse =
   | { version: 1; requestId: string; ok: false; error: { code: string; cause?: { name: string | null; code: string | number | null; message: string | null } } }
   | { version: 1; requestId: string; ok: true; action: 'prepared' | 'superseded'; result: OwnerRecoveryOperation }
   | { version: 1; requestId: string; ok: true; action: 'status'; result: OwnerRecoveryStatus }
   | { version: 1; requestId: string; ok: true; action: 'observer-ready'; result: { operation: OwnerRecoveryOperation; observerSessionId: string; dbNow: string; remainingMs: number } }
-  | { version: 1; requestId: string; ok: true; action: 'handshake-closed'; result: { handshake: OwnerRecoveryHandshake; handshakeDigest: string } }
+  | { version: 1; requestId: string; ok: true; action: 'handshake-closed'; result: { handshake: OwnerRecoveryClosedProof; handshakeDigest: string } }
+  | { version: 1; requestId: string; ok: true; action: 'pre-reset-probe-closed'; result: { probe: OwnerRecoveryAccountProbe; probeDigest: string } }
   | { version: 1; requestId: string; ok: true; action: 'committed'; result: { operation: OwnerRecoveryOperation; receipt: OwnerRecoveryReceipt; unlockAcknowledged: true } };
 
 type Validator = (value: unknown) => void;
@@ -193,15 +249,69 @@ const inventory: Validator = value => {
 function sameProcess(a: OwnerRecoveryProcess, b: OwnerRecoveryProcess): boolean {
   return a.pid === b.pid && a.startIdentity === b.startIdentity && a.executableHash === b.executableHash;
 }
+const environmentEvidence: Validator = value => {
+  object(value, { version: literal(2), inspectionId: uuid, accountId: v => text(v, 80), endpoint,
+    settingsHash: hash, deploymentHash: hash, actor: v => text(v),
+    provenance: enumeration(['agent-ui-observation', 'owner-ui-observation']), observedAt: instant,
+    product: literal('TWS'), environment: literal('paper'), process: processIdentity,
+    artifact: v => { object(v, { relativePath: p => { text(p, 300); check(!p.startsWith('/') && !p.includes('\\') && p.split('/').every(x => x && x !== '.' && x !== '..') && /\.(png|jpe?g|txt)$/i.test(p)); }, sha256: hash, observedAt: instant }); },
+  }, { afterReset: v => object(v, { operationId: uuid, nonce: uuid }) });
+  const e = value as unknown as OwnerRecoveryEnvironmentEvidence;
+  check(Date.parse(e.artifact.observedAt) <= Date.parse(e.observedAt) && Date.parse(e.process.startIdentity) <= Date.parse(e.artifact.observedAt));
+};
+const declaration: Validator = value => object(value, { confirmed: literal(true),
+  source: enumeration(['carried-owner-authorization', 'owner-attestation', 'agent-observation']),
+  actor: v => text(v), sourceReference: v => text(v, 500), observedAt: instant });
+const coordination: Validator = value => {
+  object(value, { version: literal(2), coordinationId: uuid, actor: v => text(v), accountId: v => text(v, 80), endpoint,
+    settingsHash: hash, deploymentHash: hash, recordedAt: instant, authorizationReference: v => text(v, 500),
+    declarations: v => object(v, { noPendingManualActionsOrDrafts: declaration, noOtherNativeOrExternalClients: declaration,
+      noChangesOrClientLaunchesUntilRecoveryEnds: declaration }), environmentEvidence });
+  const c = value as unknown as OwnerRecoveryCoordination, e = c.environmentEvidence;
+  check(!e.afterReset && e.accountId === c.accountId && e.settingsHash === c.settingsHash && e.deploymentHash === c.deploymentHash && ownerRecoveryHash(e.endpoint) === ownerRecoveryHash(c.endpoint));
+  check(Object.values(c.declarations).every(d => Date.parse(d.observedAt) <= Date.parse(c.recordedAt)));
+  check(Date.parse(e.observedAt) <= Date.parse(c.recordedAt));
+};
+const probeResult: Validator = value => {
+  const optionalTime = nullable(instant);
+  object(value, { accountId: v => text(v, 80), clientId: literal(0), protocolVersion: nullable(v => integer(v)), sdkVersion: literal('@stoqey/ib@1.6.10'),
+    connectedAt: optionalTime, readyAt: optionalTime, positionsRequestedAt: optionalTime, openOrdersRequestedAt: optionalTime,
+    positionsEndAt: optionalTime, openOrdersEndAt: optionalTime, completedAt: optionalTime, closedAt: instant, transportClosed: literal(true),
+    positionRows: v => integer(v, 0, 4096), openOrderRows: v => integer(v, 0, 4096), eventCount: v => integer(v, 0, 4096), rowsDigest: hash,
+    outcome: enumeration(['FLAT', 'NONFLAT', 'INCOMPLETE']), error: nullable(v => object(v, { code: c => text(c, 100) },
+      { cause: c => object(c, { name: nullable(n => text(n, 200)), code: nullable(n => text(n, 200)), message: nullable(n => text(n, 1000)) }) })),
+  });
+  const r = value as unknown as OwnerRecoveryProbeResult;
+  for (const t of [r.connectedAt, r.readyAt, r.positionsRequestedAt, r.openOrdersRequestedAt, r.positionsEndAt, r.openOrdersEndAt, r.completedAt]) if (t !== null) check(Date.parse(t) <= Date.parse(r.closedAt));
+  if (r.outcome === 'FLAT') {
+    if (r.connectedAt !== null) check(Date.parse(r.closedAt) - Date.parse(r.connectedAt) <= OWNER_RECOVERY_LIMITS.probeMs);
+    check(r.error === null && r.protocolVersion !== null && r.openOrderRows === 0);
+    check(r.connectedAt && r.readyAt && r.positionsRequestedAt && r.openOrdersRequestedAt && r.positionsEndAt && r.openOrdersEndAt && r.completedAt);
+    check(Date.parse(r.connectedAt) <= Date.parse(r.readyAt) && Date.parse(r.readyAt) <= Date.parse(r.positionsRequestedAt)
+      && Date.parse(r.readyAt) <= Date.parse(r.openOrdersRequestedAt) && Date.parse(r.positionsRequestedAt) <= Date.parse(r.positionsEndAt)
+      && Date.parse(r.openOrdersRequestedAt) <= Date.parse(r.openOrdersEndAt) && Date.parse(r.positionsEndAt) <= Date.parse(r.completedAt) && Date.parse(r.openOrdersEndAt) <= Date.parse(r.completedAt));
+  } else check(r.error !== null);
+};
+const accountProbe: Validator = value => object(value, { version: literal(2), probeId: uuid, operationId: uuid, nonce: uuid,
+  sessionId: uuid, dispatchEventId: uuid, phase: enumeration(['pre-reset', 'post-reset']), endpoint, result: probeResult });
+const preProbeEvidence: Validator = value => {
+  object(value, { version: literal(2), operationId: uuid, nonce: uuid, bindingDigest: hash, profile,
+    coordinationDigest: hash, before: processObservation, inventory, environmentEvidence });
+  const e = value as unknown as OwnerRecoveryPreProbeEvidence;
+  check(!e.environmentEvidence.afterReset && sameProcess(e.before.process, e.environmentEvidence.process));
+  check(e.profile.accountId === e.environmentEvidence.accountId && e.profile.settingsHash === e.environmentEvidence.settingsHash && e.profile.deploymentHash === e.environmentEvidence.deploymentHash && ownerRecoveryHash(e.profile.endpoint) === ownerRecoveryHash(e.environmentEvidence.endpoint));
+};
 const hostEvidence: Validator = value => {
-  object(value, { version: literal(1), operationId: uuid, nonce: uuid, bindingDigest: hash, profile, collectorStartedAt: instant,
+  const v2 = (value as { version?: unknown })?.version === 2;
+  object(value, { version: literal(v2 ? 2 : 1), operationId: uuid, nonce: uuid, bindingDigest: hash, profile, collectorStartedAt: instant,
     before: processObservation, stopped: v => object(v, { observedAt: instant, processAbsent: literal(true), listenerAbsent: literal(true) }),
     after: processObservation, current: processObservation, initialInventory: inventory, finalInventory: inventory,
     dockerEvents: v => object(v, { startedAt: instant, checkedAt: instant, continuous: literal(true), noProducerStarts: literal(true) }),
     clock: v => object(v, { wallStartedAt: instant, wallCheckedAt: instant, monotonicElapsedMs: n => integer(n, 0, OWNER_RECOVERY_LIMITS.operationMs - 1), dbSampleAt: instant,
-      dbRoundTripMs: n => integer(n, 0, OWNER_RECOVERY_LIMITS.databaseRoundTripMs) }), operatorEvidence,
+      dbRoundTripMs: n => integer(n, 0, OWNER_RECOVERY_LIMITS.databaseRoundTripMs) }),
+    ...(v2 ? { coordinationDigest: hash, preResetProbeDigest: hash, environmentEvidence } : { operatorEvidence }),
   });
-  const e = value as unknown as OwnerRecoveryHostEvidence, time = (v: string) => Date.parse(v);
+  const e = value as unknown as OwnerRecoveryWitness, time = (v: string) => Date.parse(v);
   check(time(e.collectorStartedAt) <= time(e.initialInventory.observedAt) && time(e.initialInventory.observedAt) <= time(e.before.observedAt));
   check(time(e.before.observedAt) < time(e.stopped.observedAt) && time(e.stopped.observedAt) < time(e.after.observedAt));
   check(e.before.process.pid !== e.after.process.pid && time(e.after.process.startIdentity) > time(e.before.process.startIdentity));
@@ -212,13 +322,21 @@ const hostEvidence: Validator = value => {
   const elapsed = time(e.clock.wallCheckedAt) - time(e.clock.wallStartedAt);
   check(elapsed >= 0 && elapsed < OWNER_RECOVERY_LIMITS.operationMs && Math.abs(elapsed - e.clock.monotonicElapsedMs) <= OWNER_RECOVERY_LIMITS.clockDriftMs);
   check(time(e.clock.dbSampleAt) >= time(e.clock.wallStartedAt) - OWNER_RECOVERY_LIMITS.clockDriftMs && time(e.clock.dbSampleAt) <= time(e.clock.wallCheckedAt) + OWNER_RECOVERY_LIMITS.clockDriftMs);
-  const after = e.operatorEvidence.afterReset;
-  check(after && after.operationId === e.operationId && after.nonce === e.nonce && sameProcess(after.process, e.after.process));
-  check(e.operatorEvidence.accountId === e.profile.accountId && e.operatorEvidence.settingsHash === e.profile.settingsHash && e.operatorEvidence.deploymentHash === e.profile.deploymentHash);
-  check(ownerRecoveryHash(e.operatorEvidence.endpoint) === ownerRecoveryHash(e.profile.endpoint));
-  check(time(e.operatorEvidence.observedAt) >= time(e.after.observedAt) && time(e.operatorEvidence.observedAt) <= time(e.clock.wallCheckedAt));
-  check(e.operatorEvidence.artifacts.every(a => time(a.observedAt) >= time(e.after.observedAt)));
-  check(time(e.clock.wallCheckedAt) - time(e.operatorEvidence.observedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs);
+  if (e.version === 1) {
+    const after = e.operatorEvidence.afterReset;
+    check(after && after.operationId === e.operationId && after.nonce === e.nonce && sameProcess(after.process, e.after.process));
+    check(e.operatorEvidence.accountId === e.profile.accountId && e.operatorEvidence.settingsHash === e.profile.settingsHash && e.operatorEvidence.deploymentHash === e.profile.deploymentHash);
+    check(ownerRecoveryHash(e.operatorEvidence.endpoint) === ownerRecoveryHash(e.profile.endpoint));
+    check(time(e.operatorEvidence.observedAt) >= time(e.after.observedAt) && time(e.operatorEvidence.observedAt) <= time(e.clock.wallCheckedAt));
+    check(e.operatorEvidence.artifacts.every(a => time(a.observedAt) >= time(e.after.observedAt)));
+    check(time(e.clock.wallCheckedAt) - time(e.operatorEvidence.observedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs);
+  } else {
+    const env = e.environmentEvidence;
+    check(env.afterReset?.operationId === e.operationId && env.afterReset.nonce === e.nonce && sameProcess(env.process, e.after.process));
+    check(env.accountId === e.profile.accountId && env.settingsHash === e.profile.settingsHash && env.deploymentHash === e.profile.deploymentHash && ownerRecoveryHash(env.endpoint) === ownerRecoveryHash(e.profile.endpoint));
+    check(time(env.artifact.observedAt) >= time(e.after.observedAt) && time(env.observedAt) <= time(e.clock.wallCheckedAt));
+    check(time(e.clock.wallCheckedAt) - time(env.artifact.observedAt) <= OWNER_RECOVERY_LIMITS.operatorEvidenceMs);
+  }
   check(ownerRecoveryHash(e.initialInventory.producers) === ownerRecoveryHash(e.finalInventory.producers));
   check(ownerRecoveryHash([...e.initialInventory.absentServices].sort()) === ownerRecoveryHash([...e.finalInventory.absentServices].sort()));
   check(e.initialInventory.producers.every(p => p.project === e.profile.project && p.imageId === e.profile.imageId));
@@ -231,7 +349,8 @@ const handshake: Validator = value => {
   check(Date.parse(h.closedAt) - Date.parse(h.connectedAt) <= OWNER_RECOVERY_LIMITS.handshakeMs);
 };
 const operation: Validator = value => {
-  object(value, { version: literal(1), operationId: uuid, nonce: uuid, state: enumeration(['PREPARED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']),
+  const v2 = (value as { version?: unknown })?.version === 2;
+  object(value, { version: literal(v2 ? 2 : 1), ...(v2 ? { coordination } : {}), operationId: uuid, nonce: uuid, state: enumeration(['PREPARED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']),
     owner, profile, pauseRevision: v => integer(v), actor: v => text(v), preparedAt: instant, expiresAt: instant, bindingDigest: hash,
     evidenceDigest: nullable(hash), successorOperationId: nullable(uuid), receiptId: nullable(uuid),
   });
@@ -241,11 +360,17 @@ const operation: Validator = value => {
   check(op.state !== 'PREPARED' || op.evidenceDigest === null);
   check(!['OBSERVED', 'COMMITTED'].includes(op.state) || op.evidenceDigest !== null);
   check(op.successorOperationId !== op.operationId);
+  if (op.version === 2) {
+    const c = op.coordination!;
+    check(c.actor === op.actor && c.accountId === op.profile.accountId && c.settingsHash === op.profile.settingsHash && c.deploymentHash === op.profile.deploymentHash && ownerRecoveryHash(c.endpoint) === ownerRecoveryHash(op.profile.endpoint));
+    check(Date.parse(c.recordedAt) <= Date.parse(op.preparedAt));
+  }
 };
 const receipt: Validator = value => {
-  object(value, { version: literal(1), receiptId: uuid, operationId: uuid, commitRequestId: uuid, owner,
+  const v2 = (value as { version?: unknown })?.version === 2;
+  object(value, { version: literal(v2 ? 2 : 1), receiptId: uuid, operationId: uuid, commitRequestId: uuid, owner,
     bindingDigest: hash, evidenceDigest: hash, actor: v => text(v), committedAt: instant, retiredAt: instant,
-    retirementState: literal('RETIRED'), method: literal('OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1'),
+    retirementState: literal('RETIRED'), method: literal(v2 ? 'API_OBSERVED_LOCAL_TWS_RESET_V2' : 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1'),
   });
   check(Date.parse(value.retiredAt as string) === Date.parse(value.committedAt as string));
 };
@@ -254,7 +379,12 @@ export function parseOwnerRecoveryProfile(value: unknown): OwnerRecoveryProfile 
 export function parseOwnerRecoveryOwner(value: unknown): OwnerRecoveryOwner { return parse(value, owner); }
 export function parseOwnerRecoveryInventory(value: unknown): OwnerRecoveryInventory { return parse(value, inventory); }
 export function parseOwnerRecoveryOperatorEvidence(value: unknown): OwnerRecoveryOperatorEvidence { return parse(value, operatorEvidence); }
-export function parseOwnerRecoveryHostEvidence(value: unknown): OwnerRecoveryHostEvidence { return parse(value, hostEvidence); }
+export function parseOwnerRecoveryHostEvidence(value: unknown): OwnerRecoveryWitness { return parse(value, hostEvidence); }
+export function parseOwnerRecoveryEnvironmentEvidence(value: unknown): OwnerRecoveryEnvironmentEvidence { return parse(value, environmentEvidence); }
+export function parseOwnerRecoveryCoordination(value: unknown): OwnerRecoveryCoordination { return parse(value, coordination); }
+export function parseOwnerRecoveryAccountProbe(value: unknown): OwnerRecoveryAccountProbe { return parse(value, accountProbe); }
+export function parseOwnerRecoveryPreProbeEvidence(value: unknown): OwnerRecoveryPreProbeEvidence { return parse(value, preProbeEvidence); }
+export function parseOwnerRecoveryClosedProof(value: unknown): OwnerRecoveryClosedProof { return parse(value, v => (v as { version?: unknown })?.version === 2 ? accountProbe(v) : handshake(v)); }
 export function parseOwnerRecoveryHandshake(value: unknown): OwnerRecoveryHandshake { return parse(value, handshake); }
 export function parseOwnerRecoveryOperation(value: unknown): OwnerRecoveryOperation { return parse(value, operation); }
 export function parseOwnerRecoveryReceipt(value: unknown): OwnerRecoveryReceipt { return parse(value, receipt); }
@@ -274,29 +404,34 @@ const authenticated = { version: literal(1), requestId: uuid, actor: (v: unknown
 export function parseOwnerRecoveryRequest(value: unknown): OwnerRecoveryRequest {
   return parse(value, v => {
     check(v !== null && typeof v === 'object');
-    const action = (v as Record<string, unknown>).action;
-    if (action === 'prepare') object(v, { ...authenticated, action: literal(action), operationId: uuid, operatorEvidence, inventory });
+    const raw = v as Record<string, unknown>, action = raw.action, v2 = raw.version === 2;
+    const auth = { ...authenticated, version: literal(v2 ? 2 : 1) };
+    const accountProof: Record<string, Validator> = v2 ? { coordination } : { operatorEvidence };
+    if (action === 'prepare') object(v, { ...auth, action: literal(action), operationId: uuid, ...accountProof, inventory });
     else if (action === 'status') object(v, { ...authenticated, action: literal(action), operationId: uuid }, { lookupRequestId: uuid });
-    else if (action === 'supersede') object(v, { ...authenticated, action: literal(action), operationId: uuid, replacementOperationId: uuid, operatorEvidence, inventory });
-    else if (action === 'begin-observe') object(v, { ...authenticated, action: literal(action), operationId: uuid, bindingDigest: hash });
-    else if (action === 'reset-proof') object(v, { version: literal(1), action: literal(action), requestId: uuid, observerSessionId: uuid, evidence: hostEvidence });
-    else if (action === 'finalize-observation') object(v, { version: literal(1), action: literal(action), requestId: uuid, observerSessionId: uuid,
+    else if (action === 'supersede') object(v, { ...auth, action: literal(action), operationId: uuid, replacementOperationId: uuid, ...accountProof, inventory });
+    else if (action === 'begin-observe') object(v, { ...auth, action: literal(action), operationId: uuid, bindingDigest: hash });
+    else if (action === 'pre-reset-probe') object(v, { version: literal(2), action: literal(action), requestId: uuid, observerSessionId: uuid, evidence: preProbeEvidence });
+    else if (action === 'reset-proof') object(v, { version: literal(v2 ? 2 : 1), action: literal(action), requestId: uuid, observerSessionId: uuid, evidence: hostEvidence });
+    else if (action === 'finalize-observation') object(v, { version: literal(v2 ? 2 : 1), action: literal(action), requestId: uuid, observerSessionId: uuid,
       observedRequestId: uuid, commitRequestId: uuid, handshakeDigest: hash, evidence: hostEvidence });
     else fail();
     const request = v as OwnerRecoveryRequest;
     if (request.action === 'prepare' || request.action === 'supersede') {
-      check(!request.operatorEvidence.afterReset);
-      check(request.operatorEvidence.accountId === request.profile.accountId && request.operatorEvidence.settingsHash === request.profile.settingsHash && request.operatorEvidence.deploymentHash === request.profile.deploymentHash);
-      check(ownerRecoveryHash(request.operatorEvidence.endpoint) === ownerRecoveryHash(request.profile.endpoint));
+      const proof = request.version === 2 ? request.coordination : request.operatorEvidence;
+      if (request.version === 1) check(!request.operatorEvidence.afterReset);
+      check(proof.accountId === request.profile.accountId && proof.settingsHash === request.profile.settingsHash && proof.deploymentHash === request.profile.deploymentHash);
+      check(ownerRecoveryHash(proof.endpoint) === ownerRecoveryHash(request.profile.endpoint));
       check(request.inventory.producers.every(p => p.project === request.profile.project && p.imageId === request.profile.imageId));
       if (request.action === 'supersede') check(request.operationId !== request.replacementOperationId);
     }
+    if (request.action === 'reset-proof' || request.action === 'finalize-observation') check(request.version === request.evidence.version);
     if (request.action === 'finalize-observation') check(new Set([request.requestId, request.observedRequestId, request.commitRequestId]).size === 3);
   });
 }
 const status: Validator = value => {
-  object(value, { pendingOperationId: nullable(uuid), events: array(v => object(v, { eventId: uuid, requestId: uuid, kind: enumeration(['PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), actor: a => text(a), recordedAt: instant, bindingDigest: hash, evidenceDigest: nullable(hash) }), 0, 6), operation: nullable(operation), maintenancePending: v => check(typeof v === 'boolean'), receipt: nullable(receipt), lookup: nullable(v => object(v, {
-    requestId: uuid, operationId: uuid, kind: enumeration(['PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), evidenceDigest: nullable(hash),
+  object(value, { pendingOperationId: nullable(uuid), events: array(v => object(v, { eventId: uuid, requestId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), actor: a => text(a), recordedAt: instant, bindingDigest: hash, evidenceDigest: nullable(hash) }), 0, 8), operation: nullable(operation), maintenancePending: v => check(typeof v === 'boolean'), receipt: nullable(receipt), lookup: nullable(v => object(v, {
+    requestId: uuid, operationId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), evidenceDigest: nullable(hash),
   })) });
   const s = value as unknown as OwnerRecoveryStatus;
   check(s.maintenancePending === (s.pendingOperationId !== null));
@@ -304,7 +439,7 @@ const status: Validator = value => {
   check(s.events.every(e => s.operation && e.bindingDigest === s.operation.bindingDigest));
   if (s.operation && ['PREPARED', 'OBSERVED'].includes(s.operation.state)) check(s.pendingOperationId === s.operation.operationId);
   if (s.lookup) check(s.lookup.operationId === s.operation?.operationId && s.events.some(e => e.requestId === s.lookup!.requestId && e.kind === s.lookup!.kind && e.evidenceDigest === s.lookup!.evidenceDigest));
-  if (s.receipt) check(s.operation?.state === 'COMMITTED' && s.operation.operationId === s.receipt.operationId && s.operation.receiptId === s.receipt.receiptId && s.operation.bindingDigest === s.receipt.bindingDigest && s.operation.evidenceDigest === s.receipt.evidenceDigest && ownerRecoveryHash(s.operation.owner) === ownerRecoveryHash(s.receipt.owner));
+  if (s.receipt) check(s.operation?.state === 'COMMITTED' && s.operation.version === s.receipt.version && s.operation.operationId === s.receipt.operationId && s.operation.receiptId === s.receipt.receiptId && s.operation.bindingDigest === s.receipt.bindingDigest && s.operation.evidenceDigest === s.receipt.evidenceDigest && ownerRecoveryHash(s.operation.owner) === ownerRecoveryHash(s.receipt.owner));
 };
 export function parseOwnerRecoveryResponse(value: unknown): OwnerRecoveryResponse {
   return parse(value, v => {
@@ -320,11 +455,12 @@ export function parseOwnerRecoveryResponse(value: unknown): OwnerRecoveryRespons
     }
     const result = r.action === 'prepared' || r.action === 'superseded' ? (x: unknown) => { operation(x); check((x as OwnerRecoveryOperation).state === 'PREPARED'); } : r.action === 'status' ? status :
       r.action === 'observer-ready' ? (x: unknown) => { object(x, { operation, observerSessionId: uuid, dbNow: instant, remainingMs: ms => integer(ms, 1, OWNER_RECOVERY_LIMITS.operationMs) }); const op = x.operation as OwnerRecoveryOperation; check(op.state === 'PREPARED' && Date.parse(x.dbNow as string) >= Date.parse(op.preparedAt) && Date.parse(op.expiresAt) - Date.parse(x.dbNow as string) === x.remainingMs); } :
-      r.action === 'handshake-closed' ? (x: unknown) => { object(x, { handshake, handshakeDigest: hash }); check(ownerRecoveryHash(x.handshake) === x.handshakeDigest); } :
+      r.action === 'handshake-closed' ? (x: unknown) => { object(x, { handshake: v => { parseOwnerRecoveryClosedProof(v); }, handshakeDigest: hash }); check(ownerRecoveryHash(x.handshake) === x.handshakeDigest); } :
+      r.action === 'pre-reset-probe-closed' ? (x: unknown) => { object(x, { probe: accountProbe, probeDigest: hash }); check((x.probe as OwnerRecoveryAccountProbe).phase === 'pre-reset' && ownerRecoveryHash(x.probe) === x.probeDigest); } :
       r.action === 'committed' ? (x: unknown) => {
         object(x, { operation, receipt, unlockAcknowledged: literal(true) });
         const op = x.operation as OwnerRecoveryOperation, rec = x.receipt as OwnerRecoveryReceipt;
-        check(op.state === 'COMMITTED' && op.operationId === rec.operationId && op.receiptId === rec.receiptId && op.bindingDigest === rec.bindingDigest && op.evidenceDigest === rec.evidenceDigest && ownerRecoveryHash(op.owner) === ownerRecoveryHash(rec.owner));
+        check(op.state === 'COMMITTED' && op.version === rec.version && op.operationId === rec.operationId && op.receiptId === rec.receiptId && op.bindingDigest === rec.bindingDigest && op.evidenceDigest === rec.evidenceDigest && ownerRecoveryHash(op.owner) === ownerRecoveryHash(rec.owner));
       } : undefined;
     check(result); object(v, { version: literal(1), requestId: uuid, ok: literal(true), action: literal(r.action), result });
   });

@@ -300,3 +300,90 @@ nie poprawia reconciliation, WSH/Marketaux ani budżetów. Następny zwykły sta
 musi przejść własne bramki i pełny replay. Sam receipt nie wznawia wejść.
 Szczegóły dowodów, ograniczeń i stanów nieznanych zawiera
 [kontrakt recovery](../implementation/phase3/PAPER_ACCOUNTING_OWNER_RECOVERY_CONTRACT.md).
+
+
+## Automatyczne dowody rachunku w recovery V2
+
+Rozszerzenie V2 opisuje [zaakceptowany plan](../implementation/phase3/PAPER_ACCOUNTING_AUTOMATED_EVIDENCE_PLAN.md).
+Stan publikacji, CI i wdrożenia sprawdź w
+[raporcie pakietu](../implementation/phase3/PAPER_ACCOUNTING_AUTOMATED_EVIDENCE_REPORT.md).
+Nie stosuj nowych poleceń ze starym obrazem. V2 wymaga migracji
+`000039_accounting_owner_api_evidence.sql` wykonanej istniejącym runnerem po
+backupie i przypiętego kompatybilnego obrazu. V1 zachowuje dotychczasowe znaczenie
+ręcznych dowodów; starych receiptów nie wolno interpretować jako odczytów API.
+
+V2 sam pobiera rachunek, pełny początkowy strumień pozycji i snapshot wszystkich
+otwartych zleceń dostępnych w powiązanym rachunku TWS. Korzysta wyłącznie z
+`reqManagedAccts`, `reqPositions` i `reqAllOpenOrders`, z klientem 0. Nie wywołuje
+`reqOpenOrders` ani `reqAutoOpenOrders`, które mogą wiązać zlecenia ręczne; nie
+składa, nie modyfikuje i nie anuluje zleceń. Wynik pusty bez obu znaczników końca
+odpowiedzi nie jest dowodem braku ekspozycji. Każde zlecenie lub niezerowa pozycja,
+błąd, przerwanie lub niepełna odpowiedź blokuje procedurę.
+
+Pozostają dotychczasowe ograniczenia: lokalny macOS/TWS i Docker Desktop,
+pojedynczy skonfigurowany rachunek Paper, zatrzymane usługi, master writes=false,
+trwała pauza i brak historii wysyłania zleceń przez bota. Sam V2 nie rozszerza
+obsługi rachunków z dawną ekspozycją bota. API nie dowodzi braku niewysłanych
+szkiców w interfejsie, obcych klientów ani przyszłych ręcznych zmian. Prywatny
+`coordination.json` przechowuje rzeczywiste potwierdzenia tych warunków wraz ze
+źródłem, autorem i odniesieniem do istniejącej zgody. Nie wymyślaj nowych
+potwierdzeń; wcześniejsza jawna zgoda pozostaje ważna w swoim zakresie.
+
+Schematy `OwnerRecoveryCoordination` i `OwnerRecoveryEnvironmentEvidence` są w
+`packages/shared/src/accounting-owner-recovery.ts`. Pliki i artefakty nadal
+wymagają 0600, katalogi 0700, bez symlinków. Dowód środowiska zawiera aktualny
+widok TWS wskazujący Paper/Simulated Trading i dokładny rachunek, faktyczną
+tożsamość obserwatora oraz PID/czas startu/hash procesu TWS. Może to być uczciwie
+opisany odczyt interfejsu przez agenta; nie oznacza obserwacji wykonanej przez
+właściciela. Nie zastępuje go numer portu, prefiks rachunku lub wygasła
+kwalifikacja źródła. Kwalifikacja księgowania jest osobną późniejszą bramką.
+
+Kolejność dla pozostawionej operacji:
+
+1. Sprawdź dokładny `status --operation <stare-uuid>` i brak obserwatora/backendu.
+   Zachowaj właściciela, pauzę i maintenance. Zweryfikuj prywatny profil i
+   koordynację. Zapisz świeży dowód środowiska przed restartem w coordination.
+2. Wykonaj `pnpm paper:accounting-owner-recovery supersede --operation
+   <stare-uuid> --api-evidence --coordination /absolute/private/coordination.json`.
+   Przy braku oczekującej operacji odpowiednikiem jest `prepare --api-evidence
+   --coordination /absolute/private/coordination.json`. PREPARED rezerwuje
+   maintenance; jeszcze nie potwierdza płaskiego rachunku i nie otwiera socketu.
+3. Uruchom `pnpm paper:accounting-owner-recovery observe --operation <nowe-uuid>
+   --api-evidence --coordination /absolute/private/coordination.json
+   --environment-evidence /absolute/private/after-environment.json`.
+   Użyj dokładnie pierwotnego pliku coordination z tymi samymi artefaktami.
+4. Narzędzie pod istniejącą blokadą wykonuje jeden audytowany odczyt przed
+   restartem. Dopiero kompletny brak ekspozycji i faktyczne zamknięcie socketu
+   pozwalają przejść do obserwacji zamknięcia TWS. Konflikt klienta 0 pozostawia
+   blokadę; nie zmieniaj ID i nie próbuj przejąć starego połączenia.
+5. Zamknij i uruchom cały TWS dopiero na właściwe komunikaty obserwatora.
+   Zapisz nowy dowód samego środowiska Paper/rachunku z wypisanym `afterReset`
+   i nową tożsamością procesu. Pozycje i zlecenia ponownie sprawdza API.
+6. Backend wykonuje jeden odczyt po restarcie, obserwuje faktyczne zamknięcie
+   socketu i zapisuje receipt `API_OBSERVED_LOCAL_TWS_RESET_V2`. Sprawdź dokładny
+   status operacji i request ID. Receipt nie uruchamia usług ani handlu.
+
+Całość nadal ma 15 minut od PREPARED. Każdy probe ma 20 sekund, w tym rezerwę
+na zamknięcie; brak danych nie wydłuża tego limitu. Dowody środowiska i stanu
+rachunku mają ograniczoną świeżość pięciu minut. Kontrola Docker i tożsamości
+TWS działa podczas odczytu; pełna inwentaryzacja socketów jest wykonywana przed
+nim i po pozytywnie potwierdzonym zamknięciu. Nie daje to dowodu nieobecności
+krótkotrwałego obcego klienta między próbkami — nadal obowiązuje koordynacja.
+
+Znany problem operacyjny: aktywne procesy narzędzia CUA z nazwą repozytorium w
+argumentach mogą blokować inwentaryzację natywną. Zamknięcie sesji CUA przez jej
+obsługiwany reset usuwało tę przeszkodę w preflight, bez zamykania TWS. Przed
+`observe` zamknij taką sesję i ponownie sprawdź inwentaryzację; nie otwieraj jej
+podczas obserwacji. Nie ignoruj odmowy ani nie dopisuj ogólnego wyjątku dla Node
+lub Codex. Gdy obecne narzędzie nie może sterować TWS, właściciel wykonuje pełny
+restart i dostarcza jedynie nowy dowód środowiska, a stan pozycji/zleceń pobiera API.
+
+Po niepewnym zamknięciu pre-probe albo handshake nie wolno uruchomić kolejnego
+pre-probe V2 przez `supersede`; kontrolowana jest cała historia tej samej generacji
+właściciela. Dopuszczalnym wyjściem jest istniejąca ścieżka V1: prawdziwy, świeży
+ręczny dowód płaskiego rachunku, `supersede --operator-evidence`, nowa obserwacja
+pełnego restartu przed pierwszym socketem. Nie wytwarzaj takiego dowodu z próby
+API, która się nie powiodła. Jeżeli nie można go uzyskać, zachowaj blokadę i
+zgłoś precyzyjnie brak potwierdzenia zamknięcia. Pozytywnie zamknięty, ale
+niekompletny odczyt może mieć trwałe zdarzenie CLOSED; to nadal nie jest zgoda
+na restart ani commit. Nie ponawiaj go automatycznie.

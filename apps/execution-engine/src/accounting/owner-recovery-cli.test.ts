@@ -11,7 +11,7 @@ import { performance } from 'node:perf_hooks';
 import {
   OWNER_RECOVERY_SERVICES, ownerRecoveryHash, parseOwnerRecoveryResponse,
   type OwnerRecoveryProfile, type OwnerRecoveryOperation, type OwnerRecoveryOperatorEvidence, type OwnerRecoveryInventory,
-  type OwnerRecoveryHostEvidence, type OwnerRecoveryRequest, type OwnerRecoveryResponse,
+  type OwnerRecoveryHostEvidence, type OwnerRecoveryRequest, type OwnerRecoveryResponse, type OwnerRecoveryCoordination, type OwnerRecoveryPreProbeEvidence,
 } from '@ikbr/shared/accounting-owner-recovery';
 import { runOwnerRecoveryCli, validateOwnerRecoveryRuntime, type OwnerRecoveryCliDependencies } from './owner-recovery-cli.js';
 
@@ -61,6 +61,8 @@ function fixture(t: { after: (fn: () => void | Promise<void>) => void }) {
   const observer = {
     operation, observerSessionId: sessionId, dbNow, remainingMs: Date.parse(operation.expiresAt) - Date.parse(dbNow),
     assertActive() { if (cancelled) throw new Error('ACCOUNTING_OWNER_RECOVERY_MUTATION_UNKNOWN'); },
+    async preDispatch() { calls.push('pre-dispatch'); return randomUUID(); },
+    async preProbeClosed() { calls.push('pre-closed'); },
     async dispatch() { calls.push('dispatch'); return randomUUID(); },
     async handshakeClosed() { calls.push('closed'); },
     async finalize(request: Extract<OwnerRecoveryRequest, { action: 'finalize-observation' }>, runtimeGuard?: () => Promise<void>) {
@@ -68,9 +70,9 @@ function fixture(t: { after: (fn: () => void | Promise<void>) => void }) {
       calls.push('finalize'); this.assertActive();
       const receiptId = randomUUID(), evidenceDigest = ownerRecoveryHash(request.evidence), at = new Date().toISOString();
       return { operation: { ...operation, state: 'COMMITTED' as const, receiptId, evidenceDigest },
-        receipt: { version: 1 as const, receiptId, operationId: operation.operationId, commitRequestId: request.commitRequestId,
+        receipt: { version: operation.version, receiptId, operationId: operation.operationId, commitRequestId: request.commitRequestId,
           owner: operation.owner, bindingDigest: operation.bindingDigest, evidenceDigest, actor: operation.actor, committedAt: at, retiredAt: at,
-          retirementState: 'RETIRED' as const, method: 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1' as const } };
+          retirementState: 'RETIRED' as const, method: operation.version === 2 ? 'API_OBSERVED_LOCAL_TWS_RESET_V2' as const : 'OPERATOR_OBSERVED_LOCAL_TWS_RESET_V1' as const } };
     },
     cancel() { cancelled = true; calls.push('cancel'); }, async release() { calls.push('release'); },
   };
@@ -342,4 +344,106 @@ test('actual offline entrypoint rejects unauthenticated stdin and exits with its
   assert.equal(code, 1, stderr); assert.equal(JSON.parse(stdout).error.code, 'ACCOUNTING_OWNER_RECOVERY_AUTH_REQUIRED');
   assert.equal(JSON.parse(stdout).error.cause, undefined);
   assert.equal(stdout.includes(token), false); assert.equal(stderr, '');
+});
+
+function fixtureV2(t: { after: (fn: () => void | Promise<void>) => void }) {
+  const f = fixture(t), old = f.reset().evidence;
+  assert.equal(old.version, 1);
+  const at = f.operation.preparedAt, process = { ...old.before.process, startIdentity: new Date(Date.parse(at) - 1000).toISOString() };
+  const declaration = { confirmed: true as const, source: 'carried-owner-authorization' as const, actor: 'owner', sourceReference: 'session', observedAt: at };
+  const coordination: OwnerRecoveryCoordination = { version: 2, coordinationId: randomUUID(), actor: f.operation.actor, accountId: f.profile.accountId,
+    endpoint: f.profile.endpoint, settingsHash: f.profile.settingsHash, deploymentHash: f.profile.deploymentHash, recordedAt: at, authorizationReference: 'session',
+    declarations: { noPendingManualActionsOrDrafts: declaration, noOtherNativeOrExternalClients: declaration, noChangesOrClientLaunchesUntilRecoveryEnds: declaration },
+    environmentEvidence: { version: 2, inspectionId: randomUUID(), actor: 'observing-agent', provenance: 'agent-ui-observation', accountId: f.profile.accountId,
+      endpoint: f.profile.endpoint, settingsHash: f.profile.settingsHash, deploymentHash: f.profile.deploymentHash, observedAt: at, process,
+      product: 'TWS', environment: 'paper', artifact: { relativePath: 'paper.txt', sha256: hash, observedAt: at } } };
+  f.operation.version = 2; f.operation.coordination = coordination;
+  const before = { ...old.before, process }, environmentEvidence = { ...coordination.environmentEvidence, process: old.after.process, observedAt: old.after.observedAt,
+    artifact: { ...coordination.environmentEvidence.artifact, observedAt: old.after.observedAt }, afterReset: { operationId: f.operation.operationId, nonce: f.operation.nonce } };
+  const { operatorEvidence: _operator, ...base } = old as OwnerRecoveryHostEvidence;
+  const proof = { ...base, version: 2 as const, before, coordinationDigest: ownerRecoveryHash(coordination), preResetProbeDigest: hash, environmentEvidence };
+  const preEvidence: OwnerRecoveryPreProbeEvidence = { version: 2, operationId: f.operation.operationId, nonce: f.operation.nonce, bindingDigest: f.operation.bindingDigest,
+    profile: f.profile, coordinationDigest: ownerRecoveryHash(coordination), before, inventory: old.initialInventory, environmentEvidence: coordination.environmentEvidence };
+  const pre = () => ({ version: 2 as const, action: 'pre-reset-probe' as const, requestId: randomUUID(), observerSessionId: f.observer.observerSessionId, evidence: preEvidence });
+  f.deps.probe = async () => {
+    f.calls.push('probe'); const now = new Date().toISOString();
+    return { accountId: f.profile.accountId, clientId: 0, protocolVersion: 180, sdkVersion: '@stoqey/ib@1.6.10', connectedAt: now, readyAt: now,
+      positionsRequestedAt: now, openOrdersRequestedAt: now, positionsEndAt: now, openOrdersEndAt: now, completedAt: now, closedAt: now,
+      transportClosed: true, positionRows: 0, openOrderRows: 0, eventCount: 4, rowsDigest: hash, outcome: 'FLAT', error: null };
+  };
+  const reset = () => {
+    const closed = f.responses.find(r => r.ok && r.action === 'pre-reset-probe-closed');
+    if (closed?.ok && closed.action === 'pre-reset-probe-closed') proof.preResetProbeDigest = closed.result.probeDigest;
+    return { version: 2 as const, action: 'reset-proof' as const, requestId: randomUUID(), observerSessionId: f.observer.observerSessionId, evidence: proof };
+  };
+  const finalize = () => {
+    const closed = f.responses.find(r => r.ok && r.action === 'handshake-closed');
+    assert.ok(closed?.ok && closed.action === 'handshake-closed');
+    return { version: 2 as const, action: 'finalize-observation' as const, requestId: randomUUID(), observerSessionId: f.observer.observerSessionId,
+      observedRequestId: randomUUID(), commitRequestId: randomUUID(), handshakeDigest: closed.result.handshakeDigest, evidence: proof };
+  };
+  return { ...f, begin: { ...f.begin, version: 2 as const }, pre, reset, finalize };
+}
+
+test('V2 backend owns both closed probes and cannot finalize before its witnessed reset phase', async t => {
+  const f = fixtureV2(t), done = f.start();
+  await f.send(f.begin); await f.send(f.pre()); await f.send(f.reset()); await f.send(f.finalize());
+  assert.equal(await done, 0, JSON.stringify(f.responses));
+  assert.deepEqual(f.calls, ['open', 'begin', 'pre-dispatch', 'probe', 'pre-closed', 'dispatch', 'probe', 'closed', 'finalize', 'release', 'close']);
+  assert.ok(!f.calls.includes('handshake'));
+  const receipt = f.responses.at(-1); assert.ok(receipt?.ok && receipt.action === 'committed'); assert.equal(receipt.result.receipt.version, 2);
+});
+
+test('V2 positively closed failed probe is recorded but never authorizes reset', async t => {
+  for (const outcome of ['NONFLAT', 'INCOMPLETE'] as const) {
+    const f = fixtureV2(t), probe = f.deps.probe!;
+    f.deps.probe = async (...args) => ({ ...await probe(...args), outcome, error: { code: 'ACCOUNTING_OWNER_RECOVERY_PROBE_FAILED', cause: { name: 'ProviderError', code: '326', message: 'safe detail' } } });
+    const done = f.start(); await f.send(f.begin); await f.send(f.pre());
+    assert.equal(await done, 1); assert.ok(f.calls.includes('pre-closed')); assert.ok(!f.calls.includes('dispatch'));
+    assert.equal(f.calls.filter(c => c === 'probe').length, 1);
+    assert.ok(!f.responses.some(r => r.ok && r.action === 'pre-reset-probe-closed'));
+  }
+});
+
+test('V2 unknown closure and EOF cannot persist a late successful probe or repeat it', async t => {
+  for (const scenario of ['unknown', 'eof'] as const) {
+    const f = fixtureV2(t), probe = f.deps.probe!, pending = deferred<Awaited<ReturnType<typeof probe>>>();
+    if (scenario === 'unknown') f.deps.probe = async () => { f.calls.push('probe'); throw new Error('ACCOUNTING_OWNER_RECOVERY_CLOSURE_UNKNOWN'); };
+    else f.deps.probe = async () => { f.calls.push('pending-probe'); return pending.promise; };
+    const done = f.start(); await f.send(f.begin); await f.send(f.pre());
+    if (scenario === 'eof') { f.input.end(); await immediate(); pending.resolve(await probe({ endpoint: f.profile.endpoint, accountId: f.profile.accountId })); }
+    assert.equal(await done, 1); assert.ok(!f.calls.includes('pre-closed')); assert.ok(!f.calls.includes('dispatch'));
+  }
+});
+
+test('V2 rejects reset before preprobe, wrong-version reset and duplicate preprobe without another socket', async t => {
+  for (const scenario of ['early-reset', 'v1-reset', 'duplicate-pre'] as const) {
+    const f = fixtureV2(t), done = f.start(); await f.send(f.begin);
+    if (scenario !== 'early-reset') await f.send(f.pre());
+    await f.send(scenario === 'duplicate-pre' ? f.pre() : scenario === 'v1-reset' ? { ...f.reset(), version: 1 } : f.reset());
+    assert.equal(await done, 1); assert.ok(!f.calls.includes('dispatch')); assert.ok(f.calls.filter(c => c === 'probe').length <= 1);
+  }
+});
+
+test('V2 lost response after durable closed proof does not retry and preserves failure status', async t => {
+  const f = fixtureV2(t), closed = f.observer.preProbeClosed.bind(f.observer);
+  f.observer.preProbeClosed = async () => { await closed(); f.output.destroy(); };
+  const done = f.start(); await f.send(f.begin); await f.send(f.pre());
+  assert.equal(await done, 1); assert.ok(f.calls.includes('pre-closed')); assert.equal(f.calls.filter(c => c === 'probe').length, 1);
+  assert.ok(!f.responses.some(r => r.ok && r.action === 'pre-reset-probe-closed'));
+});
+
+test('V2 rechecks remaining full probe budget after durable dispatch work', async t => {
+  const f = fixtureV2(t), remaining = 20015, now = new Date().toISOString();
+  f.operation.expiresAt = new Date(Date.parse(now) + remaining).toISOString();
+  f.operation.preparedAt = new Date(Date.parse(f.operation.expiresAt) - 900000).toISOString();
+  // Preserve the original coordination chronology when moving the synthetic deadline.
+  f.operation.coordination!.recordedAt = f.operation.preparedAt;
+  for (const d of Object.values(f.operation.coordination!.declarations)) d.observedAt = f.operation.preparedAt;
+  const env = f.operation.coordination!.environmentEvidence; env.observedAt = f.operation.preparedAt; env.artifact.observedAt = f.operation.preparedAt;
+  env.process.startIdentity = new Date(Date.parse(f.operation.preparedAt) - 1000).toISOString();
+  f.observer.dbNow = now; f.observer.remainingMs = remaining;
+  f.observer.preDispatch = async () => { f.calls.push('pre-dispatch'); await new Promise(resolve => setTimeout(resolve, 25)); return randomUUID(); };
+  const done = f.start(); await f.send(f.begin); await f.send(f.pre());
+  assert.equal(await done, 1); assert.ok(f.calls.includes('pre-dispatch')); assert.ok(!f.calls.includes('probe'));
 });

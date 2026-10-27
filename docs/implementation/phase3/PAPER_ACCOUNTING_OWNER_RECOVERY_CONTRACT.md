@@ -518,3 +518,31 @@ are installed socket close capability, exact existing offline uncertainty query,
 TWS executable/process shape and actual recovery deployment profile. Unsupported
 facts must fail closed and return to contract review; fixtures do not establish
 real-host capability or operational acceptance.
+
+
+## 2026-10-27 V2 addendum
+
+The [accepted automatic-evidence plan](PAPER_ACCOUNTING_AUTOMATED_EVIDENCE_PLAN.md)
+defines the narrowly versioned V2 extension. The owner's current AGENTS decision
+supersedes this historical document's blanket prohibition of existing IBKR UI
+automation; authorized actions still retain the broker-write controls. Existing
+V1 operator evidence and receipts keep their original meaning.
+
+V2 reserves maintenance before proving flatness, then permits one durably audited,
+non-binding client-0 account probe under the exact owner advisory lock. It never
+acquires the accounting source or treats reservation as flat-account proof.
+Complete flat pre-reset evidence and native transport closure remain prerequisites
+for restarting TWS. A witnessed full process/listener reset, another complete
+flat API probe and native closure precede the V2 receipt. Fresh environment-only
+UI provenance and genuine coordination replace neither API coverage nor owner
+source qualification. No new dashboard or inventory allowlist is introduced.
+
+The same operation's two probes retain one authenticated observer. A V2 successor
+cannot open a pre-reset probe after any unresolved V1/V2 pre-probe or handshake
+dispatch in the same owner's history. Genuine V1 manual-proof supersession and
+observed reset remain the exceptional path when automated closure is unknown.
+Migration 000039 extends version/event/receipt checks without modifying 000038
+or rewriting historical evidence. See the linked plan for complete schemas,
+capability limits, hostile cases, operational prerequisites and rollout gates;
+see the [implementation report](PAPER_ACCOUNTING_AUTOMATED_EVIDENCE_REPORT.md)
+for actual validation/publication status.

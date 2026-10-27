@@ -145,17 +145,17 @@ test('event guard detects start-stop between snapshots and pins provisional one-
   const lost = createAccountingEventGuard(undefined); lost.fail(); assert.throws(lost.check);
 });
 function processFixture() {
-  let clock = Date.parse(time), phase = 'before', oldSurvives = false, product = executable;
+  let clock = Date.parse(time), phase = 'before', oldSurvives = false, product = executable, checksum = hash, oldStart = 'Mon Oct 19 10:00:00 2026';
   const host = createAccountingRecoveryHost(options, { platform: 'darwin', now: () => new Date(clock++), run: async (file, args) => {
     if (file === '/usr/sbin/lsof') return phase === 'stopped' ? { stdout: '', stderr: '', exitCode: 1 } : { stdout: `p${phase === 'before' ? 101 : 202}\nf13\nn*:7497\n`, stderr: '', exitCode: 0 };
     if (file === '/bin/ps') {
       const pid = Number(args[2]); if (pid === 101 && phase !== 'before' && !oldSurvives) return { stdout: '', stderr: '', exitCode: 1 };
-      return { stdout: args.at(-1) === 'comm=' ? product : pid === 101 ? 'Mon Oct 19 10:00:00 2026' : 'Mon Oct 19 12:00:05 2026', stderr: '', exitCode: 0 };
+      return { stdout: args.at(-1) === 'comm=' ? product : pid === 101 ? oldStart : 'Mon Oct 19 12:00:05 2026', stderr: '', exitCode: 0 };
     }
-    if (file === '/usr/bin/shasum') return { stdout: `${hash}  ${product}\n`, stderr: '', exitCode: 0 };
+    if (file === '/usr/bin/shasum') return { stdout: `${checksum}  ${product}\n`, stderr: '', exitCode: 0 };
     throw new Error('unexpected');
   } });
-  return { host, phase: (v: string) => { phase = v; clock += 3000; }, survive: () => { oldSurvives = true; }, gateway: () => { product = '/Applications/IB Gateway.app/Contents/MacOS/JavaApplicationStub'; } };
+  return { host, hash: () => { checksum = 'b'.repeat(64); }, start: () => { oldStart = 'Mon Oct 19 11:00:00 2026'; }, phase: (v: string) => { phase = v; clock += 3000; }, survive: () => { oldSurvives = true; }, gateway: () => { product = '/Applications/IB Gateway.app/Contents/MacOS/JavaApplicationStub'; } };
 }
 test('whole TWS reset requires old process+listener absence and a distinct later process', async () => {
   const f = processFixture(), before = await f.host.captureGatewayProcess();
@@ -519,3 +519,20 @@ test('real macOS endpoint sample includes an isolated listener and every connect
       await assert.rejects(inspectAccountingNative({ ...options, port }, command, process.pid), nativeReason('socket', 'UNEXPECTED_ENDPOINT_OWNER'));
     } finally { client?.destroy(); child.kill('SIGTERM'); await exited; }
   });
+
+
+test('pre-probe unchanged-process checks retain the original observation and reject PID, start, executable, listener and sequence changes', async () => {
+  const stable = processFixture(), before = await stable.host.captureGatewayProcess();
+  assert.deepEqual((await stable.host.assertGatewayUnchanged(before)).process, before.process);
+  assert.deepEqual((await stable.host.assertGatewayUnchanged(before)).process, before.process);
+  stable.phase('stopped'); await stable.host.assertGatewayStopped(before);
+  await assert.rejects(stable.host.assertGatewayUnchanged(before), /OBSERVATION_SEQUENCE/);
+  for (const mutation of ['pid', 'start', 'hash', 'listener', 'foreign', 'port'] as const) {
+    const f = processFixture(), original = await f.host.captureGatewayProcess();
+    if (mutation === 'pid') f.phase('after');
+    if (mutation === 'start') f.start();
+    if (mutation === 'hash') f.hash();
+    if (mutation === 'listener') f.phase('stopped');
+    await assert.rejects(f.host.assertGatewayUnchanged(mutation === 'foreign' ? { ...original, observedAt: '2026-10-19T12:00:01.000Z' } : original, mutation === 'port' ? 4002 : 7497), /ACCOUNTING_OWNER_RECOVERY_/, mutation);
+  }
+});

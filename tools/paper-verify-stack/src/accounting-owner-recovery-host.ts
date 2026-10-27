@@ -170,6 +170,13 @@ export function createAccountingRecoveryHost(options: AccountingRecoveryHostOpti
     portCheck(port);
     if (!before || previous.observedAt !== before.observedAt || !processEqual(previous.process, before.process)) deny('ACCOUNTING_OWNER_RECOVERY_OBSERVATION_SEQUENCE');
   }
+  async function assertGatewayUnchanged(previous: RecoveryGatewayObservation, port = options.port): Promise<RecoveryGatewayObservation> {
+    previousCheck(previous, port);
+    if (stopped) return deny('ACCOUNTING_OWNER_RECOVERY_OBSERVATION_SEQUENCE');
+    const current = await observeProcess();
+    if (!processEqual(current.process, previous.process)) return deny('ACCOUNTING_OWNER_RECOVERY_PROCESS_CHANGED');
+    return current;
+  }
   async function assertGatewayStopped(previous: RecoveryGatewayObservation, port = options.port): Promise<RecoveryGatewayStopped> {
     previousCheck(previous, port);
     if (stopped) return structuredClone(stopped);
@@ -195,7 +202,7 @@ export function createAccountingRecoveryHost(options: AccountingRecoveryHostOpti
         next.observedAt <= stopped.observedAt) deny('ACCOUNTING_OWNER_RECOVERY_PROCESS_NOT_REPLACED');
     return next;
   }
-  return { allowOneShot, clearOneShot, inspectNative, hostIdentityHash, captureProducerInventory, verifyProducerInventory, captureGatewayProcess, assertGatewayStopped, verifyGatewayReplacement };
+  return { allowOneShot, clearOneShot, inspectNative, hostIdentityHash, captureProducerInventory, verifyProducerInventory, captureGatewayProcess, assertGatewayUnchanged, assertGatewayStopped, verifyGatewayReplacement };
 }
 
 export const ACCOUNTING_APP_SERVICES = ['execution-engine', 'ingestion', 'llm-agent', 'signal-engine', 'backtest-engine', 'ui'] as const;
