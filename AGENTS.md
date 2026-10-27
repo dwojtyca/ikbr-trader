@@ -60,12 +60,37 @@ access, with existing alerts and authenticated controls. See the
 The existing `apps/ui` is retained; its security fixes must not be undone. PP6/PP7
 must work with that service stopped, without requiring a browser or new dashboard.
 
-The owner uses the IBKR desktop application for account inspection and manual
-trades. This is not permission for agents to automate that UI or submit broker
-orders. Entry pause does not stop exit automation or cancel protective orders;
-manual changes to bot-owned exposure require coordination and supported broker
-reconciliation. Unknown outcomes remain holds. Headless operation does not remove
-audit, alert, protection, risk or deployment/recovery requirements.
+Owner clarification 2026-10-27: defer creating an additional operator interface,
+because the existing IBKR application already provides one. This supersedes the
+earlier blanket prohibition on automating the IBKR UI. Using or automating the
+existing interface is not prohibited by this scope decision; actions must remain
+within the authorized task and preserve the applicable broker-write controls.
+Prefer IBKR APIs for bot integration and automated broker-state inspection.
+
+The bot must be able to use all capabilities exposed by IBKR APIs that are
+available for the configured account, permissions, subscriptions and API version.
+This includes account state, positions, open/completed orders, executions, market
+and historical data, contract information and order lifecycle operations; these
+examples are not a restrictive allowlist. Deferring a custom UI must not restrict
+API access. Verify actual API and installed-adapter coverage: this requirement
+does not claim every capability is already implemented or enabled by IBKR.
+
+Use fresh, complete, correctly account-scoped API evidence for facts the API can
+establish, rather than asking the owner to transcribe those facts from TWS.
+Missing adapter support or incomplete coverage is an implementation gap to
+identify and address, not a policy ban on API access. Request operator evidence
+only for information that cannot currently be established reliably, and explain
+the precise missing capability. A policy edit does not itself implement that
+capability or replace evidence required by an existing recovery protocol.
+
+API access or UI automation does not itself authorize broker writes. Entries
+retain the supported proposal/AI/risk/execution flow; order management and closes
+retain their applicable authorization, risk, audit and idempotency controls.
+Service responsibilities and Paper/Live restrictions still apply. Entry pause
+does not stop exit automation or cancel protective orders; manual changes to
+bot-owned exposure require coordination and supported broker reconciliation.
+Unknown outcomes remain holds. Headless operation does not remove audit, alert,
+protection, risk or deployment/recovery requirements.
 
 ## Current delivery priority
 
@@ -446,7 +471,6 @@ Never:
 - treat timeout as cancellation
 - reverse a position during close
 - submit directly to live accounts
-- automate IBKR UI
 
 ---
 
