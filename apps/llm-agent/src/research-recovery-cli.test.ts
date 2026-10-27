@@ -60,6 +60,28 @@ test('one-shot rejects unknown request keys and source selection outside the par
     assert.equal(f.calls, 0);
   } finally { await f.close(); }
 });
+test('read requires the exact configuration process and rejects a legacy owner namespace', async () => {
+  const f = await fixture(); try {
+    await executeResearchRecovery(f.request, f.env, f.deps);
+    const request = { action: 'read', challengeId: f.challenge.id };
+    assert.equal((await executeResearchRecovery(request, f.env, f.deps) as RecoveryChallenge).id, f.challenge.id);
+    const current = f.challenge;
+    for (const change of [
+      { executionProcessId: 'execution-engine:fixture-host:12345678' },
+      { executionProcessId: randomUUID() },
+      { accountId: 'DU_OTHER' },
+      { configHash: 'e'.repeat(64) },
+      { manifestHash: 'f'.repeat(64) },
+      { pauseRevision: current.pauseRevision + 1 },
+    ]) {
+      await assert.rejects(executeResearchRecovery(request, f.env, {
+        ...f.deps, store: { ...f.deps.store, readResearchRecovery: async () => ({ ...current, ...change }) },
+      }), /RESEARCH_RECOVERY_PREFLIGHT_DENIED/);
+    }
+    f.restart();
+    await assert.rejects(executeResearchRecovery(request, f.env, f.deps), /RESEARCH_RECOVERY_PREFLIGHT_DENIED/);
+  } finally { await f.close(); }
+});
 test('reconnect performs only connect and close, then revalidates exact paused execution identity', async () => {
   const f = await fixture(); try {
     await executeResearchRecovery(f.request, f.env, f.deps); const id = randomUUID(); let now = Date.now(); const calls: string[] = [];

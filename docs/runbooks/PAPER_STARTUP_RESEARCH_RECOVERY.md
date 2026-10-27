@@ -98,6 +98,14 @@ pnpm paper:research-recovery status --kind marketaux --instrument pko_wse --chal
 Gdy restart execution, nowa rewizja pauzy lub upływ ważności unieważniły przygotowane
 recovery, można zastąpić je nowym, zachowując ciągłość wstrzymania:
 
+Heartbeat badań execution-engine i pole `processId` w uwierzytelnionym odczycie
+`/execution/configuration` korzystają z tego samego UUID `TradingConfigurationRuntime`.
+Identyfikator właściciela brokera/lifecycle `execution-engine:<host>:<suffix>` jest
+oddzielny. Po wdrożeniu poprawki poczekaj na wygaśnięcie starych obserwacji badań
+i potwierdź bieżącą tożsamość. Przygotowane wcześniej recovery związane z nazwą
+właściciela lub UUID poprzedniego procesu wymaga poniższego `supersede` i świeżego
+dowodu. Nie edytuj historycznych wyzwań ani obserwacji, aby dopasować identyfikatory.
+
 ```sh
 pnpm paper:research-recovery supersede --challenge <old-uuid> --instrument pko_wse
 ```

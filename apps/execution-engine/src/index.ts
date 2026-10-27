@@ -1880,7 +1880,7 @@ async function main(): Promise<void> {
       await researchStore.registerManifest({ manifest: loadedResearch.manifest, configuration: tradingConfiguration.loaded.configuration,
         tradingEnabled: config.TRADING_ENABLED === "true", adopt: process.env.RESEARCH_ADOPT_MANIFEST === "true" });
       const observeResearch = () => researchStore.observe({ ...researchIdentity()!, service: "execution-engine",
-        processId: EXECUTION_PROCESS_OWNER_ID, tradingEnabled: config.TRADING_ENABLED === "true" });
+        processId: configurationRuntime.processId, tradingEnabled: config.TRADING_ENABLED === "true" });
       await observeResearch();
       const heartbeat = setInterval(() => { void observeResearch().catch(error => app.log.error({ err: error }, "research observation failed")); }, 10_000);
       heartbeat.unref();

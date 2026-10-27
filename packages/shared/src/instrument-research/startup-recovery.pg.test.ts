@@ -8,6 +8,8 @@ import {ResearchStore} from './store.js';
 import {marketauxCallIdentity} from './marketaux.js';
 import {researchHash} from './validation.js';
 import type {RecoveryIdentity,RecoveryChallenge,RecoveryEvidence,ResearchRecoveryClock} from './startup-recovery.js';
+import {TradingConfigurationRuntime} from '../trading-configuration/startup.js';
+import {TradingConfigurationStore} from '../trading-configuration/store.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any,clock:ResearchRecoveryClock,advance:(ms:number,host?:boolean)=>Promise<void>)=>Promise<void>, beforeRecoveryMigration?:(pool:any,clock:ResearchRecoveryClock)=>Promise<void>, beforeCreatedMigration?:(pool:any,clock:ResearchRecoveryClock)=>Promise<void>){
@@ -33,6 +35,53 @@ function evidence(c:RecoveryChallenge):RecoveryEvidence{
  const at=Date.now(),stamp=(d:number)=>new Date(at+d).toISOString();return {version:'local-research-recovery-v1',kind:'MARKETAUX_PRODUCER_QUIESCENCE',challengeId:c.id,challengeHash:c.challengeHash,nonce:c.nonce,hostIdHash:'a'.repeat(64),platform:'darwin',collectorStartedAt:stamp(-3000),producerCheckedAt:stamp(-2000),producerRecheckedAt:stamp(-1000),deploymentHash:'b'.repeat(64),producers:[{containerId:'c'.repeat(64),imageId:'sha256:'+'d'.repeat(64),project:'fixture',service:'llm-agent',startedAt:stamp(-10000),finishedAt:stamp(-2500),state:'exited'}],runningProducerIds:[]};
 }
 async function maintenance(f:Fixture,pool:any){await pool.query('INSERT INTO execution_entry_controls(account_id) VALUES($1)',[f.accountId]);await pool.query("UPDATE research_observations SET observed_at=clock_timestamp()-interval '31 seconds',expires_at=clock_timestamp()-interval '2 seconds' WHERE service='llm-agent'");}
+
+test('configuration runtime UUID supersedes legacy research ownership and fences challenges after restart', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});
+ await claim(f);await advance(126000);await maintenance(f,pool);
+ const expireExecution=async()=>{
+  for(const table of ['research_observations','trading_configuration_observations'])
+   await pool.query(`UPDATE ${table} SET observed_at=clock_timestamp()-interval '31 seconds',expires_at=clock_timestamp()-interval '2 seconds' WHERE service='execution-engine'`);
+ };
+ const runtime=()=>new TradingConfigurationRuntime({service:'execution-engine',tradingEnabled:false,store:new TradingConfigurationStore(pool),
+  loaded:{mode:'bundle',configuration:f.config,effectiveHash:f.configHash,schemaVersion:1,canonicalVersion:1,migrationPrepare:false,diagnostics:[]}});
+ const firstRuntime=runtime();await firstRuntime.initialize();
+ const legacyOwner='execution-engine:fixture-host:12345678';
+ await f.store.observe({...f.identity,service:'execution-engine',processId:legacyOwner,tradingEnabled:false});
+ const old=await f.store.prepareResearchRecovery(identity(f));
+ assert.equal(old.executionProcessId,legacyOwner);
+ assert.notEqual(old.executionProcessId,firstRuntime.diagnostics().processId);
+ const original=(await pool.query('SELECT canonical_json,challenge_hash FROM research_recovery_challenges WHERE id=$1',[old.id])).rows[0];
+ await expireExecution();await firstRuntime.heartbeat();
+ await f.store.observe({...f.identity,service:'execution-engine',processId:firstRuntime.processId,tradingEnabled:false});
+ assert.equal(firstRuntime.diagnostics().initialized,true);
+ assert.equal((await pool.query('SELECT process_id FROM trading_configuration_observations WHERE expires_at>clock_timestamp() AND service=$1',['execution-engine'])).rows[0].process_id,firstRuntime.diagnostics().processId);
+ const supersede=async(previous:RecoveryChallenge)=>f.store.supersedeResearchRecovery({challengeId:previous.id,challengeHash:previous.challengeHash,
+  replacement:identity(f),evidence:{...evidence(previous),kind:'PRODUCER_QUIESCENCE'}});
+ const rejectStale=async(previous:RecoveryChallenge)=>{
+  await assert.rejects(f.store.readResearchRecovery(previous.id),/EXECUTION_AUTHORITY_INVALID/);
+  await assert.rejects(f.store.commitResearchRecovery({challengeId:previous.id,challengeHash:previous.challengeHash,operationId:randomUUID(),
+   actor:previous.actor,pauseRevision:previous.pauseRevision,evidence:evidence(previous)}),/EXECUTION_AUTHORITY_INVALID/);
+ };
+ await rejectStale(old);
+ const current=await supersede(old);
+ assert.equal(current.executionProcessId,firstRuntime.diagnostics().processId);
+ assert.equal((await f.store.readResearchRecovery(current.id))?.executionProcessId,firstRuntime.diagnostics().processId);
+ assert.deepEqual((await pool.query('SELECT canonical_json,challenge_hash FROM research_recovery_challenges WHERE id=$1',[old.id])).rows[0],original);
+ const restarted=runtime();assert.notEqual(restarted.processId,firstRuntime.processId);
+ await expireExecution();await restarted.initialize();
+ await f.store.observe({...f.identity,service:'execution-engine',processId:restarted.processId,tradingEnabled:false});
+ await rejectStale(current);
+ const replacement=await supersede(current);
+ assert.equal((await f.store.readResearchRecovery(replacement.id))?.executionProcessId,restarted.diagnostics().processId);
+ const rows=(await pool.query('SELECT id,state,successor_challenge_id FROM research_recovery_challenges')).rows;
+ assert.equal(rows.filter((row:any)=>row.state==='PREPARED').length,1);
+ assert.equal(rows.find((row:any)=>row.id===old.id).successor_challenge_id,current.id);
+ assert.equal(rows.find((row:any)=>row.id===current.id).successor_challenge_id,replacement.id);
+ assert.equal((await pool.query("SELECT count(*)::int n FROM research_recovery_audit WHERE action='SUPERSEDE'")).rows[0].n,2);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM research_marketaux_recoveries')).rows[0].n,0);
+ assert.equal((await pool.query('SELECT paused FROM execution_entry_controls WHERE account_id=$1',[f.accountId])).rows[0].paused,true);
+}));
 
 test('expired fenced acquisition recovers once without refund or cached admission', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock}),t=await claim(f),{call,permit}=await reserve(f,t);permit.assertActive();
