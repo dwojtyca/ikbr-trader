@@ -19,7 +19,10 @@ export interface RecoveryChallenge extends RecoveryIdentity {
   state: 'PREPARED' | 'COMMITTED' | 'CANCELLED'; endpointId: string | null; endpointGeneration: number | null;
   predecessors: RecoveryPredecessor[]; predecessorHash: string; receiptId: string | null;
 }
-export interface RecoveryProducer { containerId: string; imageId: string; project: string; service: 'llm-agent'; startedAt: string; finishedAt: string; state: 'exited' | 'dead' }
+export type RecoveryProducer = { containerId: string; imageId: string; project: string; service: 'llm-agent' } & (
+  { startedAt: string; finishedAt: string; state: 'exited' | 'dead' } |
+  { createdAt: string; startedAt: null; finishedAt: null; state: 'created' }
+);
 export interface RecoveryProcess { pid: number; startIdentity: string; executableHash: string }
 export interface RecoveryEvidenceBase {
   version: 'local-research-recovery-v1'; kind: RecoveryKind; challengeId: string; challengeHash: string; nonce: string;
@@ -86,10 +89,19 @@ export function parseRecoveryEvidence(value: unknown, allowQuiescence = false): 
   array(r.runningProducerIds,0,0);const producers=array(r.producers,1,16);
   const ids = new Set<string>();
   for (const item of producers) {
-    const p = object(item, 'containerId imageId project service startedAt finishedAt state');
+    researchAssert(item !== null && typeof item === 'object' && !Array.isArray(item), invalid);
+    const state = Object.getOwnPropertyDescriptor(item, 'state')?.value;
+    researchAssert(state === 'created' || state === 'exited' || state === 'dead', invalid);
+    const p = object(item, 'containerId imageId project service startedAt finishedAt state' + (state === 'created' ? ' createdAt' : ''));
     researchAssert(isResearchHash(p.containerId) && !ids.has(p.containerId) && typeof p.imageId === 'string' && /^sha256:[a-f0-9]{64}$/.test(p.imageId)
-      && typeof p.project === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(p.project) && p.service === 'llm-agent' && ['exited','dead'].includes(String(p.state))
-      && date(p.startedAt) <= date(p.finishedAt) && date(p.finishedAt) <= checked, invalid); ids.add(p.containerId);
+      && typeof p.project === 'string' && /^[A-Za-z0-9_.-]{1,100}$/.test(p.project) && p.service === 'llm-agent', invalid);
+    if (state === 'created') {
+      const created = date(p.createdAt);
+      researchAssert(p.createdAt === new Date(created).toISOString() && created <= checked && p.startedAt === null && p.finishedAt === null, invalid);
+    } else {
+      researchAssert(date(p.startedAt) <= date(p.finishedAt) && date(p.finishedAt) <= checked, invalid);
+    }
+    ids.add(p.containerId);
   }
   if (kind === 'WSH_ENDPOINT_RESET') {
     researchAssert(text(r.endpointId) && typeof r.host === 'string' && ['localhost','127.0.0.1','::1','host.docker.internal'].includes(r.host) && integer(r.port,65535) && integer(r.clientId,2147483647)

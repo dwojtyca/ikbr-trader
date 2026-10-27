@@ -4,15 +4,16 @@ import { randomUUID } from 'node:crypto';
 import { researchHash, type RecoveryChallenge, type RecoveryProducer } from '@ikbr/shared/instrument-research';
 import { executeRecoveryCommand, type RecoveryCliDependencies, type RecoveryProfile } from './research-recovery-cli.js';
 
-function fixture(kind: RecoveryChallenge['kind'] = 'MARKETAUX_PRODUCER_QUIESCENCE') {
+function fixture(kind: RecoveryChallenge['kind'] = 'MARKETAUX_PRODUCER_QUIESCENCE', producerState: 'exited' | 'created' = 'exited') {
   let clock = Date.parse('2026-10-19T12:00:00Z'); const anchor = clock;
   const profile: RecoveryProfile = { project: 'ikbr-trader', imageId: `sha256:${'a'.repeat(64)}`, deploymentHash: 'b'.repeat(64), compose: [],
     dockerHost: 'unix:///var/run/docker.sock', endpointId: 'local', host: 'host.docker.internal', port: 7497, clientId: 156 };
   const challenge: RecoveryChallenge = { id: randomUUID(), nonce: randomUUID(), challengeHash: 'c'.repeat(64), configHash: 'd'.repeat(64), manifestHash: 'e'.repeat(64), kind,
     accountId: 'DU_SYNTHETIC', instrumentId: 'pko_wse', sourceId: 'news', pauseRevision: 2, actor: 'operator:fixture', operationId: randomUUID(), executionProcessId: 'execution',
     state: 'PREPARED', createdAt: new Date(clock).toISOString(), expiresAt: new Date(clock + 900000).toISOString(), endpointId: 'local', endpointGeneration: 2, predecessors: [], predecessorHash: 'f'.repeat(64), receiptId: null };
-  const producer: RecoveryProducer = { containerId: '1'.repeat(64), imageId: profile.imageId, project: profile.project, service: 'llm-agent', state: 'exited',
+  let producer: RecoveryProducer = { containerId: '1'.repeat(64), imageId: profile.imageId, project: profile.project, service: 'llm-agent', state: 'exited',
     startedAt: '2026-10-19T10:00:00.000Z', finishedAt: '2026-10-19T11:00:00.000Z' };
+  if (producerState === 'created') producer = { ...producer, state: 'created', createdAt: '2026-10-19T09:00:00.123Z', startedAt: null, finishedAt: null };
   const state = new Map<string, Parameters<RecoveryCliDependencies['save']>[1]>([[challenge.id, { version: 1, challenge: structuredClone(challenge), deploymentHash: profile.deploymentHash }]]);
   const calls: Array<Record<string, unknown>> = [], logs: string[] = []; let receipt: unknown = null; let commitOperation: unknown;
   const stamp = () => new Date(clock += 10).toISOString(); let stopped = false;
@@ -122,4 +123,30 @@ test('supersession can use newly pinned profile while ordinary observe cannot re
   f.deps.oneShot = async (_p, input) => { f.calls.push(input as Record<string, unknown>); return replacement; };
   await executeRecoveryCommand({ action: 'supersede', challengeId: f.challenge.id, instrumentId: f.challenge.instrumentId }, f.deps);
   assert.equal(f.state.get(replacement.id)?.deploymentHash, f.profile.deploymentHash);
+});
+
+for (const kind of ['MARKETAUX_PRODUCER_QUIESCENCE', 'WSH_ENDPOINT_RESET'] as const) {
+  test(`${kind} observes and commits created producers with unchanged reset flow`, async () => {
+    const f = fixture(kind, 'created');
+    await executeRecoveryCommand({ action: 'observe', challengeId: f.challenge.id }, f.deps);
+    const proof = f.state.get(f.challenge.id)?.evidence;
+    assert.equal(proof?.producers[0].state, 'created');
+    assert.equal(proof?.producers[0].startedAt, null); assert.equal(proof?.producers[0].finishedAt, null);
+    assert.equal(proof?.producers[0].state === 'created' && proof.producers[0].createdAt, '2026-10-19T09:00:00.123Z');
+    await executeRecoveryCommand({ action: 'commit', challengeId: f.challenge.id }, f.deps);
+    assert.deepEqual(f.calls.map(x => x.action), kind === 'WSH_ENDPOINT_RESET' ? ['read', 'reconnect', 'read', 'commit', 'read', 'receipt'] : ['read', 'read', 'commit', 'read', 'receipt']);
+    assert.deepEqual((f.calls.find(x => x.action === 'commit')!.evidence as { producers: unknown[] }).producers, proof?.producers);
+  });
+}
+test('created-to-exited transition after observation prevents CLI commit', async () => {
+  const f = fixture('MARKETAUX_PRODUCER_QUIESCENCE', 'created');
+  await executeRecoveryCommand({ action: 'observe', challengeId: f.challenge.id }, f.deps);
+  const previous = f.host.captureProducerInventory;
+  f.host.captureProducerInventory = async () => {
+    const inventory = await previous();
+    return { ...inventory, producers: inventory.producers.map(({ containerId, imageId, project, service }) => ({ containerId, imageId, project, service,
+      state: 'exited' as const, startedAt: '2026-10-19T11:00:00.000Z', finishedAt: '2026-10-19T11:30:00.000Z' })) };
+  };
+  await assert.rejects(executeRecoveryCommand({ action: 'commit', challengeId: f.challenge.id }, f.deps), /PRODUCER/);
+  assert.equal(f.calls.some(x => x.action === 'commit'), false);
 });

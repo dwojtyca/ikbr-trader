@@ -278,3 +278,38 @@ test('PREPARED hold rejects both actual bind and validation of an otherwise elig
  await assert.rejects(f.store.validateBinding(binding),/RESEARCH_RECOVERY_MAINTENANCE_HOLD/);
  assert.equal((await pool.query('SELECT count(*)::int n FROM research_bindings')).rows[0].n,1);
 }));
+
+
+test('created producer WSH proof retains reset requirements, PREPARED hold, immutable history and budgets', { skip: !connection }, () => isolated(async (pool, advance) => {
+  const f = await seedTwoSourceResearchStore(pool, { publishWsh: false }), id = await publishUnknownCleanup(f);
+  const original = (await pool.query('SELECT * FROM research_wsh_refresh_attempts WHERE id=$1', [id])).rows[0];
+  const acquisitions = (await pool.query('SELECT * FROM research_wsh_acquisitions ORDER BY id')).rows;
+  const reservations = (await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows;
+  const outcomes = (await pool.query('SELECT * FROM research_call_outcomes ORDER BY call_key')).rows;
+  await pause(f, pool); const c = await f.store.prepareResearchRecovery(recoveryIdentity(f));
+  const proof = evidence(c);
+  proof.producers = [{ ...proof.producers[0], state: 'created', createdAt: proof.producers[0].startedAt!, startedAt: null, finishedAt: null }];
+  for (const defect of ['missing-before', 'missing-stopped', 'missing-after', 'missing-reconnect', 'same-process', 'account', 'cleanup']) {
+    const invalid = structuredClone(proof);
+    if (defect.startsWith('missing-')) Reflect.deleteProperty(invalid, defect.slice(8));
+    if (defect === 'same-process') invalid.after.process.startIdentity = invalid.before.process.startIdentity;
+    if (defect === 'account') invalid.reconnect.accountId = 'DU_OTHER';
+    if (defect === 'cleanup') invalid.reconnect.cleanup.verifiedLocalClosure = false;
+    await assert.rejects(f.store.commitResearchRecovery({ challengeId: c.id, challengeHash: c.challengeHash, operationId: randomUUID(), actor: c.actor, pauseRevision: 1, evidence: invalid }));
+    assert.equal((await f.store.readResearchRecovery(c.id))?.state, 'PREPARED');
+    assert.equal((await pool.query('SELECT count(*)::int n FROM research_wsh_recovery_receipts')).rows[0].n, 0);
+    assert.deepEqual((await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows, reservations);
+  }
+  await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'HOLD'); await pause(f, pool);
+  const operationId = randomUUID(), receipt = await f.store.commitResearchRecovery({ challengeId: c.id, challengeHash: c.challengeHash, operationId, actor: c.actor, pauseRevision: 1, evidence: proof });
+  const audit = (await pool.query('SELECT evidence_json,evidence_hash FROM research_recovery_audit WHERE operation_id=$1', [operationId])).rows[0];
+  assert.deepEqual(JSON.parse(audit.evidence_json), proof); assert.equal(audit.evidence_hash, researchHash(proof)); assert.equal(receipt.evidenceHash, researchHash(proof));
+  assert.deepEqual((await pool.query('SELECT * FROM research_wsh_refresh_attempts WHERE id=$1', [id])).rows[0], original);
+  assert.deepEqual((await pool.query('SELECT * FROM research_wsh_acquisitions ORDER BY id')).rows, acquisitions);
+  assert.deepEqual((await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows, reservations);
+  assert.deepEqual((await pool.query('SELECT * FROM research_call_outcomes ORDER BY call_key')).rows, outcomes);
+  assert.equal(Number((await pool.query('SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1', [c.endpointId])).rows[0].generation), Number(c.endpointGeneration) + 1);
+  await f.observe(); assert.notEqual((await f.store.prepareRepair(f.identity)).state, 'READY');
+  await advance(3600000); await f.observe(); await f.publishWsh(); await f.publishNews();
+  assert.equal((await f.store.prepareRepair(f.identity)).state, 'READY');
+}));

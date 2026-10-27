@@ -40,7 +40,8 @@ export const runRecoveryHostCommand: RecoveryHostCommandRunner = (file, args) =>
   });
 });
 
-const INSPECT_FORMAT = '{{json .Id}}\t{{json .Image}}\t{{json .Config.Labels}}\t{{json .State}}\t{{json .Config.Entrypoint}}\t{{json .Config.Cmd}}';
+const INSPECT_FORMAT = '{{json .Id}}\t{{json .Image}}\t{{json .Config.Labels}}\t{{json .State}}\t{{json .Config.Entrypoint}}\t{{json .Config.Cmd}}\t{{json .Created}}';
+const NEVER_STARTED = '0001-01-01T00:00:00Z';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function dockerInstant(value: unknown): string {
   if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z$/.test(value)) return deny();
@@ -111,8 +112,8 @@ export function createResearchRecoveryHost(options: ResearchRecoveryHostOptions,
     const producers: RecoveryProducer[] = [];
     for (const id of ids) {
       const parts = (await command('docker', ['--host', context as string, 'inspect', '--type', 'container', '--format', INSPECT_FORMAT, id]))!.trim().split('\t');
-      if (parts.length !== 6) deny();
-      const [containerId, imageId, rawLabels, rawState, entrypoint, cmd] = parts.map(parseJson);
+      if (parts.length !== 7) deny();
+      const [containerId, imageId, rawLabels, rawState, entrypoint, cmd, created] = parts.map(parseJson);
       const labels = record(rawLabels), state = record(rawState);
       const service = labels['com.docker.compose.service'];
       if (containerId !== id || imageId !== options.imageId || labels['com.docker.compose.project'] !== options.project ||
@@ -123,8 +124,15 @@ export function createResearchRecoveryHost(options: ResearchRecoveryHostOptions,
       }
       if (service !== 'llm-agent') continue;
       if (
-          !['exited', 'dead'].includes(String(state.Status)) || state.Running !== false || state.Paused !== false || state.Restarting !== false || state.Pid !== 0) {
+          !['created', 'exited', 'dead'].includes(String(state.Status)) || state.Running !== false || state.Paused !== false || state.Restarting !== false || state.Pid !== 0) {
         deny('RESEARCH_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+      }
+      if (state.Status === 'created') {
+        if (state.StartedAt !== NEVER_STARTED || state.FinishedAt !== NEVER_STARTED) deny('RESEARCH_RECOVERY_PRODUCERS_NOT_QUIESCENT');
+        const createdAt = dockerInstant(created);
+        if (typeof created !== 'string' || created.slice(0, 19) !== createdAt.slice(0, 19) || createdAt > timestamp()) deny('RESEARCH_RECOVERY_PRODUCER_INVENTORY_UNSUPPORTED');
+        producers.push({ containerId: id, imageId: options.imageId, project: options.project, service: 'llm-agent', createdAt, startedAt: null, finishedAt: null, state: 'created' });
+        continue;
       }
       const startedAt = dockerInstant(state.StartedAt), finishedAt = dockerInstant(state.FinishedAt);
       if (startedAt > finishedAt || finishedAt > timestamp()) deny('RESEARCH_RECOVERY_PRODUCER_INVENTORY_UNSUPPORTED');

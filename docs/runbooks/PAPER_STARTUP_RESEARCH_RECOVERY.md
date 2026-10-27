@@ -27,6 +27,20 @@ Obsługiwany kolektor to macOS i bezpośredni lokalny TWS/IB Gateway. Zdalny end
 proxy, nieznany producent, inny obraz lub niepełna inwentaryzacja wymagają osobnej
 diagnostyki. Narzędzie nie przyjmuje ręcznie wpisanego `confirmed=true`.
 
+Kontener `llm-agent` utworzony przez wdrożenie z `--no-start` może pozostać w stanie
+`created`; nie uruchamiaj go tylko po to, aby następnie go zatrzymać. Kolektor
+akceptuje ten stan wyłącznie przy `Running`, `Paused` i `Restarting` równych
+`false`, PID równym zero oraz obu czasach `StartedAt` i `FinishedAt` dokładnie
+`0001-01-01T00:00:00Z`. Zapisuje rzeczywisty czas Docker `Created` w kanonicznym
+UTC jako `createdAt`, a `startedAt` i `finishedAt` jako `null`. Brak, niepoprawna
+lub przyszła data utworzenia blokuje recovery. Dowody `exited`/`dead` zachowują
+dotychczasowy format. Kontener, obraz, konfiguracja i stan muszą pozostać zgodne
+we wszystkich obserwacjach; wymiana lub uruchomienie producenta unieważnia dowód.
+Stan `created` nie zastępuje obserwowanego resetu endpointu WSH ani handshake.
+Obsługa `created` wymaga również migracji 40: po wykonaniu kopii zapasowej zastosuj
+ją istniejącym runnerem migracji przed poleceniami recovery. Migracja rozszerza
+walidację dowodu w bazie i zachowuje dotychczasową historię.
+
 Po `pnpm stop` wybierz instrument z bieżącego manifestu:
 
 ```sh

@@ -13,7 +13,7 @@ function fixture() {
   const state = {
     phase: 'before' as 'before' | 'stopped' | 'after', oldSurvives: false, reused: false, oldStart: 'Mon Oct 19 10:00:00 2026',
     newStart: 'Mon Oct 19 12:00:00 2026', executable, listenerExtra: '', context: 'unix:///Users/operator/.docker/run/docker.sock',
-    ids: [id], containers: new Map<string, { project: string; service: string; image: string; status: string; running: boolean; oneoff?: unknown; entrypoint?: unknown; cmd?: unknown }>(),
+    ids: [id], containers: new Map<string, { project: string; service: string; image: string; status: string; running: boolean; oneoff?: unknown; entrypoint?: unknown; cmd?: unknown; created?: unknown; startedAt?: unknown; finishedAt?: unknown; paused?: unknown; restarting?: unknown; pid?: unknown }>(),
     override: undefined as ((file: string, args: readonly string[]) => RecoveryHostCommandResult | undefined) | undefined,
   };
   state.containers.set(id, { project: options.project, service: 'llm-agent', image: imageId, status: 'exited', running: false });
@@ -29,9 +29,9 @@ function fixture() {
       if (args[0] === 'inspect') {
         const cid = args.at(-1)!, row = state.containers.get(cid)!;
         return good([cid, row.image, { 'com.docker.compose.project': row.project, 'com.docker.compose.service': row.service, 'com.docker.compose.oneoff': row.oneoff === undefined ? 'False' : row.oneoff },
-          { Status: row.status, Running: row.running, Paused: false, Restarting: false, Pid: row.running ? 123 : 0,
-            StartedAt: '2026-10-19T09:00:00.000000123Z', FinishedAt: '2026-10-19T10:00:00.000000123Z' }, row.entrypoint === undefined ? ['docker-entrypoint.sh'] : row.entrypoint,
-          row.cmd === undefined ? ['pnpm', '--filter', `@ikbr/${row.service}`, row.service === 'ui' ? 'dev' : 'start'] : row.cmd].map(value => JSON.stringify(value)).join('\t') + '\n');
+          { Status: row.status, Running: row.running, Paused: row.paused === undefined ? false : row.paused, Restarting: row.restarting === undefined ? false : row.restarting, Pid: row.pid === undefined ? (row.running ? 123 : 0) : row.pid,
+            StartedAt: row.startedAt === undefined ? '2026-10-19T09:00:00.000000123Z' : row.startedAt, FinishedAt: row.finishedAt === undefined ? '2026-10-19T10:00:00.000000123Z' : row.finishedAt }, row.entrypoint === undefined ? ['docker-entrypoint.sh'] : row.entrypoint,
+          row.cmd === undefined ? ['pnpm', '--filter', `@ikbr/${row.service}`, row.service === 'ui' ? 'dev' : 'start'] : row.cmd, row.created === undefined ? '2026-10-19T08:00:00.123456789Z' : row.created].map(value => JSON.stringify(value)).join('\t') + '\n');
       }
     }
     if (file === '/usr/sbin/ioreg') return good('"IOPlatformUUID" = "12345678-1234-1234-1234-123456789abc"\n');
@@ -220,4 +220,44 @@ test('pinned image must use the supported unmodified image entrypoint', async ()
   const f = fixture();
   f.state.override = (file, args) => file === 'docker' && args.includes('--type') && args.includes('image') ? good(JSON.stringify(['sh', '-c', 'worker'])) : undefined;
   await assert.rejects(f.host.captureProducerInventory(), code('RESEARCH_RECOVERY_PRODUCER_INVENTORY_UNSUPPORTED'));
+});
+
+const neverStarted = { status: 'created', startedAt: '0001-01-01T00:00:00Z', finishedAt: '0001-01-01T00:00:00Z' };
+test('never-started inventory records canonical actual creation and null lifecycle, preserving stable identity', async () => {
+  const f = fixture(); Object.assign(f.state.containers.get(id)!, neverStarted);
+  const before = await f.host.captureProducerInventory();
+  assert.deepEqual(before.producers, [{ containerId: id, imageId, project: options.project, service: 'llm-agent',
+    state: 'created', createdAt: '2026-10-19T08:00:00.123Z', startedAt: null, finishedAt: null }]);
+  assert.deepEqual((await f.host.verifyProducerInventory(before)).producers, before.producers);
+  assert.ok(f.calls.some(call => call.args.some(arg => arg.includes('{{json .Created}}'))));
+});
+
+test('created rejects unsafe flags, non-sentinel lifecycle, missing and noncalendar creation timestamps', async () => {
+  for (const change of [
+    { running: true }, { paused: true }, { restarting: true }, { pid: 42 }, { pid: '0' }, { paused: null }, { restarting: null },
+    { startedAt: null }, { finishedAt: null }, { startedAt: '2026-10-19T08:00:00Z' }, { finishedAt: '2026-10-19T08:00:00Z' },
+    { startedAt: '0001-01-01T00:00:00.000Z' }, { finishedAt: '0001-01-01T00:00:00.000Z' },
+    ...[null, '', 123, 'invalid', '2026-02-30T00:00:00Z', '2026-10-19T24:00:00Z', '2026-10-19T13:00:00Z',
+      '2026-10-19T08:00:00+00:00', '0001-01-01T00:00:00Z'].map(created => ({ created })),
+    ...['running', 'paused', 'restarting', 'removing', 'unknown', 'dead', 'exited'].map(status => ({ status })),
+    { image: `sha256:${'e'.repeat(64)}` }, { project: 'external' }, { oneoff: 'True' }, { cmd: ['sh'] }, { entrypoint: ['sh'] },
+  ]) {
+    const f = fixture(); Object.assign(f.state.containers.get(id)!, neverStarted, change);
+    await assert.rejects(f.host.captureProducerInventory(), error => error instanceof Error, JSON.stringify(change));
+  }
+  const missing = fixture(); Object.assign(missing.state.containers.get(id)!, neverStarted);
+  missing.state.override = (file, args) => file === 'docker' && args.includes('container') ? good('missing created field') : undefined;
+  await assert.rejects(missing.host.captureProducerInventory());
+});
+
+test('created producer replacement, creation changes and created-to-exited transition reject reinspection', async () => {
+  for (const change of ['replacement', 'creation', 'lifecycle']) {
+    const f = fixture(); Object.assign(f.state.containers.get(id)!, neverStarted);
+    const before = await f.host.captureProducerInventory();
+    if (change === 'replacement') {
+      const replacement = 'e'.repeat(64); f.state.ids = [replacement]; f.state.containers.set(replacement, { ...f.state.containers.get(id)! });
+    } else if (change === 'creation') f.state.containers.get(id)!.created = '2026-10-19T08:01:00Z';
+    else Object.assign(f.state.containers.get(id)!, { status: 'exited', startedAt: '2026-10-19T09:00:00Z', finishedAt: '2026-10-19T10:00:00Z' });
+    await assert.rejects(f.host.verifyProducerInventory(before), code('RESEARCH_RECOVERY_PRODUCER_REPLACED'));
+  }
 });
