@@ -16,3 +16,4 @@ export * from "./instrument-research/policy.js";
 export * from "./instrument-research/marketaux-refresh.js";
 
 export * from "./instrument-research/startup-recovery.js";
+export * from "./instrument-research/recovery-diagnostics.js";

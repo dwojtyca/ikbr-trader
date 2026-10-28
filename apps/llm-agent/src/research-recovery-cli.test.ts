@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { twoSourceResearchFixture } from '@ikbr/shared/instrument-research-testfixture';
-import { type RecoveryChallenge, type RecoveryIdentity } from '@ikbr/shared/instrument-research';
+import { type RecoveryChallenge, type RecoveryIdentity, recoveryFailureOutput } from '@ikbr/shared/instrument-research';
 import { executeResearchRecovery, recoveryAuthenticatedRead } from './research-recovery-cli.js';
 
 async function fixture() {
@@ -112,4 +112,101 @@ test('authenticated reader rejects redirects, unknown destinations and oversized
   assert.equal(calls, 0);
   await assert.rejects(recoveryAuthenticatedRead(env, '/execution/configuration', fetcher)); assert.equal(calls, 1);
   await assert.rejects(recoveryAuthenticatedRead(env, '/execution/configuration', async (_url, init) => { assert.equal(init?.redirect, 'error'); return new Response('', { status: 302 }); }));
+});
+
+test('backend errors retain actual phase and originals with caller privacy at serialization', async () => {
+  const f = await fixture();
+  try {
+    const original = Object.assign(new Error(`read failed ${f.env.EXECUTION_API_TOKEN} DU_SYNTHETIC`), { name: 'NativeReadError', code: 'ECONNRESET' });
+    await assert.rejects(executeResearchRecovery(f.request, f.env, { ...f.deps, read: async () => { throw original; } }), error => {
+      const output = recoveryFailureOutput(error, 'request');
+      assert.equal(output.diagnostic.stage, 'preflight'); assert.equal(output.diagnostic.original.name, 'NativeReadError');
+      assert.equal(output.diagnostic.original.code, 'ECONNRESET');
+      assert.ok(!JSON.stringify(output).includes(f.env.EXECUTION_API_TOKEN!)); assert.ok(!JSON.stringify(output).includes('DU_SYNTHETIC'));
+      return true;
+    });
+    for (const action of ['prepare', 'read', 'receipt'] as const) {
+      await executeResearchRecovery(f.request, f.env, f.deps);
+      const method = { prepare: 'prepareResearchRecovery', read: 'readResearchRecovery', receipt: 'readResearchRecoveryReceipt' }[action];
+      const request = action === 'prepare' ? f.request : { action, challengeId: f.challenge.id, ...(action === 'receipt' ? { operationId: randomUUID() } : {}) };
+      await assert.rejects(executeResearchRecovery(request, f.env, { ...f.deps, store: { ...f.deps.store, [method]: async () => { throw original; } } }), error => {
+        assert.equal(recoveryFailureOutput(error, 'request').diagnostic.stage, action); return true;
+      });
+    }
+  } finally { await f.close(); }
+});
+
+test('connect and cleanup diagnostics preserve primary cause without another handshake', async () => {
+  for (const failure of ['connect', 'both', 'close', 'validate', 'postflight'] as const) {
+    const f = await fixture();
+    try {
+      await executeResearchRecovery(f.request, f.env, f.deps); const id = randomUUID(); let connects = 0, closes = 0;
+      const connectError = Object.assign(new Error('connection refused'), { name: 'ConnectError', code: 'ECONNREFUSED' });
+      const closeError = Object.assign(new Error('close failed'), { name: 'CloseError', code: 'EIO' });
+      await assert.rejects(executeResearchRecovery({ action: 'reconnect', challengeId: f.challenge.id, challengeHash: f.challenge.challengeHash }, f.env, {
+        ...f.deps, transport: () => ({ sessionId: id, serverVersion: 180, sdkVersion: '1.6.10',
+          connect: async () => { connects++; if (failure === 'connect' || failure === 'both') throw connectError; if (failure === 'postflight') f.restart(); },
+          close: async () => { closes++; if (failure === 'both' || failure === 'close') throw closeError;
+            return { sessionId: id, state: failure === 'validate' ? 'UNKNOWN' : 'CONFIRMED', verifiedLocalClosure: failure !== 'validate',
+              completedAt: new Date().toISOString(), cancellationAttemptedAt: null, disconnectRequestedAt: new Date().toISOString(), localClosedAt: new Date().toISOString() }; },
+        }),
+      }), error => {
+        const d = recoveryFailureOutput(error, 'request').diagnostic;
+        assert.equal(d.stage, failure === 'connect' || failure === 'both' ? 'reconnect-connect' : `reconnect-${failure}`);
+        if (failure === 'connect' || failure === 'both') assert.equal(d.original.code, 'ECONNREFUSED');
+        if (failure === 'close') assert.equal(d.original.code, 'EIO');
+        return true;
+      });
+      assert.equal(connects, 1); assert.equal(closes, 1);
+    } finally { await f.close(); }
+  }
+});
+
+test('invalid request never serializes validator raw inputs', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(executeResearchRecovery({ action: 'secret-provider-payload', payload: 'do-not-print' }, f.env, f.deps), error => {
+      const output = recoveryFailureOutput(error, 'request');
+      assert.equal(output.diagnostic.stage, 'request'); assert.equal(output.diagnostic.reason, 'RESEARCH_RECOVERY_REQUEST_INVALID');
+      assert.ok(!JSON.stringify(output).includes('secret-provider-payload')); assert.ok(!JSON.stringify(output).includes('do-not-print')); return true;
+    });
+    assert.equal(f.calls, 0);
+  } finally { await f.close(); }
+});
+
+test('malformed authenticated response retains SyntaxError identity without exposing its body excerpt', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(executeResearchRecovery(f.request, f.env, {
+      ...f.deps, read: path => recoveryAuthenticatedRead(f.env, path, async () => new Response('RAW_PROVIDER_SENTINEL')),
+    }), error => {
+      const d = recoveryFailureOutput(error, 'request').diagnostic;
+      assert.equal(d.stage, 'preflight'); assert.equal(d.original.name, 'SyntaxError'); assert.equal(d.original.message, null);
+      assert.ok(!JSON.stringify(d).includes('RAW_PROVID')); return true;
+    });
+    assert.equal(f.calls, 0);
+  } finally { await f.close(); }
+});
+
+test('returned unknown cleanup cause survives validation without masking a prior connect failure', async () => {
+  for (const connectFails of [false, true]) {
+    const f = await fixture();
+    try {
+      await executeResearchRecovery(f.request, f.env, f.deps); const id = randomUUID(); let connects = 0, closes = 0;
+      await assert.rejects(executeResearchRecovery({ action: 'reconnect', challengeId: f.challenge.id, challengeHash: f.challenge.challengeHash }, f.env, {
+        ...f.deps, transport: () => ({ sessionId: id, serverVersion: 180, sdkVersion: '1.6.10',
+          connect: async () => { connects++; if (connectFails) throw Object.assign(new Error('connect failed'), { code: 'ECONNRESET' }); },
+          close: async () => { closes++; return { sessionId: id, state: 'UNKNOWN', verifiedLocalClosure: false,
+            completedAt: new Date().toISOString(), cancellationAttemptedAt: null, disconnectRequestedAt: new Date().toISOString(), localClosedAt: null,
+            sourceError: { name: 'SocketCloseError', code: 'ECLOSE', message: `close failed ${f.env.EXECUTION_API_TOKEN}` } }; },
+        }),
+      }), error => {
+        const d = recoveryFailureOutput(error, 'request').diagnostic;
+        assert.equal(d.stage, connectFails ? 'reconnect-connect' : 'reconnect-validate');
+        assert.equal(d.original.code, connectFails ? 'ECONNRESET' : 'ECLOSE');
+        assert.ok(!JSON.stringify(d).includes(f.env.EXECUTION_API_TOKEN!)); return true;
+      });
+      assert.equal(connects, 1); assert.equal(closes, 1);
+    } finally { await f.close(); }
+  }
 });

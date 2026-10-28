@@ -85,6 +85,23 @@ niepewnym wyniku. Dowód obejmuje dokładnie wskazane stare próby; kolejne UNKN
 wymaga własnego dowodu. Próba na innym endpointzie nie jest naprawiana restartem
 bieżącego endpointu.
 
+Przy błędzie CLI pokazuje etap, wewnętrzny powód i dostępne oryginalne szczegóły
+po usunięciu sekretów oraz identyfikatorów kont. Przykładowo `gateway-replacement`
+oznacza sprawdzanie nowego procesu, `reconnect-connect` — handshake,
+`reconnect-close` — błąd zamykania socketu, a `reconnect-validate` — odrzucenie
+jego dowodu. Brak oryginalnego opisu pozostaje oznaczony jako niedostępny.
+Etap jest diagnostyką, nie potwierdzeniem zakończenia operacji ani zgodą na retry.
+Nie wklejaj surowych logów, sekretów ani danych konta do raportów.
+
+Gdy odczyt dokładnego wyniku mutacji nie potwierdza sukcesu, komunikat zachowuje
+pierwszą dostępną przyczynę jej niepowodzenia. Wynik nadal pozostaje niepewny;
+nie wysyłaj mutacji ponownie. Jeżeli obserwator zakończył się bez zapisania dowodu,
+nie da się odtworzyć jego wcześniejszej obserwacji z samego komunikatu o zamknięciu
+TWS. Najpierw sprawdź stan i przyczynę. Nieaktualne wyzwanie zastąp poniższym
+`supersede`; nowy dowód WSH wymaga nowej obserwacji pełnego zatrzymania i startu
+procesu przed pojedynczym handshake. Poprzednia ogólna wiadomość o błędzie nie
+pozwala ustalić, czy przyczyną był timeout, logowanie czy inny etap.
+
 ## Niepewny zapis i nieaktualne recovery
 
 Polecenia zapisują identyfikator operacji przed mutacją i po utracie odpowiedzi

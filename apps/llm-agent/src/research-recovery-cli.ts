@@ -4,6 +4,7 @@ import { Pool } from 'pg';
 import { z } from 'zod';
 import { loadTradingConfiguration } from '@ikbr/shared/trading-config';
 import { loadResearchManifest, parseRecoveryEvidence, parseRecoveryIdentity, researchHash, ResearchStore,
+  recoveryDiagnosticFailure, recoveryDiagnosticPrivacy, recoveryFailureOutput, type RecoveryDiagnosticStage,
   type RecoveryChallenge, type RecoveryIdentity, type RecoveryCommit, type RecoverySupersede,
   type RecoveryEvidence, type RecoveryQuiescenceEvidence, type WshRecoveryEvidence } from '@ikbr/shared/instrument-research';
 import { loadWshRuntimeConfiguration, WshSocketTransport, type WshTransport } from './research-wsh-transport.js';
@@ -44,8 +45,14 @@ export async function executeResearchRecovery(request: unknown, env: NodeJS.Proc
   transport?: (configuration: ReturnType<typeof loadWshRuntimeConfiguration> & { accountId: string }) => Pick<WshTransport, 'connect' | 'close' | 'sessionId' | 'serverVersion' | 'sdkVersion'>;
   now?: () => number; readFile?: (path: string) => string;
 }): Promise<unknown> {
+  let stage: RecoveryDiagnosticStage = 'request';
+  const privacy = recoveryDiagnosticPrivacy(env);
+  try {
   requireRecovery(Buffer.byteLength(JSON.stringify(request)) <= 65536, 'RESEARCH_RECOVERY_REQUEST_INVALID');
-  const command = requestSchema.parse(request);
+  const parsed = requestSchema.safeParse(request);
+  requireRecovery(parsed.success, 'RESEARCH_RECOVERY_REQUEST_INVALID');
+  const command = parsed.data;
+  stage = 'configuration';
   const loaded = loadTradingConfiguration(env, { readFile: deps.readFile });
   requireRecovery(loaded.mode === 'bundle' && env.IBKR_ENVIRONMENT === 'paper' && !env.ALLOWED_LIVE_ACCOUNTS);
   const accountId = env.RESEARCH_BUDGET_ACCOUNT_ID;
@@ -64,6 +71,7 @@ export async function executeResearchRecovery(request: unknown, env: NodeJS.Proc
       && control?.account_id === accountId && control.paused === true && Number.isSafeInteger(Number(control.revision)) && Number(control.revision) > 0);
     return { accountId, actor, revision: Number(control.revision), processId: configuration.processId, configHash: loaded.effectiveHash, manifestHash: research.hash };
   };
+  stage = 'preflight';
   const current = await preflight();
   const identity = (input: z.infer<typeof requestSchema> & { kind: RecoveryIdentity['kind']; instrumentId: string; operationId: string }): RecoveryIdentity => {
     const policy = research.manifest.instruments.find(x => x.instrumentId === input.instrumentId);
@@ -78,16 +86,18 @@ export async function executeResearchRecovery(request: unknown, env: NodeJS.Proc
       && challenge.pauseRevision === current.revision && challenge.executionProcessId === current.processId && (!expectedHash || challenge.challengeHash === expectedHash));
     return challenge;
   };
-  if (command.action === 'prepare') return deps.store.prepareResearchRecovery(identity(command));
-  if (command.action === 'replacement') return deps.store.readResearchRecoveryReplacement(command.operationId, identity(command));
-  if (command.action === 'read') return checkedChallenge(command.challengeId);
-  if (command.action === 'receipt') { await checkedChallenge(command.challengeId); return deps.store.readResearchRecoveryReceipt(command.challengeId, command.operationId); }
+  if (command.action === 'prepare') { stage = 'prepare'; return await deps.store.prepareResearchRecovery(identity(command)); }
+  if (command.action === 'replacement') { stage = 'read'; return await deps.store.readResearchRecoveryReplacement(command.operationId, identity(command)); }
+  if (command.action === 'read') { stage = 'read'; return await checkedChallenge(command.challengeId); }
+  if (command.action === 'receipt') { stage = 'receipt'; await checkedChallenge(command.challengeId); return await deps.store.readResearchRecoveryReceipt(command.challengeId, command.operationId); }
   if (command.action === 'supersede') {
+    stage = 'supersede';
     const evidence = parseRecoveryEvidence(command.evidence, true);
     requireRecovery(evidence.kind === 'PRODUCER_QUIESCENCE');
     const input: RecoverySupersede = { challengeId: command.challengeId, challengeHash: command.challengeHash, replacement: identity(command), evidence: evidence as RecoveryQuiescenceEvidence };
-    return deps.store.supersedeResearchRecovery(input);
+    return await deps.store.supersedeResearchRecovery(input);
   }
+  stage = 'challenge';
   const challenge = await checkedChallenge(command.challengeId, command.challengeHash);
   const settings = loadWshRuntimeConfiguration(env);
   const validateEndpoint = (evidence: WshRecoveryEvidence) => requireRecovery(settings.enabled && challenge.endpointId === settings.endpointId
@@ -95,29 +105,48 @@ export async function executeResearchRecovery(request: unknown, env: NodeJS.Proc
     && evidence.endpointSettingsHash === researchHash({ endpointId: settings.endpointId, host: settings.host, port: settings.port, clientId: settings.clientId })
     && evidence.reconnect.accountId === accountId);
   if (command.action === 'commit') {
+    stage = 'commit';
     const evidence = parseRecoveryEvidence(command.evidence);
     requireRecovery(evidence.kind === challenge.kind);
     if (evidence.kind === 'WSH_ENDPOINT_RESET') validateEndpoint(evidence);
     const input: RecoveryCommit = { challengeId: challenge.id, challengeHash: challenge.challengeHash, operationId: command.operationId, actor,
       pauseRevision: current.revision, evidence: evidence as RecoveryEvidence };
-    return deps.store.commitResearchRecovery(input);
+    return await deps.store.commitResearchRecovery(input);
   }
   requireRecovery(command.action === 'reconnect' && challenge.state === 'PREPARED' && challenge.kind === 'WSH_ENDPOINT_RESET'
     && settings.enabled && challenge.endpointId === settings.endpointId && ['host.docker.internal', 'localhost', '127.0.0.1', '::1'].includes(settings.host));
   const now = deps.now ?? Date.now, started = now();
+  stage = 'reconnect-connect';
   const transport = (deps.transport ?? (configuration => new WshSocketTransport({ ...configuration, secrets: [env.EXECUTION_API_TOKEN!] })) )({ ...settings, accountId });
-  let completed: number; let cleanup: Awaited<ReturnType<WshTransport['close']>>;
+  let completed: number; let cleanup!: Awaited<ReturnType<WshTransport['close']>>;
+  let connectionFailure: ReturnType<typeof recoveryDiagnosticFailure> | undefined;
+  let cleanupFailure: ReturnType<typeof recoveryDiagnosticFailure> | undefined;
   try { await transport.connect(new Date(started + 10000).toISOString()); completed = now(); }
-  finally { cleanup = await transport.close(); }
+  catch (error) { connectionFailure = recoveryDiagnosticFailure(error, stage, privacy); }
+  finally {
+    stage = 'reconnect-close';
+    try { cleanup = await transport.close(); }
+    catch (error) { cleanupFailure = recoveryDiagnosticFailure(error, stage, privacy); }
+  }
+  if (connectionFailure) throw connectionFailure;
+  if (cleanupFailure) throw cleanupFailure;
+  stage = 'reconnect-validate';
+  try {
   requireRecovery(Number.isFinite(completed!) && completed! >= started && completed! - started <= 10000
     && transport.sdkVersion === '1.6.10' && transport.serverVersion >= 173 && cleanup.state === 'CONFIRMED'
     && cleanup.verifiedLocalClosure && cleanup.sessionId === transport.sessionId && !cleanup.sourceError
     && cleanup.localClosedAt !== null && cleanup.disconnectRequestedAt !== null && Date.parse(cleanup.completedAt) >= completed!);
+  } catch (error) {
+    if (error instanceof Error && cleanup.sourceError) Object.assign(error, { sourceError: cleanup.sourceError });
+    throw error;
+  }
+  stage = 'reconnect-postflight';
   const after = await preflight();
   requireRecovery(after.processId === current.processId && after.revision === current.revision);
   await checkedChallenge(challenge.id, challenge.challengeHash);
   return { startedAt: new Date(started).toISOString(), completedAt: new Date(completed!).toISOString(), sessionId: transport.sessionId,
     accountId, serverVersion: transport.serverVersion, sdkVersion: '1.6.10', cleanup };
+  } catch (error) { throw recoveryDiagnosticFailure(error, stage, privacy); }
 }
 
 export async function runResearchRecoveryCli(input: AsyncIterable<Uint8Array> = process.stdin, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
@@ -125,11 +154,16 @@ export async function runResearchRecoveryCli(input: AsyncIterable<Uint8Array> = 
   for await (const chunk of input) { bytes += chunk.length; requireRecovery(bytes <= 65536, 'RESEARCH_RECOVERY_REQUEST_INVALID'); chunks.push(chunk); }
   requireRecovery(env.POSTGRES_URL, 'RESEARCH_RECOVERY_DATABASE_REQUIRED');
   const pool = new Pool({ connectionString: env.POSTGRES_URL, max: 1, connectionTimeoutMillis: 3000, query_timeout: 3000, statement_timeout: 3000 });
-  try { return await executeResearchRecovery(JSON.parse(Buffer.concat(chunks).toString('utf8')), env, { store: new ResearchStore(pool) }); }
+  try {
+    let request: unknown;
+    try { request = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { throw new Error('RESEARCH_RECOVERY_REQUEST_INVALID'); }
+    return await executeResearchRecovery(request, env, { store: new ResearchStore(pool) });
+  }
   finally { await pool.end(); }
 }
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
-  void runResearchRecoveryCli().then(result => process.stdout.write(JSON.stringify({ ok: true, result }) + '\n')).catch(() => {
-    process.stdout.write(JSON.stringify({ ok: false, reason: 'RESEARCH_RECOVERY_FAILED_OR_UNKNOWN' }) + '\n'); process.exitCode = 1;
+  void runResearchRecoveryCli().then(result => process.stdout.write(JSON.stringify({ ok: true, result }) + '\n')).catch(error => {
+    process.stdout.write(JSON.stringify(recoveryFailureOutput(error, 'request', recoveryDiagnosticPrivacy(process.env))) + '\n'); process.exitCode = 1;
   });
 }
