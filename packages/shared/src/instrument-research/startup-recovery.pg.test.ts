@@ -13,7 +13,7 @@ import {TradingConfigurationStore} from '../trading-configuration/store.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any,clock:ResearchRecoveryClock,advance:(ms:number,host?:boolean)=>Promise<void>)=>Promise<void>, beforeRecoveryMigration?:(pool:any,clock:ResearchRecoveryClock)=>Promise<void>, beforeCreatedMigration?:(pool:any,clock:ResearchRecoveryClock)=>Promise<void>){
- const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname)&& (url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'));
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname)&& (url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||url.port==='55438'&&url.pathname==='/ikbr_owner_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'));
  url.pathname='/postgres';const admin=new Pool({connectionString:url.href}),name='startup_recovery_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href,options:'-c search_path=public,pg_catalog'});let offset=0;
  const clock:ResearchRecoveryClock={wallNow:()=>Date.now()+offset,monotonicNow:()=>performance.now()+offset,domainId:()=> 'd'.repeat(64)};
@@ -99,13 +99,13 @@ test('expired fenced acquisition recovers once without refund or cached admissio
 }));
 
 test('database-only forward jump cannot recover or create a receipt', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(3600000,false);await f.observe();
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(3600000,false);await f.observe();
  const result=await f.store.recoverMarketauxAttempts(f.identity);assert.equal(result.state,'OPERATOR_REQUIRED');assert.equal(result.reason,'RESEARCH_RECOVERY_CLOCK_UNPROVED');
  assert.equal((await pool.query('SELECT count(*)::int n FROM research_marketaux_recoveries')).rows[0].n,0);
 }));
 
 test('maintenance survives stopped producer heartbeat and commit never admits old cache', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const c=await f.store.prepareResearchRecovery(identity(f));
  await assert.rejects(f.store.prepareRepair(f.identity),/PEER_MISSING|MAINTENANCE_HOLD/);
  const input={challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:'operator:test',pauseRevision:1,evidence:evidence(c)};
@@ -116,7 +116,7 @@ test('maintenance survives stopped producer heartbeat and commit never admits ol
 }));
 
 test('obsolete challenge supersession preserves hold and is read back by operation', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const first=await f.store.prepareResearchRecovery(identity(f));await pool.query("UPDATE execution_entry_controls SET revision=revision+1 WHERE account_id=$1",[f.accountId]);
  const replacement={...identity(f),pauseRevision:2};const old=evidence(first);
  const input={challengeId:first.id,challengeHash:first.challengeHash,replacement,evidence:{...old,kind:'PRODUCER_QUIESCENCE' as const}};
@@ -145,7 +145,7 @@ test('DB clock regression and slow sample fail before reservation', {skip:!conne
 }));
 
 test('operation readback discovers obsolete challenge only under current identical issuer scope', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const originalIdentity=identity(f),c=await f.store.prepareResearchRecovery(originalIdentity);
  await pool.query('UPDATE execution_entry_controls SET revision=revision+1 WHERE account_id=$1',[f.accountId]);
  const nextManifest=structuredClone(f.manifest);nextManifest.instruments[0].business+=' Updated fixture authority.';
@@ -164,7 +164,7 @@ test('operation readback discovers obsolete challenge only under current identic
 }));
 
 test('exact commit receipt readback rejects wrong operation and preserves original evidence', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const c=await f.store.prepareResearchRecovery(identity(f)),input={challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:'operator:test',pauseRevision:1,evidence:evidence(c)};
  const receipt=await f.store.commitResearchRecovery(input);
  assert.deepEqual(await f.store.readResearchRecoveryReceipt(c.id,input.operationId),receipt);
@@ -175,7 +175,7 @@ test('exact commit receipt readback rejects wrong operation and preserves origin
 }));
 
 test('expired challenge retains its hold and cannot be cancelled or committed by SQL', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const c=await f.store.prepareResearchRecovery(identity(f));await advance(901000);await f.observe();
  await assert.rejects(f.store.commitResearchRecovery({challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:'operator:test',pauseRevision:1,evidence:evidence(c)}),/CHALLENGE_EXPIRED/);
  const prep=await f.store.prepareRepair(f.identity);assert.equal(prep.state,'HOLD');assert.equal(prep.sources.find(s=>s.sourceId===f.source.id)?.marketauxRefresh?.recovery?.challengeId,c.id);
@@ -270,7 +270,7 @@ test('known HTTP failure after clock discontinuity cannot retain or publish elig
 }));
 
 test('SQL Marketaux admission waits for concurrent maintenance preparation before rejecting', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  let notify!:()=>void,release!:()=>void;const reached=new Promise<void>(r=>{notify=r;}),gate=new Promise<void>(r=>{release=r;});
  const wrapped={query:pool.query.bind(pool),connect:async()=>{const client=await pool.connect();let preparing=false;return {release:client.release.bind(client),query:async(sql:string,values?:unknown[])=>{
   if(sql.includes('INSERT INTO research_recovery_challenges('))preparing=true;if(preparing&&sql==='COMMIT'){notify();await gate;}return client.query(sql,values);
@@ -289,7 +289,7 @@ test('SQL Marketaux admission waits for concurrent maintenance preparation befor
 
 
 test('raw SQL created producer audit rejects forged evidence with otherwise valid challenge and hash bindings', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
- const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
+ const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);await advance(126000);await f.observe();await maintenance(f,pool);
  const c=await f.store.prepareResearchRecovery(identity(f)),proof=evidence(c);
  proof.producers=[{...proof.producers[0],state:'created',createdAt:proof.producers[0].startedAt!,startedAt:null,finishedAt:null}];
  async function rawInsert(value:unknown){
@@ -324,7 +324,7 @@ test('migration 40 preserves existing research history and can be reapplied with
   assert.deepEqual(await snapshot(pool),before);
   assert.equal((await pool.query("SELECT oid FROM pg_proc WHERE proname='research_recovery_audit_guard'")).rows[0].oid,triggerOid);
  },undefined,async(pool,clock)=>{
-  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock});await claim(f);
+  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);
   await pool.query('UPDATE fixture_clock SET offset_ms=offset_ms+126000');const wall=clock.wallNow,mono=clock.monotonicNow;clock.wallNow=()=>wall()+126000;clock.monotonicNow=()=>mono()+126000;
   await f.observe();await maintenance(f,pool);const c=await f.store.prepareResearchRecovery(identity(f));
   await f.store.commitResearchRecovery({challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:c.actor,pauseRevision:1,evidence:evidence(c)});

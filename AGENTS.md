@@ -94,13 +94,28 @@ protection, risk or deployment/recovery requirements.
 
 ## Current delivery priority
 
-Prove a supervised Paper entry and exit on **one PKO share** before tuning
-strategies or enabling unattended trading. The PKO profile uses `pko_wse`, WSE,
-PLN and `momentum_breakout_long_v1`, with explicit configuration opt-in, a bounded
-entry window and a durable one-entry-attempt-per-account/day budget.
+Owner direction 2026-10-28: deliver continuous Paper operation for PKO and AAPL,
+one whole share and at most one open position per instrument, with the existing
+USD5/day AI budget and no daily entry-attempt quota. Follow the
+[continuous-operation plan](docs/implementation/phase3/CONTINUOUS_PAPER_OPERATION_PLAN.md)
+and the [automatic startup/recovery plan](docs/implementation/phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_PLAN.md).
+Its implementation and isolated runtime recovery have independent acceptance;
+release and rollout status are tracked in the
+[recovery report](docs/implementation/phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_REPORT.md).
+
+Startup and recovery must automatically reconnect, reconcile and continue
+observation after transient database, process or broker failures. Do not create
+routine TWS-restart requirements or recurring manual qualification ceremonies.
+Read-source uncertainty is distinct from an unknown order submission: preserve
+read history and charged budgets, fence stale publications, and admit a new read
+under its normal pacing. Never turn missing evidence into success. Unresolved
+financial state can hold new orders while synchronization and diagnostics keep
+running. Historical manual-recovery protocols are superseded only through the
+reviewed implementation and evidence-preserving migration, not direct row edits.
 
 Read [the GPW runbook](docs/runbooks/GPW_PAPER_ROUND_TRIP.md) before operational
-work. [The 2026-09-24 preflight report](docs/implementation/phase3/GPW_PREFLIGHT_DOCKER_REPORT.md)
+work for its historical supervised acceptance evidence; its bounded-run quota
+does not replace the newer continuous scope. [The 2026-09-24 preflight report](docs/implementation/phase3/GPW_PREFLIGHT_DOCKER_REPORT.md)
 records observed blockers; recheck them against current IBKR evidence. Passing
 tests, `/ready` or history counts alone does not prove launch readiness. In
 particular, the preflight found unavailable completed-order coverage in the

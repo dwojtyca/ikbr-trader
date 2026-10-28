@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { researchFixture } from "./research.fixture.js";
+import { researchFixture, twoSourceResearchFixture } from "./research.fixture.js";
 import { inspectResearch } from "./repair.js";
 import { marketauxSourceUrl, type MarketauxNewsConfig } from "./marketaux.js";
 import { researchHash } from "./validation.js";
@@ -100,3 +100,15 @@ for (const change of ["snapshot", "source", "hash", "slot", "day", "recorded", "
     assert.equal(f.inspect().state, "HOLD");
   });
 }
+
+
+test('automatic WSH recovery is waiting only for exact recovery diagnostics and retains permission holds',()=>{
+ const f=twoSourceResearchFixture(now),snapshot={id:'fixture',hash:researchHash(f.snapshot),sequence:1,snapshot:f.snapshot};
+ const state:import('./wsh-refresh.js').WshRefreshState={sourceId:f.wshSource.id,lastSuccessfulAt:null,expiresAt:null,retained:false,latestAttempt:null,latestFailure:null,nextRetryAt:null,nextRegularAt:new Date(now+3600000).toISOString(),blocksCachedEvidence:true,
+  recovery:{state:'WAITING',reason:'RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR',nextCheckAt:new Date(now+3600000).toISOString(),operatorAction:null,challengeId:null,lastRecoveryId:'fixture'}};
+ const inspect=()=>inspectResearch(f.manifest,f.policy.instrumentId,snapshot,now,[],[],[state]);
+ assert.equal(inspect().state,'WAITING');
+ state.recovery!.reason='RESEARCH_WSH_OTHER';assert.equal(inspect().state,'HOLD');
+ state.recovery!.reason='RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR';state.recovery!.nextCheckAt='invalid';assert.equal(inspect().state,'HOLD');
+ state.recovery!.nextCheckAt=new Date(now+3600000).toISOString();f.wshSource.automation='UNVERIFIED';assert.equal(inspect().state,'HOLD');
+});

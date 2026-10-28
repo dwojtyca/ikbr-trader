@@ -143,24 +143,71 @@ osobnych dowodów brokera.
 
 ## Przejściowy błąd zegara
 
-Opcjonalne `EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED=true` pozwala
-execution-engine odzyskać izolowaną blokadę zegara bez ponownego `pnpm start`.
+Profil ciągłej pracy opisany tutaj wymaga
+`EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED=true`, aby execution-engine
+odzyskiwał izolowaną blokadę zegara bez ponownego `pnpm start`.
 Wymaga wdrożenia kompatybilnego obrazu i jawnego Paper opt-in; domyślnie pozostaje
-wyłączone. Nowe wejścia wracają dopiero po pełnym potwierdzeniu rozliczeń, jeśli
+wyłączone; wdrożenie tego profilu musi jawnie włączyć tę flagę i potwierdzić ją
+w efektywnej konfiguracji. Bez niej automatyczne odzyskiwanie zegara nie działa. Nowe wejścia wracają dopiero po pełnym potwierdzeniu rozliczeń, jeśli
 nie zatrzymałeś ich ręcznie i pozostałe bramki pozwalają. Automat nie zmienia pauzy
 operatora, master switch, ochrony pozycji ani zleceń.
 
-`OPERATOR_REQUIRED` i `OUTCOME_UNKNOWN` oznaczają potrzebę interwencji, nie zachętę
-do restartowania usług. Sprawdź `pnpm status` i
-[runbook rozliczeń](PAPER_ACCOUNTING_SOURCE.md#automatyczne-odzyskiwanie-zegara-w-paper).
+## Automatyczne odzyskiwanie po awarii
+
+Pakiet z 28 października zastępuje rutynowe ręczne odzyskiwanie źródła rozliczeń
+oraz przerwanych odczytów WSH. Status wdrożenia i wyniki kontroli znajdują się w
+[raporcie odzyskiwania](../implementation/phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_REPORT.md).
+Poniższe zachowanie wymaga obrazu zawierającego ten pakiet.
+
+Uruchom zalogowane TWS Paper i wykonaj `pnpm start`. Bot sprawdza rachunek,
+konfigurację API, historię wykonań, pozycje i zlecenia oraz przygotowuje dane i
+badania. Nie wymaga cyklicznego ręcznego potwierdzania pustego rachunku ani
+restartu TWS po awarii bazy. `pnpm status` i `pnpm logs` pokazują postęp.
+
+Po utracie połączenia z bazą lub TWS synchronizacja ponawia odczyt z ograniczoną
+częstotliwością. Nowy proces przejmuje źródło dopiero po zwolnieniu blokady sesji
+bazy i zapisuje nową generację; spóźnione wyniki starego procesu są odrzucane.
+Historia, pauza operatora, rezerwacje kosztów i niepewne zlecenia pozostają w bazie.
+API diagnostyczne działa podczas odzyskiwania źródła. Przy niedostępnej bazie
+na samym starcie proces ponawia inicjalizację i zapisuje powód w logach.
+
+Przerwany odczyt WSH zachowuje wynik UNKNOWN. Automat odbiera mu prawo publikacji,
+a kolejny zwykły odczyt dopuszcza dopiero zgodnie z pierwotnym harmonogramem i
+limitami. Nie uznaje starego odczytu za udany i nie odnawia budżetu. `WAITING`
+oznacza dalsze przygotowanie; brak uprawnień, niezgodność konfiguracji lub
+nierozstrzygnięte zlecenie nadal wymagają właściwej diagnozy. Synchronizacja
+pozostaje aktywna także wtedy, gdy nowe wejścia są wstrzymane.
+
+Automatyczna kwalifikacja źródła potwierdza możliwości bieżącej sesji API i zakres
+historii. Nie wygasa wyłącznie dlatego, że minęło siedem dni; po zmianie generacji
+musi powstać świeże potwierdzenie. Strefa czasu pochodzi z jawnej konfiguracji,
+a jej pochodzenie pozostaje zapisane. Automat zegara zachowuje odstępy i historię
+prób, zamiast kończyć pracę po trzech niepowodzeniach.
+
+Niepewne wysłanie zlecenia nie jest niepewnym odczytem: bot nie wysyła go ponownie,
+lecz uzgadnia je z IBKR. Nie usuwaj wierszy ani nie zeruj liczników, aby wymusić
+start. Starsze instrukcje ręcznego resetu pozostają dokumentacją poprzedniego
+obrazu, a nie zwykłym krokiem tego uruchomienia.
+
 Pozostaw host pod zasilaniem, bez sleep i zamykania pokrywy; automat nie zastępuje
-ciągłej dostępności TWS i komputera.
+ciągłej dostępności TWS i komputera. Wygasła sesja logowania może wymagać logowania
+w IBKR. Nie wymaga to przebudowy bota ani ponownej adopcji polityki.
 
-Odzyskiwanie przerwanych pobrań przy starcie oraz procedura dla starego UNKNOWN:
-[Paper startup research recovery](PAPER_STARTUP_RESEARCH_RECOVERY.md).
+## Środowisko deweloperskie odczytu rozliczeń
 
-`ACCOUNTING_SOURCE_OWNER_UNRETIRED` blokuje start execution przed HTTP. Wymaga
-oddzielnej [procedury odzyskania właściciela](PAPER_ACCOUNTING_SOURCE.md#porzucony-właściciel-accounting_source_owner_unretired),
-zatrzymanych producentów i obserwowanego pełnego restartu TWS przez właściciela.
-Nie usuwać wiersza z bazy ani wielokrotnie wywoływać `pnpm start`. Potwierdzone
-recovery tego właściciela nie usuwa pozostałych blokad i nie wznawia handlu.
+Nowy odczyt korzysta z przypiętego oficjalnego SDK Python, przygotowanego przez
+`Dockerfile`. Obsługiwana ścieżka lokalnego uruchomienia tego modułu to obraz
+Docker, także podczas prac deweloperskich:
+
+```sh
+docker build -t ikbr-trader-app:local .
+```
+
+Budowanie weryfikuje hash archiwum SDK, instaluje zależności z hashami i uruchamia
+testy czytnika. Samo `pnpm install` nie instaluje tego środowiska. Uruchomienie
+`pnpm dev:execution` bezpośrednio na hoście z włączonym źródłem rozliczeń wymaga
+wcześniejszego odtworzenia kroków instalacji z `Dockerfile`: środowiska
+`/opt/ikbr-sdk/bin/python`, źródeł w `/opt/ibkr-sdk-source` oraz identycznych wersji
+i hashów. Nie zastępuj ich przypadkowym systemowym Pythonem lub pakietem ibapi.
+Obraz deweloperski nie zastępuje zatwierdzonego obrazu z prywatnego profilu
+`pnpm start`; wdrożenie nadal wymaga kontroli wydania.

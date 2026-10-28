@@ -90,7 +90,7 @@ export async function validateRenderedCompose(value: unknown, proof: ReleaseProo
   for (const name of APP_SERVICES) {
     const service = obj(services[name]); if (!service || service.image !== proof.imageId || service.entrypoint != null) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const cmd = Array.isArray(service.command) ? service.command : typeof service.command === 'string' ? service.command.split(/\s+/) : [];
-    if (canonicalJson(cmd) !== canonicalJson(['pnpm', '--filter', `@ikbr/${name}`, 'start'])) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
+    if (canonicalJson(cmd) !== canonicalJson(name === 'execution-engine' ? ['node', 'apps/execution-engine/dist/index.js'] : ['pnpm', '--filter', `@ikbr/${name}`, 'start']) || name === 'execution-engine' && service.init !== true) throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');
     const e = envMap(service);
     appEnvironments[name] = e;
     if (e.IBKR_ENVIRONMENT !== 'paper' || e.ALLOWED_LIVE_ACCOUNTS !== '') throw new PaperRuntimeError('PAPER_CONFIG_CHANGED');

@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import type { AccountingSourceService } from './source-service.js';
+import type { AccountingSource } from './source-service.js';
 import { accountingHash, type AutomaticClockRecoveryStatus } from './types.js';
 
 export class AccountingClockRecoveryCoordinator {
@@ -14,7 +14,7 @@ export class AccountingClockRecoveryCoordinator {
   private notification: Promise<void> | undefined;
   private notified = '';
   constructor(private readonly options: {
-    source: AccountingSourceService;
+    source: AccountingSource;
     requestFreshCapture: () => Promise<unknown>;
     onState?: (snapshot: AutomaticClockRecoveryStatus) => void | Promise<void>;
     monotonicNow?: () => number;
@@ -59,6 +59,7 @@ export class AccountingClockRecoveryCoordinator {
       const mono=this.options.monotonicNow?.() ?? performance.now(), wall=Date.now();
       const database=await source.recoveryDatabaseTime();
       if(this.time && (Math.abs((wall-this.time.wall)-(mono-this.time.monotonic))>2000 || Math.abs((database-this.time.database)-(mono-this.time.monotonic))>2000)) {
+        if (status.attemptLimit === null) { this.time = undefined; this.stableIdentity = ''; }
         await source.requireRecoveryOperator('ACCOUNTING_CLOCK_RECOVERY_TIME_DISCONTINUITY'); return;
       }
       this.time={monotonic:mono,wall,database};

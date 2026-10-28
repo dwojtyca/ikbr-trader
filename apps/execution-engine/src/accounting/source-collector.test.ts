@@ -168,3 +168,40 @@ test("unsupported native transport never manufactures retirement proof", async (
   collector.connect(); assert.equal(await collector.retire(10), false);
   assert.throws(() => collector.connect(), /SOURCE_RETIREMENT_UNKNOWN/);
 });
+
+test('automatic replay brackets an explicit UTC history request with present master config', async () => {
+  const { OFFICIAL_SDK_SHA256 } = await import('./official-sdk-bridge.js');
+  const observed: Array<{kind:string; value:unknown}> = [];
+  let sent: unknown, reads = 0;
+  const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+  Object.assign(socket, { serverVersion: 226, automatic: true, sdkSha256: OFFICIAL_SDK_SHA256,
+    connect: () => { socket.emit('server', 226, 'test'); socket.emit('nextValidId', 0); },
+    disconnect: () => socket.emit('transportClosed'), reqManagedAccts: () => socket.emit('managedAccounts', settings.accountId),
+    reqConfig: async () => { reads++; return { masterClientIdPresent: true, masterClientId: 0 }; },
+    reqCurrentTime: () => socket.emit('currentTimeInMillis', Date.now()),
+    reqExecutions: (id:number, filter: unknown) => { sent = filter; socket.emit('execDetailsEnd', id); } });
+  const collector = new AccountingSourceCollector(settings, { observe: e => observed.push(e), gap: () => {}, automatic: true, settingsHash: 'a'.repeat(64) }, () => socket);
+  const result = await collector.replay(1000, new AbortController().signal);
+  assert.equal(reads, 2); assert.equal(result.capability?.filter.lastNDays, 7);
+  assert.equal(result.capability?.filter.acctCode, settings.accountId);
+  assert.deepEqual(sent, result.capability?.filter);
+  assert.match(result.capability!.filter.time, /^\d{8}-\d{2}:\d{2}:\d{2}$/);
+  assert.deepEqual(observed.map(v => v.kind), ['handshake', 'managed_accounts', 'configuration', 'clock', 'replay_start', 'replay_end', 'configuration']);
+  await collector.retire();
+});
+
+test('automatic replay rejects unsupported master, expired history, and config change without inventing coverage', async () => {
+  const { OFFICIAL_SDK_SHA256 } = await import('./official-sdk-bridge.js');
+  for (const mode of ['master', 'history', 'changed', 'error'] as const) {
+    let reads = 0;
+    const socket = new EventEmitter() as EventEmitter & AccountingSocket;
+    Object.assign(socket, { serverVersion: 226, automatic: true, sdkSha256: OFFICIAL_SDK_SHA256,
+      connect: () => { socket.emit('server', 226, 'test'); socket.emit('nextValidId', 0); }, disconnect: () => socket.emit('transportClosed'),
+      reqManagedAccts: () => socket.emit('managedAccounts', settings.accountId), reqCurrentTime: () => socket.emit('currentTimeInMillis', Date.now()),
+      reqConfig: async () => { reads++; return { masterClientIdPresent: true, masterClientId: mode === 'master' || mode === 'changed' && reads === 2 ? 4 : 0 }; },
+      reqExecutions: (id:number) => { if (mode === 'error') socket.emit('error', new Error('partial unavailable'), 102); socket.emit('execDetailsEnd', id); } });
+    const collector = new AccountingSourceCollector(settings, { observe: () => {}, gap: () => {}, automatic: true }, () => socket);
+    await assert.rejects(collector.replay(1000, new AbortController().signal, mode === 'history' ? Date.now() - 8 * 86400000 : undefined), /MASTER_SCOPE|HISTORY_WINDOW|SOURCE_GAP/);
+    await collector.retire();
+  }
+});

@@ -36,6 +36,19 @@ test('terminal states render and untrusted values are bounded and sanitized', ()
   assert.equal(field(hostile, 'clockRecoveryAttempt'), null);
 });
 
+test('continuous clock recovery presents cumulative attempts without an operator retry quota', () => {
+  const wrap = (attemptCount: unknown, attemptLimit: unknown) => ({ accounting: { automaticClockRecovery: {
+    ...projection('BACKOFF'), attemptCount, attemptLimit,
+  } } });
+  assert.equal(field(wrap(14, null), 'clockRecoveryAttempt'), '14 (ponawianie automatyczne)');
+  assert.equal(field(wrap(14, null), 'clockRecoveryEntryBlocked'), true);
+  for (const count of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '14']) {
+    assert.equal(field(wrap(count, null), 'clockRecoveryAttempt'), null);
+  }
+  assert.equal(field(wrap(14, 3), 'clockRecoveryAttempt'), null);
+  assert.equal(field(wrap(14, undefined), 'clockRecoveryAttempt'), null);
+});
+
 
 test('clock evidence and original cause are bounded; absent values remain unavailable', () => {
   const input={accounting:{automaticClockRecovery:{...projection('BACKOFF'),originalCause:{name:'Error',code:'503',message:'x'.repeat(1000)},

@@ -15,7 +15,7 @@ import type {WshAttemptResult,WshAttemptTicket} from './wsh-refresh.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any)=>Promise<void>){
- const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||url.port==='55438'&&url.pathname==='/ikbr_owner_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
  const admin=new Pool({connectionString:url.href}),name='wsh_recovery_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href});try{const dir=new URL('../../../../infra/sql/migrations/',import.meta.url);for(const f of readdirSync(dir).filter(f=>f.endsWith('.sql')).sort())await pool.query(readFileSync(new URL(f,dir),'utf8'));await run(pool);}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }
@@ -53,10 +53,10 @@ test('global issuer excludes concurrent endpoint attempts and unknown retirement
  await pool.query('ALTER TABLE research_wsh_refresh_attempts DISABLE TRIGGER research_wsh_refresh_attempt_guard');
  await pool.query("UPDATE research_wsh_refresh_attempts SET started_at=statement_timestamp()-interval '40 seconds',deadline_at=statement_timestamp()-interval '5 seconds' WHERE id=$1",[ticket.id]);
  await pool.query('ALTER TABLE research_wsh_refresh_attempts ENABLE TRIGGER research_wsh_refresh_attempt_guard');
- assert.equal((await h.store.readWshRefreshState(h.identity,pool)).blocksCachedEvidence,true);
+ await assert.rejects(h.store.readWshRefreshState(h.identity,pool),/RESEARCH_WSH_READ_RECOVERY_IDENTITY_INVALID/);
  await h.store.withWshEndpointLock('fixture-endpoint',async lease=>assert.equal((await h.claim(lease)).state,'DEFERRED'));
  const row=(await pool.query('SELECT state,failure_class FROM research_wsh_refresh_attempts WHERE id=$1',[ticket.id])).rows[0];assert.equal(row.state,'UNKNOWN');assert.equal(row.failure_class,'UNCERTAIN');
- assert.equal((await h.store.readWshRefreshState(h.identity,pool)).blocksCachedEvidence,true);
+ await assert.rejects(h.store.readWshRefreshState(h.identity,pool),/RESEARCH_WSH_READ_RECOVERY_IDENTITY_INVALID/);
 }));
 async function published(pool:any,h:Awaited<ReturnType<typeof seed>>,unknownClosure?:boolean,beforePublish?:(snapshot:any,lease:WshEndpointLease,acquisition:any)=>Promise<void>){
  let result:any;
@@ -146,7 +146,7 @@ test('unconfirmed preflight immediately holds preparation and actual existing bi
   const invalid=h.failure('HARD');if(invalid.outcome==='SUCCEEDED')throw Error('fixture');invalid.snapshot.manifestHash='0'.repeat(64);invalid.cleanup.sessionId=c.ticket.sessionId;
   await assert.rejects(h.store.finishWshAttempt(lease,c.ticket,invalid));
  });
- const restarted=new ResearchStore(pool);assert.equal((await restarted.prepareRepair(h.identity)).state,'HOLD');
+ const restarted=new ResearchStore(pool);assert.equal((await restarted.prepareRepair(h.identity)).state,'WAITING');
  await assert.rejects(restarted.validateBinding(binding),/ATTEMPT_UNRESOLVED/);
  assert.deepEqual(await restarted.latestSnapshot(h.identity),good);
 }));
@@ -279,7 +279,7 @@ test('ongoing receipt does not bypass failed hard settlement and restart HOLD',{
  const h=await seed(pool,false,true),good=await published(pool,h),binding=await bindProposal(pool,h);await h.store.validateBinding(binding);
  await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.store.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},'regular');assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')return;
  const result=h.failure('HARD');if(result.outcome==='SUCCEEDED')throw Error('fixture');result.cleanup.sessionId=c.ticket.sessionId;result.snapshot.manifestHash='0'.repeat(64);await assert.rejects(h.store.finishWshAttempt(lease,c.ticket,result));});
- const restarted=new ResearchStore(pool);assert.deepEqual(await restarted.latestSnapshot(h.identity),good);assert.equal((await restarted.prepareRepair(h.identity)).state,'HOLD');await assert.rejects(restarted.validateBinding(binding),/ATTEMPT_UNRESOLVED/);
+ const restarted=new ResearchStore(pool);assert.deepEqual(await restarted.latestSnapshot(h.identity),good);assert.equal((await restarted.prepareRepair(h.identity)).state,'WAITING');await assert.rejects(restarted.validateBinding(binding),/ATTEMPT_UNRESOLVED/);
 }));
 test('ongoing calendar24h equality agrees across real stored head/binding and controlled evaluation clock',{skip:!connection},()=>isolated(async pool=>{
  const h=await seed(pool,false,true),good=await published(pool,h),checked=Date.parse(good.snapshot.coverage.find((c:any)=>c.role==='calendar').checkedAt);

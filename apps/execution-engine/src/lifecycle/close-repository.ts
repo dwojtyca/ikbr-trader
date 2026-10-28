@@ -1,3 +1,4 @@
+import type { RuntimeOwnerGuard } from "../tws-execution-client.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { SignalTicket } from "@ikbr/shared";
@@ -193,6 +194,7 @@ export class CloseRepository {
     leg: CloseLegIdentity,
     context: CloseContext,
     evaluate: CloseEvaluator,
+    owner?: RuntimeOwnerGuard,
   ): Promise<void> {
     await this.transaction(op.accountId, async (db) => {
       const current = await this.owned(db, op);
@@ -212,6 +214,7 @@ export class CloseRepository {
         current.cancelAttempts.some((v) => v.role === leg.role)
       )
         throw new CloseConflict("cancel_authority_changed");
+      await owner?.assertInTransaction(db);
       await db.query(
         `UPDATE lifecycle_close_operations SET cancel_attempts=cancel_attempts || $2::jsonb,updated_at=clock_timestamp() WHERE id=$1`,
         [op.id, JSON.stringify([leg])],
@@ -418,6 +421,7 @@ export class CloseRepository {
     context: CloseContext,
     evaluate: CloseEvaluator,
     validatePrepared: () => void | Promise<void>,
+    owner?: RuntimeOwnerGuard,
   ) {
     return this.transaction(op.accountId, async (db) => {
       const current = await this.owned(db, op);
@@ -494,6 +498,7 @@ export class CloseRepository {
         [op.originalProposalId, op.accountId],
       );
       if (competing.rowCount) throw new CloseConflict("account_intent_changed");
+      await owner?.assertInTransaction(db);
       const inserted = await db.query(
         `INSERT INTO proposed_orders(instrument,instrument_id,conid,side,position_effect,order_type,quantity,entry,reason,confidence,risk_check_status,status,strategy,decision_source,decision_actor,client_order_id,client_order_hash,execution_account_id,execution_attempted_at,processing_owner) VALUES($1,$2,$3,'SELL','CLOSE_OR_REDUCE','LMT',1,$4,$5,1,'PASS','PROPOSED',$6,'user','user',$7,$8,$9,clock_timestamp(),$10) RETURNING id`,
         [
@@ -554,8 +559,9 @@ export class CloseRepository {
       return (await this.read(db, op.originalProposalId))!;
     });
   }
-  async submitted(op: CloseOperation) {
+  async submitted(op: CloseOperation, owner?: RuntimeOwnerGuard) {
     await this.transaction(op.accountId, async (db) => {
+      await owner?.assertInTransaction(db);
       await db.query(
         `UPDATE lifecycle_close_operations SET state='SUBMITTED',updated_at=clock_timestamp() WHERE id=$1 AND owner=$2 AND state='SUBMISSION_UNKNOWN' AND submission_attempted_at IS NOT NULL`,
         [op.id, op.owner],

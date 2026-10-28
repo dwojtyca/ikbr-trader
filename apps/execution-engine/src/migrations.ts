@@ -197,9 +197,10 @@ export async function runMigrations(
         } catch (err) {
           await client.query("ROLLBACK").catch(() => undefined);
           throw new Error(
-            `Migration ${m.filename} failed and was rolled back: ${
+            `Migration ${m.filename} failed; rollback attempted: ${
               (err as Error).message
             }`,
+            { cause: err },
           );
         }
         applied.push(m.filename);

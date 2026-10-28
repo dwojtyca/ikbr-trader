@@ -57,7 +57,8 @@ export function appendLiveSupervision(report:DiagnosticReport,raw:unknown):Diagn
   const state=clock&&states.includes(clock.state as typeof states[number])?clock.state as typeof states[number]:null;
   const bounded=(input:unknown,max=240):string|null=>typeof input==='string'?safeDiagnosticText(input).slice(0,max):null;
   const optionalText=(input:unknown,max=160):string|null=>input===null?null:bounded(input,max);
-  const safeClock=clock!==null&&validClock&&state!==null&&Number.isInteger(clock.attemptCount)&&Number(clock.attemptCount)>=0&&Number(clock.attemptCount)<=3&&clock.attemptLimit===3&&
+  const safeClock=clock!==null&&validClock&&state!==null&&Number.isSafeInteger(clock.attemptCount)&&Number(clock.attemptCount)>=0&&
+    (clock.attemptLimit===null||clock.attemptLimit===3&&Number(clock.attemptCount)<=3)&&
     (clock.nextAttemptAt===null||typeof clock.nextAttemptAt==='string')&&(clock.firstErrorAt===null||typeof clock.firstErrorAt==='string')&&
     (clock.lastError===null||typeof clock.lastError==='string')&&(clock.receiptId===null||typeof clock.receiptId==='string')&&(clock.captureId===null||typeof clock.captureId==='string')&&typeof clock.entryBlocked==='boolean';
   const cause=safeClock?object(clock?.originalCause):null, rejected=safeClock?object(clock?.rejectedClock):null;
@@ -71,7 +72,7 @@ export function appendLiveSupervision(report:DiagnosticReport,raw:unknown):Diagn
     {key:'clockRecoveryEnabled',label:'Automatyczne odzyskiwanie zegara — włączone',value:safeClock&&typeof clock?.enabled==='boolean'?clock.enabled:null},
     {key:'clockRecoveryEpisodeId',label:'Epizod odzyskiwania zegara',value:safeClock?optionalText(clock!.episodeId):null,sensitivity:'untrusted'},
     {key:'clockRecoveryState',label:'Faza odzyskiwania zegara',value:safeClock?phaseLabels[state!]:null},
-    {key:'clockRecoveryAttempt',label:'Próba odzyskiwania',value:safeClock?`${clock!.attemptCount}/3`:null},
+    {key:'clockRecoveryAttempt',label:'Próba odzyskiwania',value:safeClock?clock!.attemptLimit===null?`${clock!.attemptCount} (ponawianie automatyczne)`:`${clock!.attemptCount}/3`:null},
     {key:'clockRecoveryNextAttemptAt',label:'Następna próba od',value:safeClock?optionalText(clock!.nextAttemptAt):null,sensitivity:'untrusted'},
     {key:'clockRecoveryFirstErrorAt',label:'Pierwszy błąd od',value:safeClock?optionalText(clock!.firstErrorAt):null,sensitivity:'untrusted'},
     {key:'clockRecoveryLastError',label:'Ostatnia przyczyna',value:safeClock?optionalText(clock!.lastError):null,sensitivity:'untrusted'},

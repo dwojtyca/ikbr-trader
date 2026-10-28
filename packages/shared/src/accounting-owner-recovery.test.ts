@@ -100,6 +100,28 @@ test('operation parser rejects false terminal states and reset expiry', () => {
   assert.throws(() => parseOwnerRecoveryOperation({ ...operation(), expiresAt: time(901) }));
   assert.throws(() => parseOwnerRecoveryOperation({ ...operation(), successorOperationId: id(2) }));
 });
+test('automatic read supersession preserves evidence without claiming reset or successor operation', () => {
+  for (const evidenceDigest of [null, hash]) {
+    const retired = { ...operation(), state: 'AUTO_SUPERSEDED', evidenceDigest };
+    assert.deepEqual(parseOwnerRecoveryOperation(retired), retired);
+    assert.throws(() => parseOwnerRecoveryOperation({ ...retired, receiptId: id(30) }));
+    assert.throws(() => parseOwnerRecoveryOperation({ ...retired, successorOperationId: id(31) }));
+    assert.throws(() => parseOwnerRecoveryResponse({ version: 1, requestId: id(32), ok: true, action: 'prepared', result: retired }));
+    assert.throws(() => parseOwnerRecoveryResponse({ version: 1, requestId: id(32), ok: true, action: 'observer-ready',
+      result: { operation: retired, observerSessionId: id(33), dbNow: time(1), remainingMs: 899000 } }));
+  }
+});
+test('automatic supersession status requires its event and cannot remain its own maintenance hold', () => {
+  const retired = { ...operation(), state: 'AUTO_SUPERSEDED' };
+  const event = { eventId: id(30), requestId: id(31), kind: 'AUTO_SUPERSEDED', actor: 'automatic-read-recovery',
+    recordedAt: time(901), bindingDigest: hash, evidenceDigest: hash };
+  const result = { operation: retired, events: [event], pendingOperationId: null, maintenancePending: false, receipt: null,
+    lookup: { requestId: event.requestId, operationId: retired.operationId, kind: event.kind, evidenceDigest: hash } };
+  const response = { version: 1, requestId: id(32), ok: true, action: 'status', result };
+  assert.deepEqual(parseOwnerRecoveryResponse(response), response);
+  assert.throws(() => parseOwnerRecoveryResponse({ ...response, result: { ...result, events: [], lookup: null } }));
+  assert.throws(() => parseOwnerRecoveryResponse({ ...response, result: { ...result, pendingOperationId: retired.operationId, maintenancePending: true } }));
+});
 test('wire denies standalone commit, additional auth on observer frame, duplicate mutation IDs and unknown profiles', () => {
   assert.throws(() => parseOwnerRecoveryRequest({ version: 1, action: 'commit' }));
   const reset = { version: 1, action: 'reset-proof', requestId: id(5), observerSessionId: id(6), evidence: evidence() };

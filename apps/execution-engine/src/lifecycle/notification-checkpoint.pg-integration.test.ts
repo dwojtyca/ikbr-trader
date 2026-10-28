@@ -109,7 +109,7 @@ describe('flat watchdog notification PostgreSQL',{skip:!connection},()=>{
   const f=await fixture(true);try{
    const id=(await f.pool.query(`INSERT INTO lifecycle_faults(account_id,code) VALUES('PAPER','BROKER_STATE_STALE') RETURNING id`)).rows[0].id;
    await f.pool.query(`INSERT INTO lifecycle_alert_outbox(account_id,fault_id,status,attempts,last_error_code) VALUES('PAPER',$1,'UNKNOWN',1,'lost_ack')`,[id]);
-   const result=await runMigrations(f.pool);assert.deepEqual(result.applied,['000032_broker_stale_alert_policy.sql','000033_wsh_refresh_recovery.sql','000034_wsh_hourly_refresh.sql','000035_marketaux_hourly_refresh.sql','000036_accounting_clock_recovery.sql','000037_startup_research_recovery.sql','000038_accounting_owner_recovery.sql','000039_accounting_owner_api_evidence.sql','000040_research_recovery_created_producer.sql']);
+   const result=await runMigrations(f.pool);assert.deepEqual(result.applied,['000032_broker_stale_alert_policy.sql','000033_wsh_refresh_recovery.sql','000034_wsh_hourly_refresh.sql','000035_marketaux_hourly_refresh.sql','000036_accounting_clock_recovery.sql','000037_startup_research_recovery.sql','000038_accounting_owner_recovery.sql','000039_accounting_owner_api_evidence.sql','000040_research_recovery_created_producer.sql','000041_automatic_read_source_recovery.sql','000042_automatic_wsh_read_recovery.sql','000043_automatic_accounting_qualification.sql']);
    const row=(await f.pool.query('SELECT status,attempts,last_error_code,notification_policy FROM lifecycle_alert_outbox WHERE fault_id=$1',[id])).rows[0];
    assert.deepEqual(row,{status:'UNKNOWN',attempts:1,last_error_code:'lost_ack',notification_policy:null});
    assert.equal((await runMigrations(f.pool)).applied.length,0);

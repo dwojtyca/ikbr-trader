@@ -12,6 +12,7 @@ import { paperAccountDayStart, readPaperDailyLoss, assertPaperDailyLossUnchanged
 import { IbBrokerReconciliationAdapter } from "../reconciliation/ib-broker-adapter.js";
 import { AccountingSourceService } from "./source-service.js";
 import { AccountingSourceStore } from "./source-store.js";
+import { OFFICIAL_SDK_SHA256 } from "./official-sdk-bridge.js";
 import type { AccountingSocket } from "./source-collector.js";
 import { accountingHash, accountingReference, type AccountingCapture, type SourceSettingsV1 } from "./types.js";
 
@@ -19,14 +20,15 @@ const url = process.env.TEST_POSTGRES_URL;
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 function ibTime(time: number) { return new Date(time).toISOString().slice(0, 19).replaceAll("-", "").replace("T", " "); }
 class Socket extends EventEmitter implements AccountingSocket {
-  serverVersion = 178;
+  serverVersion = 178; sdkSha256 = OFFICIAL_SDK_SHA256;
   fills: Array<{ contract: Record<string, unknown>; exec: Record<string, unknown>; fee?: Record<string, unknown> }> = [];
   feesAfterEnd = false; omitEnd = false; afterReplay?: () => void;
-  constructor(readonly account: string) { super(); }
-  connect() { this.emit("server", 178, "test server time"); this.emit("nextValidId", 1); }
+  constructor(readonly account: string, readonly automatic = false) { super(); if (automatic) this.serverVersion = 226; }
+  async reqConfig() { return { masterClientIdPresent: true as const, masterClientId: 0 as const }; }
+  connect() { this.emit("server", this.serverVersion, "test server time"); this.emit("nextValidId", 1); }
   disconnect() { this.emit("disconnected"); this.emit("transportClosed"); }
   reqManagedAccts() { this.emit("managedAccounts", this.account); }
-  reqCurrentTime() { this.emit("currentTime", Math.floor(Date.now() / 1000)); }
+  reqCurrentTime() { if (this.automatic) this.emit("currentTimeInMillis", Date.now()); else this.emit("currentTime", Math.floor(Date.now() / 1000)); }
   reqExecutions(id: number) {
     for (const fill of this.fills) { this.emit("execDetails", id, fill.contract, fill.exec); if (fill.fee && !this.feesAfterEnd) this.emit("commissionReport", fill.fee); }
     if (!this.omitEnd) this.emit("execDetailsEnd", id);
@@ -47,18 +49,18 @@ test("F1 durable production source, qualification, capture and admission", { ski
   const pool = new Pool({ connectionString: connection.href, max: 6 });
   let created = false;
   let endpointPort=20000;
-  async function fixture(automaticClockRecoveryEnabled=false) {
-    const account = "F1_" + randomUUID(), process = "session_" + randomUUID();
+  async function fixture(automaticClockRecoveryEnabled=false, automaticSourceRecoveryEnabled=false) {
+    const account = "F1_" + randomUUID(), process = automaticSourceRecoveryEnabled ? randomUUID() : "session_" + randomUUID();
     const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: "ibkr-tws-seven-day-v1", environment: "paper", accountId: account,
       endpoint: { host: "127.0.0.1", port: endpointPort++ }, sourceClientId: 0, executionTimeZone: "UTC" };
-    let socket = new Socket(account), initialSocket = true;
+    let socket = new Socket(account, automaticSourceRecoveryEnabled), initialSocket = true;
     const next = { configure: (_socket: Socket) => {} };
     const identity = { connected: true, accountId: account, sessionId: process, generation: 1 };
     const store = new AccountingSourceStore(pool, randomUUID(), process), service = new AccountingSourceService(store, settings, "a".repeat(64), () => identity, () => {
       if (initialSocket) initialSocket = false;
-      else { const replacement = new Socket(account); replacement.fills = socket.fills; socket = replacement; next.configure(socket); }
+      else { const replacement = new Socket(account, automaticSourceRecoveryEnabled); replacement.fills = socket.fills; socket = replacement; next.configure(socket); }
       return socket;
-    },undefined,{automaticClockRecoveryEnabled});
+    },undefined,{automaticClockRecoveryEnabled,automaticSourceRecoveryEnabled});
     await service.initialize(); service.start();
     await pool.query(`INSERT INTO broker_snapshot_syncs(account_id,session_id,observed_at,complete,generation) VALUES($1,$2,clock_timestamp(),true,1)`, [account, process]);
     const qualify = async () => {
@@ -90,6 +92,38 @@ test("F1 durable production source, qualification, capture and admission", { ski
     await admin.query(`CREATE DATABASE ${database}`);
     created = true;
     await runMigrations(pool);
+    await t.test("automatic v2 qualifies without manual artifacts, stores request proof, and rejects forged interval", async () => {
+      const f = await fixture(false, true);
+      try {
+        const { joined, day } = await f.capture(); assert.equal(day.ok, true, JSON.stringify(day));
+        const q = await f.store.qualification(); assert.equal(q?.input.schemaVersion, 2); assert.equal(q?.expiresAt, null);
+        assert.ok(joined.accounting);
+        const { capture } = await f.store.readCapture(pool, joined.accounting!.captureId, false);
+        assert.equal(Date.parse(capture.certifiedFrom) % 1000, 0);
+        const forged = { ...capture, captureId: randomUUID(), connectionReceiptId: randomUUID(), certifiedFrom: new Date(Date.parse(capture.certifiedFrom)-86400000).toISOString() };
+        forged.fingerprint = accountingHash({ ...forged, fingerprint: undefined });
+        await assert.rejects(f.store.publish(forged, () => {}), /CAPTURE_INVALID|REVISION_CHANGED/);
+        const observations = (await pool.query(`SELECT kind,payload->'value' AS value FROM broker_accounting_observations WHERE source_id=$1`, [f.store.sourceId])).rows;
+        assert.equal(observations.filter(r => r.kind === 'configuration').length, 2);
+        const start = observations.find(r => r.kind === 'replay_start'); assert.equal(start.value.capability.filter.lastNDays, 7);
+        const second = await f.capture(); assert.equal(second.day.ok, true);
+        assert.equal((await f.store.qualification())?.id, q?.id);
+        assert.equal(await f.service.collector.retire(), true); f.service.start();
+        const rejoined = await f.capture(); assert.equal(rejoined.day.ok, true);
+        const replacement = await f.store.qualification(); assert.notEqual(replacement?.id, q?.id);
+        assert.equal((await pool.query('SELECT count(*) AS n FROM broker_accounting_qualifications WHERE source_id=$1', [f.store.sourceId])).rows[0].n, '2');
+        assert.throws(() => f.service.assertCurrent(joined.accounting!), /EVIDENCE_STALE|REVISION_CHANGED/);
+      } finally { await f.service.close(); }
+    });
+    await t.test("automatic v2 persists configured timestamp provenance and waits for actual fees", async () => {
+      const f = await fixture(false, true);
+      try {
+        f.socket.fills = [f.socket.fill()]; f.socket.feesAfterEnd = true;
+        const { day } = await f.capture(); assert.equal(day.ok, true, JSON.stringify(day));
+        const row = (await pool.query(`SELECT payload->'raw' AS raw FROM broker_accounting_observations WHERE source_id=$1 AND kind='execution' LIMIT 1`, [f.store.sourceId])).rows[0];
+        assert.equal(row.raw.timestampMode, 'CONFIGURED_ZONE'); assert.equal(row.raw.settingsHash, 'a'.repeat(64));
+      } finally { await f.service.close(); }
+    });
     await t.test("empty first account qualifies without historical sample and zero day reaches production reader", async () => {
       const f = await fixture();
       const { inspection } = await f.qualify(); assert.equal(inspection.corroboration, "NOT_OBSERVED");

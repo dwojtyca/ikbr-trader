@@ -106,16 +106,19 @@ test("v2 transport keeps DB deadlines opaque and uses its reserved monotonic bud
   assert.equal(calls, 1);
 });
 
-test("v2 monotonic admission expires during DNS without sending a request", async () => {
+test("v2 monotonic admission expires during DNS without sending a request", async (t) => {
+  let monotonicNow = 1000;
+  t.mock.method(performance, "now", () => monotonicNow);
   const f = marketauxFixture();
   Object.assign(f.source.parserConfig, { kind: "marketaux-news-v2", refreshIntervalMs: 3600000, maxAgeMs: 86400000, queryLookbackMs: 86400000 });
   const { marketauxWindow } = await import("@ikbr/shared/instrument-research");
   const slot = Math.floor(f.now / 3600000);
   const descriptor = { sourceUrl: f.source.urls[0], ...marketauxWindow(slot, f.source.parserConfig as any), pass: 1 as const, page: 1,
     kind: "marketaux-news-v2" as const, attemptId: "00000000-0000-0000-0000-000000000001", slot };
-  let calls = 0;
-  const fetch = createMarketauxFetch("synthetic-secret", { resolveAddress: async () => new Promise(resolve => setTimeout(() => resolve({ address: "8.8.8.8", family: 4 }), 50)),
+  let calls = 0, dnsCalls = 0;
+  const fetch = createMarketauxFetch("synthetic-secret", { resolveAddress: async () => { dnsCalls++; monotonicNow += 50; return { address: "8.8.8.8", family: 4 }; },
     httpsRequest: (() => { calls++; throw new Error("unexpected HTTP request"); }) as unknown as typeof request });
   await assert.rejects(fetch(f.source, descriptor, new Date(Date.now() + 9000).toISOString(), 1024, performance.now() + 20, { assertActive: () => {} }), /RESEARCH_SOURCE_TIMEOUT/);
   assert.equal(calls, 0);
+  assert.equal(dnsCalls, 1);
 });

@@ -1,3 +1,4 @@
+import { assertPostgresClientUsable } from "@ikbr/shared/diagnostics";
 import { readLifecycleFingerprint } from './lifecycle/observer-repository.js';
 import { cycleForRow, terminalCycleFailure, type LifecycleCycle } from './lifecycle/cycle-evidence.js';
 import { evaluateLifecycleOwnership } from './lifecycle/ownership.js';
@@ -644,6 +645,7 @@ export class ExecutionRepository {
       }
       researchPermit.assertCurrent();
       if (Date.now() >= researchPermit.validUntilMs) throw new Error("RESEARCH_DISPATCH_EXPIRED");
+      assertPostgresClientUsable(client);
       send();
       await client.query("COMMIT");
     } catch (error) {

@@ -43,3 +43,5 @@ jobs:
           TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/ikbr_trader_ci
         run: pnpm test:integration
       - run: pnpm build
+      - name: Build deployment image and verify official accounting SDK
+        run: docker build --tag ikbr-trader:ci .

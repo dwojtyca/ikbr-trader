@@ -21,7 +21,81 @@ class ResearchBudgetExhausted extends Error {
   constructor(readonly proof: { day: string; recordedAt: string; requests: number; cost: number; maxRequests: number; maxCost: number; nextCost: number }) { super("RESEARCH_BUDGET_EXHAUSTED"); }
 }
 const iso = (v: unknown): string => v instanceof Date ? v.toISOString() : String(v);
+type WshReadRecoveryRecord = {
+  identity: WshAttemptIdentity; recordedAt: string;
+  endpoints: {endpointId:string; predecessorGeneration:number; successorGeneration:number}[];
+  issuers: {ledgerKey:string; nextRegularAt:string}[];
+  predecessors: {kind:'WSH_ATTEMPT'|'WSH_ACQUISITION'; id:string; identityHash:string; deadlineAt:string}[];
+  challenges: {id:string; hash:string}[];
+};
 export class ResearchStore {
+  private readonly wshRecoveryOperations = new Map<string, string>();
+  async recoverExpiredWshReads(identity: WshAttemptIdentity): Promise<{ state: 'NOT_REQUIRED'|'RECOVERED'|'WAITING'|'BUSY'; nextCheckAt: string|null; recoveryId: string|null }> {
+    const key = researchHash(identity), retry = () => new Date(Date.now()+1000).toISOString();
+    const bounded = await connectWshBounded(this.pool), db = bounded.db;
+    let committing = false;
+    try {
+      await db.query('BEGIN');
+      await this.assertAuthority(identity, db);
+      await this.wshSource(identity, db, false);
+      const operationId = this.wshRecoveryOperations.get(key) ?? randomUUID();
+      this.wshRecoveryOperations.set(key, operationId);
+      const prior = (await db.query('SELECT canonical_json,record_hash FROM research_wsh_read_recoveries WHERE id=$1', [operationId])).rows[0];
+      if (prior) {
+        const record = JSON.parse(String(prior.canonical_json)) as WshReadRecoveryRecord;
+        researchAssert(researchHash(record) === prior.record_hash && researchHash(record.identity) === key, 'RESEARCH_WSH_READ_RECOVERY_RECEIPT_INVALID');
+        this.wshRecoveryOperations.delete(key);
+        await db.query('COMMIT');
+        return { state:'RECOVERED',nextCheckAt:null,recoveryId:operationId };
+      }
+      const read = async () => (await db.query('SELECT research_wsh_read_recovery_record($1::jsonb,clock_timestamp()) AS record', [JSON.stringify(identity)])).rows[0].record as WshReadRecoveryRecord;
+      await db.query('COMMIT');
+      const discovered = await read();
+      if (!discovered.predecessors.length) { this.wshRecoveryOperations.delete(key); return {state:'NOT_REQUIRED',nextCheckAt:null,recoveryId:null}; }
+      for (const endpoint of discovered.endpoints) {
+        const lock = (await db.query('SELECT pg_try_advisory_lock(hashtext($1)::bigint) AS locked',[`research-wsh-endpoint:${endpoint.endpointId}`])).rows[0];
+        if (lock.locked !== true) return {state:'BUSY',nextCheckAt:retry(),recoveryId:null};
+      }
+      await db.query('BEGIN');
+      await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
+      await this.assertAuthority(identity, db);
+      for (const endpoint of discovered.endpoints) {
+        await db.query('INSERT INTO research_wsh_endpoints(endpoint_id) VALUES($1) ON CONFLICT DO NOTHING',[endpoint.endpointId]);
+        await db.query('SELECT generation FROM research_wsh_endpoints WHERE endpoint_id=$1 FOR UPDATE',[endpoint.endpointId]);
+      }
+      for (const issuer of discovered.issuers) await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-wsh-issuer:${issuer.ledgerKey}`]);
+      for (const predecessor of [...discovered.predecessors].sort((a,b)=>a.id.localeCompare(b.id)||a.kind.localeCompare(b.kind))) {
+        if (predecessor.kind === 'WSH_ATTEMPT') await db.query('SELECT id FROM research_wsh_refresh_attempts WHERE id=$1 FOR UPDATE',[predecessor.id]);
+        else await db.query('SELECT id FROM research_wsh_acquisitions WHERE id=$1 FOR UPDATE',[predecessor.id]);
+      }
+      const record = await read();
+      const scope = (value:WshReadRecoveryRecord) => researchHash({...value,recordedAt:null});
+      if (scope(record) !== scope(discovered)) { await db.query('ROLLBACK'); return {state:'WAITING',nextCheckAt:retry(),recoveryId:null}; }
+      const deadline = Math.max(...record.predecessors.map(p=>Date.parse(p.deadlineAt)));
+      if (deadline > Date.parse(record.recordedAt)) { await db.query('ROLLBACK'); return {state:'WAITING',nextCheckAt:new Date(deadline).toISOString(),recoveryId:null}; }
+      await db.query(`INSERT INTO research_wsh_read_recoveries(id,account_id,config_hash,manifest_hash,instrument_id,source_id,recorded_at,canonical_json,record_hash)
+        SELECT $1,$2,$3,$4,$5,$6,$7,research_recovery_canonical($8::jsonb),encode(sha256(convert_to(research_recovery_canonical($8::jsonb),'UTF8')),'hex')`,
+        [operationId,identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId,record.recordedAt,JSON.stringify(record)]);
+      for (const predecessor of record.predecessors) await db.query(`INSERT INTO research_wsh_read_recovery_predecessors(recovery_id,kind,predecessor_id,identity_hash) VALUES($1,$2,$3,$4)`,[operationId,predecessor.kind,predecessor.id,predecessor.identityHash]);
+      for (const challenge of record.challenges) await db.query('INSERT INTO research_wsh_read_recovery_challenges(recovery_id,challenge_id,challenge_hash) VALUES($1,$2,$3)',[operationId,challenge.id,challenge.hash]);
+      for (const predecessor of record.predecessors) {
+        if (predecessor.kind === 'WSH_ATTEMPT') await db.query(`UPDATE research_wsh_refresh_attempts SET state='UNKNOWN',finished_at=$2,failure_class='UNCERTAIN',failure_reason='RESEARCH_WSH_READ_GENERATION_SUPERSEDED',failure_stage='cleanup' WHERE id=$1 AND state='STARTED'`,[predecessor.id,record.recordedAt]);
+        else await db.query(`UPDATE research_wsh_acquisitions SET state=CASE WHEN state='PENDING' THEN 'UNKNOWN' ELSE state END,retired_at=coalesce(retired_at,$2) WHERE id=$1 AND (state='PENDING' OR retired_at IS NULL)`,[predecessor.id,record.recordedAt]);
+      }
+      for (const endpoint of record.endpoints) {
+        const changed = await db.query('UPDATE research_wsh_endpoints SET generation=$3 WHERE endpoint_id=$1 AND generation=$2 RETURNING endpoint_id',[endpoint.endpointId,endpoint.predecessorGeneration,endpoint.successorGeneration]);
+        researchAssert(changed.rows.length===1,'RESEARCH_WSH_READ_RECOVERY_ENDPOINT_CHANGED');
+      }
+      committing = true;
+      await db.query('COMMIT');
+      this.wshRecoveryOperations.delete(key);
+      return {state:'RECOVERED',nextCheckAt:null,recoveryId:operationId};
+    } catch (error) {
+      if (committing) return {state:'WAITING',nextCheckAt:retry(),recoveryId:this.wshRecoveryOperations.get(key)??null};
+      throw error;
+    } finally { bounded.destroy(); }
+  }
+
   private readonly marketauxTickets = new WeakMap<MarketauxAttemptTicket, { deadline: number; ticketHash: string; failureDeadline?: number; wall: number; mono: number; invalid: boolean }>();
   private marketauxBudget(ticket: MarketauxAttemptTicket, failure = false): number {
     const budget = this.marketauxTickets.get(ticket);
@@ -414,17 +488,28 @@ export class ResearchStore {
   }
   private async recoveryDiagnostic(identity:MarketauxAttemptIdentity|WshAttemptIdentity,ledger:string,endpoint:string|null,db:ResearchDb):Promise<ResearchRecoveryDiagnostic>{
     const base:ResearchRecoveryDiagnostic={state:'NOT_REQUIRED',reason:null,nextCheckAt:null,operatorAction:null,challengeId:null,lastRecoveryId:null};
+    if(endpoint){
+      const record=(await db.query('SELECT research_wsh_read_recovery_record($1::jsonb,clock_timestamp()) AS record',[JSON.stringify(identity)])).rows[0].record as WshReadRecoveryRecord;
+      const now=await this.now(db);
+      if(record.predecessors.length)return {...base,state:'WAITING',reason:'RESEARCH_WSH_READ_RECOVERY_PENDING',challengeId:record.challenges[0]?.id??null,nextCheckAt:new Date(Math.max(now+1000,...record.predecessors.map(p=>Date.parse(p.deadlineAt)))).toISOString()};
+      const last=(await db.query(`SELECT r.id,max((i->>'nextRegularAt')::timestamptz) AS due FROM research_wsh_read_recoveries r CROSS JOIN LATERAL jsonb_array_elements(r.canonical_json::jsonb->'issuers') i
+        WHERE i->>'ledgerKey'=$1 AND NOT EXISTS(SELECT 1 FROM research_wsh_acquisitions good WHERE good.state='PUBLISHED' AND good.config_hash=$2 AND good.manifest_hash=$3 AND good.instrument_id=$4 AND good.source_id=$5 AND good.started_at>r.recorded_at)
+        GROUP BY r.id ORDER BY r.recorded_at DESC LIMIT 1`,[ledger,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId])).rows[0];
+      if(last)return {...base,state:'WAITING',reason:'RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR',nextCheckAt:new Date(Math.max(now+1000,researchTime(iso(last.due)))).toISOString(),lastRecoveryId:String(last.id)};
+    }
     const hold=(await db.query(`SELECT id FROM research_recovery_challenges c WHERE state='PREPARED' AND
       ((kind='MARKETAUX_PRODUCER_QUIESCENCE' AND account_id=$1 AND ledger_key=$2) OR
-       (kind='WSH_ENDPOINT_RESET' AND (endpoint_id=$3 OR ledger_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(predecessors) p WHERE p->>'ledgerKey'=$2)))) ORDER BY created_at LIMIT 1`,[identity.accountId,ledger,endpoint])).rows[0];
+       (kind='WSH_ENDPOINT_RESET' AND NOT EXISTS(SELECT 1 FROM research_wsh_read_recovery_challenges d WHERE d.challenge_id=c.id AND d.challenge_hash=c.challenge_hash) AND (endpoint_id=$3 OR ledger_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements(predecessors) p WHERE p->>'ledgerKey'=$2)))) ORDER BY created_at LIMIT 1`,[identity.accountId,ledger,endpoint])).rows[0];
     if(hold)return {...base,state:'PREPARED',reason:'RESEARCH_RECOVERY_MAINTENANCE_HOLD',challengeId:String(hold.id),operatorAction:endpoint?'COMPLETE_RECONNECT_PROOF':'STOP_PRODUCERS'};
     if(endpoint){
       const pending=(await db.query(`SELECT 1 FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
         WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND (a.state='STARTED' AND a.deadline_at<=clock_timestamp() OR a.cleanup_state='UNKNOWN')
         AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id)
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_read_recovery_predecessors p WHERE p.kind='WSH_ATTEMPT' AND p.predecessor_id=a.id)
         UNION ALL SELECT 1 FROM research_wsh_acquisitions a WHERE (endpoint_id=$1 OR ledger_key=$2) AND state IN ('PENDING','UNKNOWN')
         AND NOT EXISTS(SELECT 1 FROM research_wsh_refresh_attempts t WHERE t.acquisition_id=a.id)
-        AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.acquisition_id=a.id) LIMIT 1`,[endpoint,ledger])).rows.length;
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.acquisition_id=a.id)
+        AND NOT EXISTS(SELECT 1 FROM research_wsh_read_recovery_predecessors p WHERE p.kind='WSH_ACQUISITION' AND p.predecessor_id=a.id) LIMIT 1`,[endpoint,ledger])).rows.length;
       const last=(await db.query(`SELECT r.id FROM research_wsh_recovery_receipts r WHERE r.endpoint_id=$1 ORDER BY recorded_at DESC LIMIT 1`,[endpoint])).rows[0];
       return {...base,state:pending?'OPERATOR_REQUIRED':last?'RECOVERED':'NOT_REQUIRED',reason:pending?'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED':null,operatorAction:pending?'OBSERVE_LOCAL_GATEWAY_RESTART':null,lastRecoveryId:last?String(last.id):null};
     }
@@ -560,6 +645,7 @@ export class ResearchStore {
     return this.recoveryTransaction(identity,async(db,scope,execution)=>{
       const audit=(await db.query('SELECT * FROM research_recovery_audit WHERE operation_id=$1',[identity.operationId])).rows[0];
       if(audit){researchAssert(audit.action==='SUPERSEDE'&&audit.request_hash===researchHash(input),'RESEARCH_RECOVERY_OPERATION_REUSED');return audit.result_json as RecoveryChallenge;}
+      if(identity.kind==='WSH_ENDPOINT_RESET')researchAssert(!(await db.query('SELECT 1 FROM research_wsh_read_recovery_challenges WHERE challenge_id=$1',[input.challengeId])).rows.length,'RESEARCH_WSH_READ_CHALLENGE_SUPERSEDED');
       const row=(await db.query('SELECT * FROM research_recovery_challenges WHERE id=$1 FOR UPDATE',[input.challengeId])).rows[0];researchAssert(row,'RESEARCH_RECOVERY_CHALLENGE_MISSING');
       const old=this.decodeRecovery(row);
       researchAssert(old.state==='PREPARED'&&old.challengeHash===input.challengeHash&&evidence.challengeId===old.id&&evidence.challengeHash===old.challengeHash&&evidence.nonce===old.nonce
@@ -576,6 +662,7 @@ export class ResearchStore {
     const deadline=performance.now()+3000,evidence=parseRecoveryEvidence(input.evidence),initial=await this.recoveryChallengeById(input.challengeId,deadline);researchAssert(initial,'RESEARCH_RECOVERY_CHALLENGE_MISSING');
     const identity=this.recoveryIdentity(initial);identity.pauseRevision=input.pauseRevision;
     return this.recoveryTransaction(identity,async(db,scope)=>{
+      if(identity.kind==='WSH_ENDPOINT_RESET')researchAssert(!(await db.query('SELECT 1 FROM research_wsh_read_recovery_challenges WHERE challenge_id=$1',[input.challengeId])).rows.length,'RESEARCH_WSH_READ_CHALLENGE_SUPERSEDED');
       const row=(await db.query('SELECT * FROM research_recovery_challenges WHERE id=$1 FOR UPDATE',[input.challengeId])).rows[0],c=this.decodeRecovery(row);
       const prior=(await db.query('SELECT * FROM research_recovery_audit WHERE operation_id=$1',[input.operationId])).rows[0];
       if(prior){researchAssert(prior.action==='COMMIT'&&prior.request_hash===researchHash(input),'RESEARCH_RECOVERY_OPERATION_REUSED');return prior.result_json as RecoveryReceipt;}
@@ -1187,7 +1274,8 @@ export class ResearchStore {
   private async wshAttemptRow(ticket:WshAttemptTicket,db:ResearchDb,lock=false):Promise<Record<string,unknown>> {
     const row=(await db.query(`SELECT a.*,c.account_id,c.config_hash,c.manifest_hash,c.instrument_id,c.source_id,c.ledger_key,c.next_regular_at
       FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id WHERE a.id=$1${lock?' FOR UPDATE OF a':''}`,[ticket.id])).rows[0];
-    researchAssert(row && canonicalJson(this.wshTicket(row))===canonicalJson(ticket),'RESEARCH_WSH_ATTEMPT_IDENTITY');return row;
+    researchAssert(row && canonicalJson(this.wshTicket(row))===canonicalJson(ticket),'RESEARCH_WSH_ATTEMPT_IDENTITY');
+    researchAssert(!(await db.query("SELECT 1 FROM research_wsh_read_recovery_predecessors WHERE kind='WSH_ATTEMPT' AND predecessor_id=$1",[ticket.id])).rows.length,'RESEARCH_WSH_GENERATION_RETIRED');return row;
   }
   async readWshAttempt(ticket:WshAttemptTicket):Promise<WshAttemptDiagnostic|null> {
     return this.wshRead(async db=>this.wshDiagnostic(await this.wshAttemptRow(ticket,db)),ticket);
@@ -1246,7 +1334,7 @@ export class ResearchStore {
     });
   }
   private async wshRegularNotBefore(ledger:string,interval:900000|3600000,db:ResearchDb):Promise<number|null> {
-    const row=(await db.query('SELECT research_wsh_regular_not_before($1,$2,clock_timestamp()) AS due',[ledger,interval])).rows[0];
+    const row=(await db.query(`SELECT greatest(research_wsh_regular_not_before($1,$2,clock_timestamp()),(SELECT max((i->>'nextRegularAt')::timestamptz) FROM research_wsh_read_recoveries r CROSS JOIN LATERAL jsonb_array_elements(r.canonical_json::jsonb->'issuers') i WHERE i->>'ledgerKey'=$1)) AS due`,[ledger,interval])).rows[0];
     return row?.due==null?null:researchTime(iso(row.due));
   }
   private async wshCleanupFence(endpointId:string,ledger:string,kind:WshAttemptKind,db:ResearchDb):Promise<true|string|null> {
@@ -1256,7 +1344,8 @@ export class ResearchStore {
       AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id AND (
         ($3='regular' AND c.next_regular_at<=clock_timestamp()) OR EXISTS(
           SELECT 1 FROM research_wsh_recovery_successors s JOIN research_wsh_refresh_attempts first_attempt ON first_attempt.id=s.attempt_id
-          WHERE s.receipt_id=p.receipt_id AND first_attempt.started_at<=clock_timestamp())))`,[endpointId,ledger,kind])).rows;
+          WHERE s.receipt_id=p.receipt_id AND first_attempt.started_at<=clock_timestamp())))
+      AND NOT EXISTS(SELECT 1 FROM research_wsh_read_recovery_predecessors d WHERE d.kind='WSH_ATTEMPT' AND d.predecessor_id=a.id)`,[endpointId,ledger,kind])).rows;
     if(rows.some(r=>r.verified_local_closure!==true))return true;
     if(rows.length&&kind==='retry')return true;
     const waits=rows.filter(r=>researchTime(iso(r.next_regular_at))>researchTime(iso(r.now)));
@@ -1357,6 +1446,8 @@ export class ResearchStore {
          WHERE good.state='PUBLISHED' AND good.config_hash=$2 AND good.manifest_hash=$3 AND good.instrument_id=$4 AND good.source_id=$5 AND good.started_at>r.recorded_at) LIMIT 1`,
         [wshLedgerKey(config.isin),identity.configHash,identity.manifestHash,identity.instrumentId,source.id])).rows;
       if(rows.length)return true;
+      const automatic=(await db.query(`SELECT 1 FROM research_wsh_read_recoveries r CROSS JOIN LATERAL jsonb_array_elements(r.canonical_json::jsonb->'issuers') i WHERE i->>'ledgerKey'=$1 AND NOT EXISTS(SELECT 1 FROM research_wsh_acquisitions good WHERE good.state='PUBLISHED' AND good.config_hash=$2 AND good.manifest_hash=$3 AND good.instrument_id=$4 AND good.source_id=$5 AND good.started_at>r.recorded_at) LIMIT 1`,[wshLedgerKey(config.isin),identity.configHash,identity.manifestHash,identity.instrumentId,source.id])).rows;
+      if(automatic.length)return true;
     }return false;
   }
   private async assertWshRefreshAdmission(identity:ResearchIdentity & {instrumentId:string},db:ResearchDb):Promise<void> {
@@ -1394,7 +1485,8 @@ export class ResearchStore {
     const cleanupFence=await this.wshCleanupFence(config.endpointId,wshLedgerKey(config.isin),'regular',db);
     const effective=cleanupFence===true?null:Math.max(baseline??0,cleanupFence?researchTime(cleanupFence):0);
     const nextRegular=effective?new Date(effective).toISOString():null;
-    const retry=last?.retry_due_at && last.state!=='STARTED' && now<researchTime(iso(last.next_regular_at))?iso(last.retry_due_at):null;
+    const retired=last&&(await db.query("SELECT 1 FROM research_wsh_read_recovery_predecessors WHERE kind='WSH_ATTEMPT' AND predecessor_id=$1",[last.id])).rows.length>0;
+    const retry=!retired && last?.retry_due_at && last.state!=='STARTED' && now<researchTime(iso(last.next_regular_at))?iso(last.retry_due_at):null;
     return {recovery:await this.recoveryDiagnostic(identity,wshLedgerKey(config.isin),config.endpointId,db),sourceId:identity.sourceId,lastSuccessfulAt:success===null?null:new Date(success).toISOString(),expiresAt:expiry===null?null:new Date(expiry).toISOString(),
       retained:!!failures.length && success!==null && expiry!==null && now<expiry && !blocked,
       ...(cleanupFence?{acquisitionBlockedReason:'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED' as const}:{}),
@@ -1404,7 +1496,10 @@ export class ResearchStore {
     const manifest=await this.readManifest(identity,this.pool),due:WshDueAttempt[]=[],now=await this.now(this.pool);
     if(!manifest.refreshEnabled)return due;
     for(const p of manifest.instruments)for(const s of p.sources.filter(s=>s.adapter==='ibkr-wsh')){
-      const key={...identity,instrumentId:p.instrumentId,sourceId:s.id},state=await this.readWshRefreshState(key,this.pool);
+      const key={...identity,instrumentId:p.instrumentId,sourceId:s.id};
+      const recovery=await this.recoverExpiredWshReads(key);
+      if(recovery.state==='WAITING'||recovery.state==='BUSY')continue;
+      const state=await this.readWshRefreshState(key,this.pool);
       if(state.acquisitionBlockedReason&&!state.nextRegularAt)continue;
       if(state.nextRetryAt && researchTime(state.nextRetryAt)<=now)due.push({identity:key,kind:'retry',dueAt:state.nextRetryAt});
       else if(!state.nextRegularAt||researchTime(state.nextRegularAt)<=now)due.push({identity:key,kind:'regular',dueAt:state.nextRegularAt??new Date(now).toISOString()});

@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { AccountingSourceService } from '../accounting/source-service.js';
+import type { AccountingSource } from '../accounting/source-service.js';
 import type { RunnerContext } from './runner.js';
 import type { SchedulerCoordination } from './scheduler.js';
 import { canonicalRunId } from './run-id.js';
@@ -7,7 +7,7 @@ import { canonicalRunId } from './run-id.js';
 export async function readPeriodicProof(dependencies: {
   db: Pick<Pool, 'query'>;
   currentIdentity: SchedulerCoordination['currentIdentity'];
-  accounting: () => Pick<AccountingSourceService, 'assertCurrent'> | undefined;
+  accounting: () => Pick<AccountingSource, 'assertCurrent'> | undefined;
 }, context: RunnerContext, runId: unknown): Promise<{ generation: number; acquiredAt: number } | null> {
   const requestedRunId = canonicalRunId(runId);
   if (requestedRunId === null) return null;

@@ -66,6 +66,11 @@ interface CancelOrderResult {
   status: "CANCELLED" | "PENDING_CANCEL";
 }
 
+export interface RuntimeOwnerGuard {
+  assertCurrent(): void;
+  assertInTransaction(db: Pick<import("pg").PoolClient, "query">): Promise<void>;
+}
+
 export interface OwnedOrderCancellation {
   readonly brokerOrderId: string;
   readonly orderRef: string;
@@ -271,7 +276,8 @@ function toBrokerRealizedPnl(value: unknown): number | undefined {
 }
 
 export class TwsExecutionClient {
-  private readonly ib: any;
+  private ib: any;
+  private transportNeedsReplacement = false;
   private connected = false;
   private connectionGeneration = 0;
   private nextOrderId = 1;
@@ -318,15 +324,19 @@ export class TwsExecutionClient {
     ) => void,
     private readonly dependencies: {
       ib?: unknown;
+      ibFactory?: () => unknown;
       onAccountingIngressFailure?: (kind: "execution" | "commission", raw: unknown) => void;
       resolveBoundInstrument?: (id: string) => BoundInstrument | undefined;
       resolveManagementInstrument?: (id: string, originalProposalId?: number) => BoundInstrument | undefined | Promise<BoundInstrument | undefined>;
       assertEntryAllowed?: () => Promise<void>;
+      assertCancelAllowed?: () => Promise<void>;
+      captureRuntimeOwner?: () => RuntimeOwnerGuard;
+      withRuntimeOwnerPermit?: (owner: RuntimeOwnerGuard, send: () => void) => Promise<void>;
       loadStockMetadata?: (bound: BoundInstrument, accountId: string) => Promise<StockMarketMetadata>;
       loadWseMetadata?: (bound: BoundInstrument, accountId: string) => Promise<WseMarketMetadata>;
     } = {},
   ) {
-    this.ib = dependencies.ib ?? new IB({
+    this.ib = dependencies.ib ?? dependencies.ibFactory?.() ?? new IB({
       host: config.host,
       port: config.port,
       clientId: config.clientId,
@@ -421,13 +431,30 @@ export class TwsExecutionClient {
     }
   }
 
+  private transportOwner?: RuntimeOwnerGuard;
+  private cancelConnect?: () => void;
+  private transportEpoch = 0;
+
+  private currentIngress(): boolean {
+    if (!this.dependencies.captureRuntimeOwner) return true;
+    try { if (!this.connected || !this.transportOwner) return false; this.transportOwner.assertCurrent(); return true; }
+    catch { return false; }
+  }
+
   async connect(): Promise<void> {
-    if (this.connected) return;
+    if (this.connected) { this.transportOwner?.assertCurrent(); return; }
     if (this.connectPromise) {
       await this.connectPromise;
       return;
     }
 
+    const owner = this.dependencies.captureRuntimeOwner?.();
+    if (this.transportNeedsReplacement && (!this.dependencies.ib || this.dependencies.ibFactory)) {
+      this.ib = this.dependencies.ibFactory?.() ?? new IB({ host: this.config.host, port: this.config.port, clientId: this.config.clientId });
+      this.bindCoreListeners();
+    }
+    this.transportNeedsReplacement = false;
+    const epoch = this.transportEpoch;
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
@@ -440,9 +467,14 @@ export class TwsExecutionClient {
         clearTimeout(timeout);
         this.ib.off("nextValidId", onNextValidId);
         this.ib.off("error", onError);
+        this.cancelConnect = undefined;
       };
+      this.cancelConnect = () => { cleanup(); reject(new Error("EXECUTION_OWNER_CHANGED")); };
 
       const onNextValidId = (orderId: number) => {
+        try { owner?.assertCurrent(); if (epoch !== this.transportEpoch) throw new Error("EXECUTION_OWNER_CHANGED"); }
+        catch (error) { cleanup(); reject(error); return; }
+        this.transportOwner = owner;
         this.connectionGeneration += 1;
         this.connected = true;
         this.nextOrderId = Math.max(this.nextOrderId, Number(orderId));
@@ -473,6 +505,8 @@ export class TwsExecutionClient {
 
     try {
       await this.connectPromise;
+      owner?.assertCurrent();
+      if (epoch !== this.transportEpoch) throw new Error("EXECUTION_OWNER_CHANGED");
       this.onLog(
         `execution socket connected ${this.config.host}:${this.config.port}, clientId=${this.config.clientId}`,
       );
@@ -482,9 +516,14 @@ export class TwsExecutionClient {
   }
 
   disconnect(): void {
-    if (!this.connected) return;
+    this.transportEpoch += 1;
+    this.transportNeedsReplacement = true;
+    this.cancelConnect?.();
+    this.transportOwner = undefined;
     this.connected = false;
     this.connectionGeneration += 1;
+    this.clearAllSubmittedAutoCancelTimers();
+    this.clearAllBracketVerificationTimers();
     this.ib.disconnect();
   }
 
@@ -767,6 +806,7 @@ export class TwsExecutionClient {
     windowDeadlineMs?: number,
     sendWithEntryPermit?: (send: () => void) => Promise<void>,
   ): Promise<PlaceOrderResult> {
+    const owner = this.dependencies.captureRuntimeOwner?.();
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
     await this.connect();
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") await this.dependencies.assertEntryAllowed?.();
@@ -783,7 +823,8 @@ export class TwsExecutionClient {
       this.connectionGeneration,
       windowDeadlineMs,
       sendWithEntryPermit,
-      () => { this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); },
+      () => { owner?.assertCurrent(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); },
+      () => owner?.assertCurrent(),
     );
   }
 
@@ -794,6 +835,7 @@ export class TwsExecutionClient {
     prepared: PreparedBrokerOrder,
     expectedGeneration: number,
     riskDeadlineMs?: number,
+    owner = this.dependencies.captureRuntimeOwner?.(),
   ): Promise<PlaceOrderResult> {
     if (prepared.normalizedTicket.positionEffect !== "CLOSE_OR_REDUCE") throw new Error("CLOSE_POSITION_EFFECT_REQUIRED");
     this.assertConnectionGeneration(expectedGeneration);
@@ -802,8 +844,9 @@ export class TwsExecutionClient {
     assertRiskDeadline();
     this.assertWseDispatch(prepared);
     this.assertStockDispatch(prepared);
-    return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration, undefined, undefined,
-      () => { this.closeWriteGuard?.(); assertRiskDeadline(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); });
+    return this.dispatchPlan(prepared.plan, prepared.contract, prepared.normalizedTicket, expectedGeneration, undefined,
+      owner && this.dependencies.withRuntimeOwnerPermit ? send => this.dependencies.withRuntimeOwnerPermit!(owner, send) : undefined,
+      () => { owner?.assertCurrent(); this.closeWriteGuard?.(); assertRiskDeadline(); this.assertStockDispatch(prepared); this.assertWseDispatch(prepared); }, () => owner?.assertCurrent());
   }
 
   private dispatchPlan(
@@ -814,7 +857,14 @@ export class TwsExecutionClient {
     windowDeadlineMs?: number,
     sendWithEntryPermit?: (send: () => void) => Promise<void>,
     assertPrepared?: () => void,
+    assertOwner?: () => void,
   ): Promise<PlaceOrderResult> {
+    const origin = this.ib;
+    const assertCurrent = () => {
+      assertOwner?.();
+      if (this.ib !== origin) throw new Error("CLOSE_CONNECTION_CHANGED");
+      if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
+    };
     const { parentOrderId } = plan;
     this.trackOrderPlanContext(plan, ticket);
 
@@ -869,8 +919,8 @@ export class TwsExecutionClient {
       const cleanup = () => {
         settled = true;
         clearTimeout(timeout);
-        this.ib.off("orderStatus", onOrderStatus);
-        this.ib.off("error", onError);
+        origin.off("orderStatus", onOrderStatus);
+        origin.off("error", onError);
       };
 
       const onOrderStatus = (
@@ -887,6 +937,7 @@ export class TwsExecutionClient {
         _mktCapPrice: number,
       ) => {
         if (incomingOrderId !== parentOrderId) return;
+        try { assertCurrent(); } catch (error) { cleanup(); reject(error); return; }
 
         const normalized = String(status || "").toUpperCase();
         if (normalized === "FILLED") {
@@ -937,6 +988,7 @@ export class TwsExecutionClient {
         )
           return;
 
+        try { assertCurrent(); } catch (error) { cleanup(); reject(error); return; }
         const code = Number(parsed.code);
         const fatalCodes = new Set([
           103, 104, 109, 110, 200, 201, 202, 203, 320, 321, 322, 323, 354,
@@ -954,8 +1006,8 @@ export class TwsExecutionClient {
         );
       };
 
-      this.ib.on("orderStatus", onOrderStatus);
-      this.ib.on("error", onError);
+      origin.on("orderStatus", onOrderStatus);
+      origin.on("error", onError);
       const send = () => {
         if (settled || sent) throw new Error("aapl_entry_permit_inactive");
         sent = true;
@@ -968,7 +1020,10 @@ export class TwsExecutionClient {
           (!Number.isFinite(windowDeadlineMs) || Date.now() >= windowDeadlineMs!)) throw new Error("session_dispatch_expired");
         for (const plannedOrder of plan.orders) {
           if (expectedGeneration !== undefined) this.assertConnectionGeneration(expectedGeneration);
-          this.ib.placeOrder(
+          assertPrepared?.();
+          this.transportOwner?.assertCurrent();
+          assertCurrent();
+          origin.placeOrder(
             plannedOrder.orderId,
             contract,
             plannedOrder.order,
@@ -976,17 +1031,17 @@ export class TwsExecutionClient {
         }
       };
       try {
-        if (ticket.positionEffect !== "CLOSE_OR_REDUCE") {
+        if (ticket.positionEffect !== "CLOSE_OR_REDUCE" || sendWithEntryPermit) {
           if (!sendWithEntryPermit) throw new Error("session_entry_permit_missing");
           permitCompletion = sendWithEntryPermit(send);
           void permitCompletion.catch(error => { cleanup(); reject(error as Error); });
         } else send();
       } catch (error) { cleanup(); reject(error as Error); }
     });
-    return Promise.all([acknowledgment, permitCompletion]).then(([result]) => result);
+    return Promise.all([acknowledgment, permitCompletion]).then(([result]) => { assertCurrent(); return result; });
   }
 
-  async cancelOwnedOrder(input: OwnedOrderCancellation): Promise<OwnedOrderCancellationResult> {
+  async cancelOwnedOrder(input: OwnedOrderCancellation, owner = this.dependencies.captureRuntimeOwner?.()): Promise<OwnedOrderCancellationResult> {
     this.assertConnectionGeneration(input.expectedGeneration);
     this.closeWriteGuard?.();
     const orderId = Number(input.brokerOrderId);
@@ -1000,8 +1055,12 @@ export class TwsExecutionClient {
         !Number.isFinite(age) || age < 0 || age > 10_000) {
       throw new Error("CLOSE_CANCEL_IDENTITY_INVALID");
     }
-    return new Promise<OwnedOrderCancellationResult>((resolve, reject) => {
+    let inactive = false;
+    let sent = false;
+    let permit: Promise<void> = Promise.resolve();
+    const acknowledgment = new Promise<OwnedOrderCancellationResult>((resolve, reject) => {
       const cleanup = () => {
+        inactive = true;
         clearTimeout(timeout);
         this.ib.off("orderStatus", onStatus);
         this.ib.off("error", onError);
@@ -1013,6 +1072,7 @@ export class TwsExecutionClient {
       const onStatus = (id: number, status: string, _filled: number, _remaining: number,
         _average: number, incomingPermId: number, _parent: number, _last: number, clientId: number) => {
         if (id !== orderId) return;
+        try { owner?.assertCurrent(); } catch (error) { cleanup(); reject(error); return; }
         if (!this.connected || this.connectionGeneration !== input.expectedGeneration) return onDisconnect();
         if (incomingPermId !== permId || clientId !== input.clientId) return fail("CLOSE_CANCEL_ACK_IDENTITY_MISMATCH");
         const normalized = String(status).toUpperCase();
@@ -1038,25 +1098,53 @@ export class TwsExecutionClient {
       this.ib.on("disconnected", onDisconnect);
       this.ib.on("connected", onDisconnect);
       try {
-        this.assertConnectionGeneration(input.expectedGeneration);
-        this.closeWriteGuard?.();
-        this.ib.cancelOrder(orderId);
+        const send = () => {
+          if (inactive || sent) throw new Error("CANCEL_PERMIT_INACTIVE");
+          sent = true;
+          this.assertConnectionGeneration(input.expectedGeneration);
+          this.closeWriteGuard?.();
+          owner?.assertCurrent();
+          this.ib.cancelOrder(orderId);
+        };
+        if (owner && this.dependencies.withRuntimeOwnerPermit) {
+          permit = this.dependencies.withRuntimeOwnerPermit(owner, send);
+          void permit.catch(error => { cleanup(); reject(error); });
+        } else send();
       } catch (error) {
         cleanup();
         reject(error);
       }
     });
+    return Promise.all([acknowledgment, permit]).then(([result]) => { owner?.assertCurrent(); this.assertConnectionGeneration(input.expectedGeneration); return result; });
   }
 
-  async cancelBrokerOrder(brokerOrderId: string): Promise<CancelOrderResult> {
+  captureCancellationOrigin(): RuntimeOwnerGuard | undefined {
+    const owner = this.dependencies.captureRuntimeOwner?.();
+    if (!owner) return undefined;
+    const generation = this.connectionGeneration;
+    const assertCurrent = () => { owner.assertCurrent(); this.assertConnectionGeneration(generation); };
+    assertCurrent();
+    return { assertCurrent, assertInTransaction: async db => {
+      assertCurrent(); await owner.assertInTransaction(db); assertCurrent();
+    } };
+  }
+
+  async cancelBrokerOrder(brokerOrderId: string, owner = this.captureCancellationOrigin()): Promise<CancelOrderResult> {
+    owner?.assertCurrent();
     await this.connect();
+    await this.dependencies.assertCancelAllowed?.();
+    owner?.assertCurrent();
+    const generation = this.connectionGeneration;
 
     const orderId = Number.parseInt(String(brokerOrderId), 10);
     if (!Number.isFinite(orderId) || orderId <= 0) {
       throw new Error(`Invalid brokerOrderId for cancel: ${brokerOrderId}`);
     }
 
-    return new Promise<CancelOrderResult>((resolve, reject) => {
+    let inactive = false;
+    let sent = false;
+    let permit: Promise<void> = Promise.resolve();
+    const acknowledgment = new Promise<CancelOrderResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
         reject(
@@ -1067,6 +1155,7 @@ export class TwsExecutionClient {
       }, this.config.orderTimeoutMs);
 
       const cleanup = () => {
+        inactive = true;
         clearTimeout(timeout);
         this.ib.off("orderStatus", onOrderStatus);
         this.ib.off("error", onError);
@@ -1074,6 +1163,8 @@ export class TwsExecutionClient {
 
       const onOrderStatus = (incomingOrderId: number, status: string) => {
         if (incomingOrderId !== orderId) return;
+        try { owner?.assertCurrent(); this.assertConnectionGeneration(generation); }
+        catch (error) { cleanup(); reject(error); return; }
 
         const normalized = String(status || "").toUpperCase();
         if (
@@ -1125,12 +1216,23 @@ export class TwsExecutionClient {
 
       try {
         this.onLog(`execution cancel requested orderId=${orderId}`);
-        this.ib.cancelOrder(orderId);
+        const send = () => {
+          if (inactive || sent) throw new Error("CANCEL_PERMIT_INACTIVE");
+          sent = true;
+          this.assertConnectionGeneration(generation);
+          owner?.assertCurrent();
+          this.ib.cancelOrder(orderId);
+        };
+        if (owner && this.dependencies.withRuntimeOwnerPermit) {
+          permit = this.dependencies.withRuntimeOwnerPermit(owner, send);
+          void permit.catch(error => { cleanup(); reject(error); });
+        } else send();
       } catch (error) {
         cleanup();
         reject(error as Error);
       }
     });
+    return Promise.all([acknowledgment, permit]).then(([result]) => { owner?.assertCurrent(); this.assertConnectionGeneration(generation); return result; });
   }
 
   async getAccountSnapshot(accountId: string): Promise<AccountSnapshot> {
@@ -2459,26 +2561,33 @@ export class TwsExecutionClient {
   }
 
   private bindCoreListeners(): void {
+    const origin = this.ib;
     this.ib.on("sent", (tokens: unknown) => {
+      if (origin !== this.ib) return;
       // ib@0.2.9 emits after socket.write; this is not a broker acknowledgement.
       if (!Array.isArray(tokens) || tokens.length !== 4 || tokens[0] !== 6 || tokens[1] !== 2) return;
       if (tokens[2] === 1) this.traceAccountUpdates("subscribe_sent");
       else if (tokens[2] === 0) this.traceAccountUpdates("unsubscribe_sent");
     });
     this.ib.on("connected", () => {
+      if (origin !== this.ib) return;
       this.connectionGeneration += 1;
       this.onLog("execution socket connected event received");
     });
 
     this.ib.on("disconnected", () => {
+      if (origin !== this.ib) return;
+      this.cancelConnect?.();
       this.onLog("execution socket disconnected");
       this.connectionGeneration += 1;
       this.connected = false;
+      this.transportNeedsReplacement = true;
       this.clearAllSubmittedAutoCancelTimers();
       this.clearAllBracketVerificationTimers();
     });
 
     this.ib.on("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+      if (origin !== this.ib) return;
       const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
       const prefix =
         parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : "reqId=n/a";
@@ -2514,6 +2623,7 @@ export class TwsExecutionClient {
 
       void this.cancelBrokerOrder(String(reqId))
         .then((result) => {
+          if (origin !== this.ib) return;
           this.onLog(
             `execution auto-cancel locate-held result orderId=${reqId} status=${result.status}`,
           );
@@ -2529,6 +2639,7 @@ export class TwsExecutionClient {
           }
         })
         .catch((error) => {
+          if (origin !== this.ib) return;
           const message = (error as Error).message;
           this.onLog(
             `execution auto-cancel locate-held failed orderId=${reqId}: ${message}`,
@@ -2539,6 +2650,8 @@ export class TwsExecutionClient {
     this.ib.on(
       "orderStatus",
       (orderId: number, status: string, filled: number, remaining: number) => {
+        if (origin !== this.ib) return;
+        if (!this.currentIngress()) return;
         const normalized = String(status || "").toUpperCase();
         this.orderStatusById.set(orderId, normalized);
         this.onLog(
@@ -2587,6 +2700,8 @@ export class TwsExecutionClient {
         contract: ContractShape,
         exec: Record<string, unknown>,
       ) => {
+        if (origin !== this.ib) return;
+        if (!this.currentIngress()) return;
         if (!exec || typeof exec !== "object" || !contract || typeof contract !== "object") {
           this.dependencies.onAccountingIngressFailure?.("execution", { reqId, contract, exec }); return;
         }
@@ -2646,6 +2761,8 @@ export class TwsExecutionClient {
     );
 
     this.ib.on("commissionReport", (report: Record<string, unknown>) => {
+      if (origin !== this.ib) return;
+      if (!this.currentIngress()) return;
       if (!report || typeof report !== "object") {
         this.dependencies.onAccountingIngressFailure?.("commission", report); return;
       }
@@ -2751,6 +2868,8 @@ export class TwsExecutionClient {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
     if (this.submittedAutoCancelTimers.has(orderId)) return;
 
+    let origin: RuntimeOwnerGuard | undefined;
+    try { origin = this.captureCancellationOrigin(); } catch { return; }
     const timer = setTimeout(() => {
       this.submittedAutoCancelTimers.delete(orderId);
       this.onLog(
@@ -2761,8 +2880,9 @@ export class TwsExecutionClient {
         `Auto-cancel submitted-timeout after ${timeoutMs}ms without fill`,
       );
 
-      void this.cancelBrokerOrder(String(orderId))
+      void this.cancelBrokerOrder(String(orderId), origin)
         .then((result) => {
+          origin?.assertCurrent();
           this.onLog(
             `execution submitted-timeout auto-cancel result orderId=${orderId} status=${result.status}`,
           );

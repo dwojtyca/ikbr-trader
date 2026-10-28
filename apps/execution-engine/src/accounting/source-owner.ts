@@ -3,8 +3,10 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { performance } from "node:perf_hooks";
 import type { Pool, PoolClient } from "pg";
-import { accountingError, type SourceSettingsV1 } from "./types.js";
+import { parseOwnerRecoveryOperation, ownerRecoveryHash } from "@ikbr/shared/accounting-owner-recovery";
+import { accountingError, accountingHash, type SourceSettingsV1 } from "./types.js";
 
+export interface AutomaticSourceOwnership { processSessionId: string; settingsHash: string; sourceId: string; acquisitionId?: string }
 export interface SourceOwnerFence { endpointKey: string; ownerId: string; generation: number }
 export async function resolveAccountingEndpoint(endpoint: SourceSettingsV1["endpoint"]): Promise<{ key: string; endpoint: SourceSettingsV1["endpoint"] }> {
   const host = endpoint.host.trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
@@ -23,7 +25,7 @@ export function accountingOwnerLockKey(endpointKey: string): string {
   return BigInt.asIntN(64, BigInt(`0x${createHash("sha256").update(endpointKey).digest("hex").slice(0, 16)}`)).toString();
 }
 
-/** A session lock authorizes ownership; the durable row prevents crash/lease takeover. */
+/** A session lock serializes owners; durable generations fence read publication and write admissions. */
 export class AccountingSourceOwner {
   private client: PoolClient | undefined;
   private current: SourceOwnerFence | undefined;
@@ -36,7 +38,7 @@ export class AccountingSourceOwner {
   private acquiring = false;
   private releasing: Promise<void> | undefined;
   private readonly destroyedClients = new WeakSet<PoolClient>();
-  constructor(private readonly pool: Pool, private readonly settings: SourceSettingsV1, private readonly onLost: () => void = () => {}) {}
+  constructor(private readonly pool: Pool, private readonly settings: SourceSettingsV1, private readonly onLost: () => void = () => {}, private readonly automatic?: AutomaticSourceOwnership) {}
   private lose = (): void => {
     if (this.state === "LOST" || this.state === "RELEASED" || this.state === "RELEASING" || this.state === "NEW") return;
     this.state = "LOST"; clearInterval(this.timer); this.onLost();
@@ -75,6 +77,12 @@ export class AccountingSourceOwner {
       this.assertAcquiring();
       if (lock.rows[0]?.locked !== true) throw accountingError("SOURCE_OWNER_CONFLICT");
       await client.query("BEGIN"); this.assertAcquiring();
+      if (this.automatic) {
+        const fence = await this.claimReadGeneration(client, endpointKey); this.assertAcquiring();
+        await client.query("COMMIT"); this.assertAcquiring();
+        this.current = fence; this.state = "ACTIVE"; this.lastProof = performance.now();
+        this.startVerification(); return;
+      }
       const maintenance = await client.query("SELECT pending_operation_id FROM accounting_owner_recovery_maintenance WHERE singleton FOR SHARE");
       this.assertAcquiring();
       if (maintenance.rowCount !== 1 || maintenance.rows[0].pending_operation_id !== null) throw accountingError("SOURCE_OWNER_MAINTENANCE_PENDING");
@@ -89,17 +97,101 @@ export class AccountingSourceOwner {
       if (!Number.isSafeInteger(generation)) throw accountingError("SOURCE_OWNER_LOST");
       await client.query("COMMIT"); this.assertAcquiring();
       this.current = { endpointKey, ownerId, generation }; this.state = "ACTIVE"; this.lastProof = performance.now();
-      this.timer = setInterval(() => {
-        if (this.checking || !["ACTIVE", "RETIRED"].includes(this.state)) return;
-        this.checking = true;
-        void this.verifyHeld().catch(() => this.lose()).finally(() => { this.checking = false; });
-      }, 500); this.timer.unref();
+      this.startVerification();
     } catch (error) {
       if(!this.releasing)this.state = "LOST";
       if(this.client===client)this.client = undefined;
       // Destroy the dedicated session: no advisory lock may escape back into the pool.
       this.destroyClient(client); throw error;
     } finally { this.acquiring = false; }
+  }
+  private startVerification(): void {
+    this.timer = setInterval(() => {
+      if (this.checking || !["ACTIVE", "RETIRED"].includes(this.state)) return;
+      this.checking = true;
+      void this.verifyHeld().catch(() => this.lose()).finally(() => { this.checking = false; });
+    }, 500); this.timer.unref();
+  }
+  private async claimReadGeneration(client: PoolClient, endpointKey: string): Promise<SourceOwnerFence> {
+    const identity = this.automatic!;
+    const ownerId = identity.acquisitionId ?? identity.processSessionId;
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ownerId)
+      || !/^[a-f0-9]{64}$/.test(identity.settingsHash)) throw accountingError("IDENTITY_INVALID");
+    const maintenance = await client.query("SELECT pending_operation_id FROM accounting_owner_recovery_maintenance WHERE singleton FOR UPDATE");
+    if (maintenance.rowCount !== 1) throw accountingError("SOURCE_OWNER_MAINTENANCE_PENDING");
+    const previous = (await client.query("SELECT * FROM accounting_source_owners WHERE endpoint_key=$1 FOR UPDATE", [endpointKey])).rows[0];
+    const resolved = (await client.query("SELECT * FROM accounting_source_handovers WHERE endpoint_key=$1 AND owner_id=$2", [endpointKey, ownerId])).rows[0];
+    if (resolved) {
+      if (resolved.process_session_id !== identity.processSessionId || resolved.settings_hash !== identity.settingsHash
+        || resolved.account_id !== this.settings.accountId || !previous || previous.account_id !== this.settings.accountId)
+        throw accountingError("SOURCE_OWNER_LOST");
+      const sameOwner = previous.owner_id === ownerId && previous.process_session_id === identity.processSessionId
+        && previous.settings_hash === identity.settingsHash && Number(previous.generation) === Number(resolved.generation);
+      if (Number(previous.generation) > Number(resolved.generation)
+        || sameOwner && previous.retirement_state !== 'ACTIVE')
+        throw accountingError("SOURCE_OWNER_ACQUISITION_RESOLVED_INACTIVE");
+      if (!previous || previous.owner_id !== ownerId || previous.process_session_id !== identity.processSessionId
+        || previous.settings_hash !== identity.settingsHash || previous.account_id !== this.settings.accountId
+        || previous.retirement_state !== 'ACTIVE' || Number(previous.generation) !== Number(resolved.generation)) throw accountingError("SOURCE_OWNER_LOST");
+      if (maintenance.rows[0].pending_operation_id === null) return { endpointKey, ownerId, generation: Number(previous.generation) };
+    }
+    const operationId = maintenance.rows[0].pending_operation_id as string | null;
+    const operation = operationId ? (await client.query("SELECT * FROM accounting_owner_recovery_operations WHERE operation_id=$1 FOR UPDATE", [operationId])).rows[0] : null;
+    if (operationId && (!previous || !operation || !['PREPARED','OBSERVED'].includes(operation.state)
+      || operation.endpoint_key !== endpointKey || operation.owner_id !== previous.owner_id || Number(operation.generation) !== Number(previous.generation)
+      || operation.record?.profile?.accountId !== this.settings.accountId
+      || operation.record?.owner?.endpointKey !== endpointKey || operation.record?.owner?.ownerId !== previous.owner_id
+      || Number(operation.record?.owner?.generation) !== Number(previous.generation))) throw accountingError("SOURCE_OWNER_MAINTENANCE_PENDING");
+    if (operation) {
+      const parsed = parseOwnerRecoveryOperation(operation.record);
+      const { bindingDigest, state: _state, evidenceDigest: _evidenceDigest, successorOperationId: _successor, receiptId: _receipt, ...binding } = parsed;
+      if (ownerRecoveryHash(binding) !== bindingDigest || parsed.bindingDigest !== operation.binding_digest || await canonicalAccountingEndpoint(parsed.profile.endpoint) !== endpointKey) throw accountingError("SOURCE_OWNER_MAINTENANCE_PENDING");
+    }
+    const source = (await client.query("SELECT source_id,account_id,settings_hash,process_session_id,qualification_id FROM broker_accounting_sources WHERE source_id=$1 FOR UPDATE", [identity.sourceId])).rows[0];
+    let predecessorSettingsHash: string | null = previous?.settings_hash ?? null;
+    if (source && source.account_id !== this.settings.accountId) throw accountingError("SETTINGS_MISMATCH");
+    if (previous) {
+      if (previous.account_id !== null && previous.account_id !== this.settings.accountId) throw accountingError("SETTINGS_MISMATCH");
+      if (previous.account_id === null || previous.settings_hash === null) {
+        if (!source) throw accountingError("SOURCE_OWNER_LEGACY_IDENTITY_UNAVAILABLE");
+        predecessorSettingsHash = source.settings_hash;
+        if (predecessorSettingsHash !== identity.settingsHash && !operation) {
+          const qualification = source.qualification_id ? (await client.query("SELECT record FROM broker_accounting_qualifications WHERE id=$1", [source.qualification_id])).rows[0]?.record : null;
+          if (!qualification || qualification.input?.settingsSha256 !== predecessorSettingsHash || qualification.settings?.accountId !== this.settings.accountId
+            || await canonicalAccountingEndpoint(qualification.settings.endpoint) !== endpointKey) throw accountingError("SOURCE_OWNER_LEGACY_IDENTITY_UNAVAILABLE");
+        }
+      }
+      if (source && source.settings_hash !== predecessorSettingsHash || operation && operation.record.profile.settingsHash !== predecessorSettingsHash)
+        throw accountingError("SETTINGS_MISMATCH");
+    }
+    if (resolved) throw accountingError("SOURCE_OWNER_ACQUISITION_RESOLVED_INACTIVE");
+    const generation = previous ? Number(previous.generation) + 1 : 1;
+    if (!Number.isSafeInteger(generation)) throw accountingError("SOURCE_OWNER_LOST");
+    const predecessor = previous ? { ownerId: previous.owner_id, generation: Number(previous.generation), retirementState: previous.retirement_state,
+      processSessionId: previous.process_session_id, settingsHash: previous.settings_hash, validatedSettingsHash: predecessorSettingsHash, accountId: previous.account_id,
+      acquiredAt: previous.acquired_at, updatedAt: previous.updated_at, legacySourceId: previous.account_id === null ? identity.sourceId : null } : null;
+    const handoverId = ownerId;
+    const record = { endpointKey, ownerId, generation, processSessionId: identity.processSessionId, settingsHash: identity.settingsHash, accountId: this.settings.accountId, predecessor };
+    await client.query(`INSERT INTO accounting_source_handovers(id,endpoint_key,owner_id,generation,process_session_id,settings_hash,account_id,predecessor,reason,record_hash)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)`, [handoverId, endpointKey, ownerId, generation, identity.processSessionId, identity.settingsHash,
+      this.settings.accountId, predecessor === null ? null : JSON.stringify(predecessor), previous ? previous.retirement_state === 'RETIRED' ? 'CLEAN_RELEASE' : 'READ_SOURCE_FENCED' : 'INITIAL', accountingHash(record)]);
+    if (operation) {
+      const dispositionId = randomUUID(), eventId = randomUUID();
+      await client.query(`INSERT INTO accounting_read_recovery_dispositions(id,operation_id,handover_id,predecessor_record,predecessor_hash) VALUES($1,$2,$3,$4::jsonb,$5)`,
+        [dispositionId, operationId, handoverId, JSON.stringify(operation.record), accountingHash(operation.record)]);
+      await client.query(`INSERT INTO accounting_owner_recovery_events(event_id,request_id,operation_id,kind,actor,binding_digest,evidence)
+        VALUES($1,$1,$2,'AUTO_SUPERSEDED','automatic-read-source-recovery',$3,$4::jsonb)`, [eventId, operationId, operation.binding_digest, JSON.stringify({ dispositionId, handoverId })]);
+      await client.query(`UPDATE accounting_owner_recovery_operations SET state='AUTO_SUPERSEDED',record=jsonb_set(record,'{state}','"AUTO_SUPERSEDED"'::jsonb) WHERE operation_id=$1`, [operationId]);
+      await client.query("UPDATE accounting_owner_recovery_maintenance SET pending_operation_id=NULL WHERE singleton AND pending_operation_id=$1", [operationId]);
+    }
+    await client.query(`INSERT INTO accounting_source_owners(endpoint_key,owner_id,generation,retirement_state,process_session_id,settings_hash,account_id)
+      VALUES($1,$2,$3,'ACTIVE',$4,$5,$6) ON CONFLICT(endpoint_key) DO UPDATE SET owner_id=$2,generation=$3,retirement_state='ACTIVE',process_session_id=$4,
+      settings_hash=$5,account_id=$6,acquired_at=clock_timestamp(),retired_at=NULL,updated_at=clock_timestamp()`,
+      [endpointKey, ownerId, generation, identity.processSessionId, identity.settingsHash, this.settings.accountId]);
+    if (source) await client.query(`UPDATE broker_accounting_sources SET process_session_id=$2,
+      qualification_id=CASE WHEN settings_hash=$3 THEN qualification_id ELSE NULL END,settings_hash=$3,
+      gap=true,semantic_revision=semantic_revision+1,updated_at=clock_timestamp() WHERE source_id=$1`, [identity.sourceId,identity.processSessionId,identity.settingsHash]);
+    return { endpointKey, ownerId, generation };
   }
   private async verifyLock(): Promise<void> {
     if (!this.client) throw accountingError("SOURCE_OWNER_LOST");
@@ -131,7 +223,8 @@ export class AccountingSourceOwner {
     this.assertHeld(); const fence = this.current!;
     const row = await db.query(`SELECT 1 FROM accounting_source_owners WHERE endpoint_key=$1 AND owner_id=$2
       AND generation=$3 AND retirement_state IN ('ACTIVE','RETIRED')
-      AND EXISTS(SELECT 1 FROM accounting_owner_recovery_maintenance WHERE singleton AND pending_operation_id IS NULL) FOR SHARE`, [fence.endpointKey, fence.ownerId, fence.generation]);
+      ${this.automatic ? 'AND process_session_id=$4 AND settings_hash=$5 AND account_id=$6' : ''}
+      AND EXISTS(SELECT 1 FROM accounting_owner_recovery_maintenance WHERE singleton AND pending_operation_id IS NULL) FOR SHARE`, [fence.endpointKey, fence.ownerId, fence.generation, ...(this.automatic ? [this.automatic.processSessionId, this.automatic.settingsHash, this.settings.accountId] : [])]);
     this.assertHeld(); if (row.rowCount !== 1) { this.lose(); throw accountingError("SOURCE_OWNER_LOST"); }
   }
   async retire(acknowledged: boolean): Promise<void> {

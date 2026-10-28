@@ -52,3 +52,22 @@ test("invalid ID and non-submitted proposal never call broker", async () => {
     assert.equal((await app.inject({method:"POST",url:"/execution/cancel-proposed/1"})).statusCode,409);
   } finally { await app.close(); }
 });
+
+for (const boundary of ["lookup", "response"] as const) test(`cancel origin is fenced across ${boundary} repository await`, async () => {
+  const app = Fastify(); let generation = 1, reads = 0, writes = 0, reconciliations = 0;
+  registerCancelProposedRoute(app, {
+    repository: { getProposedOrderById: async () => { if (++reads === (boundary === "lookup" ? 1 : 2)) generation++; return order; } },
+    broker: {
+      captureCancellationOrigin: () => { const captured = generation; return {
+        assertCurrent: () => { if (captured !== generation) throw new Error("STALE_OWNER"); }, assertInTransaction: async () => {},
+      }; },
+      cancelBrokerOrder: async () => { writes++; return { brokerOrderId: "42", status: "CANCELLED" }; },
+    },
+    requestReconciliation: () => { reconciliations++; },
+  });
+  try {
+    const result = await app.inject({ method: "POST", url: "/execution/cancel-proposed/1" });
+    assert.equal(result.statusCode, 409); assert.equal(result.json().error, "CANCEL_UNCONFIRMED");
+    assert.equal(writes, boundary === "lookup" ? 0 : 1); assert.equal(reconciliations, 1);
+  } finally { await app.close(); }
+});

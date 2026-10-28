@@ -1,5 +1,10 @@
 # Current project state
 
+2026-10-28: [automatic Paper startup/recovery](phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_REPORT.md)
+has independent implementation acceptance and successful isolated runtime outage
+drills. Final full validation, publication/CI and operational rollout are tracked
+in the report. This note does not claim an activated bot or completed Paper trade.
+
 Owner direction 2026-10-12: continuous Paper for PKO and AAPL, one share/open
 position per instrument, no daily attempt quota, USD5/day AI. The
 [continuous-operation package](phase3/CONTINUOUS_PAPER_OPERATION_REPORT.md) tracks
@@ -74,6 +79,10 @@ links the implemented PP1 configuration and additive PP2 runtime contract.
 None of these labels implies profitability or permission to activate Live.
 
 ## Capability matrix
+
+Historical baseline: the newer dated package reports above supersede affected
+rows, including automatic accounting coverage in the 2026-10-28 recovery package.
+Implementation capability is distinct from the image currently deployed.
 
 | Capability | Implemented state | Remaining gap / evidence |
 | --- | --- | --- |

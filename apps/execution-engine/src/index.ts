@@ -1,3 +1,5 @@
+import { observePostgresPoolErrors } from "@ikbr/shared/diagnostics";
+import { BrokerSessionRecovery, readCurrentBrokerAccounts } from './broker-session-recovery.js';
 import { LifecycleNotificationCheckpoint } from "./lifecycle/notification-checkpoint.js";
 import { brokerDiagnosticPrivacy, type BrokerPhaseDiagnostics } from "./reconciliation/phase-diagnostics.js";
 import { readPeriodicProof } from "./reconciliation/periodic-proof.js";
@@ -12,7 +14,7 @@ import { registerDiagnosticRoutes } from "./diagnostics/routes.js";
 import { createDiagnosticReadModel } from "./diagnostics/read-model.js";
 import { registerResearchAuditRoute } from "./research-audit-routes.js";
 import { createResearchEntryValidator, assertResearchResumeAllowed } from "./research-entry-guard.js";
-import { loadResearchManifest, ResearchStore } from "@ikbr/shared/instrument-research";
+import { loadResearchManifest, ResearchStore, captureResearchSourceError } from "@ikbr/shared/instrument-research";
 import { EntryControlStore, EntryControlError, registerEntryControlRoutes } from "./entry-control.js";
 import { LifecycleObserverRepository, pinLifecycleEntryPolicy, assertLifecycleEntryDeadline } from "./lifecycle/observer-repository.js";
 import { LifecycleObserver } from "./lifecycle/observer.js";
@@ -87,13 +89,23 @@ import { IbBrokerReconciliationAdapter } from "./reconciliation/ib-broker-adapte
 
 import { loadAccountingSettings } from "./accounting/config.js";
 import { AccountingSourceStore } from "./accounting/source-store.js";
+import { AccountingSourceRuntime } from "./accounting/source-runtime.js";
+import { initializeWithDatabaseRetry, drainShutdown, isDatabaseUnavailable } from "./startup-recovery.js";
+import { withRuntimeOwnerPermit } from "./runtime-owner-permit.js";
 import { AccountingSourceService } from "./accounting/source-service.js";
 import { AccountingClockRecoveryCoordinator } from "./accounting/clock-recovery-coordinator.js";
 import { accountingHash } from "./accounting/types.js";
 import { registerAccountingRoutes } from "./accounting/routes.js";
 
+function startupCause(error: unknown) {
+  return captureResearchSourceError(error, { accountIds: [...config.allowedPaperAccounts, ...config.allowedLiveAccounts],
+    secrets: Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY|POSTGRES_URL/.test(key)).map(([, value]) => value ?? "") });
+}
 const app = Fastify({ logger: { level: config.LOG_LEVEL } });
-const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const pool = new Pool({ connectionString: config.POSTGRES_URL, connectionTimeoutMillis: 2000,
+  statement_timeout: 10000, query_timeout: 12000 });
+observePostgresPoolErrors(pool, error => app.log.error({ cause: startupCause(error) }, "Operational database connection unavailable"));
+const startupAbort = new AbortController();
 const entryControls = new EntryControlStore(pool);
 const lifecycleAlerts:LifecycleAlertStore = new LifecycleAlertStore(pool, { eligible: (db,account,resolving)=>notificationCheckpoint.eligible(db,account,resolving), isCurrent:(account,proof)=>notificationCheckpoint.isCurrent(account,proof) });
 let lifecycleLocallyHealthy = false;
@@ -143,7 +155,7 @@ const loadedAccounting = loadAccountingSettings({ path: config.EXECUTION_ACCOUNT
   allowedAccounts: config.allowedPaperAccounts, timeZone: config.EXECUTION_BROKER_TIME_ZONE,
   clientIds: [config.EXECUTION_CLIENT_ID, config.INGESTION_CLIENT_ID, config.BACKTEST_INGESTION_CLIENT_ID, config.IBKR_ES_ACQUISITION_CLIENT_ID,
     config.IB_METADATA_CLIENT_ID, config.IB_COMPLETED_ORDERS_CLIENT_ID, config.IB_CONFIG_METADATA_CLIENT_ID, config.SESSION_SCHEDULE_CLIENT_ID] });
-let accountingSource: AccountingSourceService | undefined;
+let accountingSource: AccountingSourceRuntime | undefined;
 let lastBrokerFillObservedAt = 0;
 const tws = new TwsExecutionClient(
   {
@@ -246,7 +258,7 @@ const tws = new TwsExecutionClient(
           status,
           message: update.message,
         },
-      });
+      }).catch(error => app.log.error({ cause: startupCause(error) }, "Alert persistence unavailable"));
     }
     if (status === "FILLED") {
       void (async () => {
@@ -262,7 +274,7 @@ const tws = new TwsExecutionClient(
             `${arrow} ${action} FILLED: ${order?.side ?? "?"} ${order?.quantity ?? "?"} ${order?.instrument ?? "?"}` +
             (order?.entry !== undefined ? ` @ ${order.entry}` : "") +
             (order?.strategy ? ` [${order.strategy}]` : "");
-          void alerts.record({
+          await alerts.record({
             severity: "info",
             kind: "order_filled",
             message: msg,
@@ -350,6 +362,16 @@ const tws = new TwsExecutionClient(
     resolveManagementInstrument: resolveOriginalManagementInstrument,
     loadStockMetadata,
     assertEntryAllowed: assertNewEntryAllowed,
+    assertCancelAllowed: async () => {
+      const session = await ensureBrokerSession();
+      assertActiveAccountAllowed(envGuardConfig(), session.accountId, { requireKnownAccount: true });
+    },
+    ...(loadedAccounting ? { captureRuntimeOwner: () => {
+      if (shuttingDown) throw new Error("EXECUTION_STOPPING");
+      if (!accountingSource) throw new Error("ACCOUNTING_SOURCE_UNCONFIGURED");
+      return accountingSource.captureRuntimeOwner();
+    },
+    withRuntimeOwnerPermit: (owner, send) => withRuntimeOwnerPermit(pool, owner, send) } : {}),
     onAccountingIngressFailure: (kind, raw) => accountingSource?.observeIngressFailure(kind, raw),
     loadWseMetadata: (bound, accountId) => wseMetadata.load(bound, accountId) },
 );
@@ -362,11 +384,13 @@ const notificationCheckpoint:LifecycleNotificationCheckpoint = new LifecycleNoti
   accountId:lastActiveAccountId,sessionId:EXECUTION_PROCESS_OWNER_ID,generation:tws.getConnectionGeneration(),connected:tws.isConnected(),
 }:null);
 
-if (loadedAccounting) accountingSource = new AccountingSourceService(
-  new AccountingSourceStore(pool, accountingHash({ account: loadedAccounting.settings.accountId, kind: "tws-accounting" }), EXECUTION_PROCESS_OWNER_ID),
-  loadedAccounting.settings, loadedAccounting.sha256, () => ({ connected: tws.isConnected(), accountId: lastActiveAccountId,
-    sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }), undefined, brokerDiagnostics,
-  { automaticClockRecoveryEnabled: config.EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED === "true" });
+if (loadedAccounting) accountingSource = new AccountingSourceRuntime(loadedAccounting.settings, loadedAccounting.sha256,
+  (sourceSessionId, onOwnerLost) => new AccountingSourceService(
+    new AccountingSourceStore(pool, accountingHash({ account: loadedAccounting.settings.accountId, kind: "tws-accounting" }), sourceSessionId),
+    loadedAccounting.settings, loadedAccounting.sha256, () => ({ connected: tws.isConnected(), accountId: lastActiveAccountId,
+      sessionId: EXECUTION_PROCESS_OWNER_ID, generation: tws.getConnectionGeneration() }), undefined, brokerDiagnostics,
+    { automaticSourceRecoveryEnabled: true, automaticClockRecoveryEnabled: config.EXECUTION_ACCOUNTING_AUTO_CLOCK_RECOVERY_ENABLED === "true", onOwnerLost }),
+  { onOwnerLost: () => { lifecycleLocallyHealthy = false; tws.disconnect(); } });
 
 // PR15 — production reconciliation wiring. Uses the REAL
 // `IbBrokerReconciliationAdapter` backed by the same `tws`
@@ -478,6 +502,7 @@ let executionSyncInFlight: Promise<void> | null = null;
 // across multiple execution-engine instances. For Phase 1 we keep them as
 // mutable in-process state.
 let lastActiveAccountId: string | null = null;
+let lastConfirmedAccountGeneration: number | null = null;
 let lastReconciliationAt: Date | null = null;
 
 // -----------------------------------------------------------------------
@@ -605,8 +630,10 @@ function assertLifecycleManagement(context?: CloseContext) {
 }
 function entryPermitDependencies(accountId: string) {
   const generation = tws.getConnectionGeneration();
+  const owner = accountingSource?.captureRuntimeOwner();
   return {
     assertCurrent: () => {
+      owner?.assertCurrent();
       assertLifecycleManagement();
       accountingSource?.assertCurrent();
       if (!lifecycleLocallyHealthy || accountId !== lastActiveAccountId || generation !== tws.getConnectionGeneration())
@@ -618,7 +645,10 @@ function entryPermitDependencies(accountId: string) {
 async function lifecycleEntryPermit(db: PoolClient, accountId: string) {
   const context = entryControlContext();
   if (context.accountId !== accountId) throw new EntryControlError("ENTRY_CONTROL_ACCOUNT_CHANGED");
-  return entryControls.permit(db, context, entryPermitDependencies(accountId));
+  const owner = accountingSource?.captureRuntimeOwner();
+  const permit = await entryControls.permit(db, context, entryPermitDependencies(accountId));
+  await owner?.assertInTransaction(db);
+  return { ...permit, assertCurrent: () => { owner?.assertCurrent(); permit.assertCurrent(); } };
 }
 async function assertNewEntryAllowed() {
   await configurationRuntime.assertEntryAllowed();
@@ -898,7 +928,7 @@ async function assertKillSwitchOk(order: {
       kind: "kill_switch_triggered",
       message: `Kill-switch blocked OPEN_OR_ADD for ${order.instrument}: ${status.reason ?? "triggered"}`,
       payload: { instrument: order.instrument, status },
-    });
+    }).catch(error => app.log.error({ cause: startupCause(error) }, "Alert persistence unavailable"));
     throw new Error(
       `Execution blocked for ${order.instrument}: daily loss kill-switch triggered (${status.reason}). Existing positions can still be closed.`,
     );
@@ -967,8 +997,10 @@ async function ensureBrokerSession(): Promise<{
   accountId: string;
   accounts: string[];
 }> {
-  await tws.connect();
-  const accounts = await tws.getManagedAccounts();
+  const owner = accountingSource?.captureRuntimeOwner();
+  const evidence = await readCurrentBrokerAccounts(tws, owner);
+  const accounts = evidence.accounts;
+  if (shuttingDown) throw Error('EXECUTION_STOPPING');
 
   const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
   if (!accountId) {
@@ -1004,14 +1036,16 @@ async function ensureBrokerSession(): Promise<{
         whitelist: [...whitelist],
         managedAccounts: accounts,
       },
-    });
+    }).catch(error => app.log.error({ cause: startupCause(error) }, "Alert persistence unavailable"));
     // Do NOT cache mismatched accountId. Force operators to fix config
     // before any state is retained.
     lastActiveAccountId = null;
     throw new EnvironmentGuardError(reason, message);
   }
 
+  evidence.assertCurrent();
   lastActiveAccountId = accountId;
+  lastConfirmedAccountGeneration = evidence.generation;
   // Round-7 blocker: kick off (or coalesce onto) a broker-driven
   // snapshot refresh whenever we (re-)confirm the active account.
   // Ensures the write-path guard has a fresh snapshot at startup
@@ -1023,6 +1057,18 @@ async function ensureBrokerSession(): Promise<{
   });
   return { accountId, accounts };
 }
+
+const brokerSessionRecovery = new BrokerSessionRecovery({
+  signal: startupAbort.signal,
+  current: () => {
+    if (!tws.isConnected() || !lastActiveAccountId || lastConfirmedAccountGeneration !== tws.getConnectionGeneration()) return false;
+    try { accountingSource?.assertRuntimeOwnerCurrent(); return true; } catch { return false; }
+  },
+  hydrate: async () => { await ensureBrokerSession(); },
+  cancel: () => tws.disconnect(),
+  recovered: () => { void reconScheduler.triggerFresh().catch(error => app.log.warn({ cause: startupCause(error) }, 'Recovered session capture unavailable')); },
+  failed: (error, retryMs) => app.log.warn({ cause: startupCause(error), retryMs }, 'Execution broker session will retry'),
+});
 
 /**
  * PR15.2 — server-side authority for logical `instrumentId` →
@@ -1318,6 +1364,7 @@ app.setErrorHandler((error, request, reply) => {
       reason: error.reason,
     });
   }
+  if (isDatabaseUnavailable(error)) return reply.code(503).send({ error: "DATABASE_UNAVAILABLE" });
   reply.send(error);
 });
 
@@ -1665,6 +1712,7 @@ const accountingClockRecovery = accountingSource ? new AccountingClockRecoveryCo
 
 const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
   durableFaults: true,
+  ...(loadedAccounting ? { captureRuntimeOwner: () => { if (!accountingSource) throw new Error("ACCOUNTING_SOURCE_UNCONFIGURED"); return accountingSource.captureRuntimeOwner(); } } : {}),
   assertManagementAllowed: assertLifecycleManagement,
   context: async (instrumentId, originalProposalId) => {
     const accountId = lastActiveAccountId, generation = tws.getConnectionGeneration();
@@ -1698,15 +1746,15 @@ const fullCloseService = new FullCloseService(new CloseRepository(pool, repo), {
     const failure = validatePersistedClosePrepared(prepared, ticket, context);
     if (failure) throw new CloseConflict(failure);
   },
-  cancel: async (leg, context) => {
+  cancel: async (leg, context, owner) => {
     if (!leg.permId) throw new CloseConflict("close_cancel_perm_missing");
     const terminal = await tws.cancelOwnedOrder({ ...leg, conid: Number(leg.conid), permId: leg.permId,
-      expectedGeneration: context.generation, observedAt: leg.observedAt });
+      expectedGeneration: context.generation, observedAt: leg.observedAt }, owner);
     return { ...leg, status: "CANCELLED", confirmedAt: terminal.confirmedAt,
       generation: terminal.connectionGeneration, sessionId: context.sessionId };
   },
-  dispatch: async (prepared, operation, context) => {
-    await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation, Date.parse(operation.riskExpiresAt ?? ""));
+  dispatch: async (prepared, operation, context, owner) => {
+    await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, context.generation, Date.parse(operation.riskExpiresAt ?? ""), owner);
   },
   alert: async (operation, reason) => {
     await lifecycleAlerts.recordFault({ accountId: operation.accountId, proposalId: operation.originalProposalId,
@@ -1805,6 +1853,7 @@ app.get("/execution/lifecycle/supervision", async () => {
     tradingEnabled: config.tradingEnabled, accounting: accountingSource?.status() ?? null, positions: rows.rows, alerts: await lifecycleAlerts.readStatus(lastActiveAccountId!, EXECUTION_PROCESS_OWNER_ID) };
 });
 const diagnosticPool = new Pool({ connectionString: config.POSTGRES_URL, max: 2, connectionTimeoutMillis: 2000, query_timeout: 3000, statement_timeout: 2500 });
+observePostgresPoolErrors(diagnosticPool, error => app.log.error({ cause: startupCause(error) }, "Diagnostic database connection unavailable"));
 const diagnosticRepository = new ExecutionRepository(diagnosticPool);
 const diagnosticReadModel = createDiagnosticReadModel({
   pool: diagnosticPool, currentAccountId: () => lastActiveAccountId, currentSessionId: () => EXECUTION_PROCESS_OWNER_ID,
@@ -1866,25 +1915,16 @@ registerStockMarketRoutes(app, { currentAccountId: () => lastActiveAccountId,
 
 
 async function main(): Promise<void> {
-  // PR14.2 — versioned database migrations. MUST complete before
-  // any HTTP route is registered and before the broker connection is
-  // opened. A migration failure blocks startup: throw propagates out
-  // of `main()`, the top-level handler logs and exits non-zero, so
-  // the scheduler / broker never come online against a partial schema.
-  try {
+  // Validate the schema before HTTP or broker work; only availability failures retry.
+  await initializeWithDatabaseRetry(async () => {
     await repo.init();
-    await accountingSource?.initialize();
     for (const accountId of config.allowedPaperAccounts) await entryControls.adopt(accountId, config.tradingEnabled);
     await configurationRuntime.initialize();
     if (loadedResearch && tradingConfiguration.loaded.mode === "bundle") {
       await researchStore.registerManifest({ manifest: loadedResearch.manifest, configuration: tradingConfiguration.loaded.configuration,
         tradingEnabled: config.TRADING_ENABLED === "true", adopt: process.env.RESEARCH_ADOPT_MANIFEST === "true" });
-      const observeResearch = () => researchStore.observe({ ...researchIdentity()!, service: "execution-engine",
+      await researchStore.observe({ ...researchIdentity()!, service: "execution-engine",
         processId: configurationRuntime.processId, tradingEnabled: config.TRADING_ENABLED === "true" });
-      await observeResearch();
-      const heartbeat = setInterval(() => { void observeResearch().catch(error => app.log.error({ err: error }, "research observation failed")); }, 10_000);
-      heartbeat.unref();
-      app.addHook("onClose", async () => { clearInterval(heartbeat); });
     }
     if (config.paperRunPolicy) {
       const client = await pool.connect();
@@ -1898,12 +1938,15 @@ async function main(): Promise<void> {
     }
     configurationRuntime.startHeartbeat(error => app.log.error({ err: error }, "configuration heartbeat failed"));
     app.log.info("database migrations up to date");
-  } catch (err) {
-    app.log.error(
-      { err: (err as Error).message },
-      "database migrations failed — refusing to start",
-    );
-    throw err;
+  }, { signal: startupAbort.signal, onRetry: (error, retryMs) => {
+    app.log.warn({ cause: startupCause(error), startupState: "WAITING_DATABASE", retryMs }, "Database startup will retry");
+  } });
+  if (loadedResearch && tradingConfiguration.loaded.mode === "bundle") {
+      const observeResearch = () => researchStore.observe({ ...researchIdentity()!, service: "execution-engine",
+        processId: configurationRuntime.processId, tradingEnabled: config.TRADING_ENABLED === "true" });
+      const heartbeat = setInterval(() => { void observeResearch().catch(error => app.log.error({ err: error }, "research observation failed")); }, 10_000);
+      heartbeat.unref();
+      app.addHook("onClose", async () => { clearInterval(heartbeat); });
   }
 
   // Phase 1 / PR2: enforce Bearer auth on every non-public route,
@@ -1920,7 +1963,7 @@ async function main(): Promise<void> {
         count: burst.count,
         windowMs: burst.windowMs,
       },
-    });
+    }).catch(error => app.log.error({ cause: startupCause(error) }, "Alert persistence unavailable"));
   });
   const expectedToken = config.EXECUTION_API_TOKEN ?? "";
   if (!expectedToken) {
@@ -1977,7 +2020,6 @@ async function main(): Promise<void> {
     assertActiveAccountAllowed(envGuardConfig(), lastActiveAccountId, { requireKnownAccount: true });
     if (accountingSource && lastActiveAccountId !== accountingSource.settings.accountId) throw new Error("ACCOUNTING_IDENTITY_INVALID");
   }, entriesPaused: async () => config.EXECUTION_ENTRIES_PAUSED === "true" || Boolean(lastActiveAccountId && (await entryControls.read(lastActiveAccountId)).control?.paused) });
-  accountingSource?.start();
 
   // PR15 — register reconciliation routes.
   registerReconciliationRoutes(app, {
@@ -1999,6 +2041,8 @@ async function main(): Promise<void> {
     host: config.EXECUTION_BIND_HOST,
   });
   app.log.info(`execution-engine listening on ${address}`);
+  accountingSource?.start();
+  void accountingSource?.initialize().catch(error => app.log.error({ err: error }, "Accounting runtime startup unavailable"));
 
   // PR15 — start the reconciliation scheduler. It ticks based on
   // config.RECONCILIATION_* env vars; the runner acquires a
@@ -2008,57 +2052,40 @@ async function main(): Promise<void> {
   reconScheduler.start();
   accountingClockRecovery?.start();
   lifecycleObserver.start();
+  brokerSessionRecovery.start();
   void lifecycleAlertWorker.start().catch(() => {
     lifecycleLocallyHealthy = false;
     app.log.error("Lifecycle alert worker failed to start; entries remain blocked");
   });
 
-  // Fire-and-forget: try to reconcile positions with the broker on
-  // startup. If TWS is not yet reachable we just emit a startup alert
-  // and let the operator trigger /execution/reconciliation later.
-  void (async () => {
-    try {
-      const report = await runReconciliation();
-      await alerts.record({
-        severity: report.mismatches.length > 0 ? "error" : "info",
-        kind: "reconciliation_run",
-        message: `Startup reconciliation: matches=${report.matches} mismatches=${report.mismatches.length} expected=${report.expectedPositionsCount} broker=${report.brokerPositionsCount}`,
-        payload: { report },
-      });
-    } catch (error) {
-      app.log.warn(
-        { err: error },
-        "startup reconciliation skipped (TWS not reachable)",
-      );
-      await alerts.record({
-        severity: "warn",
-        kind: "reconciliation_run",
-        message: `Startup reconciliation skipped: ${(error as Error).message}`,
-      });
-    }
-  })();
+
 }
 
-main().catch((err) => {
-  app.log.error(err);
-  process.exit(1);
+let shuttingDown = false;
+async function shutdown(exitCode: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  startupAbort.abort();
+  configurationRuntime.stopHeartbeat();
+  let disconnected = true;
+  try { tws.disconnect(); } catch (error) { disconnected = false; app.log.error({ cause: startupCause(error) }, "Execution transport shutdown failed"); }
+  const healthy = await drainShutdown([
+    { name: "broker-session", close: () => brokerSessionRecovery.stop() },
+    { name: "accounting-clock", close: () => accountingClockRecovery?.stop() },
+    { name: "accounting-source", close: () => accountingSource?.close() },
+    { name: "lifecycle-observer", close: () => lifecycleObserver.stop() },
+    { name: "lifecycle-alerts", close: () => lifecycleAlertWorker.stop() },
+    { name: "reconciliation", close: () => reconScheduler.stop() },
+    { name: "http", close: () => app.close() },
+    { name: "diagnostic-pool", close: () => diagnosticPool.end() },
+    { name: "operational-pool", close: () => pool.end() },
+  ], (step, error) => app.log.error({ step, cause: startupCause(error) }, "Shutdown step failed"));
+  process.exit(healthy && disconnected ? exitCode : 1);
+}
+
+main().catch(err => {
+  if (shuttingDown) return;
+  app.log.error({ cause: startupCause(err), startupState: "CONFIGURATION_HOLD" }, "Execution startup failed");
+  void shutdown(1);
 });
-
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, async () => {
-    configurationRuntime.stopHeartbeat();
-    try {
-      await accountingClockRecovery?.stop();
-      await lifecycleObserver.stop();
-      await lifecycleAlertWorker.stop();
-      await reconScheduler.stop();
-      await accountingSource?.close();
-      tws.disconnect();
-      await app.close();
-      await diagnosticPool.end();
-      await pool.end();
-    } finally {
-      process.exit(0);
-    }
-  });
-}
+for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, () => { void shutdown(0); });

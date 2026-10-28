@@ -42,7 +42,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
-    "test:integration": "node --import tsx --test src/instrument-research/marketaux-hourly-hostile.pg.test.ts src/instrument-research/marketaux-hourly-state.pg.test.ts src/instrument-research/startup-recovery.pg.test.ts src/instrument-research/startup-recovery-wsh.pg.test.ts src/instrument-research/wsh-hourly.pg.test.ts src/instrument-research/wsh-recovery.pg.test.ts"
+    "test:integration": "node --import tsx --test src/instrument-research/marketaux-hourly-hostile.pg.test.ts src/instrument-research/marketaux-hourly-state.pg.test.ts src/instrument-research/startup-recovery.pg.test.ts src/instrument-research/startup-recovery-wsh.pg.test.ts src/instrument-research/automatic-wsh-recovery.pg.test.ts src/instrument-research/wsh-hourly.pg.test.ts src/instrument-research/wsh-recovery.pg.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.7.4",

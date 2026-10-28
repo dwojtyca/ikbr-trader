@@ -7,7 +7,7 @@ export const OWNER_RECOVERY_LIMITS = Object.freeze({
 });
 export const OWNER_RECOVERY_SERVICES = ['execution-engine', 'ingestion', 'llm-agent', 'signal-engine', 'backtest-engine', 'ui'] as const;
 export type OwnerRecoveryService = typeof OWNER_RECOVERY_SERVICES[number];
-export type OwnerRecoveryState = 'PREPARED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED';
+export type OwnerRecoveryState = 'PREPARED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED' | 'AUTO_SUPERSEDED';
 export interface OwnerRecoveryEndpoint { host: string; port: number; clientId: 0 }
 export interface OwnerRecoveryProfile {
   project: string; imageId: string; deploymentHash: string; dockerHost: string;
@@ -135,14 +135,14 @@ export type OwnerRecoveryRequest =
   | { version: 1; action: 'reset-proof'; requestId: string; observerSessionId: string; evidence: OwnerRecoveryHostEvidence }
   | { version: 1; action: 'finalize-observation'; requestId: string; observerSessionId: string; observedRequestId: string; commitRequestId: string; handshakeDigest: string; evidence: OwnerRecoveryHostEvidence };
 export interface OwnerRecoveryEventMetadata {
-  eventId: string; requestId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED';
+  eventId: string; requestId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED' | 'AUTO_SUPERSEDED';
   actor: string; recordedAt: string; bindingDigest: string; evidenceDigest: string | null;
 }
 export interface OwnerRecoveryStatus {
   pendingOperationId: string | null; events: OwnerRecoveryEventMetadata[];
   operation: OwnerRecoveryOperation | null; maintenancePending: boolean;
   receipt: OwnerRecoveryReceipt | null;
-  lookup: null | { requestId: string; operationId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED'; evidenceDigest: string | null };
+  lookup: null | { requestId: string; operationId: string; kind: 'PRE_RESET_PROBE_DISPATCH' | 'PRE_RESET_PROBE_CLOSED' | 'PREPARED' | 'HANDSHAKE_DISPATCH' | 'HANDSHAKE_CLOSED' | 'OBSERVED' | 'COMMITTED' | 'SUPERSEDED' | 'AUTO_SUPERSEDED'; evidenceDigest: string | null };
 }
 export type OwnerRecoveryResponse =
   | { version: 1; requestId: string; ok: false; error: { code: string; cause?: { name: string | null; code: string | number | null; message: string | null } } }
@@ -350,7 +350,7 @@ const handshake: Validator = value => {
 };
 const operation: Validator = value => {
   const v2 = (value as { version?: unknown })?.version === 2;
-  object(value, { version: literal(v2 ? 2 : 1), ...(v2 ? { coordination } : {}), operationId: uuid, nonce: uuid, state: enumeration(['PREPARED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']),
+  object(value, { version: literal(v2 ? 2 : 1), ...(v2 ? { coordination } : {}), operationId: uuid, nonce: uuid, state: enumeration(['PREPARED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED', 'AUTO_SUPERSEDED']),
     owner, profile, pauseRevision: v => integer(v), actor: v => text(v), preparedAt: instant, expiresAt: instant, bindingDigest: hash,
     evidenceDigest: nullable(hash), successorOperationId: nullable(uuid), receiptId: nullable(uuid),
   });
@@ -430,14 +430,15 @@ export function parseOwnerRecoveryRequest(value: unknown): OwnerRecoveryRequest 
   });
 }
 const status: Validator = value => {
-  object(value, { pendingOperationId: nullable(uuid), events: array(v => object(v, { eventId: uuid, requestId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), actor: a => text(a), recordedAt: instant, bindingDigest: hash, evidenceDigest: nullable(hash) }), 0, 8), operation: nullable(operation), maintenancePending: v => check(typeof v === 'boolean'), receipt: nullable(receipt), lookup: nullable(v => object(v, {
-    requestId: uuid, operationId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED']), evidenceDigest: nullable(hash),
+  object(value, { pendingOperationId: nullable(uuid), events: array(v => object(v, { eventId: uuid, requestId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED', 'AUTO_SUPERSEDED']), actor: a => text(a), recordedAt: instant, bindingDigest: hash, evidenceDigest: nullable(hash) }), 0, 9), operation: nullable(operation), maintenancePending: v => check(typeof v === 'boolean'), receipt: nullable(receipt), lookup: nullable(v => object(v, {
+    requestId: uuid, operationId: uuid, kind: enumeration(['PRE_RESET_PROBE_DISPATCH', 'PRE_RESET_PROBE_CLOSED', 'PREPARED', 'HANDSHAKE_DISPATCH', 'HANDSHAKE_CLOSED', 'OBSERVED', 'COMMITTED', 'SUPERSEDED', 'AUTO_SUPERSEDED']), evidenceDigest: nullable(hash),
   })) });
   const s = value as unknown as OwnerRecoveryStatus;
   check(s.maintenancePending === (s.pendingOperationId !== null));
   check(new Set(s.events.map(e => e.eventId)).size === s.events.length && new Set(s.events.map(e => e.requestId)).size === s.events.length);
   check(s.events.every(e => s.operation && e.bindingDigest === s.operation.bindingDigest));
   if (s.operation && ['PREPARED', 'OBSERVED'].includes(s.operation.state)) check(s.pendingOperationId === s.operation.operationId);
+  if (s.operation?.state === 'AUTO_SUPERSEDED') check(s.pendingOperationId !== s.operation.operationId && s.events.some(e => e.kind === 'AUTO_SUPERSEDED'));
   if (s.lookup) check(s.lookup.operationId === s.operation?.operationId && s.events.some(e => e.requestId === s.lookup!.requestId && e.kind === s.lookup!.kind && e.evidenceDigest === s.lookup!.evidenceDigest));
   if (s.receipt) check(s.operation?.state === 'COMMITTED' && s.operation.version === s.receipt.version && s.operation.operationId === s.receipt.operationId && s.operation.receiptId === s.receipt.receiptId && s.operation.bindingDigest === s.receipt.bindingDigest && s.operation.evidenceDigest === s.receipt.evidenceDigest && ownerRecoveryHash(s.operation.owner) === ownerRecoveryHash(s.receipt.owner));
 };

@@ -44,7 +44,7 @@ export interface SourceInspection {
   id: string; sourceId: string; processSessionId: string; connectionGeneration: number;
   protocolVersion: number; accounts: string[]; brokerTime: string; completedAt: string;
   executionIds: string[]; observationIds: string[]; replayId: number; replayEndId: string;
-  corroboration: "OBSERVED" | "NOT_OBSERVED";
+  corroboration: "OBSERVED" | "NOT_OBSERVED"; capability?: ReplayCapability;
 }
 export interface ClockRecoveryEvidence {
   id: string; inspection: SourceInspection; barrier: AccountingBarrier;
@@ -55,9 +55,19 @@ export interface ClockRecoveryReceipt {
   id: string; inspectionId: string; sourceId: string; connectionGeneration: number;
   recoveredAt: string; qualificationId: string | null; gap: true; brokerReadOnly: true;
 }
+export interface AutomaticQualificationV2 {
+  schemaVersion: 2; sourceKind: "ibkr-api-explicit-window-v2"; settingsSha256: string;
+  processSessionId: string; connectionGeneration: number; inspectionId: string;
+  sdkSha256: string; masterClientId: 0; timestampPolicy: "EXPLICIT_OR_CONFIGURED_ZONE";
+  executionTimeZone: "UTC" | "Europe/Warsaw";
+}
+export interface ReplayCapability {
+  certifiedFrom: string; filter: { clientId: 0; acctCode: string; time: string; lastNDays: 7; symbol: ""; secType: ""; exchange: ""; side: "" };
+  sdkSha256: string; masterClientId: 0;
+}
 export interface StoredQualification {
-  id: string; input: OperatorQualificationV1; settings: SourceSettingsV1;
-  protocolVersion: number; expiresAt: string; inspectionId: string;
+  id: string; input: OperatorQualificationV1 | AutomaticQualificationV2; settings: SourceSettingsV1;
+  protocolVersion: number; expiresAt: string | null; inspectionId: string;
 }
 export interface AccountingAuthority {
   assertCurrent(reference?: AccountingCaptureReference): void;
@@ -84,7 +94,7 @@ export function accountingReference(c: AccountingCaptureReference): AccountingCa
 
 export type ClockRecoveryState = 'IDLE' | 'WAITING' | 'RECOVERING' | 'VERIFYING' | 'BACKOFF' | 'OPERATOR_REQUIRED' | 'OUTCOME_UNKNOWN' | 'RECOVERED';
 export interface AutomaticClockRecoveryStatus {
-  enabled: boolean; episodeId: string | null; state: ClockRecoveryState; attemptCount: number; attemptLimit: 3;
+  enabled: boolean; episodeId: string | null; state: ClockRecoveryState; attemptCount: number; attemptLimit: 3 | null;
   nextAttemptAt: string | null; firstErrorAt: string | null; lastError: string | null;
   receiptId: string | null; captureId: string | null; entryBlocked: boolean;
   originalCause?: { name: string | null; code: string | null; message: string | null } | null;
@@ -93,4 +103,8 @@ export interface AutomaticClockRecoveryStatus {
 export interface ClockRecoveryReservation {
   episodeId: string; attemptId: string; ownerSessionId: string; fencingGeneration: number;
   sourceId: string; accountId: string; settingsHash: string; automatic: boolean;
+}
+
+export function qualificationExpired(q: StoredQualification, now = Date.now()): boolean {
+  return q.input.schemaVersion === 2 ? q.expiresAt !== null : q.expiresAt === null || !Number.isFinite(Date.parse(q.expiresAt)) || Date.parse(q.expiresAt) <= now;
 }

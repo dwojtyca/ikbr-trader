@@ -46,7 +46,7 @@ async function fixture(twoSource = false) {
     const volumes: Array<Record<string, unknown>> = [{ type: 'bind', source: source('strategy.json'), target: '/app/private-config/continuous-strategy.json', read_only: true }];
     if (name === 'execution-engine' || name === 'llm-agent') volumes.push({ type: 'bind', source: source('research.json'), target: '/app/private-config/continuous-research.json', read_only: true });
     if (name === 'execution-engine') volumes.push({ type: 'bind', source: account, target: '/app/private-accounting', read_only: true });
-    appServices[name] = { image: imageId, command: ['pnpm', '--filter', `@ikbr/${name}`, 'start'], environment: env, volumes };
+    appServices[name] = { image: imageId, command: name === 'execution-engine' ? ['node', 'apps/execution-engine/dist/index.js'] : ['pnpm', '--filter', `@ikbr/${name}`, 'start'], ...(name === 'execution-engine' ? {init:true} : {}), environment: env, volumes };
   }
   const rendered = { services: appServices };
   const proof: ReleaseProof = { version: 1, imageId, effectiveComposeSha256: sha(canonicalJson(rendered)), files: entries };
@@ -876,4 +876,29 @@ test('recovery diagnostics distinguish proof from readiness and ignore untrusted
   assert.match(message!, /świeżość danych ocenia zwykła kontrola gotowości/); assert.doesNotMatch(message!, /secret|payload|READY/);
   assert.equal(formatResearchRecovery({ ...row, operatorAction: 'arbitrary_secret' }, { secrets: [], accountIds: [] }), null);
   assert.equal(formatResearchRecovery({ ...row, state: 'READY' }, { secrets: [], accountIds: [] }), null);
+});
+
+
+test('execution process uses exact direct Node command and init for shutdown delivery', async()=>{
+ const f=await fixture();try{
+  assert.equal((await validateRenderedCompose(f.rendered,f.proof,f.root)).accountId,'DU123456');
+  for(const command of [['node','apps/ingestion/dist/index.js'],['pnpm','--filter','@ikbr/execution-engine','start']]){
+   const altered=structuredClone(f.rendered) as {services:Record<string,{command:string[];init?:boolean}>};altered.services['execution-engine'].command=command;
+   await assert.rejects(validateRenderedCompose(altered,f.proof,f.root),/PAPER_CONFIG_CHANGED/);
+  }
+  const altered=structuredClone(f.rendered) as {services:Record<string,{init?:boolean}>};delete altered.services['execution-engine'].init;
+  await assert.rejects(validateRenderedCompose(altered,f.proof,f.root),/PAPER_CONFIG_CHANGED/);
+ }finally{await f.cleanup();}
+});
+
+test('automatic WSH read recovery waits across repeated preparation responses and resumes only after readiness',async()=>{
+ const h=await runScenario(),original=h.adapters.http;let prepares=0;
+ h.adapters.http=async(path,body,...rest)=>{
+  if(path!=='/execution/entry-control/start/prepare'||++prepares>2)return original(path,body,...rest);
+  assert.equal(h.resumeCalls,0);
+  return {revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'WAITING',reasons:['RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR'],sources:[{
+   sourceId:'wsh',role:'calendar',state:'WAITING',reasons:['RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR'],nextCheckAt:'2026-10-28T14:00:00.000Z',wshRefresh:{blocksCachedEvidence:true,recovery:{state:'WAITING',reason:'RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR',nextCheckAt:'2026-10-28T14:00:00.000Z'}}
+  }]}))};
+ };
+ try{await h.runtime.start();assert.equal(h.resumeCalls,1);assert.ok(prepares>2);}finally{await h.f.cleanup();}
 });

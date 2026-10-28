@@ -11,6 +11,10 @@ dist
 # TypeScript composite / incremental build artefacts.
 *.tsbuildinfo
 
+# Python SDK transport test/build artefacts.
+__pycache__/
+*.pyc
+
 # Vite config compiled from vite.config.ts by the `composite`
 # tsconfig.node.json project reference. Regenerated on every build.
 apps/ui/vite.config.js

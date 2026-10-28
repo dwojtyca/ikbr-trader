@@ -1,3 +1,4 @@
+import type { RuntimeOwnerGuard } from "../tws-execution-client.js";
 import type { BoundInstrument, SignalTicket } from "@ikbr/shared";
 import {
   CloseConflict,
@@ -14,6 +15,7 @@ import type {
   CloseTerminalEvidence,
 } from "./close-types.js";
 export interface FullCloseDependencies {
+  captureRuntimeOwner?(): RuntimeOwnerGuard;
   assertManagementAllowed?(context: CloseContext): void;
   durableFaults?: boolean;
   context(instrumentId: string, originalProposalId?: number): CloseContext | null | Promise<CloseContext | null>;
@@ -37,11 +39,13 @@ export interface FullCloseDependencies {
   cancel(
     leg: CloseLegIdentity,
     context: CloseContext,
+    owner?: RuntimeOwnerGuard,
   ): Promise<CloseTerminalEvidence>;
   dispatch(
     prepared: ClosePrepared,
     operation: CloseOperation,
     context: CloseContext,
+    owner?: RuntimeOwnerGuard,
   ): Promise<void>;
   alert(operation: CloseOperation, reason: string): Promise<void>;
 }
@@ -123,6 +127,7 @@ export class FullCloseService {
     limitPrice: number,
     actor: string,
   ): Promise<CloseOperation> {
+    const owner = this.deps.captureRuntimeOwner?.();
     const prior = await this.repo.get(id);
     if (prior) {
       if (prior.requestId !== requestId || prior.limitPrice !== limitPrice)
@@ -194,11 +199,13 @@ export class FullCloseService {
           leg,
           await this.unchanged(op),
           this.deps.evaluate,
+          owner,
         );
         cancellationInFlight = true;
         const cancelContext = await this.unchanged(op);
         this.deps.assertManagementAllowed?.(cancelContext);
-        const terminal = await this.deps.cancel(leg, cancelContext);
+        owner?.assertCurrent();
+        const terminal = await this.deps.cancel(leg, cancelContext, owner);
         await this.unchanged(op);
         await this.repo.recordTerminal(op, terminal);
         cancellationInFlight = false;
@@ -246,13 +253,17 @@ export class FullCloseService {
         claimContext,
         this.deps.evaluate,
         async () => this.deps.validatePrepared(prepared, ticket, await this.unchanged(op)),
+        owner,
       );
       const dispatchContext = await this.unchanged(op);
       if (!op.riskExpiresAt || !Number.isFinite(Date.parse(op.riskExpiresAt)) || Date.parse(op.riskExpiresAt) <= Date.now())
         throw new CloseConflict("close_dispatch_risk_expired");
       this.deps.assertManagementAllowed?.(dispatchContext);
-      await this.deps.dispatch(prepared, op, dispatchContext);
-      op = await this.repo.submitted(op);
+      owner?.assertCurrent();
+      await this.deps.dispatch(prepared, op, dispatchContext, owner);
+      await this.unchanged(op);
+      owner?.assertCurrent();
+      op = await this.repo.submitted(op, owner);
       await this.deps.refresh();
       return await this.observeAndAlert(op);
     } catch (error) {

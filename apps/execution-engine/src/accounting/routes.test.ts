@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Fastify from "fastify";
 import { registerAccountingRoutes } from "./routes.js";
-import type { AccountingSourceService } from "./source-service.js";
+import type { AccountingSource } from "./source-service.js";
 import { registerExecutionAuth, AuthFailureBurstTracker } from "../auth.js";
 import { isWriteGuardExempt } from "../write-guard-exemptions.js";
 import { assertActiveAccountAllowed, assertEnvironmentAllowsWrite } from "../env-guard.js";
@@ -18,7 +18,7 @@ test("source auth/account guards and disabled-Paper paused clock recovery remain
     }
   });
   const source = { status: () => ({ configured: true }), inspect: async () => { inspected++; return { inspected: true }; },
-    recoverClock: async () => { recovered++; return { recovered: true }; }, qualify: async () => ({ qualified: true }), invalidate: async () => { revoked++; } } as unknown as AccountingSourceService;
+    recoverClock: async () => { recovered++; return { recovered: true }; }, qualify: async () => ({ qualified: true }), invalidate: async () => { revoked++; } } as unknown as AccountingSource;
   registerAccountingRoutes(app, { source, recoveryEnvironment: () => cfg, assertAccount: () => assertActiveAccountAllowed(cfg, account, { requireKnownAccount: true }), entriesPaused: async () => paused });
   try {
     for (const path of ["status", "inspect", "qualify", "invalidate", "recover-clock"]) assert.equal((await app.inject({ method: path === "status" ? "GET" : "POST", url: `/execution/accounting/source/${path}` })).statusCode, 401);
@@ -40,7 +40,7 @@ test("source auth/account guards and disabled-Paper paused clock recovery remain
     assert.equal((await app.inject({ method: "POST", url: "/execution/accounting/source/invalidate", headers, payload: { reason: "settings changed" } })).statusCode, 200); assert.equal(revoked, 1);
     for (account of [null, "FOREIGN"]) {
       assert.equal((await app.inject({ method: "POST", url: "/execution/accounting/source/inspect", headers })).statusCode, 423);
-      assert.equal((await app.inject({ method: "GET", url: "/execution/accounting/source/status", headers })).statusCode, 409);
+      assert.equal((await app.inject({ method: "GET", url: "/execution/accounting/source/status", headers })).statusCode, 200);
     }
     for (const path of ["qualify/anything", "qualify/", "other"]) assert.equal(isWriteGuardExempt("POST", `/execution/accounting/source/${path}`), false);
   } finally { await app.close(); }

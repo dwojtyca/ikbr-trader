@@ -1,5 +1,13 @@
 # AI Trading Platform roadmap
 
+Owner direction 2026-10-28: replace routine manual TWS-reset and accounting
+qualification recovery with [automatic startup and synchronization](phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_PLAN.md).
+Implementation and isolated runtime review are accepted; release and rollout are
+tracked in the [recovery report](phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_REPORT.md).
+Read failures must not permanently stop observation;
+unknown broker submissions and missing financial evidence remain separately guarded.
+Do not restart the superseded manual deadline-UX delivery as the current objective.
+
 Owner direction 2026-10-12: implement and prepare continuous Paper for PKO and
 AAPL, one share/open position per instrument, no daily attempt quota and USD5/day
 AI. Follow the [accepted continuous-operation plan](phase3/CONTINUOUS_PAPER_OPERATION_PLAN.md)

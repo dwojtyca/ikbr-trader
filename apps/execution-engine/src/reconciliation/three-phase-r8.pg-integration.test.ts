@@ -8,7 +8,13 @@ import { focusedSubmissionTestSessionGuard } from "../session-entry-guard.fixtur
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
+import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
+import { AccountingSourceOwner, accountingOwnerLockKey } from "../accounting/source-owner.js";
+import { accountingHash, type SourceSettingsV1 } from "../accounting/types.js";
+import { ReconciliationRunner } from "./runner.js";
+import { ReconciliationRepository } from "./repository.js";
 import { computeClientOrderHash } from "@ikbr/shared/client-order-hash";
 import type { PartialTakeProfit, SignalTicket } from "@ikbr/shared";
 import {
@@ -24,7 +30,7 @@ import {
   type BrokerOrderDispatcher,
   type SubmissionApplicationService,
 } from "./submission-service.js";
-import type { PreparedBrokerOrder } from "../tws-execution-client.js";
+import { TwsExecutionClient, type PreparedBrokerOrder, type RuntimeOwnerGuard } from "../tws-execution-client.js";
 import { deriveChildOrderRef, deriveParentOrderRef } from "./order-ref.js";
 
 const CONN_URL = process.env.TEST_POSTGRES_URL;
@@ -98,11 +104,13 @@ function richTicket(overrides: Partial<SignalTicket> = {}): SignalTicket {
 function buildTestService(
   pool: Pool,
   overrides: {
+    repo?: ExecutionRepository;
+    prepareBrokerPlan?: Parameters<typeof buildSubmissionApplicationService>[0]["prepareBrokerPlan"];
     dispatcher?: BrokerOrderDispatcher;
     onDispatch?: (p: BrokerDispatchPayload) => Promise<void>;
   } = {},
 ): { service: SubmissionApplicationService; dispatchCount: () => number; captured: { legs: PreparedBrokerOrder["legs"] | null } } {
-  const repo = new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
+  const repo = overrides.repo ?? new LegacyResearchCompatibilityRepository(pool,undefined,undefined,focusedSubmissionTestSessionGuard);
   const captured: { legs: PreparedBrokerOrder["legs"] | null } = { legs: null };
   let count = 0;
   const dispatcher: BrokerOrderDispatcher = overrides.dispatcher ?? {
@@ -124,7 +132,7 @@ function buildTestService(
       maxSnapshotAgeMs: 60_000,
     }),
     reconciliationGate: () => async () => null,
-    prepareBrokerPlan: async ({ clientOrderId }) => ({
+    prepareBrokerPlan: overrides.prepareBrokerPlan ?? (async ({ clientOrderId }) => ({
       contract: {} as PreparedBrokerOrder["contract"],
       normalizedTicket: {} as PreparedBrokerOrder["normalizedTicket"],
       plan: {} as PreparedBrokerOrder["plan"],
@@ -133,7 +141,7 @@ function buildTestService(
         { role: "TP", roleOrdinal: 1, brokerOrderId: "80002", orderRef: deriveChildOrderRef(clientOrderId, { role: "TP", ordinal: 1 }) },
         { role: "SL", roleOrdinal: 1, brokerOrderId: "80003", orderRef: deriveChildOrderRef(clientOrderId, { role: "SL", ordinal: 1 }) },
       ],
-    }),
+    })),
     dispatcher,
     assertKillSwitchOk: async () => undefined,
     recordAlert: () => undefined,
@@ -469,5 +477,84 @@ suite("PR15 r8 §6 — executeProposed happy path with rich fields (PG)", () => 
     } finally {
       await drop(pool, dbName);
     }
+  });
+});
+
+suite('automatic owner recovery at the durable entry send boundary', () => {
+  it('lost dispatch-permit COMMIT preserves marker and plan through successor reconciliation without replay', async () => {
+    const { pool, dbName } = await fresh('owner_commit');
+    const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: 'ibkr-tws-seven-day-v1', environment: 'paper', accountId: ACCOUNT,
+      endpoint: { host: '127.0.0.1', port: 45673 }, sourceClientId: 0, executionTimeZone: 'UTC' };
+    const makeOwner = () => new AccountingSourceOwner(pool, settings, undefined, { processSessionId: randomUUID(), settingsHash: 'a'.repeat(64),
+      sourceId: accountingHash({ account: ACCOUNT, kind: 'tws-accounting' }) });
+    const first = makeOwner(), successor = makeOwner(); let current = first, armed = false;
+    const capture = (): RuntimeOwnerGuard => { const owner = current; return { assertCurrent: () => owner.assertCurrent(), assertInTransaction: db => owner.assertInTransaction(db) }; };
+    const uncertain = new Proxy(pool, { get(target, property) {
+      if (property === 'connect') return async () => {
+        const client = await pool.connect(), query = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          const result = await (query as (...args: unknown[]) => Promise<unknown>)(...args);
+          if (args[0] === 'COMMIT' && armed) { armed = false; throw Error('fixture entry permit COMMIT acknowledgement lost'); }
+          return result;
+        }) as PoolClient['query']; return client;
+      }; const value = Reflect.get(target, property); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const repo = new ExecutionRepository(uncertain, undefined, undefined, focusedSubmissionTestSessionGuard, undefined, undefined,
+      async () => ({ validUntilMs: Number.MAX_SAFE_INTEGER, assertCurrent() {} }), {
+        permit: async db => { const guard = capture(); await guard.assertInTransaction(db); return { assertCurrent: guard.assertCurrent, validUntilMs: Date.now()+10000 }; },
+        deadline: async () => Date.now()+10000, pin: async () => {},
+      });
+    class Socket extends EventEmitter {
+      writes: number[] = [];
+      connect() { queueMicrotask(() => this.emit('nextValidId', 80001)); }
+      disconnect() { this.emit('disconnected'); }
+      placeOrder(id: number) { this.writes.push(id); queueMicrotask(() => this.emit('orderStatus', id, 'Submitted', 0, 1)); }
+    }
+    const socket = new Socket(), tws = new TwsExecutionClient({ host: 'unused', port: 0, clientId: 7, securityType: 'STK', exchange: 'SMART', currency: 'USD', orderTimeoutMs: 1000 },
+      () => {}, undefined, undefined, undefined, { ib: socket, captureRuntimeOwner: capture });
+    let observedMarker: unknown;
+    const options = { repo, prepareBrokerPlan: async ({ order, clientOrderId }: Parameters<NonNullable<Parameters<typeof buildSubmissionApplicationService>[0]['prepareBrokerPlan']>>[0]): Promise<PreparedBrokerOrder> => ({
+      contract: { conId: 123456, symbol: 'TEST', secType: 'STK', currency: 'USD', exchange: 'SMART' }, normalizedTicket: order,
+      plan: { parentOrderId: 80001, relatedOrderIds: new Set([80001]), orders: [{ orderId: 80001, order: { action: 'BUY', totalQuantity: 1, transmit: true } }] },
+      legs: [{ role: 'PARENT', roleOrdinal: 0, brokerOrderId: '80001', orderRef: deriveParentOrderRef(clientOrderId) }],
+    }), dispatcher: { dispatch: async (payload: BrokerDispatchPayload) => {
+      observedMarker = (await pool.query('SELECT execution_attempted_at FROM proposed_orders WHERE id=$1', [payload.proposedOrderId])).rows[0].execution_attempted_at;
+      assert.ok(observedMarker); assert.equal((await pool.query('SELECT count(*)::int AS n FROM broker_order_links WHERE proposed_order_id=$1', [payload.proposedOrderId])).rows[0].n, 1);
+      armed = true;
+      return tws.dispatchPreparedOrder(payload.prepared, payload.windowDeadlineMs, payload.sendWithEntryPermit);
+    } } };
+    try {
+      await first.acquire(); await tws.connect(); await seedFlatSnapshot(pool);
+      const ticket = richTicket({ quantity: 1, partialTakeProfits: undefined, trailingStopPct: undefined, trailingStopActivationR: undefined });
+      const request = { ticket, strategy: 's', clientOrderId: 'owner-commit-entry', clientOrderHash: computeClientOrderHash(ticket) };
+      const result = await buildTestService(pool, options).service.submitTicket(request);
+      assert.equal(result.kind, 'execution_error'); if (result.kind !== 'execution_error') throw Error('fixture submission result');
+      assert.match(result.message, /COMMIT acknowledgement lost/); assert.deepEqual(socket.writes, [80001]);
+      assert.ok(result.order);
+      const id = result.order.id!, before = (await pool.query('SELECT execution_attempted_at,client_order_hash,status FROM proposed_orders WHERE id=$1', [id])).rows[0];
+      assert.equal(before.status, 'PROPOSED'); assert.deepEqual(before.execution_attempted_at, observedMarker);
+      const lockKey = BigInt.asUintN(64, BigInt(accountingOwnerLockKey(first.fence().endpointKey)));
+      await first.release();
+      const releaseDeadline = performance.now()+3000;
+      let held = true;
+      while (held && performance.now() < releaseDeadline) {
+        held = (await pool.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted AND classid=$1::oid AND objid=$2::oid AND objsubid=1) AS held", [(lockKey >> 32n).toString(), (lockKey & 0xffffffffn).toString()])).rows[0].held;
+      }
+      assert.equal(held, false, 'predecessor advisory lock must actually disappear before successor acquisition');
+      await successor.acquire(); current = successor;
+      const replacement = buildTestService(pool, options).service;
+      const replay = await replacement.submitTicket(request); assert.notEqual(replay.kind, 'submitted'); assert.deepEqual(socket.writes, [80001]);
+      const source = { available: true, boundedWindow: true, timedOut: false, count: 0 };
+      const runner = new ReconciliationRunner(pool, repo, new ReconciliationRepository(pool), { capture: async () => ({
+        accountId: ACCOUNT, sessionId: SESSION, capturedAt: new Date(), exposureComplete: true, recoveryComplete: false,
+        positions: [], openOrders: [], completedOrders: [], executions: [], sourceCoverage: { positions: source, openOrders: source, session: source,
+          completedOrders: { ...source, available: false }, executions: { available: true, timedOut: false, count: 0,
+            window: { from: new Date(0).toISOString(), to: new Date().toISOString(), exposureWindowComplete: true, recoveryWindowComplete: false } } },
+      }) }, { info() {}, warn() {}, error() {} });
+      const observed = await runner.runOnce({ accountId: ACCOUNT, sessionId: SESSION, sessionStartedAt: new Date(0) }, { runTimeoutMs: 1000, sourceTimeoutMs: 1000, executionSafetyMarginMs: 0 });
+      assert.ok(observed); assert.equal(observed.exposureComplete, true); assert.equal(observed.recoveryComplete, false);
+      assert.deepEqual((await pool.query('SELECT execution_attempted_at,client_order_hash,status FROM proposed_orders WHERE id=$1', [id])).rows[0], before);
+      await replacement.submitTicket(request); assert.deepEqual(socket.writes, [80001]);
+    } finally { tws.disconnect(); await first.release(); await successor.release(); await drop(pool, dbName); }
   });
 });

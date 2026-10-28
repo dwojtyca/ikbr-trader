@@ -1,6 +1,7 @@
+import { observePostgresPoolErrors } from '@ikbr/shared/diagnostics';
 import { ResearchBoundReviewRepository } from "./research-review-repository.js";
 import { ResearchOpenAiDecider } from "./research-decision.js";
-import { ResearchStore, loadResearchManifest } from "@ikbr/shared/instrument-research";
+import { ResearchStore, loadResearchManifest, captureResearchSourceError } from "@ikbr/shared/instrument-research";
 import { BoundReviewWorker } from "./bound-review-worker.js";
 import { Pool } from "pg";
 import { config, tradingConfiguration } from "./config.js";
@@ -20,7 +21,8 @@ function track<T>(promise: Promise<T>): Promise<T> {
   void promise.finally(() => active.delete(promise)).catch(() => undefined);
   return promise;
 }
-const pool = new Pool({ connectionString: config.POSTGRES_URL });
+const pool = new Pool({ connectionString: config.POSTGRES_URL, connectionTimeoutMillis:3000 });
+observePostgresPoolErrors(pool,error=>log('error','PostgreSQL connection failed',captureResearchSourceError(error,{secrets:[config.POSTGRES_URL,config.LLM_AGENT_OPENAI_API_KEY,config.LLM_AGENT_MARKETAUX_API_KEY,config.EXECUTION_API_TOKEN].filter((value):value is string=>!!value)})));
 const configurationStore = new TradingConfigurationStore(pool);
 const configurationRuntime = createTradingConfigurationRuntime({
   service: "llm-agent", loaded: tradingConfiguration.loaded, store: configurationStore,

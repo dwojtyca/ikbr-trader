@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import type { AccountingSourceService } from "./source-service.js";
+import type { AccountingSource } from "./source-service.js";
 import { accountingError } from "./types.js";
 
-export function registerAccountingRoutes(app: FastifyInstance, deps: { source?: AccountingSourceService;
+export function registerAccountingRoutes(app: FastifyInstance, deps: { source?: AccountingSource;
   assertAccount(): void; recoveryEnvironment(): { environment: string; tradingEnabled: boolean }; entriesPaused(): Promise<boolean> }): void {
   const source = () => { deps.assertAccount(); if (!deps.source) throw accountingError("SOURCE_UNCONFIGURED"); return deps.source; };
   const safe = async <T>(fn: () => Promise<T>) => {
@@ -12,7 +12,7 @@ export function registerAccountingRoutes(app: FastifyInstance, deps: { source?: 
       throw Object.assign(new Error(code), { statusCode: 409 });
     }
   };
-  app.get("/execution/accounting/source/status", () => safe(async () => source().status()));
+  app.get("/execution/accounting/source/status", () => safe(async () => { if (!deps.source) throw accountingError("SOURCE_UNCONFIGURED"); return deps.source.status(); }));
   app.post("/execution/accounting/source/inspect", { bodyLimit: 1024 }, () => safe(() => source().inspect()));
   app.post("/execution/accounting/source/recover-clock", { bodyLimit: 1024 }, request => safe(async () => {
     const service = source(), cfg = deps.recoveryEnvironment();

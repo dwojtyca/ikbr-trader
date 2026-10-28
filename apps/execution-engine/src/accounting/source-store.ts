@@ -4,8 +4,8 @@ import type { AccountingSourceOwner } from "./source-owner.js";
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { paperAccountDate, paperAccountDayStart } from "../paper-daily-loss.js";
-import { parseQualification } from "./config.js";
-import { accountingError, accountingHash, accountingReference, accountingNumber, type AccountingCapture, type AccountingLane, type LaneBarrier,
+import { parseQualification, automaticQualificationSchema } from "./config.js";
+import { qualificationExpired, accountingError, accountingHash, accountingReference, accountingNumber, type AccountingCapture, type AccountingLane, type LaneBarrier,
   type ClockRecoveryEvidence, type ClockRecoveryReservation, type ClockRecoveryReceipt, type SourceInspection, type StoredQualification } from "./types.js";
 
 export interface SourceControl { source_id: string; process_session_id: string; connection_generation: string | number;
@@ -234,8 +234,17 @@ export class AccountingSourceStore {
         AND connection_generation=$4 AND kind='inspection'`, [record.inspectionId, this.sourceId, this.sessionId, control.connection_generation]);
       if (!inspection.rowCount) throw accountingError("INSPECTION_INVALID");
       const now = Math.max(Date.now(), new Date(inspection.rows[0].database_now).getTime()), evidence = inspection.rows[0].value;
-      parseQualification(record.input, now); assertCurrent();
-      if (now - Date.parse(evidence.brokerTime) >= 10_000 || Date.parse(evidence.brokerTime) > now || Date.parse(record.expiresAt) <= now
+      if (record.input.schemaVersion === 2) {
+        automaticQualificationSchema.parse(record.input);
+        if (record.expiresAt !== null || record.input.processSessionId !== this.sessionId || record.input.connectionGeneration !== Number(control.connection_generation)
+          || record.input.inspectionId !== record.inspectionId || record.input.executionTimeZone !== record.settings.executionTimeZone || record.protocolVersion < 219
+          || !evidence.capability || record.input.sdkSha256 !== evidence.capability.sdkSha256 || !evidence.accounts.includes(record.settings.accountId)) throw accountingError('INSPECTION_INVALID');
+        const proof = (await db.query(`SELECT id,lane_sequence,kind,request_id,connection_generation,process_session_id,payload->'value' AS value,payload_hash
+          FROM broker_accounting_observations WHERE source_id=$1 AND id=ANY($2::uuid[])`, [this.sourceId, evidence.observationIds])).rows;
+        this.verifyCapability(proof, evidence, record.settings.accountId, Number(control.connection_generation));
+      } else parseQualification(record.input, now);
+      assertCurrent();
+      if (now - Date.parse(evidence.brokerTime) >= 10_000 || Date.parse(evidence.brokerTime) > now || qualificationExpired(record, now)
         || record.input.settingsSha256 !== control.settings_hash || evidence.protocolVersion !== record.protocolVersion) throw accountingError("INSPECTION_INVALID");
       await db.query(`INSERT INTO broker_accounting_qualifications(id,source_id,inspection_id,record,expires_at) VALUES($1,$2,$3,$4,$5)`,
         [record.id, this.sourceId, record.inspectionId, record, record.expiresAt]);
@@ -249,7 +258,7 @@ export class AccountingSourceStore {
     await this.transaction(async db => {
       const c = await this.control(db, true), q = await this.qualification(db);
       assertCurrent();
-      if (!q || q.id !== capture.qualificationId || Date.parse(q.expiresAt) <= Date.now() || c.hold || Number(c.semantic_revision) !== capture.barrier.semanticRevision
+      if (!q || q.id !== capture.qualificationId || qualificationExpired(q) || c.hold || Number(c.semantic_revision) !== capture.barrier.semanticRevision
         || Number(c.connection_generation) !== capture.barrier.sourceConnectionGeneration) throw accountingError("REVISION_CHANGED");
       const run = (await db.query(`SELECT position_generation FROM reconciliation_runs WHERE id=$1 AND account_id=$2 AND session_id=$3 AND status='RUNNING'`,
         [capture.reconciliationRunId, capture.accountId, capture.barrier.executionSessionId])).rows[0];
@@ -271,10 +280,27 @@ export class AccountingSourceStore {
     return { reference: accountingReference(capture), accountId: capture.accountId, replayId: capture.replayId,
       replayEndId: capture.replayEndId, observationIds: capture.observationIds };
   }
+  private verifyCapability(rows: Array<{id: string; lane_sequence: number; kind: string; request_id: number; process_session_id: string; connection_generation: number; value: Record<string, unknown>; payload_hash: string}>, inspection: SourceInspection, accountId: string, generation: number): void {
+    const capability = inspection.capability;
+    if (!capability || inspection.protocolVersion < 219 || inspection.processSessionId !== this.sessionId || inspection.connectionGeneration !== generation) throw accountingError('CAPTURE_INVALID');
+    const request = rows.filter(r => Number(r.request_id) === inspection.replayId && r.process_session_id === this.sessionId && Number(r.connection_generation) === generation);
+    if (request.some(r => accountingHash(r.value) !== r.payload_hash)) throw accountingError('CAPTURE_INVALID');
+    const start = request.find(r => r.kind === 'replay_start');
+    const before = request.find(r => r.kind === 'configuration' && r.value.stage === 'before');
+    const after = request.find(r => r.kind === 'configuration' && r.value.stage === 'after');
+    const end = request.find(r => r.kind === 'replay_end' && r.id === inspection.replayEndId);
+    const from = Date.parse(capability.certifiedFrom), through = Date.parse(inspection.brokerTime);
+    const expectedFilter = { clientId: 0, acctCode: accountId, time: new Date(Number.isFinite(from) ? from : 0).toISOString().slice(0, 10).replaceAll('-', '') + '-' + new Date(Number.isFinite(from) ? from : 0).toISOString().slice(11, 19), lastNDays: 7, symbol: '', secType: '', exchange: '', side: '' };
+    if (!start || accountingHash(start.value.capability) !== accountingHash(capability) || accountingHash(capability.filter) !== accountingHash(expectedFilter)
+      || !Number.isFinite(from) || from % 1000 !== 0 || from > paperAccountDayStart(through) || from < through - 7 * 86400_000
+      || capability.sdkSha256 !== '50a459ed09f0030df25125a177e57b69bdf576ec3a89fcb1f81fdff95bbf6316' || capability.masterClientId !== 0
+      || !before || !after || [before, after].some(r => r.value.masterClientIdPresent !== true || r.value.masterClientId !== 0 || r.value.sdkSha256 !== capability.sdkSha256)
+      || !end || Number(before.lane_sequence) >= Number(start.lane_sequence) || Number(after.lane_sequence) <= Number(end.lane_sequence)) throw accountingError('CAPTURE_INVALID');
+  }
   private async verifyObservations(db: Pick<Pool | PoolClient, "query">, capture: AccountingCapture, q: StoredQualification): Promise<void> {
     const through = Date.parse(capture.coveredThrough), start = paperAccountDayStart(through);
     if (!Number.isFinite(through) || capture.periodStart !== new Date(start).toISOString() || capture.accountDate !== paperAccountDate(through)
-      || capture.certifiedFrom !== new Date(through - 48 * 3600_000).toISOString() || Date.parse(capture.capturedAt) < through
+      || (q.input.schemaVersion === 1 && capture.certifiedFrom !== new Date(through - 48 * 3600_000).toISOString()) || Date.parse(capture.capturedAt) < through
       || Date.parse(capture.capturedAt) - through >= 10_000 || capture.accountId !== q.settings.accountId || capture.qualificationId !== q.id
       || capture.barrier.sourceId !== this.sourceId || capture.barrier.sourceProcessSessionId !== this.sessionId
       || Object.values(capture.barrier.lanes).some(lane => lane.pending !== 0 || lane.received !== lane.persisted)) throw accountingError("CAPTURE_INVALID");
@@ -292,6 +318,10 @@ export class AccountingSourceStore {
       || inspection.value.sourceId !== this.sourceId || inspection.value.processSessionId !== this.sessionId
       || inspection.value.connectionGeneration !== capture.barrier.sourceConnectionGeneration || inspection.value.replayId !== capture.replayId
       || inspection.value.observationIds.some((id: string) => !capture.observationIds.includes(id))) throw accountingError("CAPTURE_INVALID");
+    if (q.input.schemaVersion === 2) {
+      if (q.input.processSessionId !== this.sessionId || q.input.connectionGeneration !== capture.barrier.sourceConnectionGeneration || capture.certifiedFrom !== inspection.value.capability?.certifiedFrom) throw accountingError('CAPTURE_INVALID');
+      this.verifyCapability(rows, inspection.value, capture.accountId, capture.barrier.sourceConnectionGeneration);
+    }
     const allExecutions = new Map(request.filter(r => r.kind === "execution").map(r => [r.value.execId, r.value]));
     if (accountingHash([...allExecutions.keys()].sort()) !== accountingHash([...inspection.value.executionIds].sort())) throw accountingError("CAPTURE_INVALID");
     const expected = [...allExecutions.values()].filter(e => Date.parse(e.executedAt) >= start).sort((a, b) => a.execId.localeCompare(b.execId));

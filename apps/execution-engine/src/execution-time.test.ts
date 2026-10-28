@@ -32,3 +32,16 @@ test("timezone config allows only explicit supported values", () => {
   for (const value of [undefined, "", "UTC", "Europe/Warsaw"]) assert.equal(buildExecutionConfig({EXECUTION_BROKER_TIME_ZONE:value}).EXECUTION_BROKER_TIME_ZONE, value || undefined);
   for (const value of ["Europe/London", "Poland", "CET", "utc", " "]) assert.throws(() => buildExecutionConfig({EXECUTION_BROKER_TIME_ZONE:value}));
 });
+
+test('modern explicit offsets and fractional times override configured zone without guessing DST', () => {
+  for (const [raw, expected] of [
+    ['20261025 02:30:00Z', '2026-10-25T02:30:00.000Z'],
+    ['20261025 02:30:00+0200', '2026-10-25T00:30:00.000Z'],
+    ['2026-10-25T02:30:00.123+01:00', '2026-10-25T01:30:00.123Z'],
+    ['20261028 12:30:00.1 UTC', '2026-10-28T12:30:00.100Z'],
+    ['20261028 12:30:00', '2026-10-28T11:30:00.000Z'],
+  ]) assert.equal(parseIbExecutionTime(raw, 'Europe/Warsaw')?.toISOString(), expected);
+  for (const raw of ['20261025 02:30:00', '20260329 02:30:00', '20260230 12:30:00Z', '20261028 12:30:00+14:01', '20261028 12:30:00+00:60', '20261028 12:30:00.1234Z']) {
+    assert.equal(parseIbExecutionTime(raw, 'Europe/Warsaw'), null);
+  }
+});

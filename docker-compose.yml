@@ -125,7 +125,8 @@ services:
 
   execution-engine:
     <<: *app-image
-    command: pnpm --filter @ikbr/execution-engine start
+    init: true
+    command: ["node", "apps/execution-engine/dist/index.js"]
     env_file:
       - .env
     volumes:

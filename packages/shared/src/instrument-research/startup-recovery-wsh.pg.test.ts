@@ -13,7 +13,7 @@ const { Pool } = createRequire(new URL('../../../../apps/llm-agent/package.json'
 const connection = process.env.TEST_POSTGRES_URL;
 async function isolated(run: (pool: any, advance: (ms: number) => Promise<void>) => Promise<void>) {
   const url = new URL(connection!);
-  assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname) && (url.port === '55434' && url.pathname === '/ikbr_startup_recovery_test' || process.env.CI === 'true' && url.port === '5432' && url.pathname === '/ikbr_trader_ci'));
+  assert.ok(['127.0.0.1', 'localhost'].includes(url.hostname) && (url.port === '55434' && url.pathname === '/ikbr_startup_recovery_test' || url.port === '55438' && url.pathname === '/ikbr_owner_recovery_test' || process.env.CI === 'true' && url.port === '5432' && url.pathname === '/ikbr_trader_ci'));
   url.pathname = '/postgres'; const admin = new Pool({ connectionString: url.href }), name = 'startup_wsh_' + randomUUID().replaceAll('-', '');
   await admin.query(`CREATE DATABASE ${name}`); url.pathname = '/' + name;
   const pool = new Pool({ connectionString: url.href, options: '-c search_path=public,pg_catalog' });
@@ -104,9 +104,9 @@ test('PREPARED hold fences usable cleanup-unknown success and receipt cannot res
   assert.equal((await f.store.prepareRepair(f.identity)).state, 'READY');
   const old = (await pool.query('SELECT row_to_json(a) AS value FROM research_wsh_refresh_attempts a WHERE id=$1', [id])).rows[0].value;
   await pause(f, pool); const c = await f.store.prepareResearchRecovery(recoveryIdentity(f));
-  await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'HOLD');
+  await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'WAITING');
   const other = f.manifest.instruments.find(p => p.instrumentId !== f.identity.instrumentId)!;
-  assert.equal((await f.store.prepareRepair({ ...f.identity, instrumentId: other.instrumentId })).state, 'HOLD');
+  assert.equal((await f.store.prepareRepair({ ...f.identity, instrumentId: other.instrumentId })).state, 'WAITING');
   await pause(f, pool); await commit(f, c); await f.observe();
   assert.deepEqual((await pool.query('SELECT row_to_json(a) AS value FROM research_wsh_refresh_attempts a WHERE id=$1', [id])).rows[0].value, old);
   assert.notEqual((await f.store.prepareRepair(f.identity)).state, 'READY');
@@ -183,7 +183,9 @@ test('expired challenge and changed endpoint generation preserve hold without re
     else await pool.query('UPDATE research_wsh_endpoints SET generation=generation+1 WHERE endpoint_id=$1', [c.endpointId]);
     await assert.rejects(commit(f, c), /CHALLENGE_EXPIRED|ENDPOINT_CHANGED/);
     assert.equal((await pool.query('SELECT count(*)::int n FROM research_wsh_recovery_receipts')).rows[0].n, 0);
-    await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'HOLD');
+    await f.observe();
+    if(defect==='generation')await assert.rejects(f.store.prepareRepair(f.identity),/RESEARCH_WSH_READ_RECOVERY_CHALLENGE_INVALID/);
+    else assert.equal((await f.store.prepareRepair(f.identity)).state,'WAITING');
   });
 });
 
@@ -300,7 +302,7 @@ test('created producer WSH proof retains reset requirements, PREPARED hold, immu
     assert.equal((await pool.query('SELECT count(*)::int n FROM research_wsh_recovery_receipts')).rows[0].n, 0);
     assert.deepEqual((await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows, reservations);
   }
-  await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'HOLD'); await pause(f, pool);
+  await f.observe(); assert.equal((await f.store.prepareRepair(f.identity)).state, 'WAITING'); await pause(f, pool);
   const operationId = randomUUID(), receipt = await f.store.commitResearchRecovery({ challengeId: c.id, challengeHash: c.challengeHash, operationId, actor: c.actor, pauseRevision: 1, evidence: proof });
   const audit = (await pool.query('SELECT evidence_json,evidence_hash FROM research_recovery_audit WHERE operation_id=$1', [operationId])).rows[0];
   assert.deepEqual(JSON.parse(audit.evidence_json), proof); assert.equal(audit.evidence_hash, researchHash(proof)); assert.equal(receipt.evidenceHash, researchHash(proof));

@@ -13,7 +13,7 @@ import type {WshAttemptResult} from './wsh-refresh.js';
 const {Pool}=createRequire(new URL('../../../../apps/llm-agent/package.json',import.meta.url))('pg');
 const connection=process.env.TEST_POSTGRES_URL;
 async function isolated(run:(pool:any)=>Promise<void>,before34=false){
- const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
+ const url=new URL(connection!);assert.ok(['127.0.0.1','localhost'].includes(url.hostname) && (url.port==='55432'||url.port==='55434'&&url.pathname==='/ikbr_startup_recovery_test'||url.port==='55438'&&url.pathname==='/ikbr_owner_recovery_test'||process.env.CI==='true'&&url.port==='5432'&&url.pathname==='/ikbr_trader_ci'),'Only isolated PostgreSQL allowed');url.pathname='/postgres';
  const admin=new Pool({connectionString:url.href}),name='wsh_hourly_'+randomUUID().replaceAll('-','');await admin.query(`CREATE DATABASE ${name}`);url.pathname='/'+name;
  const pool=new Pool({connectionString:url.href});try{const dir=new URL('../../../../infra/sql/migrations/',import.meta.url);for(const f of readdirSync(dir).filter(f=>f.endsWith('.sql')&&(!before34||f<'000034')).sort())await pool.query(readFileSync(new URL(f,dir),'utf8'));await run(pool);}finally{await pool.end();await admin.query(`DROP DATABASE ${name}`);await admin.end();}
 }
@@ -131,7 +131,7 @@ test('verified-close cleanup wait and hourly inherited floor agree in claim/read
  await adopt(pool,h,3600000);const expected=started+3600000;
  const state=await h.store.readWshRefreshState(h.identity,pool);assert.equal(Date.parse(state.nextRegularAt!),expected);
  await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.claim(lease);assert.equal(c.state,'DEFERRED');if(c.state==='DEFERRED')assert.equal(Date.parse(c.nextCheckAt!),expected);});
- const prep=await h.store.prepareRepair(h.identity),row=prep.sources.find(r=>r.sourceId===h.identity.sourceId)!;assert.equal(row.state,'HOLD');assert.equal(row.nextCheckAt,null);assert.equal(Date.parse(row.wshRefresh!.nextRegularAt!),expected);
+ const prep=await h.store.prepareRepair(h.identity),row=prep.sources.find(r=>r.sourceId===h.identity.sourceId)!;assert.equal(row.state,'WAITING');assert.equal(Date.parse(row.nextCheckAt!),started+35000);assert.equal(Date.parse(row.wshRefresh!.nextRegularAt!),expected);
  assert.equal((await h.store.dueWshAttempts(h.identity)).some(r=>r.identity.instrumentId===h.identity.instrumentId),false);
 }));
 test('hourly retries retain original anchor, two ordinals and no extra regular cycle', {skip:!connection},()=>isolated(async pool=>{

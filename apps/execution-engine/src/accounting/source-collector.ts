@@ -2,14 +2,17 @@ import { Socket } from "node:net";
 import { IBApi } from "@stoqey/ib";
 import { performance } from 'node:perf_hooks';
 import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
-import { parseIbExecutionTime } from "../execution-time.js";
-import { accountingError, accountingNumber, type CanonicalExecution, type CanonicalCommission, type SourceSettingsV1 } from "./types.js";
+import { OfficialAccountingSocket, OFFICIAL_SDK_SHA256, type ConfigEvidence, type ExplicitExecutionFilter } from "./official-sdk-bridge.js";
+import { paperAccountDayStart } from "../paper-daily-loss.js";
+import { parseIbExecutionTime, executionTimestampMode } from "../execution-time.js";
+import { accountingError, accountingNumber, type CanonicalExecution, type CanonicalCommission, type SourceSettingsV1, type ReplayCapability } from "./types.js";
 
 export interface AccountingSocket {
-  readonly serverVersion: number;
+  readonly serverVersion: number; readonly automatic?: boolean; readonly sdkSha256?: string;
+  reqConfig?(): Promise<ConfigEvidence>;
   on(event: string, callback: (...args: unknown[]) => void): unknown;
   connect(): unknown; disconnect(): unknown; reqManagedAccts(): unknown; reqCurrentTime(): unknown;
-  reqExecutions(requestId: number, filter: { clientId: number; acctCode: string; time: string; symbol: string; secType: string; exchange: string; side: string }): unknown;
+  reqExecutions(requestId: number, filter: ExplicitExecutionFilter): unknown;
 }
 // @stoqey/ib 1.6.10 emits disconnected on TCP EOF as well as close. Only the
 // captured native transport's close event can certify retirement.
@@ -43,7 +46,7 @@ export function accountingSocketWithTransportClose(api: AccountingSocket): Accou
 }
 export type CollectorObservation = { kind: "execution"; value: CanonicalExecution; raw: unknown; requestId: number }
   | { kind: "commission"; value: CanonicalCommission; raw: unknown }
-  | { kind: "handshake" | "managed_accounts" | "clock" | "clock_rejected" | "replay_start" | "replay_end"; value: unknown; requestId?: number };
+  | { kind: "handshake" | "managed_accounts" | "clock" | "clock_rejected" | "replay_start" | "replay_end" | "configuration"; value: unknown; requestId?: number };
 const obj = (v: unknown): Record<string, unknown> => { if (!v || typeof v !== "object" || Array.isArray(v)) throw accountingError("IDENTITY_INVALID"); return v as Record<string, unknown>; };
 const str = (v: unknown): string => { if (typeof v !== "string" || !v.trim() || v.length > 200) throw accountingError("IDENTITY_INVALID"); return v.trim(); };
 const id = (v: unknown): string => { if (!Number.isSafeInteger(Number(v)) || Number(v) < 0) throw accountingError("IDENTITY_INVALID"); return String(v); };
@@ -79,9 +82,9 @@ export class AccountingSourceCollector {
   private active: { requestId: number; executionIds: Set<string>; ended: boolean; brokerTime?: number; clockWaiting: boolean; clockRequestedAt?: string; error?: Error;
     started: number; phase: 'ready' | 'clock' | 'replay_end'; clockSent: boolean; clockReceived: boolean } | undefined;
   constructor(readonly settings: SourceSettingsV1, private readonly callbacks: {
-    observe: (value: CollectorObservation) => void; gap: (generation: number, code?: string) => void; assertOwner?: () => void; socketEndpoint?: () => SourceSettingsV1["endpoint"];
+    observe: (value: CollectorObservation) => void; gap: (generation: number, code?: string) => void; assertOwner?: () => void; automatic?: boolean; settingsHash?: string; socketEndpoint?: () => SourceSettingsV1["endpoint"];
   }, socketFactory?: () => AccountingSocket, private readonly diagnostics?: BrokerPhaseDiagnostics) {
-    this.socketFactory = socketFactory ?? (() => accountingSocketWithTransportClose(new IBApi({ ...(callbacks.socketEndpoint?.() ?? settings.endpoint), clientId: 0 }) as unknown as AccountingSocket));
+    this.socketFactory = socketFactory ?? (callbacks.automatic ? (() => new OfficialAccountingSocket(callbacks.socketEndpoint?.() ?? settings.endpoint, settings.accountId)) : (() => accountingSocketWithTransportClose(new IBApi({ ...(callbacks.socketEndpoint?.() ?? settings.endpoint), clientId: 0 }) as unknown as AccountingSocket)));
   }
   private bindSocket(socket: AccountingSocket, generation: number): void {
     const settings = this.settings;
@@ -123,7 +126,7 @@ export class AccountingSourceCollector {
     });
     listen("execDetails", (requestId, contract, execution) => {
       const value = normalizeAccountingExecution(contract, execution, settings);
-      this.callbacks.observe({ kind: "execution", value, raw: { contract, execution }, requestId: Number(requestId) });
+      this.callbacks.observe({ kind: "execution", value, raw: { contract, execution, ...(this.callbacks.automatic ? { timestampMode: executionTimestampMode(str(obj(execution).time)), settingsHash: this.callbacks.settingsHash } : {}) }, requestId: Number(requestId) });
       const active = this.active;
       if (active && active.requestId === requestId) active.executionIds.add(value.execId);
     });
@@ -133,23 +136,25 @@ export class AccountingSourceCollector {
       if (!active || active.requestId !== requestId) return;
       this.callbacks.observe({ kind: "replay_end", value: { requestId }, requestId: Number(requestId) }); active.ended = true;
     });
-    listen("currentTime", seconds => {
+    const receiveClock = (milliseconds: unknown, seconds: unknown) => {
       if (!this.clockRequestedAt || this.active?.error) return;
-      const received = Date.now(), milliseconds = typeof seconds === "number" ? seconds * 1000 : NaN;
-      if (!Number.isSafeInteger(seconds) || !Number.isFinite(milliseconds) || !Number.isFinite(new Date(milliseconds).getTime()) || Math.abs(received - milliseconds) > 2000) {
+      const received = Date.now();
+      if (typeof milliseconds !== "number" || !Number.isSafeInteger(milliseconds) || !Number.isFinite(new Date(milliseconds).getTime()) || Math.abs(received - milliseconds) > 2000) {
         if (this.active) this.active.clockWaiting = false;
         this.callbacks.observe({ kind: "clock_rejected", requestId: this.active?.requestId, value: {
           receivedAt: new Date(received).toISOString(), requestedAt: this.clockRequestedAt,
           reportedKind: seconds === null ? "null" : typeof seconds,
           reportedSeconds: ["number", "string", "boolean", "bigint"].includes(typeof seconds) ? String(seconds).slice(0, 80) : "[non-scalar]",
-          ...(Number.isFinite(milliseconds) ? { skewMs: received - milliseconds } : {}),
+          ...(typeof milliseconds === "number" && Number.isFinite(milliseconds) ? { skewMs: received - milliseconds } : {}),
         } });
         throw accountingError("CLOCK_INVALID");
       }
       if (!this.active?.clockWaiting) return;
       this.active.brokerTime = milliseconds; this.active.clockWaiting = false;
       this.callbacks.observe({ kind: "clock", value: { brokerTime: new Date(milliseconds).toISOString() }, requestId: this.active.requestId });
-    });
+    };
+    listen("currentTime", seconds => receiveClock(typeof seconds === "number" ? seconds * 1000 : NaN, seconds));
+    listen("currentTimeInMillis", milliseconds => receiveClock(milliseconds, milliseconds));
     listen("disconnected", () => { this.ready = false; this.connecting = false; this.accounts = []; if (this.active) this.active.error ??= accountingError("SOURCE_GAP"); this.callbacks.gap(this.generation); });
     listen("error", (error, code) => {
       if ([2104, 2106, 2107, 2108, 2158].includes(Number(code))) return;
@@ -157,6 +162,7 @@ export class AccountingSourceCollector {
         { name: error instanceof Error ? error.name : undefined, message: error instanceof Error ? error.message : undefined, code });
       if (Number(code) === 1100) this.upstream = false;
       if ([1101, 1102].includes(Number(code))) this.upstream = true;
+      if (this.active) this.active.error ??= accountingError("SOURCE_GAP");
       this.callbacks.gap(this.generation);
     });
   }
@@ -217,7 +223,7 @@ export class AccountingSourceCollector {
       if (signal.aborted) abort(); else check();
     });
   }
-  async replay(timeoutMs: number, signal: AbortSignal): Promise<{ requestId: number; brokerTime: string; executionIds: string[]; generation: number }> {
+  async replay(timeoutMs: number, signal: AbortSignal, recoveryFloor?: number): Promise<{ requestId: number; brokerTime: string; executionIds: string[]; generation: number; capability?: ReplayCapability }> {
     this.callbacks.assertOwner?.();
     if (this.active) throw accountingError("SOURCE_BUSY");
     const deadline = Date.now() + Math.min(10_000, timeoutMs);
@@ -230,23 +236,53 @@ export class AccountingSourceCollector {
       });
       const generation = this.generation;
       if (!Number.isSafeInteger(this.protocol) || this.protocol <= 0) throw accountingError("IDENTITY_INVALID");
+      const automatic = this.callbacks.automatic === true;
+      const config = async (stage: 'before' | 'after') => {
+        if (!this.socket?.automatic || this.protocol < 219 || this.socket.sdkSha256 !== OFFICIAL_SDK_SHA256 || !this.socket.reqConfig) throw accountingError('CAPABILITY_UNAVAILABLE');
+        this.callbacks.assertOwner?.();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let abort: (() => void) | undefined;
+        let evidence: ConfigEvidence;
+        try {
+          evidence = await Promise.race([this.socket.reqConfig(), new Promise<never>((_, reject) => {
+            abort = () => reject(accountingError('REPLAY_INCOMPLETE'));
+            timer = setTimeout(abort, Math.max(1, deadline - Date.now()));
+            signal.addEventListener('abort', abort, { once: true });
+            if (signal.aborted) abort();
+          })]);
+        } finally { clearTimeout(timer); if (abort) signal.removeEventListener('abort', abort); }
+        this.callbacks.assertOwner?.();
+        if (!evidence.masterClientIdPresent || evidence.masterClientId !== 0) throw accountingError('MASTER_SCOPE_UNAVAILABLE');
+        this.callbacks.observe({ kind: 'configuration', requestId: active.requestId, value: { stage, ...evidence, sdkSha256: OFFICIAL_SDK_SHA256 } });
+      };
+      if (automatic) await config('before');
       active.clockRequestedAt = new Date().toISOString(); this.clockRequestedAt = active.clockRequestedAt; active.clockWaiting = true;
       active.phase = 'clock';
       emitBrokerPhase(this.diagnostics, 'accounting.clock_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
       await brokerPhase(this.diagnostics, 'accounting.clock_wait', { generation, requestId: active.requestId }, async () => {
         this.callbacks.assertOwner?.(); this.socket!.reqCurrentTime(); await this.wait(() => active.brokerTime !== undefined, deadline, signal);
       });
-      this.callbacks.observe({ kind: "replay_start", value: { requestId: active.requestId }, requestId: active.requestId });
+      let capability: ReplayCapability | undefined;
+      const filter: ExplicitExecutionFilter = { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" };
+      if (automatic) {
+        const floor = Math.floor(Math.min(active.brokerTime! - 48 * 3600_000, paperAccountDayStart(active.brokerTime!), recoveryFloor ?? Infinity) / 1000) * 1000;
+        if (!Number.isFinite(floor) || floor < active.brokerTime! - 7 * 86400_000) throw accountingError('HISTORY_WINDOW_UNAVAILABLE');
+        const certifiedFrom = new Date(floor).toISOString();
+        filter.time = certifiedFrom.slice(0, 10).replaceAll('-', '') + '-' + certifiedFrom.slice(11, 19); filter.lastNDays = 7;
+        capability = { certifiedFrom, filter: filter as ReplayCapability['filter'], sdkSha256: OFFICIAL_SDK_SHA256, masterClientId: 0 };
+      }
+      this.callbacks.observe({ kind: "replay_start", value: { requestId: active.requestId, ...(capability ? { capability } : {}) }, requestId: active.requestId });
       active.phase = 'replay_end';
       emitBrokerPhase(this.diagnostics, 'accounting.replay_requested', 'milestone', { generation, requestId: active.requestId }, performance.now() - active.started);
       await brokerPhase(this.diagnostics, 'accounting.replay_end_wait', { generation, requestId: active.requestId }, async () => {
-        this.callbacks.assertOwner?.(); this.socket!.reqExecutions(active.requestId, { clientId: 0, acctCode: this.settings.accountId, time: "", symbol: "", secType: "", exchange: "", side: "" });
+        this.callbacks.assertOwner?.(); this.socket!.reqExecutions(active.requestId, filter);
         await this.wait(() => active.ended, deadline, signal);
       });
+      if (automatic) await config('after');
       this.callbacks.assertOwner?.();
       if (!this.identity().ready || generation !== this.generation) throw accountingError("SOURCE_GAP");
       emitBrokerPhase(this.diagnostics, 'accounting.replay_total', 'ok', { generation, requestId: active.requestId }, performance.now() - active.started);
-      return { requestId: active.requestId, brokerTime: new Date(active.brokerTime!).toISOString(), executionIds: [...active.executionIds], generation };
+      return { requestId: active.requestId, brokerTime: new Date(active.brokerTime!).toISOString(), executionIds: [...active.executionIds], generation, ...(capability ? { capability } : {}) };
     } catch (error) {
       emitBrokerPhase(this.diagnostics, 'accounting.replay_total', 'error', { generation: this.generation, requestId: active.requestId }, performance.now() - active.started, error);
       // A clock response has no request id: abandon this connection after an incomplete read.

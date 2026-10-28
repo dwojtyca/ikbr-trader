@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { AccountingSourceService } from "../accounting/source-service.js";
 import { AccountingSourceStore } from "../accounting/source-store.js";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   InstrumentBindingAuthority,
   InstrumentRegistry,
@@ -22,7 +22,10 @@ import { runMigrations } from "../migrations.js";
 import { ReconciliationRunner } from "../reconciliation/runner.js";
 import { ReconciliationScheduler } from "../reconciliation/scheduler.js";
 import { IbBrokerReconciliationAdapter } from "../reconciliation/ib-broker-adapter.js";
-import type { TwsExecutionClient } from "../tws-execution-client.js";
+import { TwsExecutionClient, type PreparedBrokerOrder, type RuntimeOwnerGuard } from "../tws-execution-client.js";
+import { AccountingSourceOwner, accountingOwnerLockKey } from "../accounting/source-owner.js";
+import { accountingHash, type SourceSettingsV1 } from "../accounting/types.js";
+import { withRuntimeOwnerPermit } from "../runtime-owner-permit.js";
 import type { AccountingJoin } from "../accounting/types.js";
 import { ReconciliationRepository } from "../reconciliation/repository.js";
 import type { BrokerReconciliationSnapshot } from "../reconciliation/broker-adapter.js";
@@ -1192,5 +1195,69 @@ describe('PP5 durable observer with real FullCloseService and PostgreSQL', {skip
       const order=(await f.execution.getProposedOrderById(f.id))!;await assert.rejects(pinLifecycleEntryPolicy(db,order,f.context().bound!,accountId,new Date(order.executionAttemptedAt!),15),/deadline/);
       assert.ok((await f.execution.getProposedOrderById(f.id))?.executionAttemptedAt);
     }finally{db.release();await f.observer.stop();await f.close();}
+  });
+});
+
+describe('automatic owner recovery at the durable full-close send boundary', { skip: !connection }, () => {
+  it('lost permit COMMIT after one real adapter send retains marker and successor reconciliation never replays', async () => {
+    const f = await createFixture('USD');
+    const settings: SourceSettingsV1 = { schemaVersion: 1, sourceKind: 'ibkr-tws-seven-day-v1', environment: 'paper', accountId,
+      endpoint: { host: '127.0.0.1', port: 45672 }, sourceClientId: 0, executionTimeZone: 'UTC' };
+    const makeOwner = () => new AccountingSourceOwner(f.pool, settings, undefined, { processSessionId: randomUUID(),
+      settingsHash: 'a'.repeat(64), sourceId: accountingHash({ account: accountId, kind: 'tws-accounting' }) });
+    const first = makeOwner(), successor = makeOwner(); let current = first, loseCommit = true;
+    const capture = (): RuntimeOwnerGuard => { const owner = current; return {
+      assertCurrent: () => owner.assertCurrent(), assertInTransaction: db => owner.assertInTransaction(db),
+    }; };
+    const uncertain = new Proxy(f.pool, { get(target, property) {
+      if (property === 'connect') return async () => {
+        const client = await f.pool.connect(), query = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          const result = await (query as (...args: unknown[]) => Promise<unknown>)(...args);
+          if (args[0] === 'COMMIT' && loseCommit) { loseCommit = false; throw Error('fixture permit COMMIT acknowledgement lost'); }
+          return result;
+        }) as PoolClient['query']; return client;
+      }; return Reflect.get(target, property);
+    } });
+    class Socket extends EventEmitter {
+      writes: number[] = [];
+      connect() { queueMicrotask(() => this.emit('nextValidId', 201)); }
+      disconnect() { this.emit('disconnected'); }
+      placeOrder(id: number) { this.writes.push(id); queueMicrotask(() => this.emit('orderStatus', id, 'Submitted', 0, 1)); }
+    }
+    const socket = new Socket();
+    const tws = new TwsExecutionClient({ host: 'unused', port: 0, clientId: 7, securityType: 'STK', exchange: 'SMART', currency: 'USD', orderTimeoutMs: 1000 },
+      () => {}, undefined, undefined, undefined, { ib: socket, captureRuntimeOwner: capture,
+        withRuntimeOwnerPermit: (owner, send) => withRuntimeOwnerPermit(uncertain, owner, send) });
+    try {
+      await first.acquire(); await tws.connect(); f.service.deps.captureRuntimeOwner = capture;
+      f.service.deps.dispatch = async (prepared, op, _context, owner) => {
+        const durable = await f.repo.get(f.id);
+        assert.ok(durable?.submissionAttemptedAt); assert.equal(durable?.closeLink?.broker_order_id, '201');
+        f.state.closeRef = prepared.persistence.legs[0].orderRef; f.state.closeWorking = true;
+        await tws.dispatchPreparedClose(prepared.payload as PreparedBrokerOrder, tws.getConnectionGeneration(), Date.parse(op.riskExpiresAt!), owner);
+      };
+      const key = randomUUID(), op = await f.service.request(f.id, key, 100, 'fixture');
+      assert.equal(op.state, 'SUBMISSION_UNKNOWN', op.failureReason ?? '');
+      assert.match(op.failureReason ?? '', /COMMIT acknowledgement lost/); assert.deepEqual(socket.writes, [201]);
+      const durableBefore = (await f.pool.query('SELECT submission_attempted_at,close_proposal_id FROM lifecycle_close_operations WHERE id=$1', [op.id])).rows[0];
+      const lockKey = BigInt.asUintN(64, BigInt(accountingOwnerLockKey(first.fence().endpointKey)));
+      await first.release();
+      const releaseDeadline = performance.now()+3000;
+      let held = true;
+      while (held && performance.now() < releaseDeadline) {
+        held = (await f.pool.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted AND classid=$1::oid AND objid=$2::oid AND objsubid=1) AS held", [(lockKey >> 32n).toString(), (lockKey & 0xffffffffn).toString()])).rows[0].held;
+      }
+      assert.equal(held, false, 'predecessor advisory lock must actually disappear before successor acquisition');
+      await successor.acquire(); current = successor;
+      const replacement = new FullCloseService(new CloseRepository(f.pool, f.execution), f.service.deps);
+      await replacement.request(f.id, key, 100, 'fixture');
+      f.state.closeWorking = false; f.state.position = 0;
+      assert.notEqual((await replacement.reconcile(f.id)).state, 'COMPLETED');
+      assert.deepEqual((await f.pool.query('SELECT submission_attempted_at,close_proposal_id FROM lifecycle_close_operations WHERE id=$1', [op.id])).rows[0], durableBefore);
+      assert.deepEqual(socket.writes, [201]);
+      f.state.closeFilled = true;
+      assert.equal((await replacement.reconcile(f.id)).state, 'COMPLETED'); assert.deepEqual(socket.writes, [201]);
+    } finally { tws.disconnect(); await first.release(); await successor.release(); await f.close(); }
   });
 });

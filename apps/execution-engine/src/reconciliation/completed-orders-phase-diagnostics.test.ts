@@ -51,10 +51,13 @@ const stages = {
   }; } },
 };
 for (const [name, stage] of Object.entries(stages)) for (const failure of ['timeout', 'aborted'] as const) {
-  test(`completed ${failure} identifies ${name} stage without changing result or cleanup`, async () => {
+  test(`completed ${failure} identifies ${name} stage without changing result or cleanup`, async (t) => {
+    t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
     const f = fixture(); stage.configure(f.socket); const controller = new AbortController();
     const pending = f.client.load(request(controller.signal));
-    if (failure === 'aborted') { await settleTurn(); controller.abort(); }
+    await settleTurn();
+    if (failure === 'aborted') controller.abort();
+    else t.mock.timers.tick(20);
     assert.deepEqual(await pending, { ok: false, rows: [], error: failure });
     const event = f.events.find(row => row.phase === 'completed.read');
     assert.equal(event?.reason, `${failure}:${stage.reason}`); assert.equal(event?.cause, null);

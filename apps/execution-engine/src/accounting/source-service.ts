@@ -10,7 +10,7 @@ import { paperAccountDate, paperAccountDayStart } from "../paper-daily-loss.js";
 import { parseQualification } from "./config.js";
 import { AccountingSourceCollector, type AccountingSocket, type CollectorObservation } from "./source-collector.js";
 import { AccountingSourceStore, type SourceControl, type SourceObservation } from "./source-store.js";
-import { accountingError, accountingHash, accountingNumber, accountingReference, type AccountingBarrier, type AccountingCapture, type AccountingCaptureReference,
+import { qualificationExpired, accountingError, accountingHash, accountingNumber, accountingReference, type AccountingBarrier, type AccountingCapture, type AccountingCaptureReference,
   type AutomaticClockRecoveryStatus, type ClockRecoveryReceipt, type ClockRecoveryReservation, type AccountingLane, type CanonicalExecution, type CanonicalCommission, type SourceInspection, type SourceSettingsV1, type StoredQualification } from "./types.js";
 
 export interface ExecutionSourceIdentity { connected: boolean; accountId: string | null; sessionId: string; generation: number }
@@ -36,14 +36,20 @@ export class AccountingSourceService {
   constructor(readonly store: AccountingSourceStore, readonly settings: SourceSettingsV1, readonly settingsHash: string,
     private readonly executionIdentity: () => ExecutionSourceIdentity, socketFactory?: () => AccountingSocket,
     private readonly diagnostics?: BrokerPhaseDiagnostics,
-    private readonly options: { automaticClockRecoveryEnabled?: boolean; owner?: AccountingSourceOwner } = {}) {
+    private readonly options: { automaticClockRecoveryEnabled?: boolean; owner?: AccountingSourceOwner; automaticSourceRecoveryEnabled?: boolean; onOwnerLost?: () => void } = {}) {
     this.owner = options.owner ?? new AccountingSourceOwner(store.pool,settings,() => {
-      this.recoveryUnknown = true; this.gap = true; this.latest = undefined; this.collector.close();
-    });
+      this.recoveryUnknown = true; this.gap = true; this.latest = undefined; this.collector.close(); this.options.onOwnerLost?.();
+    }, options.automaticSourceRecoveryEnabled ? { processSessionId: store.sessionId, settingsHash, sourceId: store.sourceId } : undefined);
     store.owner = this.owner;
-    this.collector = new AccountingSourceCollector(settings, { socketEndpoint: () => this.owner.endpoint(), assertOwner: () => this.owner.assertCurrent(), observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory,
+    this.collector = new AccountingSourceCollector(settings, { automatic: !!options.automaticSourceRecoveryEnabled, settingsHash, socketEndpoint: () => this.owner.endpoint(), assertOwner: () => this.owner.assertCurrent(), observe: event => this.observe(event), gap: (generation, hold) => this.markGap(generation, hold) }, socketFactory,
       diagnostics && { ...diagnostics, emit: event => diagnostics.emit({ ...event, ...(this.diagnosticRunId === undefined ? {} : { runId: this.diagnosticRunId }) }) });
   }
+  captureRuntimeOwner() {
+    this.assertRuntimeOwnerCurrent();
+    return { assertCurrent: () => this.assertRuntimeOwnerCurrent(), assertInTransaction: (db: Pick<PoolClient, "query">) => this.assertRuntimeOwnerInTransaction(db) };
+  }
+  assertRuntimeOwnerCurrent(): void { this.owner.assertCurrent(); }
+  async assertRuntimeOwnerInTransaction(db: Pick<PoolClient, "query">): Promise<void> { this.owner.assertCurrent(); await this.owner.assertInTransaction(db); this.owner.assertCurrent(); }
   async initialize(): Promise<void> {
     await this.owner.acquire();
     this.control = await this.store.begin(this.settings.accountId, this.settingsHash);
@@ -53,7 +59,8 @@ export class AccountingSourceService {
       if (row.kind === "execution") { const value = row.value as CanonicalExecution; this.executions.set(value.execId, value); }
       else { const value = row.value as CanonicalCommission; this.commissions.set(value.execId, value); }
     }
-    await this.store.recovery.initialize();
+    await this.store.recovery.initialize(!!this.options.automaticSourceRecoveryEnabled);
+    if (this.options.automaticSourceRecoveryEnabled) this.control = await this.store.control();
     this.episode = await this.store.recovery.latest();
     this.rejectedClock = await this.store.rejectedClock();
     this.initialized = true;
@@ -166,7 +173,8 @@ export class AccountingSourceService {
   private assertQualified() {
     const q = this.qualification;
     if (!q) throw accountingError("QUALIFICATION_REQUIRED");
-    if (Date.parse(q.expiresAt) <= Date.now()) throw accountingError("QUALIFICATION_EXPIRED");
+    if (qualificationExpired(q)) throw accountingError("QUALIFICATION_EXPIRED");
+    if (this.options.automaticSourceRecoveryEnabled && (q.input.schemaVersion !== 2 || q.input.processSessionId !== this.store.sessionId || q.input.connectionGeneration !== this.collector.identity().generation)) throw accountingError('QUALIFICATION_REQUIRED');
     if (q.input.settingsSha256 !== this.settingsHash || q.protocolVersion !== this.collector.identity().protocolVersion || accountingHash(q.settings) !== accountingHash(this.settings)) throw accountingError("SETTINGS_MISMATCH");
   }
   assertCurrent(reference = this.latest): void {
@@ -198,12 +206,12 @@ export class AccountingSourceService {
     for (const fee of this.commissions.values()) if (!this.executions.has(fee.execId)) throw accountingError("FEE_PENDING");
     return { executions: executions.sort((a, b) => a.execId.localeCompare(b.execId)), commissions: commissions.sort((a, b) => a.execId.localeCompare(b.execId)) };
   }
-  private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false): Promise<SourceInspection> {
+  private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false, recoveryFloor?: number): Promise<SourceInspection> {
     if(signal.aborted) throw accountingError("REPLAY_INCOMPLETE");
     this.requestObservations.clear(); this.endIds.clear();
     this.collector.connect(); const epoch = this.gapEpoch, execution = this.executionIdentity();
     const deadline = Date.now() + Math.min(timeoutMs, 10_000);
-    const replay = await this.collector.replay(timeoutMs, signal);
+    const replay = await this.collector.replay(timeoutMs, signal, recoveryFloor);
     const through = Date.parse(replay.brokerTime), start = paperAccountDayStart(Date.now());
     if (paperAccountDate(through) !== paperAccountDate(Date.now())) throw accountingError("EVIDENCE_STALE");
     const metadata = { runId: this.diagnosticRunId, generation: replay.generation, requestId: replay.requestId };
@@ -230,6 +238,7 @@ export class AccountingSourceService {
     }
     const inspection: SourceInspection = { id: randomUUID(), sourceId: this.store.sourceId, processSessionId: this.store.sessionId,
       connectionGeneration: replay.generation, protocolVersion: this.collector.identity().protocolVersion, accounts: this.collector.identity().accounts,
+      ...(replay.capability ? { capability: replay.capability } : {}),
       brokerTime: replay.brokerTime, completedAt: new Date().toISOString(), executionIds: replay.executionIds,
       observationIds: [...this.connectionObservations.values(), ...(this.requestObservations.get(replay.requestId) ?? [])], replayId: replay.requestId, replayEndId: this.endIds.get(replay.requestId) ?? "",
       corroboration: replay.executionIds.some(id => {
@@ -276,7 +285,9 @@ export class AccountingSourceService {
   async verificationExpired(databaseNow: number): Promise<boolean> { return !!this.episode?.verifying_at && databaseNow-this.episode.verifying_at.getTime()>=60000; }
   recoveryIdentity() { return { ...this.executionIdentity(),settingsHash:this.settingsHash }; }
   async requireRecoveryOperator(reason: string): Promise<void> {
-    await this.store.recovery.requireOperator(reason); await this.refreshRecoveryState();
+    if (this.options.automaticSourceRecoveryEnabled) await this.store.recovery.deferContinuous(reason);
+    else await this.store.recovery.requireOperator(reason);
+    await this.refreshRecoveryState();
   }
   async automaticRecovery(signal: AbortSignal): Promise<ClockRecoveryReceipt | null> {
     if (!this.options.automaticClockRecoveryEnabled) return null;
@@ -304,9 +315,9 @@ export class AccountingSourceService {
       await this.refreshRecoveryState(); this.assertDrained(true);
       if (!this.control!.hold && manual && this.episode) return await this.completeManualRecovery();
       if (this.control!.hold !== "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_RECOVERY_HOLD_MISMATCH");
-      if (!manual) {
+      if (!manual && !this.options.automaticSourceRecoveryEnabled) {
         if (!this.qualification) throw accountingError("QUALIFICATION_REQUIRED");
-        if (Date.parse(this.qualification.expiresAt)<=Date.now()) throw accountingError("QUALIFICATION_EXPIRED");
+        if (qualificationExpired(this.qualification)) throw accountingError("QUALIFICATION_EXPIRED");
         if (this.qualification.input.settingsSha256!==this.settingsHash) throw accountingError("SETTINGS_MISMATCH");
       }
       try { reservation = await this.persistence(()=>this.store.recovery.claim(this.settings.accountId,this.settingsHash,!manual,attemptId)); }
@@ -328,6 +339,7 @@ export class AccountingSourceService {
       const operation = AbortSignal.any([wholeOperation,AbortSignal.timeout(Math.max(1,Math.min(timeoutMs,9000)))]);
       const inspection = await this.inspectInternal(Math.min(timeoutMs,9000), operation, true);
       await this.persisted(operation); this.assertDrained(true); this.assertIdentity();
+      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection);
       if (!manual) this.assertQualified();
       const barrier = this.barrier(), epoch = this.gapEpoch, through = Date.parse(inspection.brokerTime);
       if (inspection.executionIds.some(id => !this.executions.has(id) || Date.parse(this.executions.get(id)!.executedAt) > through)) throw accountingError("REVISION_CHANGED");
@@ -385,6 +397,21 @@ export class AccountingSourceService {
     this.episode=await this.store.recovery.latest();
     return this.store.recoveryReceipt(this.episode!.receipt_id!);
   }
+  private async qualifyAutomatically(inspection: SourceInspection): Promise<void> {
+    if (!inspection.capability || inspection.protocolVersion < 219) throw accountingError('CAPABILITY_UNAVAILABLE');
+    const prior = this.qualification;
+    if (prior?.input.schemaVersion === 2 && prior.input.processSessionId === this.store.sessionId && prior.input.connectionGeneration === inspection.connectionGeneration
+      && prior.input.settingsSha256 === this.settingsHash && !qualificationExpired(prior)) return;
+    const record: StoredQualification = { id: randomUUID(), input: { schemaVersion: 2, sourceKind: 'ibkr-api-explicit-window-v2',
+      settingsSha256: this.settingsHash, inspectionId: inspection.id, processSessionId: this.store.sessionId,
+      connectionGeneration: inspection.connectionGeneration, sdkSha256: inspection.capability.sdkSha256, masterClientId: 0,
+      timestampPolicy: 'EXPLICIT_OR_CONFIGURED_ZONE', executionTimeZone: this.settings.executionTimeZone },
+      settings: this.settings, protocolVersion: inspection.protocolVersion, inspectionId: inspection.id, expiresAt: null };
+    const epoch = this.gapEpoch, barrier = this.barrier();
+    const fresh = () => { this.owner.assertCurrent(); if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError('REVISION_CHANGED'); };
+    this.control = await this.store.recordQualification(record, fresh);
+    this.qualification = record; this.gap = true; this.latest = undefined;
+  }
   async qualify(value: unknown): Promise<{ qualificationId: string; expiresAt: string; settingsHash: string; corroboration: string }> {
     if (this.busy) throw accountingError("SOURCE_BUSY"); this.busy = true;
     try { return await this.qualifyInternal(value); } finally { this.busy = false; }
@@ -415,7 +442,7 @@ export class AccountingSourceService {
     });
     await this.drain();
     if (rejection) throw rejection;
-    return { qualificationId: record.id, expiresAt: record.expiresAt, settingsHash: this.settingsHash, corroboration: fresh.corroboration };
+    return { qualificationId: record.id, expiresAt: record.expiresAt!, settingsHash: this.settingsHash, corroboration: fresh.corroboration };
   }
   async invalidate(reason: string): Promise<void> {
     if (!reason.trim() || reason.length > 300) throw accountingError("INVALIDATION_INVALID");
@@ -429,7 +456,7 @@ export class AccountingSourceService {
     return { configured: true, sourceId: this.store.sourceId, qualificationId: this.qualification?.id ?? null,
       expiresAt: this.qualification?.expiresAt ?? null, sourceGeneration: this.collector.identity().generation,
       semanticRevision: Number(this.control?.semantic_revision ?? 0), pending: this.pending, hold, captureId: this.latest?.captureId ?? null,
-      settingsHash: this.settingsHash, brokerReadOnly: true, automaticClockRecovery: {...recoveryStatus(!!this.options.automaticClockRecoveryEnabled,this.episode,this.recoveryUnknown),rejectedClock:this.rejectedClock} };
+      settingsHash: this.settingsHash, brokerReadOnly: true, automaticClockRecovery: {...recoveryStatus(!!this.options.automaticClockRecoveryEnabled,this.episode,this.recoveryUnknown,!!this.options.automaticSourceRecoveryEnabled),rejectedClock:this.rejectedClock} };
   }
   async join(snapshot: BrokerReconciliationSnapshot, input: { runId: number; positionGeneration: number; recoveryStart: Date; timeoutMs: number; abortSignal: AbortSignal }): Promise<BrokerReconciliationSnapshot> {
     if (this.busy) throw accountingError("SOURCE_BUSY");
@@ -437,9 +464,10 @@ export class AccountingSourceService {
     this.busy = true;
     this.diagnosticRunId = input.runId;
     try {
-      const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal);
+      const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal, false, input.recoveryStart.getTime());
+      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection);
       await this.drain(); this.assertDrained(); this.assertIdentity(); this.assertQualified();
-      const barrier = this.barrier(), through = Date.parse(inspection.brokerTime), floor = through - 48 * 3600_000;
+      const barrier = this.barrier(), through = Date.parse(inspection.brokerTime), floor = inspection.capability ? Date.parse(inspection.capability.certifiedFrom) : through - 48 * 3600_000;
       if (!snapshot.exposureComplete || !snapshot.recoveryComplete || snapshot.accountId !== this.settings.accountId
         || snapshot.sessionId !== barrier.executionSessionId || snapshot.connectionGeneration !== barrier.executionConnectionGeneration
         || input.recoveryStart.getTime() < floor) throw accountingError("REPLAY_INCOMPLETE");
@@ -476,7 +504,14 @@ export class AccountingSourceService {
     if (await this.store.recovery.active(db)) throw accountingError("CLOCK_RECOVERY_ACTIVE");
     if (accountingHash(accountingReference(capture)) !== accountingHash(reference) || capture.accountId !== this.settings.accountId || control.gap || control.hold
       || Number(control.semantic_revision) !== capture.barrier.semanticRevision || control.qualification_id !== capture.qualificationId
-      || !qualification || Date.parse(qualification.expiresAt) <= Date.now()) throw accountingError("REVISION_CHANGED");
+      || !qualification || qualificationExpired(qualification)) throw accountingError("REVISION_CHANGED");
     this.assertCurrent(reference); return capture;
   }
 }
+
+export type AccountingSource = Pick<AccountingSourceService,
+  "captureRuntimeOwner" | "settings" | "settingsHash" | "status" | "assertCurrent" | "assertRuntimeOwnerCurrent" | "assertRuntimeOwnerInTransaction" |
+  "observeIngressFailure" | "observeOrderStatus" | "observeExecution" | "observeCommission" |
+  "inspect" | "qualify" | "invalidate" | "join" | "readCapture" | "refreshRecoveryState" |
+  "recoveryDatabaseTime" | "verificationExpired" | "recoveryIdentity" | "requireRecoveryOperator" |
+  "automaticRecovery" | "recoverClock">;

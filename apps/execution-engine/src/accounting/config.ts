@@ -60,3 +60,8 @@ export function verifyQualificationArtifacts(value: OperatorQualificationV1, evi
     if (/\.txt$/i.test(path)) new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   }
 }
+
+export const automaticQualificationSchema = z.object({ schemaVersion: z.literal(2), sourceKind: z.literal('ibkr-api-explicit-window-v2'),
+  settingsSha256: sha, inspectionId: z.string().uuid(), processSessionId: text, connectionGeneration: z.number().int().positive(),
+  sdkSha256: z.literal('50a459ed09f0030df25125a177e57b69bdf576ec3a89fcb1f81fdff95bbf6316'), masterClientId: z.literal(0),
+  timestampPolicy: z.literal('EXPLICIT_OR_CONFIGURED_ZONE'), executionTimeZone: z.enum(['UTC', 'Europe/Warsaw']) }).strict();

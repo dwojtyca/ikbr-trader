@@ -147,7 +147,11 @@ test('actual claimed runtime mismatch plus lost negative write blocks published 
   assert.equal((await restarted.readWshRefreshState(identity)).blocksCachedEvidence, true);
   const prepared = await restarted.prepareRepair(identity);
   const source = prepared.sources.find(s => s.sourceId === h.f.source.id)!;
-  assert.equal(source.state, 'HOLD'); assert.ok(source.reasons.includes('RESEARCH_WSH_ATTEMPT_UNRESOLVED'));
+  assert.equal(source.state, 'WAITING'); assert.ok(source.reasons.includes('RESEARCH_WSH_READ_RECOVERY_PENDING'));
+  assert.equal(source.wshRefresh?.blocksCachedEvidence, true);
+  assert.notEqual(prepared.state, 'READY');
+  const deadline = (await pool.query('SELECT deadline_at FROM research_wsh_refresh_attempts ORDER BY started_at DESC LIMIT 1')).rows[0].deadline_at as Date;
+  assert.equal(Date.parse(source.nextCheckAt!), deadline.getTime());
   const attempt = (await pool.query('SELECT state,preflight_complete FROM research_wsh_refresh_attempts ORDER BY started_at DESC LIMIT 1')).rows[0];
   assert.deepEqual(attempt, { state: 'STARTED', preflight_complete: false });
 }));
