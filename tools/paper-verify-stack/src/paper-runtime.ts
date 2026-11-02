@@ -417,7 +417,7 @@ export class PaperRuntime {
       const paused = await this.startupPause(reason, revision(current), accountId), pausedRevision = revision(paused);
       await this.assertStart(generation, accountId, pausedRevision);
       await this.compose(['up', '-d', '--no-build', '--pull', 'never', ...PAPER_SERVICES]);
-      await this.assertStart(generation, accountId, pausedRevision);
+      await this.waitControl(generation, accountId, pausedRevision);
       await this.prepareBootstrap(generation, accountId, pausedRevision, validated.instrumentIds);
       await this.waitPreparation(generation, accountId, pausedRevision, validated.instrumentIds);
       await this.resume(reason, pausedRevision, accountId, generation, validated.instrumentIds);
@@ -437,7 +437,7 @@ export class PaperRuntime {
       throw new PaperRuntimeError('PAPER_START_FAILED');
     }
   }
-  private async waitControl(generation: string, accountId: string): Promise<RuntimeControl> {
+  private async waitControl(generation: string, accountId: string, expectedRevision?: number): Promise<RuntimeControl> {
     let reported = false;
     for (;;) {
       await this.assertStart(generation);
@@ -450,7 +450,10 @@ export class PaperRuntime {
         if (!reported) { this.options.adapters.log?.('WAITING: połączenie Paper i potwierdzenie rachunku w IBKR.'); reported = true; }
         await this.sleep(1000); continue;
       }
-      await this.assertStart(generation); this.assertAccount(current, accountId); revision(current); return current;
+      await this.assertStart(generation); this.assertAccount(current, accountId);
+      const currentRevision = revision(current);
+      if (expectedRevision !== undefined && (currentRevision !== expectedRevision || !current.control?.paused)) throw new PaperRuntimeError('PAPER_START_SUPERSEDED');
+      return current;
     }
   }
   private async prepareBootstrap(generation: string, accountId: string, expectedRevision: number, expectedInstruments: string[]): Promise<void> {
@@ -592,23 +595,31 @@ export class PaperRuntime {
           const calendar = row.role === 'calendar' && row.sourceError === undefined && Array.isArray(row.reasons) && row.reasons.includes('RESEARCH_CALENDAR_ERROR');
           const sourceFailure = row.sourceError !== undefined || typeof row.failureReason === 'string' ||
             Array.isArray(row.reasons) && row.reasons.some(reason => /^RESEARCH_(NEWS|REPORTS)_ERROR$/.test(String(reason)));
-          if (!calendar && !sourceFailure) continue;
           const label = typeof row.sourceId === 'string' ? safeDiagnosticText(row.sourceId.slice(0, 200), privacy) : 'źródło';
+          const sourceLabel = `${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}`;
           const ownReason = typeof row.failureReason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(row.failureReason) ? `${row.failureReason}; ` : '';
           const localBudget = row.role === 'news' && row.failureReason === 'RESEARCH_BUDGET_EXHAUSTED' ? formatLocalResearchBudget(row.localBudget) : null;
-          details.push(`  ${safeDiagnosticText(String(item?.instrumentId), privacy)} / ${label}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}${row.role === 'calendar' && !calendar && isResearchProviderError(row.providerError) ? `; ${formatResearchProviderError(row.providerError, privacy)}` : ''}`);
-          if (row.state === 'WAITING' && typeof row.nextCheckAt === 'string' && Number.isFinite(Date.parse(row.nextCheckAt)))
-            details.push(`  Dane nadal niedostępne. Najwcześniejsze kolejne sprawdzenie: ${new Date(row.nextCheckAt).toISOString()}.`);
+          if (calendar || sourceFailure)
+            details.push(`  ${sourceLabel}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}${row.role === 'calendar' && !calendar && isResearchProviderError(row.providerError) ? `; ${formatResearchProviderError(row.providerError, privacy)}` : ''}`);
+          if (row.state === 'READY') continue;
+          const refresh = obj(row.role === 'calendar' ? row.wshRefresh : row.role === 'news' ? row.marketauxRefresh : null);
+          const instant = (value: unknown): value is string => typeof value === 'string' &&
+            /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) &&
+            new Date(value).toISOString() === value.replace(/Z$/, value.includes('.') ? 'Z' : '.000Z');
+          const deadlines = [
+            instant(refresh?.nextRetryAt) ? `Najwcześniejsze ponowienie: ${refresh.nextRetryAt}.` : '',
+            instant(refresh?.nextRegularAt) ? `Najwcześniejsze zwykłe odświeżenie: ${refresh.nextRegularAt}.` : '',
+            instant(row.nextCheckAt) ? `Najwcześniejsze kolejne sprawdzenie: ${row.nextCheckAt}.` : '',
+          ].filter(Boolean);
+          if (deadlines.length) details.push(`  ${sourceLabel}: ${deadlines.join(' ')} Terminy nie potwierdzają odzyskania poprawnych danych.`);
         }
       }
-      if (states.some(s => s === 'HOLD')) {
-        if (reasons.length) this.options.adapters.log?.(`Wstrzymano przygotowanie: ${[...new Set(reasons)].join(', ')}`);
-        for (const detail of details) this.options.adapters.log?.(detail);
-        throw new PaperRuntimeError(reasons[0] ?? 'PAPER_RESEARCH_HOLD');
-      }
-      const description = JSON.stringify({ reasons: [...new Set(reasons)], details });
+      const state = states.some(s => s === 'HOLD') ? 'HOLD' : 'WAITING';
+      const description = JSON.stringify({ state, reasons: [...new Set(reasons)], details });
       if (description !== lastStatus) {
-        this.options.adapters.log?.(`WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`);
+        this.options.adapters.log?.(state === 'HOLD'
+          ? `HOLD: Wstrzymano przygotowanie: ${reasons.length ? [...new Set(reasons)].join(', ') : 'PAPER_RESEARCH_HOLD'}. Wejścia pozostają wstrzymane; obserwacja trwa. Termin usunięcia przyczyny nie jest potwierdzony.`
+          : `WAITING: przygotowanie badań: ${reasons.length ? [...new Set(reasons)].join(', ') : 'dane w przygotowaniu'}. Po ukończeniu bot automatycznie sprawdzi gotowość do pracy.`);
         for (const detail of details) this.options.adapters.log?.(detail);
         lastStatus = description;
       }

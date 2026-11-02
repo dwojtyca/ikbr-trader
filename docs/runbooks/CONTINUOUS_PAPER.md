@@ -34,6 +34,22 @@ nieaktualne dane uruchamiają kolejkę uzupełnienia przez dotychczasowego dosta
 Stan `WAITING` nie rezerwuje wejścia ani nie wywołuje AI. Kolejny cykl strategii
 sprawdza od nowa sygnał, ceny i ryzyko po uzupełnieniu danych.
 
+Poprawka [odzyskiwania badań przy starcie](../implementation/phase3/PAPER_STARTUP_RESEARCH_RETRY_REPORT.md)
+rozróżnia zwykłe odświeżanie od ograniczonych ponowień po błędzie WSH 10281.
+W obrazie zawierającym tę poprawkę nowa, jednoznacznie zakończona błędem próba
+z potwierdzonym zamknięciem lokalnego połączenia może otrzymać dwa ponowienia:
+po 30 sekundach, następnie po 120 sekundach. Nadal obowiązują wspólne limity
+dostawcy i kosztów. Niepewny wynik nie otrzymuje takiego skrótu. Zapisane wcześniej
+zakończone próby nie są przepisywane; kolejny zwykły cykl zachowuje swój termin.
+
+W tej wersji `pnpm start` pozostaje aktywne także przy stanie badań `HOLD`,
+pokazując przyczynę i znany termin kolejnego pobrania. Samo oczekiwanie nie
+zezwala na handel: dopiero świeże `READY` i dotychczasowe kontrole wznowienia
+pozwalają zakończyć start. `pnpm stop`, przerwanie polecenia lub zmiana pauzy
+operatora nadal unieważniają ten start. Termin ponowienia nie jest obietnicą
+naprawienia błędu dostawcy. Nieprawidłowa odpowiedź Marketaux pozostaje błędem;
+diagnostyka wskazuje odrzucone pole bez zapisywania treści odpowiedzi.
+
 Decyzja właściciela z 15 października 2026 wybiera politykę
 `TWO_SOURCE_HOURLY_V1`: wyłącznie Marketaux i WSH, oba odświeżane co godzinę,
 oba ważne przez 24 godziny od poprawnego pobrania. Start korzysta od razu

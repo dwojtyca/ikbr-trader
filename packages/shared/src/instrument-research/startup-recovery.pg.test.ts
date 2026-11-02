@@ -87,15 +87,42 @@ test('expired fenced acquisition recovers once without refund or cached admissio
  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,recoveryClock:clock}),t=await claim(f),{call,permit}=await reserve(f,t);permit.assertActive();
  assert.equal((await f.store.recoverMarketauxAttempts(f.identity)).state,'WAITING');
  await advance(126000);await f.observe();
+ assert.deepEqual((await f.store.readMarketauxRefreshState(f.identity)).holdReasons,['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED']);
  const outcomes=await Promise.all([f.store.recoverMarketauxAttempts(f.identity),f.store.recoverMarketauxAttempts(f.identity)]);
  assert.deepEqual(outcomes.map(r=>r.state).sort(),['NOT_REQUIRED','RECOVERED']);
  assert.equal((await pool.query('SELECT outcome FROM research_call_outcomes WHERE call_key=$1',[call.callKey])).rows[0].outcome,'UNKNOWN');
  assert.equal((await pool.query('SELECT count(*)::int n FROM research_call_reservations')).rows[0].n,3);
  assert.throws(permit.assertActive,/CLOCK_OR_DEADLINE/);
  assert.equal((await f.store.claimMarketauxAttempt(f.identity)).claimed,false);
- assert.equal((await f.store.prepareRepair(f.identity)).state,'HOLD');
+ const recovered=await f.store.readMarketauxRefreshState(f.identity);assert.deepEqual(recovered.holdReasons,[]);
+ const preparation=await f.store.prepareRepair(f.identity);assert.equal(preparation.state,'WAITING');
+ assert.equal(preparation.sources.find(s=>s.sourceId===f.source.id)?.nextCheckAt,recovered.nextRegularAt);
+ assert.equal((await f.store.latestSnapshot(f.identity))?.snapshot.coverage.some(c=>c.sourceId===f.source.id&&c.complete),false);
+ await assert.rejects(f.store.recordMarketauxCallOutcome(t,call.callKey,{outcome:'SUCCEEDED',contentHash:'e'.repeat(64)}),/CLOCK_OR_DEADLINE|TICKET_INVALID|EXPIRED/);
+ for(const patch of [{account_id:'DU_OTHER'},{ledger_key:'marketaux:ibkr-conid:999'},{identity_hash:'0'.repeat(64)}])
+  await assert.rejects(pool.query(`INSERT INTO research_marketaux_recoveries SELECT (jsonb_populate_record(NULL::research_marketaux_recoveries,to_jsonb(r)||$2::jsonb)).* FROM research_marketaux_recoveries r WHERE attempt_id=$1`,[t.attemptId,JSON.stringify({id:randomUUID(),...patch})]),/RECOVERY_ATTEMPT_INVALID/);
  await advance(3600000);await f.observe();await f.publishNews();assert.equal((await f.store.prepareRepair(f.identity)).state,'READY');
  assert.equal((await pool.query('SELECT state FROM research_marketaux_attempts WHERE id=$1',[t.attemptId])).rows[0].state,'UNKNOWN');
+}));
+
+test('three-day-old weekend source cache admits both legal reads immediately without a new hour wait', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
+ const f=await seedTwoSourceResearchStore(pool,{recoveryClock:clock,configureManifest:manifest=>{
+  for(const policy of manifest.instruments)for(const source of policy.sources)for(const name of ['qualification','entitlement'])
+   (source.parserConfig[name] as {expiresAt:string}).expiresAt=new Date(clock.wallNow()+7*86400000).toISOString();
+ }});
+ const old=await f.store.latestSnapshot(f.identity);await advance(3*86400000);await f.observe();
+ const now=await f.clock(),prep=await f.store.prepareRepair(f.identity);assert.equal(prep.state,'WAITING',JSON.stringify(prep));
+ assert.ok(prep.sources.every(s=>s.state==='WAITING'&&Date.parse(s.nextCheckAt!)<=now+1000));
+ const news=await f.store.claimMarketauxAttempt(f.identity);assert.ok(news.claimed);
+ assert.ok(Math.abs(Date.parse(news.ticket.startedAt)-now)<1000);
+ const calendar={...f.identity,sourceId:f.wshSource.id};
+ assert.ok((await f.store.dueWshAttempts(f.identity)).some(a=>a.identity.instrumentId===f.identity.instrumentId&&a.kind==='regular'));
+ await f.store.withWshEndpointLock(String(f.wshSource.parserConfig.endpointId),async lease=>{
+  const result=await f.store.claimWshAttempt(lease,{...calendar,sessionId:randomUUID()},'regular');assert.equal(result.state,'CLAIMED');
+  if(result.state==='CLAIMED')assert.ok(Math.abs(Date.parse(result.ticket.startedAt)-now)<1000);
+ });
+ assert.deepEqual(await f.store.latestSnapshot(f.identity),old);
+ assert.equal((await pool.query('SELECT count(*)::int n FROM research_call_reservations')).rows[0].n,4);
 }));
 
 test('database-only forward jump cannot recover or create a receipt', {skip:!connection},()=>isolated(async(pool,clock,advance)=>{
@@ -111,7 +138,7 @@ test('maintenance survives stopped producer heartbeat and commit never admits ol
  const input={challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:'operator:test',pauseRevision:1,evidence:evidence(c)};
  const receipt=await f.store.commitResearchRecovery(input);assert.equal((await f.store.commitResearchRecovery(input)).id,receipt.id);
  assert.equal((await f.store.readResearchRecovery(c.id))!.state,'COMMITTED');
- await f.observe();assert.equal((await f.store.prepareRepair(f.identity)).state,'HOLD');
+ await f.observe();assert.equal((await f.store.prepareRepair(f.identity)).state,'WAITING');
  await assert.rejects(pool.query('DELETE FROM research_marketaux_recoveries'),/immutable/i);
 }));
 
@@ -207,7 +234,7 @@ for(const legacyState of ['UNKNOWN','STARTED'] as const) for(const producerState
    if(legacyState==='UNKNOWN')assert.deepEqual(after,original);else assert.equal(after.state,'UNKNOWN');
    assert.deepEqual((await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows,reservationRows);
    for(const old of outcomes)assert.deepEqual((await pool.query('SELECT * FROM research_call_outcomes WHERE call_key=$1',[old.call_key])).rows[0],old);
-   await f.observe();assert.equal((await f.store.prepareRepair(f.identity)).state,'HOLD');
+   await f.observe();assert.equal((await f.store.prepareRepair(f.identity)).state,'WAITING');
    await advance(3600000);await f.observe();await f.publishWsh();await f.publishNews();assert.equal((await f.store.prepareRepair(f.identity)).state,'READY');
    assert.equal((await pool.query('SELECT count(*)::int n FROM research_marketaux_attempt_calls WHERE attempt_id=$1',[attemptId])).rows[0].n,legacyState==='UNKNOWN'?1:7);
   },async(pool,clock)=>{

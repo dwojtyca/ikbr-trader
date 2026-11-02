@@ -112,3 +112,27 @@ test('automatic WSH recovery is waiting only for exact recovery diagnostics and 
  state.recovery!.reason='RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR';state.recovery!.nextCheckAt='invalid';assert.equal(inspect().state,'HOLD');
  state.recovery!.nextCheckAt=new Date(now+3600000).toISOString();f.wshSource.automation='UNVERIFIED';assert.equal(inspect().state,'HOLD');
 });
+
+test('BUSY preparation waits only for exact confirmed retry evidence and preserves other holds',()=>{
+ const f=twoSourceResearchFixture(now),at=new Date(now).toISOString();
+ f.snapshot.events=[];f.snapshot.evidence=f.snapshot.evidence.filter(e=>e.sourceId!==f.wshSource.id);
+ f.snapshot.coverage=f.snapshot.coverage.filter(c=>c.sourceId!==f.wshSource.id);
+ f.snapshot.coverage.push({sourceId:f.wshSource.id,role:'calendar',status:'ERROR',complete:false,evidenceRefs:[],checkedAt:at,windowStart:at,windowEnd:at,reason:'RESEARCH_WSH_ERROR_10281'});
+ const snapshot={id:'fixture',hash:researchHash(f.snapshot),sequence:1,snapshot:f.snapshot};
+ const failure:import('./wsh-refresh.js').WshAttemptDiagnostic={id:'failed',cycleId:'cycle',ordinal:0,state:'FAILED',terminalResultHash:null,
+  startedAt:at,finishedAt:at,cleanup:'CONFIRMED',failureClass:'BUSY',failureReason:'RESEARCH_WSH_ERROR_10281',stage:'events',providerError:{code:10281,message:'duplicate'}};
+ const original:import('./wsh-refresh.js').WshRefreshState={sourceId:f.wshSource.id,lastSuccessfulAt:null,expiresAt:null,retained:false,
+  latestAttempt:failure,latestFailure:failure,nextRetryAt:new Date(now+30000).toISOString(),nextRegularAt:new Date(now+3600000).toISOString(),blocksCachedEvidence:false};
+ const inspect=(state=original)=>inspectResearch(f.manifest,f.policy.instrumentId,snapshot,now,[],[],[state]);
+ assert.equal(inspect().state,'WAITING',JSON.stringify(inspect()));assert.equal(inspect().nextCheckAt,original.nextRetryAt);
+ for(const change of [
+  (s:typeof original)=>{s.nextRetryAt='invalid';},(s:typeof original)=>{s.nextRetryAt=null;},
+  (s:typeof original)=>{s.latestFailure!.cleanup='UNKNOWN';},(s:typeof original)=>{s.latestFailure!.cleanup='NOT_NEEDED';},
+  (s:typeof original)=>{s.latestFailure!.providerError=undefined;},(s:typeof original)=>{s.latestFailure!.providerError!.code=502;},
+  (s:typeof original)=>{s.latestFailure!.failureReason='RESEARCH_WSH_TIMEOUT';},(s:typeof original)=>{s.latestFailure!.failureClass='HARD';},
+  (s:typeof original)=>{s.latestFailure!.state='UNKNOWN';},(s:typeof original)=>{s.blocksCachedEvidence=true;},
+ ]){const state=structuredClone(original);change(state);assert.equal(inspect(state).state,'HOLD');}
+ const active=structuredClone(original);active.nextRetryAt=null;active.latestAttempt={...failure,id:'successor',state:'STARTED',ordinal:1,finishedAt:null};
+ assert.equal(inspect(active).state,'WAITING');active.latestAttempt.cycleId='other';assert.equal(inspect(active).state,'HOLD');
+ f.wshSource.automation='UNVERIFIED';assert.equal(inspect().state,'HOLD');
+});

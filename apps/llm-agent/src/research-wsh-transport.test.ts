@@ -153,6 +153,68 @@ test("a cancellation exception cannot replace original failure or skip the remai
   assert.equal(socket.disconnected, 1);
 });
 
+for (const kind of ["metadata", "events"] as const) for (const asynchronous of [false, true]) {
+  test(`owned ${kind} cancellation failure is diagnostic only (${asynchronous ? 'async' : 'sync'})`, async () => {
+    const socket = new Socket(), transport = new WshSocketTransport({ ...options, secrets: ['private-key'] }, () => socket);
+    await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+    socket.autoReply = false;
+    const pending = transport.events(2, request, deadline(), 100);
+    const method = kind === 'metadata' ? 'reqCancelWshMetaData' : 'reqCancelWshEventData';
+    const original = socket[method].bind(socket), code = kind === 'metadata' ? 10280 : 10284;
+    socket[method] = id => {
+      original(id);
+      const emit = () => {
+        socket.emit('error', Object.assign(new Error('Cancel DU_FIXTURE private-key\n'), { name: 'ProviderCancelError' }), code, id);
+        socket.emit('error', new Error('second cause'), code, id);
+      };
+      if (asynchronous) setImmediate(emit); else emit();
+    };
+    socket.emit('error', new Error('original duplicate'), 10281, 2);
+    await assert.rejects(pending, /RESEARCH_WSH_ERROR_10281/);
+    const cleanup = await transport.close();
+    assert.equal(cleanup.state, 'CONFIRMED'); assert.equal(cleanup.verifiedLocalClosure, true);
+    assert.deepEqual(cleanup.sourceError, { name: 'ProviderCancelError', code, message: 'Cancel [UKRYTO] [UKRYTO]\\u000a' });
+    assert.deepEqual(socket.cancellations, ['events:2', 'metadata:1']); assert.equal(socket.disconnected, 1);
+    assert.equal(socket.listenerCount('error'), 1);
+    socket.emit('error', new Error('late cause'), code, kind === 'metadata' ? 1 : 2);
+    assert.strictEqual(await transport.close(), cleanup);
+    assert.equal(cleanup.sourceError?.name, 'ProviderCancelError');
+  });
+}
+
+test('cleanup ignores foreign, global, wrong-kind and not-yet-cancelled request errors', async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline()); await transport.metadata(1, deadline(), 100); await transport.events(2, request, deadline(), 100);
+  socket.reqCancelWshEventData = id => {
+    socket.cancellations.push(`events:${id}`); socket.emit('sent', [103, id]);
+    for (const [code, requestId] of [[10284, -1], [10284, 99], [10280, id], [10280, 1], [502, id]])
+      socket.emit('error', new Error('irrelevant'), code, requestId);
+  };
+  const cleanup = await transport.close();
+  assert.equal(cleanup.state, 'CONFIRMED'); assert.equal(cleanup.sourceError, undefined);
+  assert.equal(socket.listenerCount('error'), 1);
+});
+
+for (const localFirst of [false, true]) test(`local cleanup failure takes precedence over cancellation diagnostic (${localFirst})`, async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline()); await transport.metadata(1, deadline(), 100); await transport.events(2, request, deadline(), 100);
+  socket.reqCancelWshEventData = id => {
+    socket.cancellations.push(`events:${id}`); socket.emit('sent', [103, id]);
+    if (localFirst) throw new Error('local failure');
+    socket.emit('error', new Error('provider cancellation failure'), 10284, id);
+  };
+  socket.reqCancelWshMetaData = id => {
+    socket.cancellations.push(`metadata:${id}`); socket.emit('sent', [101, id]);
+    if (!localFirst) throw new Error('local failure');
+    socket.emit('error', new Error('provider cancellation failure'), 10280, id);
+  };
+  const cleanup = await transport.close();
+  assert.equal(cleanup.state, 'UNKNOWN'); assert.equal(cleanup.verifiedLocalClosure, true);
+  assert.deepEqual(cleanup.sourceError, { name: 'Error', code: null, message: 'local failure' });
+  assert.deepEqual(socket.cancellations, ['events:2', 'metadata:1']);
+  assert.equal(socket.listenerCount('error'), 1);
+});
+
 test("synchronous SDK exceptions retain original description without inventing a provider code", async () => {
   for (const phase of ["connect", "send"] as const) {
     const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
@@ -222,6 +284,7 @@ test('actual delayed local close gates cleanup, peer end does not; duplicate clo
   assert.equal(result.state, 'CONFIRMED'); assert.ok(result.localClosedAt); assert.equal(socket.disconnected, 1);
   assert.equal(result.sessionId, transport.sessionId);
   assert.equal(result.verifiedLocalClosure, true);
+  assert.equal(socket.listenerCount('error'), 1);
 });
 test('already closed exact socket qualifies, while verified no socket is NOT_NEEDED', async () => {
   for (const allocated of [true, false]) {

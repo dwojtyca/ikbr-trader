@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { marketauxFixture } from "./research-marketaux.testfixture.js";
 import { marketauxRecordSetHash, parseMarketauxPage } from "./research-marketaux.js";
-import { captureResearchSourceError, researchHash, type MarketauxNewsConfig, type MarketauxRequest } from "@ikbr/shared/instrument-research";
+import { captureResearchSourceError, ResearchSourceFailure, researchHash, type MarketauxNewsConfig, type MarketauxRequest } from "@ikbr/shared/instrument-research";
 
 test("real provider envelope maps positive records and detects substituted or changed UUID contents", () => {
   const f = marketauxFixture();
@@ -127,7 +127,7 @@ test("capacity diagnostics retain numeric-before-cap-before-consistency validati
   for (const key of ["found", "returned", "limit", "page"]) for (const invalid of ["31", -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => parseMarketauxPage({ ...badLaterFields, meta: { ...badLaterFields.meta, [key]: invalid } }, config, f.descriptor), (error: unknown) => {
       assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
-      assert.equal(Object.hasOwn(error, "sourceError"), false);
+      assert.deepEqual(captureResearchSourceError(error), { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=meta.${key}.nonnegative_safe_integer` });
       return true;
     });
   }
@@ -154,4 +154,57 @@ test("invalid diagnostic-only fields are omitted without interpolating payload o
       return true;
     });
   }
+});
+
+
+test("payload diagnostics identify only fixed predicates while retaining rejection precedence", () => {
+  const f = marketauxFixture();
+  const base = () => ({ meta: { found: 1, returned: 1, limit: 2, page: 1 }, data: [f.article(1)] });
+  const cases: [string, (value: any) => unknown][] = [
+    ["root.object", () => null],
+    ["meta.object", v => ({ ...v, meta: null })],
+    ["root.provider_error_envelope", v => ({ ...v, error: "private-provider-error", data: null })],
+    ["data.array", v => ({ ...v, data: null })],
+    ["meta.limit.request_match", v => ({ ...v, meta: { ...v.meta, limit: 3, page: 2 } })],
+    ["meta.page.request_match", v => ({ ...v, meta: { ...v.meta, page: 2 } })],
+    ["meta.returned.data_length", v => ({ ...v, meta: { ...v.meta, returned: 0 } })],
+    ["meta.returned.page_cardinality", v => ({ ...v, meta: { ...v.meta, found: 2 } })],
+    ["article.object", v => ({ ...v, data: [null] })],
+    ["article.uuid.format", v => { v.data[0].uuid = "private-uuid"; v.data[0].title = ""; return v; }],
+    ["article.title.string", v => { v.data[0].title = 3; return v; }],
+    ["article.title.nonempty", v => { v.data[0].title = " "; return v; }],
+    ["article.title.max_length", v => { v.data[0].title = "x".repeat(1001); return v; }],
+    ["article.title.control_characters", v => { v.data[0].title = "private-title\u0000"; return v; }],
+    ["article.url.safe_public_url", v => { v.data[0].url = "https://127.0.0.1/private-api-token"; return v; }],
+    ["article.entities.array", v => { v.data[0].entities = null; return v; }],
+    ["article.similar.empty_array", v => { v.data[0].similar = [{ private: "provider-copy" }]; return v; }],
+    ["article.entity.object", v => { v.data[0].entities = [null]; return v; }],
+    ["published_at.string", v => { v.data[0].published_at = null; return v; }],
+    ["published_at.utc_format", v => { v.data[0].published_at = "private-timestamp"; return v; }],
+    ["published_at.calendar_date", v => { v.data[0].published_at = "2026-02-30T00:00:00Z"; return v; }],
+    ["matched_entity.sentiment_score.finite_unit_range", v => { v.data[0].entities[0].sentiment_score = "private-sentiment"; v.data[0].description = 3; return v; }],
+    ["description.string", v => { v.data[0].description = {}; return v; }],
+    ["description.max_length", v => { v.data[0].description = "x".repeat(8001); return v; }],
+    ["description.control_characters", v => { v.data[0].description = "private-description\u0000"; return v; }],
+    ["snippet.string", v => { v.data[0].snippet = {}; return v; }],
+    ["snippet.max_length", v => { v.data[0].snippet = "x".repeat(8001); return v; }],
+    ["snippet.control_characters", v => { v.data[0].snippet = "private-snippet\u0000"; return v; }],
+  ];
+  for (const [constraint, mutate] of cases) {
+    const value = base();
+    Object.assign(value.data[0], { description: "synthetic-secret-account-payload", snippet: "https://private.example/?api_token=secret" });
+    assert.throws(() => parseMarketauxPage(mutate(value), f.newsConfig, f.descriptor, 2), (error: unknown) => {
+      assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
+      const expected = { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=${constraint}` };
+      assert.deepEqual(captureResearchSourceError(error), expected);
+      assert.deepEqual(captureResearchSourceError(new ResearchSourceFailure(error.message, error)), expected);
+      assert.equal(JSON.stringify(captureResearchSourceError(error)).includes("private"), false);
+      assert.equal(JSON.stringify(captureResearchSourceError(error)).includes("synthetic-secret"), false);
+      return true;
+    });
+  }
+  assert.throws(() => parseMarketauxPage({ meta: { found: 0, returned: 0, limit: 2, page: 2 }, data: [] }, f.newsConfig, { ...f.descriptor, page: 2 }), error => {
+    assert.equal(captureResearchSourceError(error).message, "Local Marketaux payload validation; constraint=request.page.result_bound");
+    return true;
+  });
 });

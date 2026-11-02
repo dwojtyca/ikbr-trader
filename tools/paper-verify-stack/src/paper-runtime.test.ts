@@ -137,6 +137,21 @@ async function runScenario(options: { pause?: 'lost' | 'unchanged'; resume?: 'lo
   return { f, runtime, calls, logs, adapters, get control() { return control; }, get events() { return events; }, get pauseCalls() { return pauseCalls; }, get resumeCalls() { return resumeCalls; } };
 }
 
+async function assertHoldingUntilAborted(h: Awaited<ReturnType<typeof runScenario>>) {
+  const abort = new AbortController(), log = h.adapters.log, sleep = h.adapters.sleep;
+  let holding = false;
+  h.adapters.signal = abort.signal;
+  h.adapters.log = message => { holding ||= message.startsWith('HOLD:'); log?.(message); };
+  h.adapters.sleep = async ms => {
+    if (holding) {
+      assert.equal(ms, 5000); assert.equal(h.control?.paused, true); assert.equal(h.resumeCalls, 0);
+      abort.abort();
+    } else await sleep?.(ms);
+  };
+  await assert.rejects(h.runtime.start(), /PAPER_START_INTERRUPTED/);
+  assert.equal(holding, true);
+}
+
 test('completed bootstrap reports independent partial PKO and failed AAPL session warmup without changing resume', async () => {
   const timeframes = ['1m', '5m', '1h', '4h', '1d', '1w'];
   const warmup = [
@@ -667,7 +682,7 @@ test('calendar hold displays provider code/message below failure, masks secrets,
             role:'calendar', reasons:['RESEARCH_CALENDAR_ERROR'], ...(providerError ? {providerError} : {})}] })) };
     };
     try {
-      await assert.rejects(h.runtime.start(), /RESEARCH_CALENDAR_ERROR/);
+      await assertHoldingUntilAborted(h);
       assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
       const output = messages.join('\n');
       assert.match(output, /Wstrzymano przygotowanie: RESEARCH_CALENDAR_ERROR/);
@@ -693,7 +708,7 @@ test('news recovery prints original and next check once across repeated WAITING 
   try {
     await h.runtime.start(); assert.equal(h.resumeCalls,1);
     const output=messages.join('\n');assert.match(output,/RESEARCH_SOURCE_TIMEOUT/);assert.match(output,/ABORT_ERR/);assert.match(output,/Najwcześniejsze kolejne sprawdzenie: 2026-10-13T15:00/);
-    assert.equal(messages.filter(m=>m.includes('pko_wse / marketaux_news')).length,1);assert.doesNotMatch(output,/fixture|DU123456/);
+    assert.equal(messages.filter(m=>m.includes('pko_wse / marketaux_news') && m.includes('RESEARCH_SOURCE_TIMEOUT')).length,1);assert.doesNotMatch(output,/fixture|DU123456/);
   } finally {await h.f.cleanup();}
 });
 
@@ -759,7 +774,7 @@ test('exhausted local limit holds; malformed local diagnosis falls back without 
         localBudget,
       }] })) });
     try {
-      await assert.rejects(h.runtime.start(), /RESEARCH_NEWS_ERROR/);
+      await assertHoldingUntilAborted(h);
       assert.equal(h.resumeCalls, 0);
       const output = messages.join('\n');
       assert.match(output, /LOCAL_LIMIT/);
@@ -775,7 +790,7 @@ test('hard and legacy news failures show original details or truthful unavailabi
   for(const sourceError of [{name:'Error',code:401,message:'Unauthorized',httpStatus:401,providerCode:'invalid_api_token',providerMessage:'Invalid fixture'},undefined]) {
     const h=await runScenario(), messages:string[]=[];const original=h.adapters.http;h.adapters.log=text=>messages.push(text);
     h.adapters.http=async(path,body,...rest)=>path!=='/execution/entry-control/start/prepare'?original(path,body,...rest):({revision:(body as {expectedRevision:number}).expectedRevision,instruments:['pko_wse','aapl_smart'].map(instrumentId=>({instrumentId,state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],sources:[{sourceId:'marketaux_news',role:'news',state:'HOLD',reasons:['RESEARCH_NEWS_ERROR'],failureReason:'RESEARCH_SOURCE_HTTP_401',...(sourceError?{sourceError}:{})}]}))});
-    try {await assert.rejects(h.runtime.start(),/RESEARCH_NEWS_ERROR/);assert.equal(h.resumeCalls,0);const output=messages.join('\n');assert.match(output,sourceError?/invalid_api_token/:/Oryginalny opis błędu niedostępny/);assert.doesNotMatch(output,/fixture/);}finally{await h.f.cleanup();}
+    try {await assertHoldingUntilAborted(h);assert.equal(h.resumeCalls,0);const output=messages.join('\n');assert.match(output,sourceError?/invalid_api_token/:/Oryginalny opis błędu niedostępny/);assert.doesNotMatch(output,/fixture/);}finally{await h.f.cleanup();}
   }
 });
 
@@ -807,7 +822,7 @@ test('retained WSH diagnostic cannot override an unresolved preparation hold or 
         retained:true,blocksCachedEvidence:true,lastSuccessfulAt:'unsafe\ntext',expiresAt:'2026-10-15T12:00:00.000Z',
         latestFailure:{state:'UNKNOWN',finishedAt:'2026-10-14T13:00:00.000Z',failureReason:'unsafe\ntext'}
       }}]}))});
-  try{await assert.rejects(h.runtime.start(),/RESEARCH_WSH_RECOVERY_REQUIRED/);assert.equal(h.resumeCalls,0);
+  try{await assertHoldingUntilAborted(h);assert.equal(h.resumeCalls,0);
     assert.doesNotMatch(messages.join('\n'),/zachowane dane pozostają ważne|unsafe/);
   }finally{await h.f.cleanup();}
 });
@@ -824,7 +839,7 @@ test('WSH provider code and message remain visible beside a legacy unavailable s
           wshRefresh:{retained:state==='READY',blocksCachedEvidence:false,lastSuccessfulAt:'2026-10-14T12:00:00.000Z',expiresAt:'2026-10-15T12:00:00.000Z',
             nextRetryAt:null,nextRegularAt:'2026-10-14T13:15:00.000Z',latestAttempt:{state:'STARTED'},latestFailure:{state:'FAILED',
               finishedAt:'2026-10-14T13:00:00.000Z',failureReason:`RESEARCH_WSH_ERROR_${code}`,stage:'events',sourceError,providerError}}}]}))});
-    try{if(state==='READY')await h.runtime.start();else await assert.rejects(h.runtime.start(),/RESEARCH_CALENDAR_ERROR/);
+    try{if(state==='READY')await h.runtime.start();else await assertHoldingUntilAborted(h);
       assert.equal(h.resumeCalls,state==='READY'?1:0);const output=messages.join('\n');
       assert.match(output,new RegExp(`Original broker ${code}`));assert.doesNotMatch(output,/fixture|DU123456/);
     }finally{await h.f.cleanup();}
@@ -901,4 +916,227 @@ test('automatic WSH read recovery waits across repeated preparation responses an
   }]}))};
  };
  try{await h.runtime.start();assert.equal(h.resumeCalls,1);assert.ok(prepares>2);}finally{await h.f.cleanup();}
+});
+
+test('Compose recreation waits for execution HTTP and account hydration under the original pause', async () => {
+  const h = await runScenario(), compose = h.adapters.compose, http = h.adapters.http;
+  let recreated = false, outages = 0, fullUps = 0, expectedRevision = 0;
+  const revisions: number[] = [];
+  h.adapters.compose = async (args, ...rest) => {
+    const result = await compose(args, ...rest);
+    if (args.includes('up') && args.includes('ingestion')) { recreated = true; fullUps++; expectedRevision = Number(h.control!.revision); }
+    return result;
+  };
+  h.adapters.http = async (path, body, ...rest) => {
+    if (recreated && path === '/execution/entry-control' && outages < 3) {
+      assert.equal(h.resumeCalls, 0); assert.equal(h.calls.includes('post:http://ingestion/bootstrap'), false);
+      const attempt = outages++;
+      if (attempt === 0) throw new Error('execution HTTP not listening');
+      if (attempt === 1) throw new PaperHttpError('PAPER_HTTP_REJECTED', 503);
+      throw new PaperHttpError('ENTRY_CONTROL_ACCOUNT_UNAVAILABLE', 423);
+    }
+    if (path === '/execution/entry-control/start/prepare' || path === '/execution/entry-control/resume') revisions.push((body as {expectedRevision:number}).expectedRevision);
+    return http(path, body, ...rest);
+  };
+  try {
+    await h.runtime.start(); assert.equal(outages, 3); assert.equal(fullUps, 1);
+    assert.equal(h.pauseCalls, 1); assert.equal(h.resumeCalls, 1);
+    assert.ok(revisions.length >= 2); assert.ok(revisions.every(value => value === expectedRevision));
+    assert.equal(h.logs.filter(message => message.includes('połączenie Paper')).length, 1);
+  } finally { await h.f.cleanup(); }
+});
+
+test('post-Compose control recovery rejects changed authority and definitive errors before bootstrap', async () => {
+  for (const failure of ['account', 'revision', 'unpaused', 'protocol', 'shape', 'auth', 'unknown423']) {
+    const h = await runScenario(), compose = h.adapters.compose, http = h.adapters.http; let recreated = false;
+    h.adapters.compose = async (args, ...rest) => { const result = await compose(args, ...rest); if (args.includes('up') && args.includes('ingestion')) recreated = true; return result; };
+    h.adapters.http = async (path, body, ...rest) => {
+      if (!recreated || path !== '/execution/entry-control') return http(path, body, ...rest);
+      if (failure === 'auth') throw new PaperHttpError('unauthorized', 401);
+      if (failure === 'unknown423') throw new PaperHttpError('UNRELATED_HOLD', 423);
+      const current = { startupProtocolVersion: 1, control: { ...h.control! }, events: h.events };
+      if (failure === 'account') current.control.account_id = 'DU_OTHER';
+      if (failure === 'revision') current.control.revision = Number(current.control.revision) + 1;
+      if (failure === 'unpaused') current.control.paused = false;
+      if (failure === 'protocol') current.startupProtocolVersion = 99;
+      if (failure === 'shape') return { startupProtocolVersion: 1, control: h.control, events: [{}] };
+      return current;
+    };
+    try {
+      const expected = failure === 'account' ? 'PAPER_ACCOUNT_MISMATCH' : ['revision', 'unpaused'].includes(failure) ? 'PAPER_START_SUPERSEDED' : failure === 'protocol' ? 'PAPER_PROTOCOL_UNSUPPORTED' : failure === 'shape' ? 'PAPER_CONTROL_UNKNOWN' : failure === 'auth' ? 'unauthorized' : 'UNRELATED_HOLD';
+      await assert.rejects(h.runtime.start(), (error: unknown) => error instanceof PaperRuntimeError && error.code === expected);
+      assert.equal(h.pauseCalls, 1); assert.equal(h.resumeCalls, 0); assert.equal(h.calls.includes('post:http://ingestion/bootstrap'), false);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('stop and abort cancel post-Compose availability waits and late successful control reads', async () => {
+  for (const mode of ['stop-wait', 'abort-wait', 'stop-read', 'abort-read']) {
+    const abort = new AbortController(), h = await runScenario({ abort }), compose = h.adapters.compose, http = h.adapters.http;
+    let recreated = false, cancelled = false, pending = false;
+    const cancel = async () => {
+      cancelled = true;
+      if (mode.startsWith('abort')) abort.abort();
+      else await new PaperRuntime({ root: h.f.root, token: 'fixture', adapters: h.adapters }).stop();
+    };
+    h.adapters.compose = async (args, ...rest) => { const result = await compose(args, ...rest); if (args.includes('up') && args.includes('ingestion')) recreated = true; return result; };
+    h.adapters.http = async (path, body, ...rest) => {
+      if (recreated && !cancelled && path === '/execution/entry-control') {
+        if (mode.endsWith('wait')) { pending = true; throw new Error('execution restarting'); }
+        const stale = structuredClone(await http(path, body, ...rest)); await cancel(); return stale;
+      }
+      return http(path, body, ...rest);
+    };
+    h.adapters.sleep = async () => { if (pending && !cancelled) await cancel(); };
+    try {
+      await assert.rejects(h.runtime.start(), (error: unknown) => error instanceof PaperRuntimeError && error.code === (mode.startsWith('abort') ? 'PAPER_START_INTERRUPTED' : 'PAPER_START_CANCELLED'));
+      assert.equal(cancelled, true); assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
+      assert.equal(h.calls.includes('post:http://ingestion/bootstrap'), false);
+      assert.ok(h.calls.some(call => call.includes('stop signal-engine llm-agent')));
+      assert.equal(h.events.filter(event => event.reason.startsWith('paper-start:')).length, 1);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('GET protocol failures preserve terminal auth status and server availability without changing POST ambiguity', async () => {
+  const { httpClient } = await import('./paper-runtime-cli.js');
+  for (const status of [200, 401, 403, 503]) for (const content of [null, 'not json', 'x'.repeat(2_000_001)]) {
+    const transport = httpClient('fixture', (async () => new Response(content, {status})) as typeof fetch);
+    await assert.rejects(transport('/execution/entry-control'), (error: unknown) => error instanceof PaperHttpError && error.status === status && error.code === (status === 200 ? 'PAPER_HTTP_PROTOCOL_INVALID' : 'PAPER_HTTP_REJECTED'));
+  }
+  const h = await runScenario(), http = h.adapters.http; let resumeAttempts = 0;
+  const malformed = httpClient('fixture', (async () => new Response('not json', {status:423})) as typeof fetch);
+  h.adapters.http = async (path, body, ...rest) => {
+    if (path === '/execution/entry-control/resume') { resumeAttempts++; return malformed(path, body, ...rest); }
+    return http(path, body, ...rest);
+  };
+  try { await assert.rejects(h.runtime.start(), /PAPER_RESUME_UNKNOWN/); assert.equal(resumeAttempts, 1); assert.equal(h.control?.paused, true); }
+  finally { await h.f.cleanup(); }
+});
+
+test('startup observes repeated WAITING and BUSY or HARD HOLD until every instrument is READY', async () => {
+  for (const kind of ['busy', 'hard']) {
+    const h = await runScenario(), http = h.adapters.http;
+    let prepares = 0, waits = 0;
+    const revisions = new Set<number>();
+    h.adapters.http = async (path, body, ...rest) => {
+      if (path !== '/execution/entry-control/start/prepare') return http(path, body, ...rest);
+      prepares++;
+      assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
+      revisions.add((body as { expectedRevision: number }).expectedRevision);
+      if (prepares === 5) return http(path, body, ...rest);
+      assert.ok(prepares < 5);
+      const state = prepares <= 2 ? 'WAITING' : 'HOLD';
+      const failureReason = kind === 'busy' ? 'RESEARCH_WSH_ERROR_10281' : 'RESEARCH_MARKETAUX_PAYLOAD_INVALID';
+      const refresh = { nextRetryAt: kind === 'busy' ? '2026-11-02T12:00:30.000Z' : null, nextRegularAt: '2026-11-02T13:00:00.000Z', latestFailure: { failureClass: kind === 'busy' ? 'BUSY' : 'HARD' } };
+      return { revision: Number(h.control!.revision), instruments: [
+        { instrumentId: 'pko_wse', state: 'READY', reasons: [] },
+        { instrumentId: 'aapl_smart', state, reasons: [failureReason], sources: [{
+          sourceId: kind === 'busy' ? 'wsh_calendar' : 'marketaux_news', role: kind === 'busy' ? 'calendar' : 'news', state,
+          reasons: [failureReason], failureReason, sourceError: { name: 'Error', code: kind === 'busy' ? 10281 : 'INVALID_PAYLOAD', message: 'Unavailable fixture DU123456' },
+          ...(kind === 'busy' ? { wshRefresh: refresh } : { marketauxRefresh: refresh }),
+        }] },
+      ] };
+    };
+    h.adapters.sleep = async ms => { if (prepares) { assert.equal(ms, 5000); waits++; assert.equal(h.resumeCalls, 0); } };
+    try {
+      await h.runtime.start();
+      assert.equal(prepares, 5); assert.equal(waits, 4); assert.equal(h.pauseCalls, 1); assert.equal(h.resumeCalls, 1); assert.equal(revisions.size, 1);
+      assert.equal(h.logs.filter(message => message.startsWith('HOLD:')).length, 1);
+      assert.equal(h.logs.filter(message => message.startsWith('WAITING: przygotowanie badań:')).length, 1);
+      const output = h.logs.join('\n');
+      assert.match(output, /Najwcześniejsze zwykłe odświeżenie: 2026-11-02T13:00:00.000Z/);
+      assert.equal(output.includes('Najwcześniejsze ponowienie: 2026-11-02T12:00:30.000Z'), kind === 'busy');
+      assert.match(output, /Termin usunięcia przyczyny nie jest potwierdzony/);
+      assert.doesNotMatch(output, /fixture|DU123456/);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('HOLD deadlines without failure details are reported and invalid dates never become repair promises', async () => {
+  const h = await runScenario(), http = h.adapters.http;
+  h.adapters.http = async (path, body, ...rest) => path !== '/execution/entry-control/start/prepare' ? http(path, body, ...rest) : ({
+    revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_SOURCE_STALE'], sources: [{
+      sourceId: 'wsh_calendar', role: 'calendar', state: 'HOLD', reasons: ['RESEARCH_SOURCE_STALE'],
+      nextCheckAt: '2026-11-02T13:01:00.000Z', wshRefresh: { nextRetryAt: '2026-02-30T12:00:00.000Z', nextRegularAt: 'unsafe\nfixture' },
+    }] })),
+  });
+  try {
+    await assertHoldingUntilAborted(h);
+    assert.match(h.logs.join('\n'), /pko_wse \/ wsh_calendar: Najwcześniejsze kolejne sprawdzenie: 2026-11-02T13:01:00.000Z/);
+    assert.doesNotMatch(h.logs.join('\n'), /2026-02-30|unsafe|fixture|Najwcześniejsze ponowienie|Najwcześniejsze zwykłe odświeżenie/);
+  } finally { await h.f.cleanup(); }
+});
+
+test('stop and AbortSignal end research HOLD observation and fence a late READY response', async () => {
+  for (const mode of ['stop-wait', 'abort-wait', 'stop-read', 'abort-read']) {
+    const abort = new AbortController(), h = await runScenario({ abort }), http = h.adapters.http;
+    let prepares = 0, cancelled = false;
+    const cancel = async () => {
+      cancelled = true;
+      if (mode.startsWith('abort')) abort.abort();
+      else await new PaperRuntime({ root: h.f.root, token: 'fixture', adapters: h.adapters }).stop();
+    };
+    h.adapters.http = async (path, body, ...rest) => {
+      if (path !== '/execution/entry-control/start/prepare') return http(path, body, ...rest);
+      if (++prepares === 1) return { revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_NEWS_ERROR'] })) };
+      assert.equal(prepares, 2);
+      const late = await http(path, body, ...rest); await cancel(); return late;
+    };
+    h.adapters.sleep = async () => { if (prepares && mode.endsWith('wait')) await cancel(); };
+    try {
+      await assert.rejects(h.runtime.start(), new RegExp(mode.startsWith('abort') ? 'PAPER_START_INTERRUPTED' : 'PAPER_START_CANCELLED'));
+      assert.equal(cancelled, true); assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
+      assert.equal(prepares, mode.endsWith('wait') ? 1 : 2);
+      assert.ok(h.calls.some(call => call.includes('stop signal-engine llm-agent')));
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('authority, protocol and authentication changes after research HOLD terminate before resume', async () => {
+  for (const failure of ['account', 'revision', 'unpaused', 'protocol', 'shape', 'auth', 'prepare-shape', 'prepare-auth', 'prepare-control']) {
+    const h = await runScenario(), http = h.adapters.http;
+    let holding = false, prepares = 0;
+    h.adapters.sleep = async () => { if (prepares) holding = true; };
+    h.adapters.http = async (path, body, ...rest) => {
+      if (holding && path === '/execution/entry-control' && !failure.startsWith('prepare-')) {
+        if (failure === 'auth') throw new PaperHttpError('unauthorized', 401);
+        const current = { startupProtocolVersion: 1, control: { ...h.control! }, events: h.events };
+        if (failure === 'account') current.control.account_id = 'DU_OTHER';
+        if (failure === 'revision') current.control.revision = Number(current.control.revision) + 1;
+        if (failure === 'unpaused') current.control.paused = false;
+        if (failure === 'protocol') current.startupProtocolVersion = 99;
+        if (failure === 'shape') return { ...current, events: [{}] };
+        return current;
+      }
+      if (path !== '/execution/entry-control/start/prepare') return http(path, body, ...rest);
+      if (++prepares === 1) return { revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_NEWS_ERROR'] })) };
+      assert.equal(prepares, 2);
+      if (failure === 'prepare-auth') throw new PaperHttpError('unauthorized', 401);
+      if (failure === 'prepare-control') throw new PaperHttpError('ENTRY_CONTROL_REVISION_CHANGED', 423);
+      return { revision: Number(h.control!.revision), instruments: [{ instrumentId: 'pko_wse', state: 'READY' }] };
+    };
+    try {
+      const expected = failure === 'account' ? 'PAPER_ACCOUNT_MISMATCH' : ['revision', 'unpaused'].includes(failure) ? 'PAPER_START_SUPERSEDED' : failure === 'protocol' ? 'PAPER_PROTOCOL_UNSUPPORTED' : failure === 'shape' ? 'PAPER_CONTROL_UNKNOWN' : failure === 'auth' ? 'unauthorized' : failure === 'prepare-control' ? 'ENTRY_CONTROL_REVISION_CHANGED' : 'PAPER_PREPARATION_UNKNOWN';
+      await assert.rejects(h.runtime.start(), (error: unknown) => error instanceof PaperRuntimeError && error.code === expected);
+      assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true); assert.equal(h.pauseCalls, 1);
+      assert.equal(h.logs.filter(message => message.startsWith('HOLD:')).length, 1);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('research HOLD recovery never retries an unknown resume mutation', async () => {
+  for (const resume of ['unchanged', 'server'] as const) {
+    const h = await runScenario({ resume }), http = h.adapters.http;
+    let prepares = 0;
+    h.adapters.http = async (path, body, ...rest) => {
+      if (path === '/execution/entry-control/start/prepare' && ++prepares === 1)
+        return { revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_NEWS_ERROR'] })) };
+      return http(path, body, ...rest);
+    };
+    try {
+      await assert.rejects(h.runtime.start(), /PAPER_RESUME_UNKNOWN/);
+      assert.equal(prepares, 2); assert.equal(h.resumeCalls, 1); assert.equal(h.control?.paused, true);
+    } finally { await h.f.cleanup(); }
+  }
 });

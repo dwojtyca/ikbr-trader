@@ -42,11 +42,15 @@ function harness(rows: unknown[] = [], ongoing = false, configure?: (source: Ret
     for (const call of calls) if (!outcomes.has(call.callKey)) outcomes.set(call.callKey, outcome);
     state = outcome; generation++;
   };
+  const retryable=(result:WshAttemptResult)=>result.outcome==='FAILED' && (
+    result.failureClass==='TRANSIENT'&&result.cleanup.state!=='UNKNOWN'
+    ||result.failureClass==='BUSY'&&result.failureReason==='RESEARCH_WSH_ERROR_10281'&&result.providerError?.code===10281
+      &&result.cleanup.state==='CONFIRMED'&&result.acquisitionOutcome!=='UNKNOWN');
   const store: any = {
     claimWshAttempt: async (_lease: unknown, input: any, kind: string) => {
       const last = attempts.at(-1), ordinal = kind === 'retry' ? (last?.ticket.ordinal ?? 0) + 1 : 0;
       if (kind === 'regular' && clock < nextRegularAt || kind === 'retry' && (!last?.result || last.result.outcome !== 'FAILED'
-        || last.result.failureClass !== 'TRANSIENT' || last.result.cleanup.state === 'UNKNOWN' || ordinal > 2
+        || !retryable(last.result) || ordinal > 2
         || clock < Date.parse(last.result.cleanup.completedAt) + (ordinal === 1 ? 30000 : 120000) || clock >= nextRegularAt))
         return { state: 'DEFERRED', reason: 'not-due', nextCheckAt: null };
       if (kind === 'regular') { cycleStart = clock; nextRegularAt = clock + Number(f.source.parserConfig.refreshIntervalMs); }
@@ -57,7 +61,7 @@ function harness(rows: unknown[] = [], ongoing = false, configure?: (source: Ret
     confirmWshPreflight: async (_lease: unknown, ticket: WshAttemptTicket) => { attempts.find(a => a.ticket.id === ticket.id)!.preflightComplete = true; },
     dueWshAttempts: async () => {
       const last = attempts.at(-1);
-      return last?.result?.outcome === 'FAILED' && last.result.failureClass === 'TRANSIENT' && last.result.cleanup.state !== 'UNKNOWN'
+      return last?.result && retryable(last.result)
         && last.ticket.ordinal < 2 && clock < nextRegularAt && clock >= Date.parse(last.result.cleanup.completedAt) + (last.ticket.ordinal === 0 ? 30000 : 120000)
         ? [{ identity: { ...last.ticket }, kind: 'retry', dueAt: new Date(clock).toISOString() }] : [];
     },
@@ -468,14 +472,22 @@ test('confirmed connect 502 consumes a durable ordinal but no call budget before
   h.advance(120000); assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false);
   assert.deepEqual(h.attempts.map(a => a.ticket.ordinal), [0, 1, 2]); assert.equal(h.calls.length, 0);
 });
-test('busy and unconfirmed cleanup never schedule an accelerated attempt', async () => {
+test('unconfirmed cleanup never schedules an accelerated BUSY or transient attempt', async () => {
   for (const kind of ['busy', 'cleanup'] as const) {
     const h = harness(), create = h.wsh.createTransport;
     h.faults({ eventError: kind === 'busy' ? Object.assign(new Error('RESEARCH_WSH_ERROR_10281'), { providerError: { code: 10281, message: 'busy' } }) : new Error('RESEARCH_WSH_TIMEOUT') });
-    if (kind === 'cleanup') h.wsh.createTransport = () => ({ ...create(), close: async () => ({ ...h.cleanupReceipt(), state: 'UNKNOWN' }) });
+    h.wsh.createTransport = () => ({ ...create(), close: async () => ({ ...h.cleanupReceipt(), state: 'UNKNOWN' }) });
     await h.run(); h.advance(120000); assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false);
     assert.equal(h.attempts.length, 1); assert.equal(h.calls.length, 2);
   }
+});
+test('confirmed BUSY cannot retry at the original regular-cycle boundary', async () => {
+  const h = harness([], true);
+  h.faults({ eventError: Object.assign(new Error('RESEARCH_WSH_ERROR_10281'), { providerError: { code: 10281, message: 'busy' } }) });
+  await h.run(); assert.equal(h.attempts[0].result?.cleanup.state, 'CONFIRMED');
+  h.advance(3600000);
+  assert.equal(await refreshWsh({ ...h.options, kind: 'retry' }), false);
+  assert.equal(h.attempts.length, 1); assert.equal(h.calls.length, 2);
 });
 test('terminal commit readback requires the exact result hash and never resends', async () => {
   const h = harness(), finish = h.store.finishWshAttempt;

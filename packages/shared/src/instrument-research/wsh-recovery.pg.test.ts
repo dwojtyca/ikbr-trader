@@ -103,6 +103,69 @@ test('unconfirmed cleanup and10281 never authorize fast retry; original failure 
  const h=await seed(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.claim(lease);assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')return;const result=h.failure();result.cleanup.state='UNKNOWN';if(result.outcome==='SUCCEEDED')throw Error('fixture');result.failureClass='BUSY';result.failureReason='RESEARCH_WSH_ERROR_10281';result.providerError={code:10281,message:'original busy text'};await h.store.finishWshAttempt(lease,c.ticket,result);assert.equal((await h.claim(lease,'retry')).state,'DEFERRED');});
  const state=await h.store.readWshRefreshState(h.identity,pool);assert.equal(state.nextRetryAt,null);assert.equal(state.latestFailure?.providerError?.code,10281);
 }));
+function busyFailure(h:Awaited<ReturnType<typeof seed>>,ticket:WshAttemptTicket){
+ const result=h.failure();if(result.outcome==='SUCCEEDED')throw Error('fixture');
+ result.failureClass='BUSY';result.failureReason='RESEARCH_WSH_ERROR_10281';result.stage='events';
+ result.providerError={code:10281,message:'Duplicate WSH event data request'};
+ result.snapshot.coverage.find(c=>c.sourceId===h.f.source.id)!.reason=result.failureReason;
+ const at=new Date().toISOString();result.cleanup={sessionId:ticket.sessionId,state:'CONFIRMED',verifiedLocalClosure:true,
+  completedAt:at,cancellationAttemptedAt:at,disconnectRequestedAt:at,localClosedAt:at};
+ return result;
+}
+test('confirmed BUSY uses two durable bounded retries across workers, preserving original cycle and history',{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool);let regularAt:string|undefined;
+ for(const ordinal of [0,1,2]){
+  if(ordinal)await dueNow(pool);
+  const worker=new ResearchStore(pool);
+  await worker.withWshEndpointLock('fixture-endpoint',async lease=>{
+   const c=await worker.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},ordinal?'retry':'regular');
+   assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')throw Error('fixture');
+   assert.equal(c.ticket.ordinal,ordinal);regularAt??=c.ticket.nextRegularAt;assert.equal(c.ticket.nextRegularAt,regularAt);
+   await worker.confirmWshPreflight(lease,c.ticket);
+   const result=busyFailure(h,c.ticket);await worker.finishWshAttempt(lease,c.ticket,result);
+   const row=(await pool.query('SELECT retry_due_at,finished_at,result_hash FROM research_wsh_refresh_attempts WHERE id=$1',[c.ticket.id])).rows[0];
+   assert.equal(row.result_hash,researchHash(result));
+   if(ordinal<2){const delay=row.retry_due_at.getTime()-row.finished_at.getTime();assert.ok(delay>=(ordinal?120000:30000)-1000&&delay<=(ordinal?120000:30000));}
+   else assert.equal(row.retry_due_at,null);
+   assert.equal((await worker.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},'retry')).state,'DEFERRED');
+  });
+  const prep=await worker.prepareRepair(h.identity);assert.equal(prep.sources.find(s=>s.sourceId==='wsh')?.state,ordinal<2?'WAITING':'HOLD');
+ }
+ const restarted=new ResearchStore(pool);await restarted.withWshEndpointLock('fixture-endpoint',async lease=>assert.equal((await restarted.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},'regular')).state,'DEFERRED'));
+ assert.equal((await pool.query('SELECT count(*) FROM research_wsh_refresh_attempts')).rows[0].count,'3');
+ assert.equal((await pool.query('SELECT count(*) FROM research_wsh_refresh_cycles')).rows[0].count,'1');
+}));
+test('SQL BUSY retry authority rejects absent, null, string and wrong provider codes',{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{
+  const c=await h.claim(lease);if(c.state!=='CLAIMED')throw Error('fixture');
+  const settle=`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=clock_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
+   provider_error=$2::jsonb,cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=clock_timestamp(),cleanup_completed_at=clock_timestamp(),retry_due_at=clock_timestamp()+interval '30 seconds' WHERE id=$1`;
+  for(const detail of [null,'null','{}','[]','{"code":null}','{"code":"10281"}','{"code":502}'])
+   await assert.rejects(pool.query(settle,[c.ticket.id,detail]),/research_wsh_retry_known_failure/);
+  await pool.query(settle,[c.ticket.id,'{"code":10281,"message":"fixture busy"}']);
+ });
+}));
+for(const mode of ['application','sql'] as const)test(`${mode} cannot grant BUSY retry for an UNKNOWN linked acquisition`,{skip:!connection},()=>isolated(async pool=>{
+ const h=await seed(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{
+  const c=await h.claim(lease);if(c.state!=='CLAIMED')throw Error('fixture');
+  const reservation={...h.identity,provider:'ibkr-wsh',kind:'source' as const,reservedCostMicros:0,maxRequestsPerDay:100,maxCostMicrosPerDay:0,
+   callKey:'metadata_'+randomUUID(),requestHash:'a'.repeat(64),deadlineAt:new Date(Date.now()+9000).toISOString()};
+  const acquisition=await h.store.beginWshAcquisition(lease,{...h.identity,sessionId:c.ticket.sessionId,reservation},c.ticket);
+  if(mode==='application'){
+   const result=busyFailure(h,c.ticket);result.acquisition=acquisition;result.acquisitionOutcome='UNKNOWN';
+   await h.store.finishWshAttempt(lease,c.ticket,result);
+   assert.equal((await pool.query('SELECT retry_due_at FROM research_wsh_refresh_attempts WHERE id=$1',[c.ticket.id])).rows[0].retry_due_at,null);
+   assert.equal((await h.claim(lease,'retry')).state,'DEFERRED');
+  }else{
+   await h.store.retireWshAcquisition(lease,acquisition,'UNKNOWN');
+   await assert.rejects(pool.query(`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=clock_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
+    provider_error='{"code":10281}',cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=clock_timestamp(),cleanup_completed_at=clock_timestamp(),retry_due_at=clock_timestamp()+interval '30 seconds' WHERE id=$1`,[c.ticket.id]),/BUSY_ACQUISITION_UNRESOLVED/);
+  }
+  assert.equal((await pool.query('SELECT state FROM research_wsh_acquisitions WHERE id=$1',[acquisition.id])).rows[0].state,'UNKNOWN');
+  assert.equal((await pool.query('SELECT outcome FROM research_call_outcomes WHERE call_key=$1',[reservation.callKey])).rows[0].outcome,'UNKNOWN');
+  assert.equal((await pool.query('SELECT count(*) FROM research_call_reservations')).rows[0].count,'1');
+ });
+}));
 test('lost terminal acknowledgement is verified by exact result hash, never overwritten or replayed', {skip:!connection},()=>isolated(async pool=>{
  const h=await seed(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{const c=await h.claim(lease);assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')return;const result=h.failure();await h.store.finishWshAttempt(lease,c.ticket,result);assert.equal((await new ResearchStore(pool).readWshAttempt(c.ticket))?.terminalResultHash,researchHash(result));await assert.rejects(h.store.finishWshAttempt(lease,c.ticket,h.failure('HARD')),/IMMUTABLE/);});assert.equal((await pool.query('SELECT count(*) FROM research_wsh_refresh_attempts')).rows[0].count,'1');
 }));

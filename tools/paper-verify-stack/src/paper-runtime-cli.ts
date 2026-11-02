@@ -47,17 +47,20 @@ export function httpClient(token: string, fetchImpl: typeof fetch = fetch): Runt
       signal: AbortSignal.any([AbortSignal.timeout(timeoutMs), ...(parentSignal ? [parentSignal] : [])]),
       headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-    if (!response.body) throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
+    const invalidResponse = () => body === undefined
+      ? new PaperHttpError(response.ok ? 'PAPER_HTTP_PROTOCOL_INVALID' : 'PAPER_HTTP_REJECTED', response.status)
+      : new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
+    if (!response.body) throw invalidResponse();
     const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let bytes = 0;
-    try { for (;;) { const x = await reader.read(); if (x.done) break; bytes += x.value.byteLength; if (bytes > MAX_OUTPUT) { await reader.cancel(); throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE'); } chunks.push(x.value); } }
+    try { for (;;) { const x = await reader.read(); if (x.done) break; bytes += x.value.byteLength; if (bytes > MAX_OUTPUT) { await reader.cancel(); throw invalidResponse(); } chunks.push(x.value); } }
     finally { reader.releaseLock(); }
     let value: unknown;
-    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; } catch { throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE'); }
+    try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown; } catch { throw invalidResponse(); }
     if (!response.ok) {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidResponse();
       const data = value as Record<string, unknown>;
       const code = [data.reason, data.message, data.error].find(v => typeof v === 'string' && /^(?:[A-Z][A-Z0-9_]{0,119}|[a-z][a-z0-9_]{0,119})$/.test(v));
-      if (typeof code !== 'string') throw new PaperRuntimeError('PAPER_HTTP_UNAVAILABLE');
+      if (typeof code !== 'string') throw invalidResponse();
       throw new PaperHttpError(code, response.status);
     }
     return value;

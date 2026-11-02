@@ -12,7 +12,7 @@ function frame(tokens: (string | number)[]): Buffer {
 const request: WshEventRequest = { conId: 123, filter: "", fillWatchlist: false, fillPortfolio: false, fillCompetitors: false,
   startDate: "20261001", endDate: "20261125", totalLimit: 100 };
 
-for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-end"] as const) {
+for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-end", "cancel-error"] as const) {
   test(`installed SDK bounded owned cleanup: ${stage}`, { timeout: 5000 }, async () => {
     const trace: string[] = [];
     let peer: Socket | undefined;
@@ -22,6 +22,7 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
     const closed = new Promise<void>(resolve => { ended = resolve; });
     const server = createServer(socket => {
       peer = socket;
+      if (stage === 'cancel-error') socket.setNoDelay(true);
       let buffer = Buffer.alloc(0), handshake = false;
       socket.on("data", bytes => {
         buffer = Buffer.concat([buffer, bytes]);
@@ -52,7 +53,9 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
             if (code === 102) {
               requested();
               if (stage === "success") socket.write(frame([105, id, "[]"]));
+              if (stage === 'cancel-error') socket.write(frame([4, 2, id, 10281, 'Duplicate WSH event data request', '']));
             }
+            if (code === 103 && stage === 'cancel-error') socket.write(frame([4, 2, id, 10284, 'Cancellation failed DU_FIXTURE', '']));
           }
         }
       });
@@ -71,7 +74,7 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
     try {
       await transport.connect(deadline());
       let pending = transport.metadata(17, deadline(), 100);
-      if (stage === "events" || stage === "success") { await pending; pending = transport.events(29, request, deadline(), 100); }
+      if (stage === "events" || stage === "success" || stage === 'cancel-error') { await pending; pending = transport.events(29, request, deadline(), 100); }
       const result = pending.then(value => ({ value }), error => ({ error }));
       await requestSeen;
       if (stage === "metadata" || stage === "events") controller.abort();
@@ -83,10 +86,14 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
       assert.equal(cleanup.state, stage === 'peer-end' ? 'UNKNOWN' : 'CONFIRMED');
       assert.ok(cleanup.localClosedAt); assert.equal(sdk.localSocket?.()?.closed, true); await closed;
       assert.equal(cleanup.verifiedLocalClosure, true);
+      if (stage === 'cancel-error') {
+        assert.equal(('error' in settled ? settled.error as Error : null)?.message, 'RESEARCH_WSH_ERROR_10281');
+        assert.deepEqual(cleanup.sourceError, { name: 'Error', code: 10284, message: 'Cancellation failed [UKRYTO]' });
+      }
       if (stage === 'peer-end') {
         assert.equal(disconnectProof[0], false);
         assert.equal(trace[0], '100:17');
-      } else assert.deepEqual(trace, stage === "events" || stage === "success"
+      } else assert.deepEqual(trace, stage === "events" || stage === "success" || stage === 'cancel-error'
         ? ["100:17", "102:29", "103:29", "101:17", "end"] : ["100:17", "101:17", "end"]);
     } finally { await transport.close(); peer?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });

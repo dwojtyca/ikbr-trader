@@ -387,9 +387,11 @@ export class ResearchStore {
     if (orphan) return ['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED'];
     const rows = (await db.query(`SELECT a.* FROM research_marketaux_attempts a WHERE a.config_hash=$1 AND a.manifest_hash=$2 AND a.instrument_id=$3
       AND ($4::text IS NULL OR a.source_id=$4) AND ($5::text IS NULL OR a.account_id=$5)
-      AND ((a.state IN ('FINALIZING','UNKNOWN')) OR (a.state='STARTED' AND (a.deadline_at<=clock_timestamp() OR EXISTS(
+      AND (((a.state IN ('FINALIZING','UNKNOWN') OR a.state='STARTED' AND (a.deadline_at<=clock_timestamp() OR EXISTS(
        SELECT 1 FROM research_marketaux_attempt_calls c JOIN research_call_reservations r USING(call_key) LEFT JOIN research_call_outcomes o USING(call_key)
        WHERE c.attempt_id=a.id AND (o.outcome IN ('UNKNOWN','FAILED') OR o.call_key IS NULL AND r.deadline_at<=clock_timestamp()))))
+       AND NOT EXISTS(SELECT 1 FROM research_marketaux_recoveries recovered WHERE recovered.attempt_id=a.id
+        AND recovered.account_id=a.account_id AND recovered.ledger_key=a.ledger_key))
        OR (a.state='FAILED' AND a.failure_class='HARD'))
       AND NOT EXISTS(SELECT 1 FROM research_marketaux_attempts good WHERE good.config_hash=a.config_hash AND good.manifest_hash=a.manifest_hash AND good.instrument_id=a.instrument_id AND good.source_id=a.source_id AND good.account_id=a.account_id AND good.state='SUCCEEDED' AND good.started_at>a.started_at) LIMIT 1`, [identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId ?? null,identity.accountId ?? null])).rows;
     return rows.length ? ['RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED'] : [];
@@ -1419,7 +1421,9 @@ export class ResearchStore {
           await this.retireWshAcquisition(lease,result.acquisition,result.acquisitionOutcome??result.outcome,db);
           await db.query('UPDATE research_wsh_acquisitions SET snapshot_id=$2 WHERE id=$1',[result.acquisition.id,retained?null:snapshotId]);
         }
-        if(result.outcome==='FAILED'&&result.failureClass==='TRANSIENT'&&cleanup.state!=='UNKNOWN'&&ticket.ordinal<2){
+        const busyRetry=result.failureClass==='BUSY'&&result.failureReason==='RESEARCH_WSH_ERROR_10281'
+          &&result.providerError?.code===10281&&cleanup.state==='CONFIRMED'&&result.acquisitionOutcome!=='UNKNOWN';
+        if(result.outcome==='FAILED'&&(result.failureClass==='TRANSIENT'&&cleanup.state!=='UNKNOWN'||busyRetry)&&ticket.ordinal<2){
           const due=(await this.now(db))+WSH_RETRY_DELAYS_MS[ticket.ordinal as 0|1];
           if(due<researchTime(ticket.nextRegularAt))retryAt=new Date(due);
         }

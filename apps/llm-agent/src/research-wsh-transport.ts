@@ -203,6 +203,14 @@ export class WshSocketTransport implements WshTransport {
           disconnectRequestedAt: null, localClosedAt: null, verifiedLocalClosure: false };
       }
       let cleanupError: ResearchSourceError | undefined;
+      let cancellationError: ResearchSourceError | undefined;
+      const cancelling = new Map<number, string>();
+      const cancellationFailed = (cause: unknown, code: number, requestId: number) => {
+        const kind = cancelling.get(requestId);
+        if ((code === 10280 && kind === "wshMetaData") || (code === 10284 && kind === "wshEventData"))
+          cancellationError ??= { ...captureResearchSourceError(cause, this.privacy), code };
+      };
+      this.socket.on("error", cancellationFailed);
       const failed = (cause: unknown) => { this.localUncertain = true; cleanupError ??= captureResearchSourceError(cause, this.privacy); };
       const cancellationAttemptedAt = this.owned.size ? new Date().toISOString() : null;
       let disconnectRequestedAt: string | null = null;
@@ -220,6 +228,7 @@ export class WshSocketTransport implements WshTransport {
         for (const event of ["wshEventData", "wshMetaData"]) for (const [id, kind] of this.owned) {
           if (kind !== event) continue;
           try {
+            cancelling.set(id, kind);
             if (event === "wshEventData") this.socket.reqCancelWshEventData(id);
             else this.socket.reqCancelWshMetaData(id);
           } catch (cause) { failed(cause); }
@@ -248,12 +257,13 @@ export class WshSocketTransport implements WshTransport {
       this.inspectLocal();
       this.local?.removeListener("close", this.localClosed);
       this.socket.removeListener("disconnected", this.disconnected);
+      this.socket.removeListener("error", cancellationFailed);
       // Keep the closed error listener to absorb delayed SDK/network errors.
       return { sessionId: this.sessionId, state: this.localUncertain || !this.localInspected ? "UNKNOWN" : this.local
         ? this.localClosedAt ? "CONFIRMED" : "UNKNOWN" : "NOT_NEEDED", completedAt: new Date().toISOString(),
       cancellationAttemptedAt, disconnectRequestedAt, localClosedAt: this.localClosedAt,
       verifiedLocalClosure: !!this.local && !!this.localClosedAt && this.localInspected && !this.localIdentityUncertain,
-      ...(cleanupError ? { sourceError: cleanupError } : {}) };
+      ...(cleanupError || cancellationError ? { sourceError: cleanupError ?? cancellationError } : {}) };
     });
     const pending = this.pending; this.pending = null; pending?.(error);
     return this.closing;

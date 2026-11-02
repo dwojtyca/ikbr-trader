@@ -115,12 +115,20 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
         && ['RESEARCH_WSH_READ_RECOVERY_PENDING','RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR'].includes(wshState.recovery.reason??'')
         && Number.isFinite(Date.parse(wshState.recovery.nextCheckAt??'')) && wshState.latestFailure?.failureClass!=='HARD'
         && (wshState.blocksCachedEvidence || wshState.recovery.challengeId!==null || !coverage || !coverage.complete || !['AVAILABLE','EMPTY'].includes(coverage.status) || nowMs-Date.parse(coverage.checkedAt)>=maxAge);
-      const wshRecoverable=source.adapter==='ibkr-wsh' && !!wshState?.latestFailure && !wshState.retained && !wshState.blocksCachedEvidence && (wshState.nextRetryAt!==null || wshState.latestAttempt?.state==='STARTED') && wshState.latestFailure.failureClass==='TRANSIENT';
+      const wshRetryableFailure=wshState?.latestFailure?.failureClass==='TRANSIENT'
+        || wshState?.latestFailure?.failureClass==='BUSY' && wshState.latestFailure.state==='FAILED'
+          && wshState.latestFailure.failureReason==='RESEARCH_WSH_ERROR_10281' && wshState.latestFailure.providerError?.code===10281
+          && wshState.latestFailure.cleanup==='CONFIRMED';
+      const wshRetryPending=wshState?.latestFailure?.failureClass==='BUSY'
+        ? Number.isFinite(Date.parse(wshState.nextRetryAt??'')) || wshState.latestAttempt?.state==='STARTED'
+          && wshState.latestAttempt.cycleId===wshState.latestFailure.cycleId && wshState.latestAttempt.ordinal===wshState.latestFailure.ordinal+1
+        : wshState?.nextRetryAt!==null || wshState?.latestAttempt?.state==='STARTED';
+      const wshRecoverable=source.adapter==='ibkr-wsh' && !!wshState?.latestFailure && !wshState.retained && !wshState.blocksCachedEvidence && wshRetryPending && wshRetryableFailure;
       if(wshState?.acquisitionBlockedReason&&!automaticWshWaiting){row.failureReason??=wshState.acquisitionBlockedReason;
         if(!coverage||!coverage.complete||!['AVAILABLE','EMPTY'].includes(coverage.status)||nowMs-Date.parse(coverage.checkedAt)>=maxAge||wshState.expiresAt!==null&&nowMs>=Date.parse(wshState.expiresAt))deny(wshState.acquisitionBlockedReason);
       }
       if(wshState?.blocksCachedEvidence&&!automaticWshWaiting)deny("RESEARCH_WSH_ATTEMPT_UNRESOLVED");
-      if(!automaticWshWaiting && wshState?.latestFailure?.failureClass==='TRANSIENT' && !wshState.retained && !wshRecoverable && wshState.latestAttempt?.state!=='STARTED')deny("RESEARCH_WSH_RETRY_EXHAUSTED");
+      if(!automaticWshWaiting && wshRetryableFailure && !wshState!.retained && !wshRecoverable && wshState!.latestAttempt?.state!=='STARTED')deny("RESEARCH_WSH_RETRY_EXHAUSTED");
       const recoverable = wshRecoverable || source.adapter === "marketaux-news" && role === "news" && coverage?.status === "ERROR"
         && (isTwoSourceResearch(manifest) ? Boolean(marketauxState?.latestFailure && !marketauxState.holdReasons.length) : marketauxTransientFailure(coverage) || legacy !== undefined || Boolean(budget));
       if (coverage && (!coverage.complete || !["AVAILABLE", ...(role === "reports" ? [] : ["EMPTY"])].includes(coverage.status)) && !recoverable && !automaticWshWaiting) {
@@ -146,7 +154,7 @@ export function inspectResearch(manifest: ResearchManifest, instrumentId: string
     const eligibility = evaluateResearchEligibility(stored.snapshot, manifest, nowMs);
     const missingReports = sources.some(s => s.role === "reports" && s.state === "WAITING" && !stored.snapshot.coverage.some(c => c.sourceId === s.sourceId && c.role === s.role));
     for (const reason of eligibility.reasons) {
-      if(reason==='RESEARCH_CALENDAR_ERROR' && sources.filter(s=>s.role==='calendar').every(s=>s.state==='WAITING'&&(s.wshRefresh?.latestFailure?.failureClass==='TRANSIENT'||s.reasons.some(r=>['RESEARCH_WSH_READ_RECOVERY_PENDING','RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR'].includes(r)))))continue;
+      if(reason==='RESEARCH_CALENDAR_ERROR' && sources.filter(s=>s.role==='calendar').every(s=>s.state==='WAITING'&&(s.reasons.includes('RESEARCH_SOURCE_TRANSIENT_FAILURE')||s.reasons.some(r=>['RESEARCH_WSH_READ_RECOVERY_PENDING','RESEARCH_WSH_READ_RECOVERY_WAITING_REGULAR'].includes(r)))))continue;
       if (reason === "RESEARCH_NEWS_ERROR" && sources.filter(s=>s.role==="news" && stored.snapshot.coverage.some(c=>c.sourceId===s.sourceId&&c.role==='news'&&c.status==='ERROR')).every(s=>s.state==='WAITING'&&s.reasons.some(r=>['RESEARCH_SOURCE_TRANSIENT_FAILURE','RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION','RESEARCH_MARKETAUX_BUDGET_RENEWED'].includes(r)))) continue;
       if (reason === "RESEARCH_SOURCE_STALE_OR_FUTURE" && !reasons.has("RESEARCH_SOURCE_FUTURE")) continue;
       if (/^RESEARCH_(REPORTS|NEWS|CALENDAR)_MISSING$/.test(reason) && sources.some(s => s.state === "WAITING" && `RESEARCH_${s.role.toUpperCase()}_MISSING` === reason)) continue;
