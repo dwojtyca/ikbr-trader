@@ -111,15 +111,18 @@ test('three-day-old weekend source cache admits both legal reads immediately wit
    (source.parserConfig[name] as {expiresAt:string}).expiresAt=new Date(clock.wallNow()+7*86400000).toISOString();
  }});
  const old=await f.store.latestSnapshot(f.identity);await advance(3*86400000);await f.observe();
- const now=await f.clock(),prep=await f.store.prepareRepair(f.identity);assert.equal(prep.state,'WAITING',JSON.stringify(prep));
- assert.ok(prep.sources.every(s=>s.state==='WAITING'&&Date.parse(s.nextCheckAt!)<=now+1000));
+ const preparationBefore=await f.clock(),prep=await f.store.prepareRepair(f.identity),preparationAfter=await f.clock();assert.equal(prep.state,'WAITING',JSON.stringify(prep));
+ assert.ok(prep.sources.every(s=>s.state==='WAITING'&&Date.parse(s.nextCheckAt!)>=preparationBefore&&Date.parse(s.nextCheckAt!)<=preparationAfter));
+ const newsBefore=await f.clock();
  const news=await f.store.claimMarketauxAttempt(f.identity);assert.ok(news.claimed);
- assert.ok(Math.abs(Date.parse(news.ticket.startedAt)-now)<1000);
+ const newsAfter=await f.clock();assert.ok(Date.parse(news.ticket.startedAt)>=newsBefore&&Date.parse(news.ticket.startedAt)<=newsAfter);
  const calendar={...f.identity,sourceId:f.wshSource.id};
  assert.ok((await f.store.dueWshAttempts(f.identity)).some(a=>a.identity.instrumentId===f.identity.instrumentId&&a.kind==='regular'));
  await f.store.withWshEndpointLock(String(f.wshSource.parserConfig.endpointId),async lease=>{
+  const calendarBefore=await f.clock();
   const result=await f.store.claimWshAttempt(lease,{...calendar,sessionId:randomUUID()},'regular');assert.equal(result.state,'CLAIMED');
-  if(result.state==='CLAIMED')assert.ok(Math.abs(Date.parse(result.ticket.startedAt)-now)<1000);
+  const calendarAfter=await f.clock();
+  if(result.state==='CLAIMED')assert.ok(Date.parse(result.ticket.startedAt)>=calendarBefore&&Date.parse(result.ticket.startedAt)<=calendarAfter);
  });
  assert.deepEqual(await f.store.latestSnapshot(f.identity),old);
  assert.equal((await pool.query('SELECT count(*)::int n FROM research_call_reservations')).rows[0].n,4);

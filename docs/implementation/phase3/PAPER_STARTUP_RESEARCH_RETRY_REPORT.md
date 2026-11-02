@@ -1,6 +1,6 @@
 # Paper startup research recovery — implementation evidence
 
-Date: 2026-11-02. Status: implementation and local validation complete; publication and deployment pending.
+Date: 2026-11-02. Status: initial source published with failed CI; reviewed timing repair passed local validation. Successor publication and deployment pending.
 
 The [accepted plan](PAPER_STARTUP_RESEARCH_RETRY_PLAN.md) addresses delayed WSH
 retries and startup observation ending on a research HOLD. It includes the
@@ -100,6 +100,30 @@ and exit code 0. No strategy or simulator behavior changed in this package,
 so no new strategy backtest was required. Local documentation links and the
 scoped diff were checked. Publication, exact-commit CI and operational acceptance
 are still separate, pending steps.
+
+## Published CI and validation timing repair
+
+Commit `64b61c3e2be6fbba28dd0b9fb8aca09f4ab7fff0` was published on main.
+[Its CI run](https://github.com/dwojtyca/ikbr-trader/actions/runs/41480213476)
+passed lint, typecheck and unit tests but failed the PostgreSQL integration step.
+Detailed logs require GitHub authentication unavailable to the agent at diagnosis;
+public annotations only report exit code 1. The same first shared suite was rerun
+locally against localhost PostgreSQL and passed 114/114.
+
+Independent inspection found arbitrary one-second assertions in two new fixtures.
+A disposable container with a valid 1.5s scheduling delay reproduced the old
+weekend fixture assertion failure, while runtime deadlines remained unchanged.
+This establishes a test fragility, not the unobserved CI failure cause. The accepted
+validation amendment replaces those comparisons with operation-specific DB-time
+brackets, preserving exact 30s/120s retry policy and all admission/fencing assertions.
+The independent plan reviewer accepted the amendment before implementation;
+a different final reviewer accepted the resulting tests and documentation.
+Both complete PostgreSQL fixture files passed 56/56; the corrected disposable
+fixture passed with the same 1.5s delay before each operation. Final full lint,
+typecheck, build and clean Docker build passed; unit tests passed 4,000 with
+377 expected skips, and isolated integration passed 3,222 without skips.
+Publication and exact-successor CI remain pending. No production timeout or
+provider acceptance is changed by this test repair.
 
 ## Limits
 

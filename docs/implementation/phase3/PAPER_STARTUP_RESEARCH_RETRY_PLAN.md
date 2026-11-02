@@ -281,3 +281,32 @@ field before diagnostic deployment, or add Marketaux same-hour attempts. Those
 limitations must remain visible in the report; resolving the observed HARD
 payload failure may require a separate evidence-driven follow-up before the
 owner's complete operational outcome can be claimed.
+
+### Validation timing amendment
+
+The first published commit64b61c3 passed local validation but failed GitHub's
+integration step; access to its detailed log is pending. Independent source
+inspection found two real test fragilities, not a proven explanation of that CI
+failure: the weekend-cache fixture compares several sequential operations against
+one timestamp with an arbitrary one-second bound, and the BUSY fixture requires
+less than one second between the DB clock used for retry calculation and the
+separate settlement UPDATE. Neither elapsed-time bound belongs to the production
+contract.
+
+Change only those new assertions in `startup-recovery.pg.test.ts` and
+`wsh-recovery.pg.test.ts` to bracket each operation using actual database time.
+Preparation/admission evidence must fall within the corresponding before/after
+DB times, and retry_due_at must fall within before/after settlement-operation
+clock plus the exact30s or120s policy delay. Preserve immediate admission, all
+source/freshness assertions, denied immediate retries, ordinals, original cycle,
+result hashes, three-attempt maximum and unknown-outcome guards. Do not change
+production timeouts, retry policy, source code or test deadlines.
+
+Demonstrate the old assertion's failure under an explicitly injected valid
+scheduling delay in a disposable copy, then prove the bracketed assertion retains
+its invariants with the same delay. The injection is test evidence, not a new
+production sleep. Independent plan acceptance precedes implementation and a
+different final reviewer accepts the final test diff. Run focused real-Postgres
+fixtures and all required release checks, update the report honestly, publish
+and verify exact-commit CI. Do not claim CI root cause without its log or matching
+reproduction evidence.

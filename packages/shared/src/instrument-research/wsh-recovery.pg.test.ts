@@ -122,10 +122,11 @@ test('confirmed BUSY uses two durable bounded retries across workers, preserving
    assert.equal(c.state,'CLAIMED');if(c.state!=='CLAIMED')throw Error('fixture');
    assert.equal(c.ticket.ordinal,ordinal);regularAt??=c.ticket.nextRegularAt;assert.equal(c.ticket.nextRegularAt,regularAt);
    await worker.confirmWshPreflight(lease,c.ticket);
-   const result=busyFailure(h,c.ticket);await worker.finishWshAttempt(lease,c.ticket,result);
-   const row=(await pool.query('SELECT retry_due_at,finished_at,result_hash FROM research_wsh_refresh_attempts WHERE id=$1',[c.ticket.id])).rows[0];
+   const result=busyFailure(h,c.ticket),before=(await pool.query('SELECT clock_timestamp() AS now')).rows[0].now;
+   await worker.finishWshAttempt(lease,c.ticket,result);
+   const row=(await pool.query('SELECT retry_due_at,finished_at,result_hash,clock_timestamp() AS now FROM research_wsh_refresh_attempts WHERE id=$1',[c.ticket.id])).rows[0];
    assert.equal(row.result_hash,researchHash(result));
-   if(ordinal<2){const delay=row.retry_due_at.getTime()-row.finished_at.getTime();assert.ok(delay>=(ordinal?120000:30000)-1000&&delay<=(ordinal?120000:30000));}
+   if(ordinal<2){const delay=ordinal?120000:30000;assert.ok(row.retry_due_at.getTime()>=before.getTime()+delay&&row.retry_due_at.getTime()<=row.now.getTime()+delay);}
    else assert.equal(row.retry_due_at,null);
    assert.equal((await worker.claimWshAttempt(lease,{...h.identity,sessionId:randomUUID()},'retry')).state,'DEFERRED');
   });
