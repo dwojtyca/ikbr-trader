@@ -1,14 +1,19 @@
-# Strategy-only historical evaluation for PKO and AAPL
+# General strategy-only backtest engine
 
-Date: 2026-10-31. Status: PLAN REVIEW ACCEPTED; no implementation or
+Updated: 2026-11-02. Status: independent scope and final document reviews accepted.
+No implementation or
 operational change is authorized by this document alone.
-Planning baseline: `4727ed84d576a02c501fe7cf07819b8ff6b2ad34` on main, with
+Planning baseline: `a8c22e196ed631f4b38d1f18b50e02cad68eef6d` on main, with
 unrelated local changes. Recheck HEAD and the dirty-file inventory before work.
 
 ## Owner-selected outcome
 
-Evaluate existing technical strategies on historical PKO and AAPL data, using
-the same strategy and indicator implementations as the configured bot. Evaluate
+Build one general engine for evaluating registered technical strategies on
+compatible historical instruments, using the same strategy and indicator code
+as the bot. PKO and AAPL are initial validation examples, never an instrument
+allowlist or architectural restriction. Select instruments, strategy instances,
+validated parameters, timeframes and evaluation intervals through research
+configuration. Evaluate
 each instrument/strategy instance independently. The immediate result is a
 chronological signal report, including why a strategy produced no signal and
 where the data cannot support evaluation.
@@ -20,13 +25,58 @@ exit, account, reservation, recovery, session-deadline or deployment policies.
 The owner's preference for no compulsory session-end close applies to the future
 research simulator; it does not silently alter current Paper lifecycle controls.
 
-Signal evaluation comes first. Simulated orders, positions, fills, costs and P&L
-are a possible later package, with its own accepted contract. There is no shared
-portfolio, strategy competition, FX aggregation, new strategy, short activation,
-parameter optimization or Go/Rust rewrite in this delivery. The current configured
-factory supports `momentum_breakout_long_v1`; existing configured instances and
-parameters are the first subjects. Other registry implementations need a separate
-scope decision, rather than being enabled implicitly.
+Signal evaluation comes first. Positions, fills, costs and P&L remain an optional
+later package. No AI, new strategy implementation, live short activation, shared
+portfolio, automated parameter search or Go/Rust rewrite in this delivery.
+Existing registered LONG and SHORT signal implementations are eligible according
+to their declared capabilities, regardless of whether the bot currently enables
+them. Research selection never changes production activation or broker permissions.
+
+## General architecture and extension contract
+
+- **Research run configuration:** explicitly selects dataset version, full
+  instrument identities, strategy implementation IDs, instance IDs/revisions,
+  validated parameters, requested directions, evaluation interval and timeframes.
+  Run each selected compatible instrument/instance pair independently; selection
+  must not silently mean every possible combination. Record effective parameters,
+  code/data versions and the planned pair matrix in the result.
+- **Instrument/data adapters:** supply canonical candles, provenance, contract
+  metadata, session calendars, timezone, currency, price increments and supported
+  timeframes. Stable instrument identity is not just a ticker. The first adapter
+  handles stock history from the operational database; the engine/manifest must
+  not hardcode PKO, AAPL, WSE, Nasdaq or a two-instrument limit. Adding a supported
+  stock requires only metadata/configuration/data, not engine edits.
+- **Strategy registry:** reuse the existing Strategy interface and implementations.
+  Each research registration declares supported instrument types/directions,
+  required timeframes, warmup/context requirements and a validated parameter
+  schema/factory. Adding a strategy extends its implementation and registration,
+  not the replay loop. No copied formulas, parallel activation list or dependency
+  on production entryEnabled, enabledInBot, accounts or live bindings.
+- **Replay core:** one historical clock, closed-bar visibility, context assembly
+  and deterministic evaluation loop for compatible pairs. Indicators/regime
+  calculation and single-strategy eligibility use shared functions. Requirements
+  derive from the selected strategies and shared calculation dependencies, not
+  a global momentum-specific minimum or timeframe list.
+- **Results:** a common event/report format retains instrument identity, strategy
+  instance, parameters, direction, evaluation/input times, signals and reasons.
+  Unsupported combinations fail preflight explicitly; missing observations are
+  unavailable coverage, not no_signal. Compare signal counts/coverage per pair
+  without presenting independent results as a portfolio or profitability ranking.
+
+The existing createStrategy registry contains multiple implementations, while
+createConfiguredStrategy/TradingConfigurationV1 currently support parameterized
+long momentum only. A research configuration and validated factory adapter for
+other registrations are planned gaps, not capabilities already delivered. Reuse
+normalization for supported parameters; fixed-default strategies must reject
+unsupported overrides instead of silently ignoring them. Preserve the production
+configuration API and its narrower activation policy.
+
+Generality does not claim immediate support for every asset class. The first
+source/session adapter supports stocks; futures require explicit expiry/contract
+and roll semantics, and options require their own metadata/context support.
+Unsupported classes are rejected before evaluation. Extend adapters and capability
+registrations without embedding asset-specific conditions in the replay loop or
+replacing the existing ES research pipeline.
 
 ## Evidence and existing seams
 
@@ -67,12 +117,13 @@ private audit files are not a verified dataset or publication scope.
 
 | Package | Deliverable | Acceptance boundary |
 | --- | --- | --- |
-| S1 — first implementation | Offline stock snapshot/export and readiness CLI | Repeatable, isolated input; exact gaps and unavailable metadata; no strategy evaluation yet |
-| S2 — following package | Signal-only CLI using common strategy/indicator code | Closed-bar chronology, independent instances, parity fixtures, honest evaluable coverage |
+| S1 — first implementation | Generic history bundle/readiness CLI; first stock source adapter | Repeatable, isolated input; exact gaps and unavailable metadata; no strategy evaluation yet |
+| S2 — following package | Generic signal-only CLI, registry/configuration and common strategy code | Closed-bar chronology, independent instances, parity fixtures, honest evaluable coverage |
 | S3 — optional later | Simulated position/fill evaluation | Separate fill/cost/overnight contract; never required to finish S2 |
 
-S1 is the next bounded implementation after review and owner authorization. S2
-needs a reviewed context/time contract after S1 exposes actual coverage. A truthful
+S1 is the next bounded implementation package. Finalize and review its research
+configuration/manifest schema before coding; documentation acceptance is not
+implementation acceptance. S2 needs a reviewed context/time contract after S1 exposes actual coverage. A truthful
 blocked report can complete S1, but not the owner's signal-evaluation outcome.
 
 ## S1 — bounded implementation packet
@@ -83,25 +134,29 @@ Add a file-first CLI without service entrypoints, global operational configurati
 simulator, broker client or ES importer. Proposed commands, not yet implemented:
 
 ```sh
-pnpm --filter @ikbr/backtest-engine exec tsx src/stock-history-cli.ts export \
-  --configuration /absolute/private/trading-configuration.json \
+pnpm --filter @ikbr/backtest-engine exec tsx src/history-dataset-cli.ts export \
+  --adapter operational-stocks --configuration /absolute/private/research-run.json \
   --instrument-id pko_wse --instrument-id aapl_nasdaq \
   --from 2026-04-01T00:00:00.000Z --to 2026-10-31T00:00:00.000Z \
-  --out /absolute/private/stock-history-snapshot
-pnpm --filter @ikbr/backtest-engine exec tsx src/stock-history-cli.ts inspect \
-  --bundle /absolute/private/stock-history-snapshot \
-  --out /absolute/private/stock-history-report
+  --out /absolute/private/history-dataset-snapshot
+pnpm --filter @ikbr/backtest-engine exec tsx src/history-dataset-cli.ts inspect \
+  --bundle /absolute/private/history-dataset-snapshot \
+  --out /absolute/private/history-dataset-report
 ```
 
-IDs are examples; resolve them from the validated bundle. `export` reads only
-explicit `STOCK_HISTORY_SOURCE_POSTGRES_URL` from the environment, with no default
+IDs are examples, not a fixed selection; resolve any supplied compatible identities
+from validated research configuration. Do not require a deployed trading bundle.
+`export` reads only
+explicit `HISTORY_SOURCE_POSTGRES_URL` from the environment, with no default
 DB, `.env` discovery, admin URL or fallback. `inspect` is offline. UTC ranges are
 half-open `[from,to)`; include prehistory for warmup explicitly. Reject invalid
 ranges, duplicate/unknown instrument IDs and existing output destinations.
 
-Snapshot export reads selected configured stock contract identities and existing
-`1m`, `5m`, `1h`, `4h`, `1d`, `1w` rows; legacy `12h` is reported unsupported and
-is not an input to this path. No historical acquisition or aggregation occurs.
+The first operational-stocks adapter reads selected stock identities and existing
+`1m`, `5m`, `1h`, `4h`, `1d`, `1w` rows; legacy `12h` is reported unsupported
+by this adapter. The generic format does not globally forbid it;
+a future adapter must establish its boundaries and semantics before use. No
+historical acquisition or aggregation occurs in S1.
 The supplied configuration is the research configuration, not a claim that those
 parameters were deployed throughout the historical period.
 
@@ -125,12 +180,15 @@ output. Integration fixtures use disposable PostgreSQL, never the operational DB
 
 ### Bundle and report contract
 
-Versioned stock manifest: export time, requested range, selected contract identities,
-normalized research config/attribution, known revision, file byte hashes/counts and
+Versioned instrument-neutral manifest with adapter/schema identifiers: export
+time, requested range, selected contract identities,
+normalized research configuration/instance identity, known revision, file hashes/counts and
 `operational_history_snapshot` provenance. Unknown revision stays unknown. Exclude
 DSNs, secrets, account IDs and environment dumps from files/diagnostics.
 
-Order candles by `(conId,timeframe,ts)`; retain symbol, timestamp, OHLCV and source.
+Order candles by `(instrumentId,timeframe,ts)`; preserve source contract identity
+(conId for the IBKR adapter) without requiring every source to be IBKR; retain
+symbol, timestamp, OHLCV and source.
 Unknown metadata stays unknown: no default native/adjusted/RTH/timezone provenance.
 Preserve session status, generation, identity, coverage and acquisition timestamps.
 Present contract/configuration identity is not historical validity evidence.
@@ -154,11 +212,15 @@ win rate, ranking or strategy-quality conclusion.
 
 S1 may add only:
 
-- `apps/backtest-engine/src/stock-history-cli.ts`
-- `apps/backtest-engine/src/stock-history-snapshot.ts`
-- `apps/backtest-engine/src/stock-history-readiness.ts`
-- corresponding `stock-history-*.test.ts` and
-  `stock-history-snapshot.pg-integration.test.ts`
+- `apps/backtest-engine/src/research-run-config.ts`
+- `apps/backtest-engine/src/research-strategy-catalog.ts`
+- `apps/backtest-engine/src/history-dataset-types.ts`
+- `apps/backtest-engine/src/history-operational-stocks-adapter.ts`
+- `apps/backtest-engine/src/history-dataset-cli.ts`
+- `apps/backtest-engine/src/history-dataset-snapshot.ts`
+- `apps/backtest-engine/src/history-dataset-readiness.ts`
+- corresponding config/catalog/adapter unit tests, `history-dataset-*.test.ts` and
+  `history-dataset-snapshot.pg-integration.test.ts`
 - `docs/runbooks/STRATEGY_ONLY_BACKTEST.md` and
   `docs/implementation/phase3/STRATEGY_ONLY_BACKTEST_REPORT.md`.
 
@@ -169,8 +231,10 @@ or schema change stops the affected work for a reviewed scope amendment.
 
 Required targeted acceptance:
 
-1. A disposable source with PKO/AAPL plus unrelated rows exports only requested
-   identities/time range, in one consistent snapshot, with original metadata.
+1. A disposable source with PKO/AAPL, a third fixture stock absent from production
+   source branches and unrelated rows exports only requested identities/ranges.
+   Adding that third stock changes fixture metadata/configuration only, not engine
+   or adapter code. Preserve original metadata in one consistent snapshot.
 2. The source connection rejects a test write; database content/schema before
    and after export is unchanged. Export and inspect make no broker/provider call.
 3. Missing schedule/source/adjustment knowledge, partial sessions, holidays and
@@ -179,13 +243,16 @@ Required targeted acceptance:
    unwritable output and interrupted export cannot finalize a valid bundle.
 5. Export twice from unchanged fixture data yields identical content hashes;
    export-time envelopes may differ. Repeated inspect results are identical.
-6. Existing output is preserved. Sanitized connection/query failure diagnostics
+6. Reject unsupported asset classes/adapters, ambiguous identities and unknown
+   strategy/parameter requirements explicitly; production activation is not a
+   research-selection prerequisite.
+7. Existing output is preserved. Sanitized connection/query failure diagnostics
    contain no credentials or account data. Files are consumed directly in isolation.
 
-Targeted commands: `pnpm --filter @ikbr/backtest-engine exec node --import tsx
---test src/stock-history-*.test.ts` with repository-standard isolated PostgreSQL
-setup for the integration fixture; do not let the broad glob connect to a default
-database when no test URL is provided. Then all mandatory code-delivery gates:
+Targeted checks cover history-dataset, research-run-config, research-strategy-catalog
+and adapter unit tests, plus their PostgreSQL integration fixtures with isolated
+setup; do not let test discovery connect to a default database when no test URL
+is provided. Then all mandatory code-delivery gates:
 `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm test:integration` against isolated
 PostgreSQL, and `pnpm build`. No deployment change or strategy/simulator behavior
 change is in S1, so no new Docker build or trading backtest is required for S1.
@@ -201,9 +268,11 @@ A terminal command takes the snapshot/configuration, instrument/instance selecti
 evaluation range and output directory; writes chronological JSON and Polish text.
 No service, UI, operational database or provider. Required contract and acceptance:
 
-- Fresh object per instance/instrument; reuse configured factory, attribution,
-  indicator/regime functions and single-strategy portfolio evaluation. Reuse bot
-  windows/timeframes; add narrow exports if necessary, without changing formulas.
+- Fresh object per instance/instrument; resolve an explicitly selected registered
+  strategy through the shared factory and validated research parameter adapter.
+  Reuse indicator/regime functions and single-strategy eligibility. Derive windows
+  and timeframes from each strategy and shared context dependencies; add narrow
+  exports if necessary, without changing formulas or production activation gates.
 - Historical context preserves real session provenance. No fake runtime READY,
   backdated timestamps or relaxed production checks. Retrospective calendars imply
   retrospective technical research, not point-in-time replay of the bot.
@@ -219,10 +288,16 @@ No service, UI, operational database or provider. Required contract and acceptan
   absent required quote information blocks evaluation, never creates a fake trigger.
 - Events distinguish signal, no_signal, unavailable and error; retain reasons,
   raw signals, indicators, input cutoff and attribution. No P&L conclusions.
-- Test both instruments, nonempty signals/rejections, separate instances, exact
+- Test PKO/AAPL plus a third metadata-only fixture instrument and at least two
+  distinct existing strategy implementations (not merely two momentum parameter
+  sets), including a declared SHORT signal path if compatible. Test a strategy
+  disabled for bot activation but explicitly selected for offline research.
+  Include nonempty signals/rejections, distinct parameter instances and exact
   direct-call parity, DST/session/warmup/partial-bar/gap boundaries, future-row
   mutation invariance, repeatability and no broker/provider/write side effects.
-  Partial real history remains partial even if a useful subset evaluates.
+  Confirm unsupported instrument/timeframe/quote/parameter combinations fail
+  explicitly. Future additions through adapter/registry contracts must not require
+  replay-loop changes. Partial real history remains partial even if a subset evaluates.
 
 ## S3 — future simulation boundary
 

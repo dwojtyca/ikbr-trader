@@ -1,12 +1,16 @@
 # Strategy-only backtest planning report
 
-Date: 2026-10-31. Status: independent plan and final document reviews accepted; publication/CI pending.
+Initial plan: 2026-10-31. Amended: 2026-11-02.
+Status: amendment scope and final wording reviews accepted; publication/CI pending.
+Original publication: `a8c22e1`, [CI passed](https://github.com/dwojtyca/ikbr-trader/actions/runs/41209539923). This is historical evidence, not CI for the amendment.
 
 ## Owner-selected outcome
 
 The owner narrowed the proposed backtester to technical strategies generating
-signals: no AI adjudication, news, research providers or LLM calls. Start with
-configured PKO/AAPL strategy instances, evaluated independently. Reuse strategy
+signals: no AI adjudication, news, research providers or LLM calls. On 2026-11-02
+the owner corrected the instrument/strategy scope: a general engine for different
+registered strategies and compatible instruments. PKO/AAPL are initial examples,
+not an allowlist; momentum is not the only eligible research strategy. Reuse strategy
 implementations and indicator/regime computation from the bot. No new strategy,
 Paper activation or operational exit-policy change belongs to this planning task.
 
@@ -50,14 +54,14 @@ Source inspection confirms:
 
 ## Validation and publication
 
-Only the new plan and this report are in the publication scope. Validate local
+Only the amended plan and this report are in the publication scope. Validate local
 Markdown links, check whitespace/diff and obtain independent plan and final
 review. No local runtime suite is required for prose-only changes. Per repository
 workflow, publish the reviewed documentation on main and verify GitHub CI for
 that exact commit. Publication/CI evidence will be reported separately from
 future implementation acceptance.
 
-## Review and routing record
+## Original 2026-10-31 review and routing record
 
 | Task | Requested model / effort | Evidence | Repairs / escalation | Usage |
 | --- | --- | --- | --- | --- |
@@ -77,7 +81,33 @@ written. This planning acceptance does not claim those packages are implemented.
 
 Final reviewer (different from author and plan reviewer) accepted both documents.
 Local validation found no broken relative links or trailing whitespace. Only these
-two new Markdown files are selected for publication. Mechanical publication uses
+two Markdown files were selected for the original publication. Mechanical publication uses
 the lead fallback: the requested GPT-5.6-Luna route is unavailable in this session.
 Exact-commit CI status is reported in the chat after publication; pending here
 avoids recording a CI result before its commit exists.
+
+## 2026-11-02 general-engine amendment
+
+Bounded documentation change: revise the title, outcome, architecture, proposed
+CLI/configuration, neutral manifest, file ownership and acceptance consistently.
+The stock database export becomes the first input adapter, not the engine's asset
+or ticker definition. Future research configuration is independent of production
+entry flags and the momentum-only TradingConfigurationV1 factory. Reuse existing
+strategy code with validated parameter/capability registrations; no formulas or
+live controls are changed. No runtime, database or operational changes in this task.
+
+Acceptance now requires a third stock configured solely through metadata/data and
+at least two distinct existing strategy implementations, explicit unsupported
+capabilities and preserved no-lookahead/parity evidence. Full futures/options
+support is not claimed; adapter support must precede those runs. The current shared
+registry is broader than its configured factory, so a validated research factory
+adapter is an explicit implementation gap.
+
+Amendment scope review: independent gpt-6-astra/high accepted; no material findings.
+Final amended-document review: independent gpt-6-astra/high accepted; no material
+findings, no repair rounds. Relative links and scoped whitespace checks passed.
+Exact-commit publication CI is checked separately and reported in the chat. Lead authors the amendment; independent
+final reviewer differs from the scope reviewer. Model execution identity and
+per-task tokens/elapsed telemetry unavailable; no runtime suites run locally for
+prose-only edits. Mechanical publication uses the lead fallback because the
+configured GPT-5.6-Luna route is unavailable in this session.
