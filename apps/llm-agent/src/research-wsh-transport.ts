@@ -16,6 +16,7 @@ export interface WshSocket {
   disconnect(): unknown;
   reqCancelWshMetaData(requestId: number): unknown;
   reqCancelWshEventData(requestId: number): unknown;
+  reqCurrentTime(): unknown;
   reqWshMetaData(requestId: number): unknown;
   reqWshEventData(requestId: number, request: WshEventRequest): unknown;
   localSocket?(): WshLocalSocket | null;
@@ -189,6 +190,50 @@ export class WshSocketTransport implements WshTransport {
       } catch (error) { finish(error instanceof Error ? error : new Error("RESEARCH_WSH_TRANSPORT_FAILED")); }
     });
   }
+  private drainCancellation(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false, issued = false, sent = false;
+      const finish = (reason?: string, sourceError?: ResearchSourceError) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.socket.removeListener("sent", observed);
+        this.socket.removeListener("currentTime", received);
+        this.socket.removeListener("disconnected", disconnected);
+        this.socket.removeListener("error", errored);
+        this.local?.removeListener("close", disconnected);
+        if (reason) reject(Object.assign(new Error(`Local WSH cancellation drain ${reason}`), {
+          name: "WshDrainError", code: "RESEARCH_WSH_DRAIN_FAILED", ...(sourceError ? { sourceError } : {}),
+        }));
+        else resolve();
+      };
+      const observed = (tokens: unknown) => {
+        if (issued && Array.isArray(tokens) && tokens.length === 2 && tokens[0] === 49 && tokens[1] === 1) sent = true;
+      };
+      const received = (time: unknown) => {
+        if (!issued || !sent) return;
+        finish(typeof time === "number" && Number.isSafeInteger(time) && time > 0 ? undefined : "response invalid");
+      };
+      const disconnected = () => finish("connection closed");
+      const errored = (_error: unknown, code: number, requestId: number) => {
+        if (!INFO_CODES.has(code) && (requestId === -1 || requestId === undefined))
+          finish("connection error", { ...captureResearchSourceError(_error, this.privacy), code: Number.isSafeInteger(code) ? code : null });
+      };
+      const timer = setTimeout(() => finish("deadline expired"), 750);
+      this.socket.on("sent", observed);
+      this.socket.on("currentTime", received);
+      this.socket.on("disconnected", disconnected);
+      this.socket.on("error", errored);
+      this.local?.once("close", disconnected);
+      if (this.local?.closed || this.local?.destroyed) { finish("connection closed"); return; }
+      try {
+        issued = true;
+        // This dedicated socket has no earlier time request. The roundtrip proves
+        // a later message was received, not acknowledgement of WSH cancellation.
+        this.socket.reqCurrentTime();
+      } catch (cause) { finish("send failed", captureResearchSourceError(cause, this.privacy)); }
+    });
+  }
   private closeWith(error: Error): Promise<WshCleanupResult> {
     if (this.closing) return this.closing;
     this.terminalError = error;
@@ -235,8 +280,9 @@ export class WshSocketTransport implements WshTransport {
         }
         if (expected.size) await sent;
         if (expected.size) this.localUncertain = true;
-        // The SDK's sent event follows socket.write, not its flush callback.
-        if (this.owned.size) await new Promise<void>(resolve => setTimeout(resolve, 25));
+        if (this.owned.size && !expected.size) {
+          try { await this.drainCancellation(); } catch (cause) { failed(cause); }
+        }
       } finally {
         clearTimeout(timeout); this.socket.removeListener("sent", observed);
         disconnectRequestedAt = new Date().toISOString();

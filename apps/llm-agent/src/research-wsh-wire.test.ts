@@ -55,6 +55,7 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
               if (stage === "success") socket.write(frame([105, id, "[]"]));
               if (stage === 'cancel-error') socket.write(frame([4, 2, id, 10281, 'Duplicate WSH event data request', '']));
             }
+            if (code === 49) socket.write(frame([49, 1, 1790000000]));
             if (code === 103 && stage === 'cancel-error') socket.write(frame([4, 2, id, 10284, 'Cancellation failed DU_FIXTURE', '']));
           }
         }
@@ -94,7 +95,89 @@ for (const stage of ["metadata", "events", "success", "timeout", "error", "peer-
         assert.equal(disconnectProof[0], false);
         assert.equal(trace[0], '100:17');
       } else assert.deepEqual(trace, stage === "events" || stage === "success" || stage === 'cancel-error'
-        ? ["100:17", "102:29", "103:29", "101:17", "end"] : ["100:17", "101:17", "end"]);
+        ? ["100:17", "102:29", "103:29", "101:17", "49:1", "end"] : ["100:17", "101:17", "49:1", "end"]);
     } finally { await transport.close(); peer?.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 }
+
+test('installed SDK drains delayed cancellation before a same-client successor', { timeout: 8000 }, async () => {
+  const trace: string[] = [], peers = new Set<Socket>();
+  let sessionCount = 0, eventCount = 0, duplicateCount = 0, pendingWsh = false;
+  const closures: Promise<void>[] = [];
+  const server = createServer(socket => {
+    peers.add(socket);
+    const session = ++sessionCount;
+    closures.push(new Promise(resolve => socket.once('close', () => { peers.delete(socket); resolve(); })));
+    let buffer = Buffer.alloc(0), handshake = false, processing = Promise.resolve();
+    socket.on('data', bytes => {
+      buffer = Buffer.concat([buffer, bytes]);
+      if (!handshake) {
+        if (buffer.length < 8) return;
+        const length = buffer.readInt32BE(4);
+        if (buffer.length < 8 + length) return;
+        buffer = buffer.subarray(8 + length); handshake = true;
+        socket.write(frame([180, '20261103 12:00:00']));
+      }
+      while (buffer.length >= 4) {
+        const length = buffer.readInt32BE();
+        if (buffer.length < 4 + length) break;
+        const tokens = buffer.subarray(4, 4 + length).toString().split('\0');
+        buffer = buffer.subarray(4 + length);
+        const code = Number(tokens[0]), id = Number(tokens[1]);
+        if (code === 71) {
+          assert.equal(Number(tokens[2]), 97);
+          socket.write(frame([15, 1, 'DU_FIXTURE'])); socket.write(frame([9, 1, 1])); continue;
+        }
+        trace.push(`${session}:${code}:${id}`);
+        if (code === 100) socket.write(frame([104, id, '{"meta_data":{}}']));
+        if (code === 102) {
+          eventCount++;
+          if (pendingWsh) {
+            duplicateCount++;
+            socket.write(frame([4, 2, id, 10281, 'Duplicate WSH event data request', '']));
+          } else {
+            pendingWsh = true;
+            if (session === 2) socket.write(frame([105, id, '[]']));
+          }
+        }
+        if (code === 103) processing = new Promise(resolve => setTimeout(() => {
+          // Model cancellation work abandoned by premature connection closure.
+          if (!socket.destroyed) { pendingWsh = false; trace.push(`${session}:cancel-processed`); }
+          resolve();
+        }, 350));
+        if (code === 49) void processing.then(() => {
+          if (!socket.destroyed) { trace.push(`${session}:time-response`); socket.write(frame([49, 1, 1790000000])); }
+        });
+      }
+    });
+    socket.on('end', () => { trace.push(`${session}:end`); });
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const port = (server.address() as { port: number }).port;
+  const transports: WshSocketTransport[] = [];
+  try {
+    for (const session of [1, 2]) {
+      const sdk = adaptWshSdkSocket(new IBApi({ host: '127.0.0.1', port, maxReqPerSec: 10 }));
+      const transport = new WshSocketTransport({ enabled: true, endpointId: 'loopback', host: '127.0.0.1', port,
+        clientId: 97, accountId: 'DU_FIXTURE' }, () => sdk);
+      transports.push(transport);
+      const deadline = () => new Date(Date.now() + 1500).toISOString();
+      await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+      const result = transport.events(2, request, new Date(Date.now() + (session === 1 ? 150 : 1500)).toISOString(), 100);
+      if (session === 1) await assert.rejects(result, /RESEARCH_WSH_TIMEOUT/);
+      else assert.equal(await result, '[]');
+      const cleanup = await transport.close(); await closures[session - 1];
+      assert.equal(cleanup.state, 'CONFIRMED'); assert.equal(cleanup.sourceError, undefined);
+      assert.equal(pendingWsh, false);
+    }
+    assert.equal(eventCount, 2); assert.equal(duplicateCount, 0);
+    assert.deepEqual(trace, [1, 2].flatMap(session => [
+      `${session}:100:1`, `${session}:102:2`, `${session}:103:2`, `${session}:101:1`, `${session}:49:1`,
+      `${session}:cancel-processed`, `${session}:time-response`, `${session}:end`,
+    ]));
+  } finally {
+    await Promise.all(transports.map(transport => transport.close()));
+    for (const peer of peers) peer.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});

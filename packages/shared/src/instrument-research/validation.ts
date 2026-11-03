@@ -37,15 +37,24 @@ export function researchTime(v: unknown): number {
 function date(v: unknown): asserts v is string {
   researchAssert(typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v);
 }
-export function safeResearchUrl(v: unknown): v is string {
-  if (typeof v !== "string" || v.length > 2000) return false;
+export type ResearchUrlRejection = "string" | "max_length" | "parse" | "https" | "credentials" | "fragment" | "port" | "ip_host" | "domain_syntax" | "reserved_host";
+export function researchUrlRejection(v: unknown): ResearchUrlRejection | null {
+  if (typeof v !== "string") return "string";
+  if (v.length > 2000) return "max_length";
   try {
     const u = new URL(v), h = u.hostname.toLowerCase();
-    return u.protocol === "https:" && !u.username && !u.password && !u.hash && (!u.port || u.port === "443") &&
-      !isIP(h.replace(/^\[|\]$/g, "")) && /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h) &&
-      !/(^|\.)(localhost|local|internal|test|invalid|example)$/.test(h) && !h.endsWith(".localhost");
-  } catch { return false; }
+    if (u.protocol !== "https:") return "https";
+    if (u.username || u.password) return "credentials";
+    if (u.hash) return "fragment";
+    if (u.port && u.port !== "443") return "port";
+    if (isIP(h.replace(/^\[|\]$/g, ""))) return "ip_host";
+    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h)) return "domain_syntax";
+    if (/(^|\.)(localhost|local|internal|test|invalid|example)$/.test(h) || h.endsWith(".localhost")) return "reserved_host";
+    return null;
+  } catch { return "parse"; }
 }
+export function safeResearchUrl(v: unknown): v is string { return researchUrlRejection(v) === null; }
+
 function identifier(v: unknown): void {
   const r = obj(v, "scheme value"); choice(r.scheme, "CIK LEI ISIN"); txt(r.value, 30);
   const re = r.scheme === "CIK" ? /^\d{10}$/ : r.scheme === "LEI" ? /^[A-Z0-9]{20}$/ : /^[A-Z]{2}[A-Z0-9]{9}\d$/;

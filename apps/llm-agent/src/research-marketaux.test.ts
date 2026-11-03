@@ -127,7 +127,7 @@ test("capacity diagnostics retain numeric-before-cap-before-consistency validati
   for (const key of ["found", "returned", "limit", "page"]) for (const invalid of ["31", -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => parseMarketauxPage({ ...badLaterFields, meta: { ...badLaterFields.meta, [key]: invalid } }, config, f.descriptor), (error: unknown) => {
       assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
-      assert.deepEqual(captureResearchSourceError(error), { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=meta.${key}.nonnegative_safe_integer` });
+      assert.deepEqual(captureResearchSourceError(error), { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=meta.${key}.nonnegative_safe_integer; pass=1; page=1` });
       return true;
     });
   }
@@ -195,7 +195,10 @@ test("payload diagnostics identify only fixed predicates while retaining rejecti
     Object.assign(value.data[0], { description: "synthetic-secret-account-payload", snippet: "https://private.example/?api_token=secret" });
     assert.throws(() => parseMarketauxPage(mutate(value), f.newsConfig, f.descriptor, 2), (error: unknown) => {
       assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
-      const expected = { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=${constraint}` };
+      const record = !/^(root|meta|data)\./.test(constraint);
+      const location = `; pass=1; page=1${record ? "; recordIndex=0" : ""}${constraint === "article.entity.object" || constraint.startsWith("matched_entity.") ? "; entityIndex=0" : ""}`;
+      const url = constraint === "article.url.safe_public_url" ? "; urlPredicate=ip_host" : "";
+      const expected = { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=${constraint}${url}${location}` };
       assert.deepEqual(captureResearchSourceError(error), expected);
       assert.deepEqual(captureResearchSourceError(new ResearchSourceFailure(error.message, error)), expected);
       assert.equal(JSON.stringify(captureResearchSourceError(error)).includes("private"), false);
@@ -204,7 +207,42 @@ test("payload diagnostics identify only fixed predicates while retaining rejecti
     });
   }
   assert.throws(() => parseMarketauxPage({ meta: { found: 0, returned: 0, limit: 2, page: 2 }, data: [] }, f.newsConfig, { ...f.descriptor, page: 2 }), error => {
-    assert.equal(captureResearchSourceError(error).message, "Local Marketaux payload validation; constraint=request.page.result_bound");
+    assert.equal(captureResearchSourceError(error).message, "Local Marketaux payload validation; constraint=request.page.result_bound; pass=1; page=2");
     return true;
   });
+});
+
+
+test("payload diagnostics locate later records and nested entities without provider strings", () => {
+  const f = marketauxFixture();
+  const request = { ...f.descriptor, pass: 2 as const, page: 2 };
+  const secret = "synthetic-secret-DU_TEST";
+  const parse = (second: unknown) => parseMarketauxPage({ meta: { found: 4, returned: 2, limit: 2, page: 2 }, data: [f.article(1), second] }, f.newsConfig, request, 2);
+  const badEntity = { ...f.article(2), entities: [{ symbol: "OTHER" }, null] };
+  const sentiment = { ...f.article(2), entities: [{ symbol: "OTHER" }, { ...f.newsConfig.entity, sentiment_score: secret }] };
+  const cases: [unknown, string][] = [
+    [{ ...f.article(2), url: `https://publisher.com/article?api_token=${secret}#${secret}` }, "article.url.safe_public_url; urlPredicate=fragment; pass=2; page=2; recordIndex=1"],
+    [badEntity, "article.entity.object; pass=2; page=2; recordIndex=1; entityIndex=1"],
+    [sentiment, "matched_entity.sentiment_score.finite_unit_range; pass=2; page=2; recordIndex=1; entityIndex=1"],
+    [{ ...f.article(2), published_at: secret }, "published_at.utc_format; pass=2; page=2; recordIndex=1"],
+    [{ ...f.article(2), description: secret + "\u0000" }, "description.control_characters; pass=2; page=2; recordIndex=1"],
+  ];
+  for (const [item, detail] of cases) assert.throws(() => parse(item), error => {
+    assert.ok(error instanceof Error); assert.equal(error.message, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
+    const captured = captureResearchSourceError(new ResearchSourceFailure(error.message, error));
+    assert.deepEqual(captured, { name: "MarketauxPayloadValidationError", code: null, message: `Local Marketaux payload validation; constraint=${detail}` });
+    for (const privateValue of [secret, "publisher.com", f.article(2).uuid]) assert.equal(JSON.stringify(captured).includes(privateValue), false);
+    return true;
+  });
+});
+
+test("payload diagnostics omit invalid request location without trusting string values", () => {
+  const f = marketauxFixture();
+  for (const value of ["synthetic-secret", 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null]) {
+    const request = { ...f.descriptor, pass: value, page: value } as unknown as MarketauxRequest;
+    assert.throws(() => parseMarketauxPage(null, f.newsConfig, request), error => {
+      assert.equal(captureResearchSourceError(error).message, "Local Marketaux payload validation; constraint=root.object");
+      return true;
+    });
+  }
 });

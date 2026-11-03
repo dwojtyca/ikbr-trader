@@ -23,6 +23,7 @@ async function transportProviderFailure(code: number, observeCleanup?: (cleanup:
     }, reqCancelWshEventData(id: number) { socket.emit('sent', [103, id]); },
     reqWshMetaData(id: number) { socket.emit('error', Object.assign(new Error('WSH provider failure DU_TEST known-secret\n\u001b[31m'), { name: 'ProviderSocketError' }), code, code === 502 ? -1 : id); },
     reqWshEventData() {},
+    reqCurrentTime() { socket.emit('sent', [49, 1]); socket.emit('currentTime', 1790000000); },
   });
   const transport = new WshSocketTransport({ enabled: true, endpointId: 'fixture-endpoint', host: '127.0.0.1', port: 4002,
     clientId: 77, accountId: 'DU_TEST', secrets: ['known-secret'] }, () => socket);

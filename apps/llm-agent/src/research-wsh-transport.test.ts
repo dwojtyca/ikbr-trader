@@ -21,6 +21,8 @@ class Socket extends EventEmitter {
   cancellations: string[] = [];
   reqCancelWshMetaData(id: number) { this.cancellations.push(`metadata:${id}`); this.emit("sent", [101, id]); }
   reqCancelWshEventData(id: number) { this.cancellations.push(`events:${id}`); this.emit("sent", [103, id]); }
+  timeRequests = 0;
+  reqCurrentTime() { this.timeRequests++; this.emit("sent", [49, 1]); setImmediate(() => this.emit("currentTime", 1790000000)); }
   autoReply = true;
   account = "DU_FIXTURE";
   connect() { this.emit("managedAccounts", this.account); this.emit("nextValidId", 1); }
@@ -312,4 +314,71 @@ test('a close timestamp from the original socket cannot prove stable closure aft
     const result = await transport.close(); assert.ok(result.localClosedAt);
     assert.equal(result.state, 'UNKNOWN'); assert.equal(result.verifiedLocalClosure, false);
   }
+});
+
+for (const mode of ['timeout', 'invalid', 'throw', 'disconnect', 'local-close', 'global-error', 'missing-send'] as const) {
+  test(`cancellation drain ${mode} preserves original failure and separate local closure`, async t => {
+    const socket = new Socket(), transport = new WshSocketTransport({ ...options, secrets: ['private-key'] }, () => socket);
+    await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+    socket.autoReply = false;
+    const pending = transport.events(2, request, deadline(), 100);
+    const started = performance.now();
+    socket.reqCurrentTime = () => {
+      socket.timeRequests++;
+      if (mode !== 'missing-send') socket.emit('sent', [49, 1]);
+      if (mode === 'invalid') socket.emit('currentTime', NaN);
+      if (mode === 'throw') throw new Error('private-key DU_FIXTURE');
+      if (mode === 'disconnect') socket.emit('disconnected');
+      if (mode === 'local-close') socket.local.close();
+      if (mode === 'global-error') socket.emit('error', new Error('private-key DU_FIXTURE'), 502, -1);
+      if (mode === 'missing-send') { socket.emit('sent', [49, 2]); socket.emit('currentTime', 1790000000); }
+    };
+    socket.emit('error', new Error('original duplicate'), 10281, 2);
+    await assert.rejects(pending, /RESEARCH_WSH_ERROR_10281/);
+    const cleanup = await transport.close();
+    assert.equal(cleanup.state, 'UNKNOWN'); assert.equal(cleanup.verifiedLocalClosure, true);
+    assert.equal(cleanup.sourceError?.name, ['throw', 'global-error'].includes(mode) ? 'Error' : 'WshDrainError');
+    assert.equal(cleanup.sourceError?.code, mode === 'global-error' ? 502 : mode === 'throw' ? null : 'RESEARCH_WSH_DRAIN_FAILED');
+    t.diagnostic(`cleanup ${mode}: ${(performance.now() - started).toFixed(1)}ms`);
+    assert.doesNotMatch(JSON.stringify(cleanup), /private-key|DU_FIXTURE/);
+    assert.equal(socket.timeRequests, 1); assert.equal(socket.disconnected, 1);
+    for (const event of ['sent', 'currentTime', 'disconnected']) assert.equal(socket.listenerCount(event), 0);
+    assert.equal(socket.local.listenerCount('close'), 0); assert.equal(socket.listenerCount('error'), 1);
+    socket.emit('currentTime', 1790000000); socket.emit('error', new Error('late'), 502, -1);
+    assert.strictEqual(await transport.close(), cleanup);
+    await assert.rejects(transport.events(3, request, deadline(), 100), /RESEARCH_WSH_ERROR_10281/);
+  });
+}
+
+test('drain accepts synchronous ordered response and ignores earlier callbacks and unrelated errors', async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+  socket.reqCurrentTime = () => {
+    socket.timeRequests++;
+    socket.emit('currentTime', 'invalid-before-send'); socket.emit('sent', [49, 1]);
+    socket.emit('error', new Error('informational'), 2104, -1);
+    socket.emit('error', new Error('unrelated'), 502, 99); socket.emit('currentTime', 1790000000);
+  };
+  const a = transport.close(), b = transport.close(); assert.strictEqual(a, b);
+  assert.equal((await a).state, 'CONFIRMED'); assert.equal(socket.timeRequests, 1);
+});
+
+test('no owned requests or unresolved cancellation sends do not enqueue a drain', async () => {
+  for (const owned of [false, true]) {
+    const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+    await transport.connect(deadline());
+    if (owned) { await transport.metadata(1, deadline(), 100); socket.reqCancelWshMetaData = id => { socket.cancellations.push(`metadata:${id}`); }; }
+    const result = await transport.close();
+    assert.equal(result.state, owned ? 'UNKNOWN' : 'CONFIRMED'); assert.equal(socket.timeRequests, 0);
+  }
+});
+
+test('drain failure has local-error precedence over cancellation diagnostic', async () => {
+  const socket = new Socket(), transport = new WshSocketTransport(options, () => socket);
+  await transport.connect(deadline()); await transport.metadata(1, deadline(), 100);
+  const original = socket.reqCancelWshMetaData.bind(socket);
+  socket.reqCancelWshMetaData = id => { original(id); socket.emit('error', new Error('cancellation failed'), 10280, id); };
+  socket.reqCurrentTime = () => { throw new Error('private cause'); };
+  const result = await transport.close();
+  assert.equal(result.state, 'UNKNOWN'); assert.deepEqual(result.sourceError, { name: 'Error', code: null, message: 'private cause' });
 });

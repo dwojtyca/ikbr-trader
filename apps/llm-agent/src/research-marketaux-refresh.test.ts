@@ -448,3 +448,24 @@ test("future ongoing Marketaux confirmation sends no provider request", async ()
   assert.equal(s.state.requests.length, 0); assert.equal(s.state.reservations.length, 0);
   assert.equal(s.coverage().status, "UNVERIFIED");
 });
+
+
+test("ordinary URL rejection persists exact safe location without partial evidence or extra calls", async () => {
+  const s = setup();
+  s.state.response = request => marketauxResponse([s.f.article(1), {
+    ...s.f.article(2), title: "synthetic-secret DU_TEST private title", url: "https://publisher.com/article?api_token=synthetic-secret#DU_TEST",
+  }], request.page, 2);
+  await s.make().tick();
+  const coverage = s.coverage();
+  assert.equal(s.state.requests.length, 1); assert.equal(s.state.reservations.length, 1);
+  assert.deepEqual(s.state.outcomes, [s.state.reservations[0].callKey + ":SUCCEEDED"]);
+  assert.equal(coverage.status, "ERROR"); assert.equal(coverage.complete, false);
+  assert.equal(coverage.reason, "RESEARCH_MARKETAUX_PAYLOAD_INVALID");
+  assert.deepEqual(coverage.evidenceRefs, []); assert.equal(coverage.acquisition, undefined);
+  assert.equal(s.state.snapshots[0].news.length, 0);
+  assert.deepEqual(coverage.sourceError, { name: "MarketauxPayloadValidationError", code: null,
+    message: "Local Marketaux payload validation; constraint=article.url.safe_public_url; urlPredicate=fragment; pass=1; page=1; recordIndex=1" });
+  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "HOLD");
+  const serialized = JSON.stringify(coverage);
+  for (const value of ["synthetic-secret", "DU_TEST", "publisher.com", "private title", s.f.article(2).uuid]) assert.equal(serialized.includes(value), false);
+});
