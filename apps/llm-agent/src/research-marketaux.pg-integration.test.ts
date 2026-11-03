@@ -59,15 +59,18 @@ async function seed(pool: Pool, expiryMs = 3_600_000, budget = 1000, twoIssuers 
     latestSnapshot: store.latestSnapshot.bind(store), withRefreshLock: store.withRefreshLock.bind(store), reserveCall: store.reserveCall.bind(store), recordCallOutcome: store.recordCallOutcome.bind(store),
     hasRefreshSlot: async key => skipped.has(key) || store.hasRefreshSlot(key),
     storeSnapshot: async (snapshot, slot, deadline) => { assert.equal(snapshot.schemaVersion, 1); if (snapshot.schemaVersion !== 1) throw new Error("V1 fixture received V2"); await beforeStore?.(snapshot, deadline); return store.storeSnapshot(snapshot, slot, deadline); },
-  }, marketauxFetch: async (source, request) => { requests.push(request); return marketauxResponse([{ ...f.article(1), entities: [source.parserConfig.entity] }], request.page, 1); } });
+  }, marketauxFetch: async (source, request) => { requests.push(request); return marketauxResponse([{ ...f.article(1), url: f.article(1).url + "#:~:text=Article%20section", entities: [source.parserConfig.entity] }], request.page, 1); } });
   return { ...f, store, scheduler, requests, beforeStore: (hook: typeof beforeStore) => { beforeStore = hook; } };
 }
 
-test("durable refresh lock and reservations publish once across workers and restart", { skip: !connection }, () => isolated(async pool => {
+test("fragment references publish once with canonical evidence across workers and restart", { skip: !connection }, () => isolated(async pool => {
   const f = await seed(pool); await Promise.all([f.scheduler().tick(), f.scheduler().tick()]);
   assert.equal(f.requests.length, 2); await f.scheduler().tick(); assert.equal(f.requests.length, 2);
   const head = (await f.store.latestSnapshot({ configHash: f.configHash, manifestHash: f.manifestHash, instrumentId: f.policy.instrumentId }))!;
   assert.equal(head.snapshot.coverage.find(c => c.sourceId === f.source.id)!.status, "AVAILABLE");
+  const evidence = head.snapshot.evidence.filter(e => e.sourceId === f.source.id);
+  assert.equal(evidence.length, 1); assert.ok("url" in evidence[0]); assert.equal(evidence[0].url, f.source.urls[0]);
+  assert.equal(head.snapshot.news.length, 1);
   assert.equal((await pool.query("SELECT count(*) FROM research_call_reservations")).rows[0].count, "2");
   assert.equal((await pool.query("SELECT count(*) FROM research_refresh_slots")).rows[0].count, "1");
   const audit = (await pool.query("SELECT * FROM research_call_reservations")).rows;
@@ -129,7 +132,7 @@ test("head-lock wait past admission expiry rolls back success then publishes exa
 }));
 
 for (const expiryField of ["qualification", "entitlement"] as const) for (const stage of ["AI finalization", "execution permit"] as const)
-test(`${expiryField} expiry fences actual ${stage} with fresh news and readable history`, { skip: !connection }, () => isolated(async pool => {
+test(`${expiryField} expiry fences actual ${stage} after fragment-reference publication with readable history`, { skip: !connection }, () => isolated(async pool => {
   const f = await seed(pool, 5000, 1000, false, expiryField); await f.scheduler().tick();
   const r = reviewFixture(f.now), c = r.claim;
   await pool.query(`INSERT INTO proposed_orders(id,instrument,instrument_id,conid,side,position_effect,order_type,quantity,entry,stop,take_profit,reason,confidence,risk_check_status,status,strategy,

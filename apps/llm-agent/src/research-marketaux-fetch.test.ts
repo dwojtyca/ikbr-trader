@@ -33,7 +33,7 @@ test("missing keys, altered authority and raw token-bearing errors never leak or
   });
   assert.equal(connections, 1);
   await assert.rejects(createMarketauxFetch(undefined)(f.source, f.descriptor, deadline()), /KEY_MISSING/);
-  for (const sourceUrl of [f.source.urls[0] + "&api_token=x", "https://127.0.0.1/", "https://api.marketaux.com/v1/entity/search"])
+  for (const sourceUrl of [f.source.urls[0] + "#section", f.source.urls[0] + "#:~:text=article", f.source.urls[0] + "&api_token=x", "https://127.0.0.1/", "https://api.marketaux.com/v1/entity/search"])
     await assert.rejects(fetch(f.source, { ...f.descriptor, sourceUrl }, deadline()), /REQUEST_INVALID/);
   assert.equal(connections, 1);
   assert.equal(sanitizeMarketauxError(new Error("RESEARCH_MARKETAUX_SYNTHETIC_SECRET_TOKEN")), "RESEARCH_MARKETAUX_ACQUISITION_FAILED");

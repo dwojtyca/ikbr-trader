@@ -5,6 +5,7 @@ import type { request } from "node:https";
 import { marketauxSourceUrl, inspectResearch, parseResearchSnapshot, researchHash, type InstrumentResearchSnapshotV1, type ResearchSnapshot, type MarketauxRequest, type ResearchCallReservation, type StoredResearchSnapshot } from "@ikbr/shared/instrument-research";
 import { ResearchRefreshScheduler, researchSourceSlot } from "./research-refresh.js";
 import { marketauxFixture, marketauxResponse } from "./research-marketaux.testfixture.js";
+import { marketauxRecordSetHash, parseMarketauxPage } from "./research-marketaux.js";
 import type { ResearchFetchResult } from "./research-fetch.js";
 import { createMarketauxFetch, type MarketauxFetch } from "./research-marketaux-fetch.js";
 
@@ -453,7 +454,7 @@ test("future ongoing Marketaux confirmation sends no provider request", async ()
 test("ordinary URL rejection persists exact safe location without partial evidence or extra calls", async () => {
   const s = setup();
   s.state.response = request => marketauxResponse([s.f.article(1), {
-    ...s.f.article(2), title: "synthetic-secret DU_TEST private title", url: "https://publisher.com/article?api_token=synthetic-secret#DU_TEST",
+    ...s.f.article(2), title: "synthetic-secret DU_TEST private title", url: "https://publisher.com:8443/article?api_token=synthetic-secret#DU_TEST",
   }], request.page, 2);
   await s.make().tick();
   const coverage = s.coverage();
@@ -464,8 +465,51 @@ test("ordinary URL rejection persists exact safe location without partial eviden
   assert.deepEqual(coverage.evidenceRefs, []); assert.equal(coverage.acquisition, undefined);
   assert.equal(s.state.snapshots[0].news.length, 0);
   assert.deepEqual(coverage.sourceError, { name: "MarketauxPayloadValidationError", code: null,
-    message: "Local Marketaux payload validation; constraint=article.url.safe_public_url; urlPredicate=fragment; pass=1; page=1; recordIndex=1" });
+    message: "Local Marketaux payload validation; constraint=article.url.safe_public_url; urlPredicate=port; pass=1; page=1; recordIndex=1" });
   assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "HOLD");
   const serialized = JSON.stringify(coverage);
   for (const value of ["synthetic-secret", "DU_TEST", "publisher.com", "private title", s.f.article(2).uuid]) assert.equal(serialized.includes(value), false);
+});
+
+test("fragment article references complete both passes with exact record hashes and canonical evidence URLs", async () => {
+  const s = setup();
+  const articles = [
+    { ...s.f.article(1), url: "https://publisher.com/article#section" },
+    { ...s.f.article(2), url: "https://publisher.com/article#:~:text=Some%20text" },
+    { ...s.f.article(3), url: "HTTPS://Publisher.COM:443/article#%53ection" },
+  ];
+  s.state.response = request => marketauxResponse(articles.slice((request.page - 1) * 2, request.page * 2), request.page, articles.length);
+  await s.make().tick();
+  assert.equal(s.coverage().status, "AVAILABLE"); assert.equal(s.coverage().complete, true);
+  assert.equal(s.state.snapshots[0].news.length, 3);
+  assert.deepEqual(s.state.requests.map(({ pass, page }) => [pass, page]), [[1, 1], [1, 2], [2, 1], [2, 2]]);
+  assert.equal(s.state.reservations.length, 4);
+  const records = [1, 2].flatMap(page => parseMarketauxPage({ meta: { found: 3, returned: page === 1 ? 2 : 1, limit: 2, page },
+    data: articles.slice((page - 1) * 2, page * 2) }, s.f.newsConfig, { ...s.f.descriptor, page }).records);
+  assert.deepEqual(records.map(record => record.url), articles.map(article => article.url));
+  assert.equal(s.coverage().acquisition!.recordSetHash, marketauxRecordSetHash(records));
+  assert.notEqual(s.coverage().acquisition!.recordSetHash, marketauxRecordSetHash(records.map(record => ({ ...record, url: record.url.split("#")[0] }))));
+  const evidence = s.state.snapshots[0].evidence.filter(e => e.sourceId === s.f.source.id);
+  assert.equal(evidence.length, 3); assert.ok(evidence.every(e => e.url === s.f.source.urls[0]));
+  assert.ok(s.state.requests.every(request => request.sourceUrl === s.f.source.urls[0]));
+  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "READY");
+  for (const url of [s.f.source.urls[0] + "#section", articles[0].url]) {
+    const tampered = structuredClone(s.state.snapshots[0]);
+    tampered.evidence.find(e => e.sourceId === s.f.source.id)!.url = url;
+    assert.throws(() => parseResearchSnapshot(tampered, s.f.manifest), /RESEARCH_EVIDENCE_URL_MISMATCH/);
+  }
+});
+
+test("changing only an article fragment between complete passes fails without partial publication or retry", async () => {
+  const s = setup();
+  s.state.response = request => marketauxResponse([{ ...s.f.article(1), url: `https://publisher.com/article#section-${request.pass}` }], request.page, 1);
+  await s.make().tick();
+  assert.equal(s.state.requests.length, 2); assert.equal(s.state.reservations.length, 2);
+  assert.equal(s.coverage().status, "ERROR"); assert.equal(s.coverage().complete, false);
+  assert.equal(s.coverage().reason, "RESEARCH_MARKETAUX_RESULT_CHANGED");
+  assert.equal(s.coverage().acquisition, undefined); assert.deepEqual(s.coverage().evidenceRefs, []);
+  assert.deepEqual(s.state.snapshots[0].news, []);
+  assert.equal(s.state.snapshots[0].evidence.filter(e => e.sourceId === s.f.source.id).length, 0);
+  assert.equal(inspectResearch(s.f.manifest, s.f.policy.instrumentId, s.state.prior, s.state.now).state, "HOLD");
+  await s.make().tick(); assert.equal(s.state.requests.length, 2);
 });

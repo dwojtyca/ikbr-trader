@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { researchUrlRejection, safeResearchUrl, type ResearchUrlRejection } from "./validation.js";
+import { researchReferenceUrlRejection, researchUrlRejection, safeResearchUrl, type ResearchUrlRejection } from "./validation.js";
 
 test("URL diagnostics preserve the existing acceptance and first failing predicate", () => {
   const cases: [unknown, ResearchUrlRejection | null][] = [
@@ -22,5 +22,25 @@ test("URL diagnostics preserve the existing acceptance and first failing predica
   for (const [value, reason] of cases) {
     assert.equal(researchUrlRejection(value), reason);
     assert.equal(safeResearchUrl(value), reason === null);
+  }
+});
+
+test("article reference URLs allow fragments while retaining every other ordered predicate", () => {
+  const cases: [unknown, ResearchUrlRejection | null][] = [
+    [null, "string"], [123, "string"], [{ toString: () => { throw new Error("must not coerce"); } }, "string"],
+    ["https://sec.gov/#" + "x".repeat(1983), null], ["https://sec.gov/#" + "x".repeat(1984), "max_length"],
+    ["not a URL#section", "parse"], ["https://[#section", "parse"],
+    ["http://user:password@127.0.0.1:8080/#section", "https"], ["file:///private#section", "https"],
+    ["https://user@sec.gov:8443/#section", "credentials"], ["https://:password@sec.gov/#section", "credentials"],
+    ["https://sec.gov:8443/#section", "port"], ["https://127.0.0.1:8443/#section", "port"],
+    ...["127.0.0.1", "10.0.0.1", "8.8.8.8", "[::1]", "2130706433", "0x7f000001"].map(host => [`https://${host}/#section`, "ip_host"] as [string, ResearchUrlRejection]),
+    ...["localhost", "sec.gov.", "host.xn--p1ai", "a_b.gov"].map(host => [`https://${host}/#section`, "domain_syntax"] as [string, ResearchUrlRejection]),
+    ...["localhost", "local", "internal", "test", "invalid", "example"].map(tld => [`https://host.${tld}/#section`, "reserved_host"] as [string, ResearchUrlRejection]),
+    ["https://sec.gov/#section", null], ["https://sec.gov/#:~:text=Some%20text", null],
+    ["https://sec.gov/#", null], ["HTTPS://SEC.GOV:443/a#section", null],
+  ];
+  for (const [value, reason] of cases) assert.equal(researchReferenceUrlRejection(value), reason);
+  for (const url of ["https://sec.gov/#section", "https://sec.gov/#:~:text=Some%20text"]) {
+    assert.equal(researchUrlRejection(url), "fragment"); assert.equal(safeResearchUrl(url), false);
   }
 });

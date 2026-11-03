@@ -38,14 +38,14 @@ function date(v: unknown): asserts v is string {
   researchAssert(typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v);
 }
 export type ResearchUrlRejection = "string" | "max_length" | "parse" | "https" | "credentials" | "fragment" | "port" | "ip_host" | "domain_syntax" | "reserved_host";
-export function researchUrlRejection(v: unknown): ResearchUrlRejection | null {
+function inspectResearchUrl(v: unknown, allowFragment: boolean): ResearchUrlRejection | null {
   if (typeof v !== "string") return "string";
   if (v.length > 2000) return "max_length";
   try {
     const u = new URL(v), h = u.hostname.toLowerCase();
     if (u.protocol !== "https:") return "https";
     if (u.username || u.password) return "credentials";
-    if (u.hash) return "fragment";
+    if (!allowFragment && u.hash) return "fragment";
     if (u.port && u.port !== "443") return "port";
     if (isIP(h.replace(/^\[|\]$/g, ""))) return "ip_host";
     if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/.test(h)) return "domain_syntax";
@@ -53,6 +53,8 @@ export function researchUrlRejection(v: unknown): ResearchUrlRejection | null {
     return null;
   } catch { return "parse"; }
 }
+export function researchUrlRejection(v: unknown): ResearchUrlRejection | null { return inspectResearchUrl(v, false); }
+export function researchReferenceUrlRejection(v: unknown): ResearchUrlRejection | null { return inspectResearchUrl(v, true); }
 export function safeResearchUrl(v: unknown): v is string { return researchUrlRejection(v) === null; }
 
 function identifier(v: unknown): void {

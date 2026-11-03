@@ -152,7 +152,13 @@ Preserve the publisher URL only in the validated acquisition record hash in this
 first package; direct clickable publisher links are intentionally outside scope.
 No publisher, image, similar-story, next-link or entity-search request occurs
 during scheduled news refresh. Publisher URL validity is checked as reference
-data with `safeResearchUrl`; malformed links fail the refresh rather than disappear.
+data with `researchReferenceUrlRejection`: HTTPS article links may contain ordinary
+or text fragments (`#section`, `#:~:text=...`). All other existing URL checks
+remain in force; malformed links fail the refresh rather than disappear. Preserve
+the original publisher URL byte-for-byte, including the fragment, in acquisition
+records and their record-set digest. A fragment change between passes is record
+drift. `researchUrlRejection` and `safeResearchUrl` retain their existing strict
+behavior for request, evidence and permission URLs.
 
 ## 4. Fixed time window and bounded exhaustive acquisition
 

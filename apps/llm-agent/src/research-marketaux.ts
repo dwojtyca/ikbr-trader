@@ -1,4 +1,4 @@
-import { ResearchSourceFailure, researchHash, researchUrlRejection, safeResearchUrl, type ResearchUrlRejection, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest, type ResearchNewsV2 } from "@ikbr/shared/instrument-research";
+import { ResearchSourceFailure, researchHash, researchReferenceUrlRejection, type ResearchUrlRejection, type MarketauxEntity, type MarketauxNewsConfig, type MarketauxRequest, type ResearchNewsV2 } from "@ikbr/shared/instrument-research";
 
 export interface MarketauxNewsRecord { uuid: string; title: string; url: string; publishedAt: string; originalPublishedAt: string; entity: MarketauxEntity; inWindow: boolean; enrichment?: { description: string | null; snippet: string | null; providerSentiment: ResearchNewsV2["providerSentiment"] } }
 export interface MarketauxPage { found: number; returned: number; limit: number; page: number; records: MarketauxNewsRecord[] }
@@ -86,7 +86,8 @@ export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, 
     if (!item.title.trim()) reject("article.title.nonempty");
     if (item.title.length > 1000) reject("article.title.max_length");
     if (/[\u0000-\u001f\u007f]/.test(item.title)) reject("article.title.control_characters");
-    if (!safeResearchUrl(item.url)) reject("article.url.safe_public_url", researchUrlRejection(item.url) ?? undefined);
+    const urlRejection = researchReferenceUrlRejection(item.url);
+    if (urlRejection !== null) reject("article.url.safe_public_url", urlRejection);
     if (!Array.isArray(item.entities)) reject("article.entities.array");
     if (item.similar !== undefined && (!Array.isArray(item.similar) || item.similar.length !== 0)) reject("article.similar.empty_array");
     const uuid = item.uuid.toLowerCase();
@@ -96,7 +97,7 @@ export function parseMarketauxPage(input: unknown, config: MarketauxNewsConfig, 
     if (matched.length !== 1) throw new Error("RESEARCH_MARKETAUX_ENTITY_MISMATCH");
     const published = timestamp(item.published_at, recordLocation);
     if (published.micros < start - 1_000_000n || published.micros > end + 1_000_000n) throw new Error("RESEARCH_MARKETAUX_PUBLICATION_OUTSIDE_QUERY");
-    return { uuid, title: item.title, url: item.url, publishedAt: published.canonical, originalPublishedAt: published.original,
+    return { uuid, title: item.title, url: item.url as string, publishedAt: published.canonical, originalPublishedAt: published.original,
       entity: { ...config.entity }, inWindow: published.micros >= start && published.micros <= end,
       ...(schemaVersion === 2 ? { enrichment: enrichment(item, matched[0].sentiment_score, recordLocation, entities.indexOf(matched[0])) } : {}) };
   });

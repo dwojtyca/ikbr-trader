@@ -221,7 +221,7 @@ test("payload diagnostics locate later records and nested entities without provi
   const badEntity = { ...f.article(2), entities: [{ symbol: "OTHER" }, null] };
   const sentiment = { ...f.article(2), entities: [{ symbol: "OTHER" }, { ...f.newsConfig.entity, sentiment_score: secret }] };
   const cases: [unknown, string][] = [
-    [{ ...f.article(2), url: `https://publisher.com/article?api_token=${secret}#${secret}` }, "article.url.safe_public_url; urlPredicate=fragment; pass=2; page=2; recordIndex=1"],
+    [{ ...f.article(2), url: `https://publisher.com:8443/article?api_token=${secret}#${secret}` }, "article.url.safe_public_url; urlPredicate=port; pass=2; page=2; recordIndex=1"],
     [badEntity, "article.entity.object; pass=2; page=2; recordIndex=1; entityIndex=1"],
     [sentiment, "matched_entity.sentiment_score.finite_unit_range; pass=2; page=2; recordIndex=1; entityIndex=1"],
     [{ ...f.article(2), published_at: secret }, "published_at.utc_format; pass=2; page=2; recordIndex=1"],
@@ -244,5 +244,17 @@ test("payload diagnostics omit invalid request location without trusting string 
       assert.equal(captureResearchSourceError(error).message, "Local Marketaux payload validation; constraint=root.object");
       return true;
     });
+  }
+});
+
+for (const schemaVersion of [1, 2] as const) test(`V${schemaVersion} article fragments survive parsing byte-for-byte and remain part of record identity`, () => {
+  const f = marketauxFixture();
+  const urls = ["https://publisher.com/article#section", "https://publisher.com/article#:~:text=Some%20text", "HTTPS://Publisher.COM:443/article#%53ection"];
+  const parse = (url: string) => parseMarketauxPage({ meta: { found: 1, returned: 1, limit: 2, page: 1 }, data: [{ ...f.article(1), url }] }, f.newsConfig, f.descriptor, schemaVersion).records;
+  for (const url of urls) {
+    const records = parse(url);
+    assert.equal(records[0].url, url);
+    assert.notEqual(marketauxRecordSetHash(records), marketauxRecordSetHash(parse(url.split("#")[0])));
+    assert.notEqual(marketauxRecordSetHash(records), marketauxRecordSetHash(parse(url + "changed")));
   }
 });
