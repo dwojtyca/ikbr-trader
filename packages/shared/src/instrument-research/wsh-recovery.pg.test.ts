@@ -139,11 +139,13 @@ test('confirmed BUSY uses two durable bounded retries across workers, preserving
 test('SQL BUSY retry authority rejects absent, null, string and wrong provider codes',{skip:!connection},()=>isolated(async pool=>{
  const h=await seed(pool);await h.store.withWshEndpointLock('fixture-endpoint',async lease=>{
   const c=await h.claim(lease);if(c.state!=='CLAIMED')throw Error('fixture');
-  const settle=`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=clock_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
-   provider_error=$2::jsonb,cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=clock_timestamp(),cleanup_completed_at=clock_timestamp(),retry_due_at=clock_timestamp()+interval '30 seconds' WHERE id=$1`;
+  const settle=`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=statement_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
+   provider_error=$2::jsonb,cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=statement_timestamp(),cleanup_completed_at=statement_timestamp(),retry_due_at=statement_timestamp()+interval '30 seconds' WHERE id=$1`;
   for(const detail of [null,'null','{}','[]','{"code":null}','{"code":"10281"}','{"code":502}'])
    await assert.rejects(pool.query(settle,[c.ticket.id,detail]),/research_wsh_retry_known_failure/);
   await pool.query(settle,[c.ticket.id,'{"code":10281,"message":"fixture busy"}']);
+  const timing=(await pool.query("SELECT local_closed_at=cleanup_completed_at AS cleanup_ordered,finished_at=cleanup_completed_at AS settled_together,retry_due_at=finished_at+interval '30 seconds' AS exact_retry_delay FROM research_wsh_refresh_attempts WHERE id=$1",[c.ticket.id])).rows[0];
+  assert.deepEqual(timing,{cleanup_ordered:true,settled_together:true,exact_retry_delay:true});
  });
 }));
 for(const mode of ['application','sql'] as const)test(`${mode} cannot grant BUSY retry for an UNKNOWN linked acquisition`,{skip:!connection},()=>isolated(async pool=>{
@@ -159,8 +161,8 @@ for(const mode of ['application','sql'] as const)test(`${mode} cannot grant BUSY
    assert.equal((await h.claim(lease,'retry')).state,'DEFERRED');
   }else{
    await h.store.retireWshAcquisition(lease,acquisition,'UNKNOWN');
-   await assert.rejects(pool.query(`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=clock_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
-    provider_error='{"code":10281}',cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=clock_timestamp(),cleanup_completed_at=clock_timestamp(),retry_due_at=clock_timestamp()+interval '30 seconds' WHERE id=$1`,[c.ticket.id]),/BUSY_ACQUISITION_UNRESOLVED/);
+   await assert.rejects(pool.query(`UPDATE research_wsh_refresh_attempts SET state='FAILED',finished_at=statement_timestamp(),failure_class='BUSY',failure_reason='RESEARCH_WSH_ERROR_10281',failure_stage='events',
+    provider_error='{"code":10281}',cleanup_state='CONFIRMED',verified_local_closure=true,local_closed_at=statement_timestamp(),cleanup_completed_at=statement_timestamp(),retry_due_at=statement_timestamp()+interval '30 seconds' WHERE id=$1`,[c.ticket.id]),/BUSY_ACQUISITION_UNRESOLVED/);
   }
   assert.equal((await pool.query('SELECT state FROM research_wsh_acquisitions WHERE id=$1',[acquisition.id])).rows[0].state,'UNKNOWN');
   assert.equal((await pool.query('SELECT outcome FROM research_call_outcomes WHERE call_key=$1',[reservation.callKey])).rows[0].outcome,'UNKNOWN');
