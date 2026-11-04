@@ -269,7 +269,11 @@ export function filterClosedSessionCandles(rows: Candle[], timeframe: SessionTim
 }
 export function evaluateSessionCandles(rows: Candle[], timeframe: SessionTimeframe, evidence: SessionScheduleEvidence | null | undefined, identity: InstrumentSessionIdentity, nowMs: number): { candles: Candle[]; expectedStart?: string; expectedEnd?: string; latestStart?: string; latestEnd?: string; reason?: string } {
   try {
-    const schedule = requireSessionSchedule(evidence, identity, nowMs), active = schedule.sessions.find(x => isoMs(x.start) <= nowMs && nowMs < isoMs(x.end));
+    const availability = classifySessionAvailability(evidence, identity, nowMs);
+    const schedule = availability.kind === 'CLOSED' ? requireSessionHistorySchedule(evidence, identity, nowMs)
+      : requireSessionSchedule(evidence, identity, nowMs);
+    const active = schedule.sessions.find(x => isoMs(x.start) <= nowMs && nowMs < isoMs(x.end));
+    if (availability.kind === 'CLOSED' && active) return fail('session_schedule_hours_conflict');
     const candles = filterClosedSessionCandles(rows, timeframe, schedule, nowMs);
     const eligible = sessionCandleSlots(schedule, timeframe).filter(x => isoMs(x.end) <= nowMs);
     const expected = eligible.at(-1), previous = eligible.at(-2), latest = candles.at(-1);

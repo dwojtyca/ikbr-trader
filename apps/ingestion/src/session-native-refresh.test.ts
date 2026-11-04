@@ -463,3 +463,71 @@ for (const stage of ['fetch', 'final-read', 'between-writes'] as const)
     assert.equal(status.historyCoverage, 'UNAVAILABLE'); assert.equal(status.countsMeasured, false);
     assert.equal(minuteWrites, stage === 'fetch' ? 0 : 1);
   });
+
+for (const [symbol, zone, openMinutes, closeMinutes] of [
+  ['AAPL', 'America/New_York', 570, 960], ['PKO', 'Europe/Warsaw', 540, 1025], ['THIRD', 'Asia/Kolkata', 555, 930],
+] as const) test(`${symbol} preopen preparation automatically refreshes at open and requires the current closed minute`, async () => {
+  const { SessionScheduleRefresh } = await import('./session-schedule-refresh.js');
+  const { SESSION_REQUIRED_CANDLES, parseBrokerContractSessionHours, sessionCandleSlots, sessionLocalTime } = await import('@ikbr/shared');
+  const identity = sessionIdentityFixture({ instrumentId: symbol.toLowerCase(), symbol, timeZone: zone });
+  const instant = (date: string, minutes: number) => new Date(sessionLocalTime(date, Math.floor(minutes / 60), minutes % 60, 0, zone)).toISOString();
+  const opening = Date.parse(instant('2026-11-04', openMinutes));
+  let now = opening - 600000, evidence: import('@ikbr/shared').SessionScheduleEvidence | null = null, scheduleCalls = 0;
+  const brokerSchedule = () => {
+    const stamp = new Date(now).toISOString(), sessions: import('@ikbr/shared').SessionInterval[] = [];
+    const lastDate = now < opening ? '2026-11-03' : '2026-11-04';
+    for (let date = '2026-10-01'; date <= lastDate; date = shiftSessionDate(date, 1)) {
+      if ([0, 6].includes(new Date(`${date}T12:00:00Z`).getUTCDay())) continue;
+      sessions.push({ date, start: instant(date, openMinutes), end: instant(date, closeMinutes) });
+    }
+    const hhmm = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}${String(minutes % 60).padStart(2, '0')}`;
+    return { source: 'ibkr_session_schedule_v1' as const, identity, requestedAt: stamp, receivedAt: stamp,
+      coverageStart: instant('2026-10-01', 0), coverageEnd: sessions.at(-1)!.end, sessions,
+      currentHours: parseBrokerContractSessionHours({ timeZoneId: zone, liquidHours: `20261104:${hhmm(openMinutes)}-${hhmm(closeMinutes)}` }, identity, stamp, stamp) };
+  };
+  const nativeBars = (tf: SessionTimeframe): Candle[] => {
+    const schedule = brokerSchedule(), count = SESSION_REQUIRED_CANDLES[tf];
+    const slots = sessionCandleSlots(schedule, tf).filter(slot => Date.parse(slot.end) <= now).slice(-count);
+    const starts = slots.map(slot => slot.start);
+    for (let n = 0; starts.length < count; n++) {
+      const date = shiftSessionDate('2026-09-25', -n * (tf === '1w' ? 7 : 1));
+      starts.unshift(instant(date, 0));
+    }
+    return starts.map(start => ({ conid: String(identity.conId), symbol, timeframe: tf, ts: new Date(start),
+      open: 100, high: 101, low: 99, close: 100, volume: 100, source: sessionNativeSource(identity) }));
+  };
+  const rows = new Map((Object.keys(SESSION_REQUIRED_CANDLES) as SessionTimeframe[]).map(tf => [tf, nativeBars(tf)]));
+  const schedules = new SessionScheduleRefresh(identity, {
+    now: () => now, read: async () => evidence,
+    begin: async status => { evidence = { generation: (evidence?.generation ?? 0) + 1, status, updatedAt: new Date(now).toISOString() }; return evidence.generation; },
+    finish: async (generation, schedule) => {
+      if (evidence?.generation !== generation || evidence.status !== 'REFRESHING') return false;
+      evidence = { ...evidence, status: schedule ? 'READY' : 'FAILED', schedule, updatedAt: new Date(now).toISOString() }; return true;
+    },
+    fetch: async () => { scheduleCalls++; return brokerSchedule(); },
+  });
+  const native = new SessionNativeRefresh({
+    now: () => now, identity: () => identity, schedule: () => schedules.ensure(), readSchedule: async () => evidence,
+    invalidate: async () => { await schedules.invalidate(); }, read: async (_identity, tf) => rows.get(tf)!,
+    fetch: async (_sub, _identity, tf) => nativeBars(tf),
+    write: async candle => { const tf = candle.timeframe as SessionTimeframe; rows.set(tf, upsertRow(rows.get(tf)!, candle)); },
+  });
+  const subscriptions = [{ instrumentId: identity.instrumentId, conid: String(identity.conId), symbol }];
+  await native.run(subscriptions);
+  assert.equal(scheduleCalls, 1);
+  for (const status of native.status.values()) {
+    assert.equal(status.historyCoverage, 'COMPLETE'); assert.equal(status.countsMeasured, true);
+    assert.equal(status.preparationState, 'WAITING'); assert.equal(status.preparationReason, 'session_closed');
+    assert.ok(status.nativeClosed >= status.required); assert.equal(status.coverageEnd, instant('2026-11-03', closeMinutes));
+  }
+  now = opening; await native.run(subscriptions);
+  assert.equal(scheduleCalls, 2);
+  const key = `${identity.instrumentId}:${identity.conId}:rth:1m`;
+  assert.equal(native.status.get(key)?.preparationReason, 'session_current_interval_minute_missing');
+  assert.equal(native.status.get(key)?.preparationState, 'WAITING');
+  now = opening + 60000; await native.run(subscriptions);
+  assert.equal(scheduleCalls, 2);
+  assert.equal(native.status.get(key)?.preparationState, 'READY');
+  assert.equal(native.status.get(key)?.latest, new Date(opening).toISOString());
+  assert.equal(native.status.get(key)?.latestEnd, new Date(opening + 60000).toISOString());
+});

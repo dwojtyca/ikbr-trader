@@ -145,3 +145,26 @@ test("changed session evidence has an explicit diagnostic without permitting a s
  assert.deepEqual(result.reasons,["STRATEGY_CONTEXT_UNAVAILABLE","session_evidence_changed_during_evaluation"]);
  assert.equal(result.signal,undefined);assert.equal(f.calls.length,0);
 });
+
+test('real historical-only OPEN evidence stays an error when loading crosses the close', async () => {
+ const {classifySessionAvailability,parseBrokerContractSessionHours,buildInstrumentSessionIdentity}=await import('@ikbr/shared');
+ const {fixtureSessionSchedule}=await import('./session-native.fixture.js');
+ let checks=0;
+ const f=setup({loadError:'session_schedule_coverage_missing',checkSession:async({instrument,bound})=>{
+  checks++;
+  const identity=buildInstrumentSessionIdentity(instrument,bound), stamp=new Date('2026-09-29T15:00:00.000Z');
+  const evidence=fixtureSessionSchedule(identity,stamp);
+  evidence.schedule!.sessions=evidence.schedule!.sessions.filter(session=>session.date<'2026-09-29');
+  evidence.schedule!.coverageEnd=evidence.schedule!.sessions.at(-1)!.end;
+  evidence.schedule!.currentHours=parseBrokerContractSessionHours({timeZoneId:identity.timeZone,liquidHours:'20260929:0900-1705'},identity,evidence.schedule!.requestedAt,evidence.schedule!.receivedAt);
+  const before=classifySessionAvailability(evidence,identity,Date.parse('2026-09-29T15:04:59Z'));
+  const after=classifySessionAvailability(evidence,identity,Date.parse('2026-09-29T15:05:00Z'));
+  assert.equal(before.kind,'OPEN');assert.equal(before.historyReady,false);assert.equal(after.kind,'CLOSED');
+  assert.equal(before.evidenceKey,after.evidenceKey);
+  return checks===1?before:after;
+ }});
+ const result=await f.runtime.evaluate(f.row.id);
+ assert.equal(result.kind,'error');assert.equal(result.signal,undefined);assert.equal(f.calls.length,0);
+ assert.deepEqual(result.reasons,['STRATEGY_CONTEXT_UNAVAILABLE','session_schedule_coverage_missing']);
+ assert.equal(checks,1);
+});

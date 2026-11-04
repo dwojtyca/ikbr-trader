@@ -170,6 +170,21 @@ test('completed bootstrap reports independent partial PKO and failed AAPL sessio
   } finally { await h.f.cleanup(); }
 });
 
+test('closed market is normal waiting while contradictory session evidence remains an explicit hold', async () => {
+  const h = await runScenario({ sessionWarmup: [
+    { instrumentId: 'pko_wse', timeframe: '1m', preparationState: 'WAITING', historyCoverage: 'COMPLETE', countsMeasured: true, available: 230, nativeClosed: 230, required: 220, preparationReason: 'session_closed' },
+    { instrumentId: 'aapl_smart', timeframe: '1m', preparationState: 'HOLD', historyCoverage: 'COMPLETE', countsMeasured: true, available: 230, nativeClosed: 230, required: 220, preparationReason: 'session_schedule_hours_conflict' },
+  ] });
+  try {
+    await h.runtime.start();
+    const report = h.logs.join('\n');
+    assert.match(report, /pko_wse:.*1m: WAITING, historia COMPLETE, 230\/220 zamkniętych; rynek zamknięty — oczekiwanie na kolejną sesję/);
+    assert.match(report, /aapl_smart:.*1m: HOLD, historia COMPLETE, 230\/220 zamkniętych; session_schedule_hours_conflict/);
+    assert.doesNotMatch(report, /1m: READY/);
+    assert.equal(h.resumeCalls, 1);
+  } finally { await h.f.cleanup(); }
+});
+
 test('missing or malformed session warmup diagnostics are unavailable and hostile text is omitted', async () => {
   const h = await runScenario({ sessionWarmup: [
     { instrumentId: 'pko_wse', timeframe: '1m', preparationState: 'READY', historyCoverage: 'PARTIAL', countsMeasured: true, available: 99, nativeClosed: 99, required: 1, preparationReason: 'SECRET DU123456 raw provider response' },

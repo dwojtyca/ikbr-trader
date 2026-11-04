@@ -34,6 +34,22 @@ Historical warming may use fresh broker calendars ending at the last close.
 That does not extend coverage or make the instrument entry-ready. Runtime and
 execution always require fresh current-time coverage and an active interval.
 
+With complete historical coverage and fresh matching IBKR contract hours proving
+the current market CLOSED, candle assessment reports `session_closed` rather than
+`session_schedule_coverage_missing`. With sufficient valid native candles, warmup
+reports WAITING / history COMPLETE; terminal output explains “rynek zamknięty —
+oczekiwanie na kolejną sesję”. Insufficient counts and invalid candles retain their
+own diagnostics. Historical bounds and stored sessions are never extended by
+contract hours. An explicitly active historical interval contradicting CLOSED
+contract hours produces `session_schedule_hours_conflict`, not normal waiting.
+
+At opening, contract hours alone cannot establish candle readiness: the ordinary
+paced refresh must obtain the current historical session and the required closed
+current-interval minute. Missing current coverage continues to retry without a
+manual restart. The strict `historyReady` flag used by strategy close-crossing
+checks is unchanged; `sessionWarmup.historyCoverage` describes historical
+preparation separately. See the [reviewed correction plan](../implementation/phase3/SESSION_READINESS_SEPARATION_PLAN.md).
+
 A Monday preopening SCHEDULE can end at the prior Friday close. With matching,
 fresh contract hours explicitly proving the current market CLOSED and a bounded
 recent history envelope, ingestion prepares native 1m/5m/1h/4h/1d history as

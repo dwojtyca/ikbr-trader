@@ -81,3 +81,9 @@ test('availability carries the observed clock and exact active interval end', ()
   const result = classifySessionAvailability(f.evidence,identity,f.now);
   assert.equal(result.checkedAt,f.now);assert.equal(result.activeIntervalEnd,Date.parse('2026-10-13T20:00:00Z'));
 });
+
+test('historical preparation does not broaden the strict close-crossing eligibility flag', () => {
+  const f = fixture('2026-10-13T12:00:00Z');
+  assert.equal(classifySessionAvailability(f.evidence, identity, f.now).historyReady, false);
+  assert.equal(classifySessionAvailability(f.evidence, identity, Date.parse('2026-10-13T13:30:00Z')).historyReady, false);
+});

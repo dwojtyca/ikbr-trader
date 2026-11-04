@@ -304,3 +304,56 @@ test('history preparation bounds follow separate US and Polish DST dates', () =>
   assert.deepEqual(sessionHistoryCoverageBounds({ ...us, timeZone: 'Europe/Warsaw' }, Date.parse('2026-10-26T08:00:00Z')), {
     priorSunday: '2026-10-17T22:00:00.000Z', previousMonday: '2026-10-18T22:00:00.000Z', currentMonday: '2026-10-25T23:00:00.000Z' });
 });
+
+for (const [symbol, zone, open, close, exchange, currency] of [
+  ['AAPL', 'America/New_York', '0930', '1600', 'SMART', 'USD'],
+  ['PKO', 'Europe/Warsaw', '0900', '1705', 'WSE', 'PLN'],
+  ['THIRD', 'Asia/Kolkata', '0915', '1530', 'TEST', 'INR'],
+] as const) test(`complete history and verified preopen hours wait without extending ${symbol} history`, () => {
+  const identity: InstrumentSessionIdentity = { instrumentId: symbol.toLowerCase(), conId: 9876, symbol, secType: 'STK', exchange, currency, timeZone: zone, useRTH: true };
+  const instant = (date: string, hhmm: string) => new Date(sessionLocalTime(date, +hhmm.slice(0, 2), +hhmm.slice(2), 0, zone)).toISOString();
+  const now = Date.parse(instant('2026-11-04', open)) - 600000, stamp = new Date(now - 1000).toISOString();
+  const schedule: SessionSchedule = { source: 'ibkr_session_schedule_v1', identity, requestedAt: stamp, receivedAt: stamp,
+    coverageStart: instant('2026-10-01', '0000'), coverageEnd: instant('2026-11-03', close),
+    sessions: ['2026-10-23', '2026-10-30', '2026-11-02', '2026-11-03'].map(date => ({ date, start: instant(date, open), end: instant(date, close) })),
+    currentHours: parseBrokerContractSessionHours({ timeZoneId: zone, liquidHours: `20261104:${open}-${close}` }, identity, stamp, stamp) };
+  const evidence: SessionScheduleEvidence = { generation: 1, status: 'READY', updatedAt: stamp, schedule };
+  const before = JSON.stringify(schedule);
+  for (const tf of ['1m', '5m', '1h', '4h', '1d', '1w'] as const) {
+    const expected = expectedSessionSlot(tf, schedule, now)!;
+    const row = candle(identity, tf, expected.start);
+    const result = evaluateSessionCandles([row], tf, evidence, identity, now);
+    assert.equal(result.reason, 'session_closed', tf); assert.equal(result.candles.length, 1);
+    assert.equal(result.latestStart, expected.start); assert.equal(result.expectedEnd, expected.end);
+    assert.throws(() => requireSessionSchedule(evidence, identity, now), /coverage_missing/);
+    assert.throws(() => checkSessionWindow(evidence, identity, now, now, now + 1), /coverage_missing/);
+  }
+  const slot = expectedSessionSlot('1m', schedule, now)!;
+  assert.equal(evaluateSessionCandles([{ ...candle(identity, '1m', slot.start), high: 0 }], '1m', evidence, identity, now).reason, 'session_candle_values_invalid');
+  const opening = Date.parse(instant('2026-11-04', open));
+  assert.equal(evaluateSessionCandles([], '1m', evidence, identity, opening).reason, 'session_schedule_coverage_missing');
+  for (const mutation of ['missing', 'null', 'wrong-date', 'identity', 'stale', 'future', 'failed', 'refreshing', 'generation', 'history'] as const) {
+    const bad = structuredClone(evidence);
+    if (mutation === 'missing') delete bad.schedule!.currentHours;
+    if (mutation === 'null') bad.schedule!.currentHours = null as never;
+    if (mutation === 'wrong-date') bad.schedule!.currentHours!.days[0].date = '2026-11-05';
+    if (mutation === 'identity') bad.schedule!.currentHours!.identity.conId++;
+    if (mutation === 'stale') bad.schedule!.receivedAt = bad.schedule!.requestedAt = new Date(now - 7 * 3600000).toISOString();
+    if (mutation === 'future') bad.updatedAt = new Date(now + 1).toISOString();
+    if (mutation === 'failed') bad.status = 'FAILED';
+    if (mutation === 'refreshing') bad.status = 'REFRESHING';
+    if (mutation === 'generation') bad.generation = 0;
+    if (mutation === 'history') { bad.schedule!.coverageStart = instant('2026-11-02', '0000'); bad.schedule!.sessions = bad.schedule!.sessions.slice(-2); }
+    const result = evaluateSessionCandles([], '1m', bad, identity, now);
+    assert.ok(result.reason && result.reason !== 'session_closed', mutation);
+  }
+  assert.equal(JSON.stringify(schedule), before);
+});
+
+for (const hours of ['20260924:CLOSED', '20260924:1200-1700']) test(`closed hours cannot mask an active historical interval: ${hours}`, () => {
+  const f = fixture();
+  f.schedule.currentHours = parseBrokerContractSessionHours({ timeZoneId: f.identity.timeZone, liquidHours: hours }, f.identity, f.schedule.requestedAt, f.schedule.receivedAt);
+  const slot = expectedSessionSlot('1m', f.schedule, f.now)!;
+  const result = evaluateSessionCandles([candle(f.identity, '1m', slot.start)], '1m', f.evidence, f.identity, f.now);
+  assert.equal(result.reason, 'session_schedule_hours_conflict'); assert.deepEqual(result.candles, []);
+});

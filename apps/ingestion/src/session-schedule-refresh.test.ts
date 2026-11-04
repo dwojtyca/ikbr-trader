@@ -164,3 +164,27 @@ test('cached diagnostics also observe external generation changes inside the ret
   await f.deps.begin('FAILED'); await refresh.ensure();
   assert.equal(f.calls, 1); assert.equal(refresh.lastAttemptDiagnostic?.status, 'SUPERSEDED');
 });
+
+test('historical-only complete schedule retries on the existing minute floor through opening until current coverage arrives', async () => {
+  const { parseBrokerContractSessionHours, evaluateSessionCandles } = await import('@ikbr/shared');
+  const f = fixture(); f.advance(Date.parse('2026-09-24T13:20:00Z') - f.deps.now());
+  let current = false, calls = 0;
+  const refresh = new SessionScheduleRefresh(identity, { ...f.deps, fetch: async () => {
+    calls++;
+    const schedule = scheduleFixture(f.deps.now()).schedule!;
+    schedule.currentHours = parseBrokerContractSessionHours({ timeZoneId: identity.timeZone, liquidHours: '20260924:0930-1600' }, identity, schedule.requestedAt, schedule.receivedAt);
+    if (!current) { schedule.sessions = schedule.sessions.filter(s => s.date < '2026-09-24'); schedule.coverageEnd = schedule.sessions.at(-1)!.end; }
+    return schedule;
+  } });
+  const first = refresh.ensure(); assert.equal(refresh.ensure(), first); await first;
+  assert.equal(refresh.lastAttemptDiagnostic?.status, 'COMPLETE');
+  assert.equal(evaluateSessionCandles([], '1m', f.evidence, identity, f.deps.now()).reason, 'session_closed');
+  f.advance(59999); await refresh.ensure(); assert.equal(calls, 1);
+  f.advance(1); await refresh.ensure(); assert.equal(calls, 2);
+  f.advance(Date.parse('2026-09-24T13:30:00Z') - f.deps.now()); await refresh.ensure(); assert.equal(calls, 3);
+  assert.equal(evaluateSessionCandles([], '1m', f.evidence, identity, f.deps.now()).reason, 'session_schedule_coverage_missing');
+  current = true; f.advance(59999); await refresh.ensure(); assert.equal(calls, 3);
+  f.advance(1); await refresh.ensure(); assert.equal(calls, 4);
+  assert.equal(f.evidence?.schedule?.coverageEnd, '2026-09-24T20:00:00.000Z');
+  assert.equal(evaluateSessionCandles([], '1m', f.evidence, identity, f.deps.now()).reason, 'session_current_interval_minute_missing');
+});

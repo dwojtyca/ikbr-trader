@@ -223,7 +223,7 @@ const sessionPreparationReasons = new Set([
   'session_invalidation_failed', 'session_mode_conflict', 'session_mode_invalid',
   'session_native_refresh_failed', 'session_polling_capacity_exceeded', 'session_refresh_queued',
   'session_schedule_coverage_missing', 'session_schedule_envelope_invalid', 'session_schedule_failed',
-  'session_schedule_generation_changed', 'session_schedule_identity_invalid', 'session_schedule_intervals_invalid',
+  'session_schedule_generation_changed', 'session_schedule_hours_conflict', 'session_schedule_identity_invalid', 'session_schedule_intervals_invalid',
   'session_schedule_invalid', 'session_schedule_stale', 'session_schedule_timestamp_order_invalid',
   'session_schedule_timezone_invalid', 'session_schedule_unavailable', 'session_slot_invalid',
   'session_timeframe_unsupported', 'session_timestamp_invalid', 'session_timezone_invalid',
@@ -252,7 +252,8 @@ function formatSessionWarmups(value: unknown, expectedInstruments: string[], pri
       const state = ready ? 'READY' : row.preparationState === 'HOLD' ? 'HOLD' : 'WAITING';
       const coverage = String(row.historyCoverage);
       const reason = typeof row.preparationReason === 'string' && sessionPreparationReasons.has(row.preparationReason)
-        ? safeDiagnosticText(row.preparationReason, privacy) : ready ? '' : 'powód niedostępny';
+        ? row.preparationReason === 'session_closed' ? 'rynek zamknięty — oczekiwanie na kolejną sesję'
+          : safeDiagnosticText(row.preparationReason, privacy) : ready ? '' : 'powód niedostępny';
       const next = instant(row.nextCheckAt) ? `; następne sprawdzenie ${new Date(row.nextCheckAt).toISOString()}` : '';
       return `${timeframe}: ${state}, historia ${coverage},${counts}${reason ? `; ${reason}` : ''}${next}`;
     });
