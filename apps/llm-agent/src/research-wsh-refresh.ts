@@ -84,6 +84,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
     const pending = await store.pendingWshAcquisition(lease);
     assertActive();
     if (pending) {
+      if (options.kind === 'demand') { attempted = false; return; }
       // Recovery never replays either call from an abandoned transport session.
       if (pending.configHash === identity.configHash && pending.manifestHash === identity.manifestHash && pending.instrumentId === identity.instrumentId && pending.sourceId === source.id) {
         await finishFailure(lease, pending, negative("ERROR", "RESEARCH_WSH_ABANDONED_ACQUISITION"), "UNKNOWN");
@@ -113,7 +114,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
     let acquisition: WshAcquisition | null = null;
     let publicationAttempted = false, committed = false, acquisitionUnknown = false, preflightComplete = false;
     let stage: WshFailureStage = 'connect', failure: unknown;
-    const publicationSlot = options.kind === 'retry' ? undefined : slotKey;
+    const publicationSlot = ticket.publicationSlotKey ?? (options.kind === 'retry' ? undefined : slotKey);
     try {
       assertActive();
       researchAssert(options.wsh?.runtime.enabled, "RESEARCH_WSH_DISABLED");

@@ -1034,6 +1034,7 @@ test('startup observes repeated WAITING and BUSY or HARD HOLD until every instru
         { instrumentId: 'aapl_smart', state, reasons: [failureReason], sources: [{
           sourceId: kind === 'busy' ? 'wsh_calendar' : 'marketaux_news', role: kind === 'busy' ? 'calendar' : 'news', state,
           reasons: [failureReason], failureReason, sourceError: { name: 'Error', code: kind === 'busy' ? 10281 : 'INVALID_PAYLOAD', message: 'Unavailable fixture DU123456' },
+          acquisition: { state: 'WAITING', reason: failureReason, nextDemandAt: '2026-11-02T12:02:00.000Z' },
           ...(kind === 'busy' ? { wshRefresh: refresh } : { marketauxRefresh: refresh }),
         }] },
       ] };
@@ -1046,6 +1047,7 @@ test('startup observes repeated WAITING and BUSY or HARD HOLD until every instru
       assert.equal(h.logs.filter(message => message.startsWith('WAITING: przygotowanie badań:')).length, 1);
       const output = h.logs.join('\n');
       assert.match(output, /Najwcześniejsze zwykłe odświeżenie: 2026-11-02T13:00:00.000Z/);
+      assert.match(output, /Najwcześniejsze pobranie brakujących danych: 2026-11-02T12:02:00.000Z/);
       assert.equal(output.includes('Najwcześniejsze ponowienie: 2026-11-02T12:00:30.000Z'), kind === 'busy');
       assert.match(output, /Termin usunięcia przyczyny nie jest potwierdzony/);
       assert.doesNotMatch(output, /fixture|DU123456/);
@@ -1059,6 +1061,7 @@ test('HOLD deadlines without failure details are reported and invalid dates neve
     revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({ instrumentId, state: 'HOLD', reasons: ['RESEARCH_SOURCE_STALE'], sources: [{
       sourceId: 'wsh_calendar', role: 'calendar', state: 'HOLD', reasons: ['RESEARCH_SOURCE_STALE'],
       nextCheckAt: '2026-11-02T13:01:00.000Z', wshRefresh: { nextRetryAt: '2026-02-30T12:00:00.000Z', nextRegularAt: 'unsafe\nfixture' },
+      acquisition: { state: 'WAITING', reason: 'RESEARCH_SOURCE_STALE', nextDemandAt: '2026-02-30T12:00:00.000Z' },
     }] })),
   });
   try {

@@ -689,6 +689,16 @@ test("future ongoing WSH confirmation makes no broker connection", async () => {
   assert.equal(calendar(h).status, "UNVERIFIED");
 });
 
+test('demand encountering a pending WSH predecessor leaves retirement to recovery without a publication slot or new call', async () => {
+  const h = harness();
+  h.store.pendingWshAcquisition = async () => ({ id: 'pending-predecessor' });
+  h.store.finishWshFailure = async () => { throw new Error('must not publish predecessor from demand'); };
+  h.store.retireWshAcquisition = async () => { throw new Error('must not retire predecessor from demand'); };
+  assert.equal(await refreshWsh({ ...h.options, kind: 'demand', slotKey: '' }), false);
+  assert.equal(h.attempts.length, 0); assert.equal(h.calls.length, 0); assert.equal(h.slots.size, 0);
+  assert.ok(!h.trace.includes('connect'));
+});
+
 test("mixed WSH policy expiry after metadata prevents sending events", async () => {
   const h = harness([], true, (source, now) => {
     const entitlement = source.parserConfig.entitlement as any;

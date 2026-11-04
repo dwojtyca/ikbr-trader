@@ -1,12 +1,13 @@
 import type { ResearchSnapshotV2, ResearchIdentity, ResearchProviderError, ResearchSourceError } from './types.js';
 import type { WshAcquisition } from './wsh.js';
 
-export type WshAttemptKind = 'regular' | 'retry';
+export type WshAttemptKind = 'regular' | 'retry' | 'demand';
 export type WshCleanupState = 'CONFIRMED' | 'UNKNOWN' | 'NOT_NEEDED';
 export type WshFailureClass = 'TRANSIENT' | 'HARD' | 'UNCERTAIN' | 'BUSY' | 'ABORTED' | 'BUDGET';
 export type WshFailureStage = 'connect' | 'metadata' | 'events' | 'normalize' | 'publish' | 'cleanup';
 export interface WshAttemptIdentity extends ResearchIdentity { accountId: string; instrumentId: string; sourceId: string }
 export interface WshAttemptTicket extends WshAttemptIdentity {
+  publicationSlotKey?: string;
   id: string; cycleId: string; ordinal: 0 | 1 | 2; endpointId: string; sessionId: string;
   startedAt: string; deadlineAt: string; nextRegularAt: string;
 }

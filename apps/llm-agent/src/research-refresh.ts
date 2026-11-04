@@ -1,7 +1,7 @@
 import { ResearchSourceFailure, captureResearchSourceError, isTwoSourceResearch, researchAssert, type ResearchSourceError, parseResearchSnapshot, researchHash, researchRefreshSlot, researchRefreshSlotKey, type ResearchSnapshot, type ResearchInstrumentPolicy, type ResearchManifest, type ResearchSource, type ResearchStore, type MarketauxAttemptTicket } from "@ikbr/shared/instrument-research";
 import { refreshWsh, type WshRefreshStore, type WshRefreshRuntime } from "./research-wsh-refresh.js";
 import { normalizeResearchSource } from "./research-providers.js";
-import { assertResearchPdfResponse, fetchResearchSource, type ResearchFetchResult, type ResearchDispatchGuard } from "./research-fetch.js";
+import { assertResearchPdfResponse, fetchResearchSource, researchRetryAfter, type ResearchFetchResult, type ResearchDispatchGuard } from "./research-fetch.js";
 import { extractResearchPdf } from "./research-pdf-extractor.js";
 import { parseIssuerPdfMapping } from "./research-pdf-mapping.js";
 import { createHash } from "node:crypto";
@@ -73,9 +73,11 @@ export class ResearchRefreshScheduler {
   private readonly controller = new AbortController();
   private inFlight = false;
   private repairInFlight = false;
+  private readonly undiscoveredInstruments = new Set<string>();
   private readonly attemptedSlots = new Map<string, number>();
   constructor(private readonly options: { manifest: ResearchManifest; manifestHash: string; accountId: string; store: SourceStore; fetch?: Fetch; now?: () => number; marketauxApiKey?: string; marketauxFetch?: MarketauxFetch; marketauxOnDemand?: boolean; wsh?: WshRefreshRuntime; signal?: AbortSignal; secrets?: readonly string[] }) {
     if (isTwoSourceResearch(options.manifest)) {
+      for (const policy of options.manifest.instruments) if (policy.assetClass !== 'etf') this.undiscoveredInstruments.add(policy.instrumentId);
       researchAssert(options.marketauxOnDemand === false, "RESEARCH_MARKETAUX_ON_DEMAND_POLICY_MISMATCH");
       for (const method of ["claimMarketauxAttempt", "reserveMarketauxCall", "recordMarketauxCallOutcome", "finalizeMarketauxSuccess", "finishMarketauxFailure", "recoverMarketauxAttempts"] as const)
         researchAssert(typeof options.store[method] === "function", "RESEARCH_MARKETAUX_ATTEMPT_STORE_REQUIRED");
@@ -109,8 +111,13 @@ export class ResearchRefreshScheduler {
             this.assertActive();
             for (const source of policy.sources) {
               if (this.options.marketauxOnDemand && source.adapter === "marketaux-news") continue;
-              for (const role of source.roles) await this.refreshSlot(policy, source, role);
+              for (const role of source.roles) {
+                try { await this.refreshSlot(policy, source, role); }
+                catch (error) { if (!isTwoSourceResearch(this.options.manifest)) throw error; errors.push(error); }
+              }
             }
+            if (isTwoSourceResearch(this.options.manifest)) await this.options.store.prepareRepair?.({ configHash: this.options.manifest.configHash,
+              manifestHash: this.options.manifestHash, accountId: this.options.accountId, instrumentId: policy.instrumentId });
           });
         } catch (error) { errors.push(error); }
       }
@@ -136,12 +143,12 @@ export class ResearchRefreshScheduler {
               const result = await store.recoverMarketauxAttempts!({ ...identity, sourceId: source.id });
               this.assertActive(); recovered ||= result.state === 'RECOVERED';
             }
-            if (recovered) await store.prepareRepair?.(identity);
+            if (recovered) this.undiscoveredInstruments.add(policy.instrumentId);
           });
         } catch (error) { errors.push(error); }
       }
       if (manifest.instruments.some(policy => policy.sources.some(source => source.adapter === 'ibkr-wsh'))) {
-        const due = await store.dueWshAttempts({ configHash: manifest.configHash, manifestHash, accountId });
+        const due = await store.dueWshAttempts({ configHash: manifest.configHash, manifestHash, accountId }).catch(error => { errors.push(error); return []; });
         for (const attempt of due) {
           if (this.stopped) break;
           const policy = manifest.instruments.find(row => row.instrumentId === attempt.identity.instrumentId);
@@ -159,18 +166,30 @@ export class ResearchRefreshScheduler {
       }
       if (!store.dueRepairs || !store.prepareRepair) { if (errors.length) throw errors[0]; return; }
       const requests = await store.dueRepairs({ configHash: manifest.configHash, manifestHash, accountId });
-      const instruments = [...new Set(requests.map(row => row.instrumentId))];
+      const instruments = [...new Set([...this.undiscoveredInstruments, ...requests.map(row => row.instrumentId)])];
       for (const instrumentId of instruments) {
         if (this.stopped) break;
         const identity = { configHash: manifest.configHash, manifestHash, accountId, instrumentId };
         try {
           await store.withRefreshLock(identity, async () => {
             this.assertActive();
+            const discovery = this.undiscoveredInstruments.has(instrumentId);
             const inspected = await store.prepareRepair!(identity);
             this.assertActive();
-            if (inspected.state !== "WAITING") return;
+            this.undiscoveredInstruments.delete(instrumentId);
+            if (!isTwoSourceResearch(manifest) && inspected.state !== "WAITING") return;
             const policy = manifest.instruments.find(p => p.instrumentId === instrumentId)!;
             for (const requested of inspected.sources) {
+              if (isTwoSourceResearch(manifest)) {
+                if (!discovery && !requests.some(row => row.instrumentId === instrumentId && row.sourceId === requested.sourceId && row.role === requested.role)) continue;
+                if (requested.acquisition?.state !== 'WAITING') continue;
+                const source = policy.sources.find(s => s.id === requested.sourceId)!;
+                try {
+                  if (source.adapter === 'marketaux-news') await this.refreshMarketaux(policy, source, 0, '', 'demand');
+                  else if (source.adapter === 'ibkr-wsh') await refreshWsh({ ...this.options, policy, source, kind: 'demand', slotKey: '', signal: this.controller.signal });
+                } catch (error) { errors.push(error); }
+                continue;
+              }
               if (requested.nextCheckAt && Date.parse(requested.nextCheckAt) > (this.options.now ?? Date.now)()) continue;
               if (requested.state !== "WAITING" || !requested.reasons.some(reason => ["RESEARCH_SOURCE_MISSING", "RESEARCH_SOURCE_STALE", "RESEARCH_SOURCE_TRANSIENT_FAILURE", "RESEARCH_MARKETAUX_LEGACY_FRESH_VERIFICATION", "RESEARCH_MARKETAUX_BUDGET_RENEWED"].includes(reason))) continue;
               const source = policy.sources.find(s => s.id === requested.sourceId)!;
@@ -292,7 +311,7 @@ export class ResearchRefreshScheduler {
     await store.storeSnapshot(snapshot, slotKey);
   }
 
-  private async refreshMarketaux(policy: ResearchInstrumentPolicy, source: ResearchSource, slot: number, slotKey: string): Promise<void> {
+  private async refreshMarketaux(policy: ResearchInstrumentPolicy, source: ResearchSource, slot: number, slotKey: string, kind: 'regular' | 'demand' = 'regular'): Promise<void> {
     const { manifest, manifestHash, store, accountId } = this.options;
     const now = this.options.now ?? Date.now, startedAt = now();
     const config = parseMarketauxNewsConfig(source, policy);
@@ -302,7 +321,7 @@ export class ResearchRefreshScheduler {
       const recovery = await store.recoverMarketauxAttempts!(identity);
       this.assertActive();
       if (recovery.state === 'WAITING' || recovery.state === 'OPERATOR_REQUIRED') return;
-      const claim = await store.claimMarketauxAttempt!(identity);
+      const claim = await store.claimMarketauxAttempt!(identity, kind);
       if (!claim.claimed) return;
       ticket = claim.ticket;
     }
@@ -460,7 +479,7 @@ export class ResearchRefreshScheduler {
       // Terminal failures propagate with their durable fence; they must never become a second finalization or provider attempt.
       if (acquisitionFailure) {
         const { reason, original } = acquisitionFailure;
-        await store.finishMarketauxFailure!(ticket, { reason, outcome: failureOutcome,
+        await store.finishMarketauxFailure!(ticket, { reason, outcome: failureOutcome, ...researchRetryAfter(original),
           sourceError: captureResearchSourceError(original, { secrets: [...(this.options.secrets ?? []), this.options.marketauxApiKey ?? ""], accountIds: [accountId] }) },
         recordedAt => failure("ERROR", reason, original, recordedAt));
       } else await store.finalizeMarketauxSuccess!(ticket, completedAt => {

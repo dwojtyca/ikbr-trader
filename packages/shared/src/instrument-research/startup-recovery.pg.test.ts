@@ -255,7 +255,7 @@ for(const legacyState of ['UNKNOWN','STARTED'] as const) for(const producerState
    }
    if(legacyState==='UNKNOWN')await pool.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=clock_timestamp(),failure_class='UNKNOWN',failure_reason='RESEARCH_SOURCE_TIMEOUT' WHERE id=$1",[attemptId]);
    original=(await pool.query('SELECT * FROM research_marketaux_attempts WHERE id=$1',[attemptId])).rows[0];
-   Object.assign(original,{recovery_protocol:null,clock_domain_id:null,clock_db_at:null,clock_wall_at:null});
+   Object.assign(original,{recovery_protocol:null,clock_domain_id:null,clock_db_at:null,clock_wall_at:null,admission_kind:"REGULAR",demand_request_id:null,provider_not_before:null,provider_retry_invalid:false,provider_refusal:null});
    reservationRows=(await pool.query('SELECT * FROM research_call_reservations ORDER BY call_key')).rows;outcomes=(await pool.query('SELECT * FROM research_call_outcomes')).rows;
   });
  });
@@ -354,10 +354,15 @@ test('migration 40 preserves existing research history and can be reapplied with
   assert.deepEqual(await snapshot(pool),before);
   assert.equal((await pool.query("SELECT oid FROM pg_proc WHERE proname='research_recovery_audit_guard'")).rows[0].oid,triggerOid);
  },undefined,async(pool,clock)=>{
-  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});await claim(f);
+  const f=await seedTwoSourceResearchStore(pool,{publishNews:false,publishWsh:false,recoveryClock:clock});
+  const started=new Date(await f.clock()).toISOString(),deadline=new Date(Date.parse(started)+120000).toISOString();
+  await pool.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state,recovery_protocol,clock_domain_id,clock_db_at,clock_wall_at)
+    VALUES($1,$2,'https://api.marketaux.com',$3,$4,$5,$6,$7,$8,$9,$10,$11,'STARTED','DEADLINE_FENCED_HTTP_V1',$12,$10,$10)`,[randomUUID(),f.accountId,f.configHash,f.manifestHash,f.identity.instrumentId,f.source.id,'marketaux:ibkr-conid:'+f.policy.listing.conId,researchHash(f.source),Math.floor(Date.parse(started)/3600000),started,deadline,clock.domainId()]);
   await pool.query('UPDATE fixture_clock SET offset_ms=offset_ms+126000');const wall=clock.wallNow,mono=clock.monotonicNow;clock.wallNow=()=>wall()+126000;clock.monotonicNow=()=>mono()+126000;
   await f.observe();await maintenance(f,pool);const c=await f.store.prepareResearchRecovery(identity(f));
   await f.store.commitResearchRecovery({challengeId:c.id,challengeHash:c.challengeHash,operationId:randomUUID(),actor:c.actor,pauseRevision:1,evidence:evidence(c)});
-  before=await snapshot(pool);triggerOid=(await pool.query("SELECT oid FROM pg_proc WHERE proname='research_recovery_audit_guard'")).rows[0].oid;
+  before=await snapshot(pool);
+  for(const record of before[0] as {row:Record<string,unknown>}[]) Object.assign(record.row,{admission_kind:'REGULAR',demand_request_id:null,provider_not_before:null,provider_retry_invalid:false,provider_refusal:null});
+  triggerOid=(await pool.query("SELECT oid FROM pg_proc WHERE proname='research_recovery_audit_guard'")).rows[0].oid;
  });
 });

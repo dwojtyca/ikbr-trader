@@ -9,6 +9,7 @@ export type ResearchRole = "reports" | "news" | "calendar";
 export type ResearchPreparationState = "READY" | "WAITING" | "HOLD";
 export interface ResearchRepairIdentity extends ResearchIdentity { accountId: string; instrumentId: string }
 export interface ResearchRepairSource {
+  acquisition?: import('./source-demand.js').ResearchSourceAcquisition;
   marketauxRefresh?: import("./marketaux-refresh.js").MarketauxRefreshState;
   wshRefresh?: import("./wsh-refresh.js").WshRefreshState;
   sourceId: string; role: ResearchRole; state: ResearchPreparationState; reasons: string[]; nextCheckAt: string | null;

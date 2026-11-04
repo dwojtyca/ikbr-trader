@@ -5,6 +5,57 @@ import type { request } from "node:https";
 import { createMarketauxFetch, sanitizeMarketauxError } from "./research-marketaux-fetch.js";
 import { ResearchSourceFailure } from "@ikbr/shared/instrument-research";
 import { marketauxFixture } from "./research-marketaux.testfixture.js";
+import { researchRetryAfter } from './research-fetch.js';
+
+test('Marketaux preserves only sanitized Retry-After timing through both error wrappers', async t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-11-04T12:00:00.000Z'));
+  const weekday = (year: number) => ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][new Date(`${year}-01-01T00:00:00Z`).getUTCDay()];
+  const cases: { header?: string | string[]; serverDate?: string; expected: object }[] = [
+    { expected: {} }, { header: '0', expected: { retryAfterMs: 0 } },
+    { header: '60', expected: { retryAfterMs: 60000 } },
+    { header: '86400', expected: { retryAfterMs: 86400000 } },
+    { header: 'Wed, 04 Nov 2026 12:30:00 GMT', expected: { retryAfterAt: '2026-11-04T12:30:00.000Z' } },
+    { header: 'Wednesday, 04-Nov-26 12:30:00 GMT', expected: { retryAfterAt: '2026-11-04T12:30:00.000Z' } },
+    { header: 'Wed Nov  4 12:30:00 2026', expected: { retryAfterAt: '2026-11-04T12:30:00.000Z' } },
+    { header: `${weekday(2076)}, 01-Jan-76 00:00:00 GMT`, serverDate: 'Thu, 01 Jan 2026 00:00:00 GMT', expected: { retryAfterAt: '2076-01-01T00:00:00.000Z' } },
+    { header: `${weekday(1976)}, 01-Jan-76 00:00:01 GMT`, serverDate: 'Thu, 01 Jan 2026 00:00:00 GMT', expected: { retryAfterAt: '1976-01-01T00:00:01.000Z' } },
+    ...['', '-1', '1.5', 'Infinity', '9007199254740992', '8640000000000', 'private-token', 'Wed, 99 Nov 2026 12:30:00 GMT',
+      'Mon, 30 Feb 2026 12:30:00 GMT', 'Mon, 04 Nov 2026 12:30:00 GMT']
+      .map(header => ({ header, expected: { retryAfterMs: null } })),
+    { header: ['60', '120'], expected: { retryAfterMs: null } },
+  ];
+  for (const { header, serverDate, expected } of cases) for (const status of [402, 429, 503]) {
+    const f = marketauxFixture(); let calls = 0;
+    const fake = ((_url: URL, _options: unknown, callback: (res: any) => void) => {
+      calls++; const req = new EventEmitter() as any; req.destroy = () => {};
+      req.end = () => {
+        const res = new EventEmitter() as any; res.statusCode = status;
+        res.headers = { 'content-type': 'application/json', ...(header === undefined ? {} : { 'retry-after': header }), ...(serverDate ? { date: serverDate } : {}) };
+        res.destroy = () => {}; callback(res);
+        res.emit('data', Buffer.from(JSON.stringify({ error: { code: 'provider_limit', message: 'Limit private-token' } })));
+        res.emit('end');
+      }; return req;
+    }) as typeof request;
+    await assert.rejects(createMarketauxFetch('private-token', {
+      resolveAddress: async () => ({ address: '8.8.8.8', family: 4 }), httpsRequest: fake,
+    })(f.source, f.descriptor, new Date(Date.now() + 9000).toISOString()), error => {
+      assert.ok(error instanceof ResearchSourceFailure);
+      assert.equal(error.message, `RESEARCH_SOURCE_HTTP_${status}`);
+      assert.equal(error.sourceError.httpStatus, status);
+      assert.deepEqual(researchRetryAfter(error), expected);
+      assert.ok(!JSON.stringify(error).includes('private-token')); return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('invalid internal cooldown timing fails validation instead of becoming a malformed header observation', () => {
+  for (const timing of [
+    ...[-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER, '60', undefined].map(retryAfterMs => ({ retryAfterMs })),
+    { retryAfterAt: 'invalid' }, { retryAfterAt: '2026-11-04T12:30:00Z' },
+    { retryAfterMs: 60000, retryAfterAt: '2026-11-04T12:30:00.000Z' },
+  ]) assert.throws(() => researchRetryAfter(Object.assign(new Error('fixture'), timing)), /RESEARCH_MARKETAUX_RETRY_AFTER_INVALID/);
+});
 
 test("Marketaux authenticates only transport URL and pins public DNS with no redirects", async () => {
   const f = marketauxFixture(), token = "synthetic-secret-transport-only";
@@ -36,6 +87,7 @@ test("missing keys, altered authority and raw token-bearing errors never leak or
   for (const sourceUrl of [f.source.urls[0] + "#section", f.source.urls[0] + "#:~:text=article", f.source.urls[0] + "&api_token=x", "https://127.0.0.1/", "https://api.marketaux.com/v1/entity/search"])
     await assert.rejects(fetch(f.source, { ...f.descriptor, sourceUrl }, deadline()), /REQUEST_INVALID/);
   assert.equal(connections, 1);
+  assert.equal(sanitizeMarketauxError(new Error("RESEARCH_PROVIDER_USAGE_HOLD")), "RESEARCH_PROVIDER_USAGE_HOLD");
   assert.equal(sanitizeMarketauxError(new Error("RESEARCH_MARKETAUX_SYNTHETIC_SECRET_TOKEN")), "RESEARCH_MARKETAUX_ACQUISITION_FAILED");
 });
 

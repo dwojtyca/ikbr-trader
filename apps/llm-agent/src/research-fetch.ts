@@ -48,6 +48,61 @@ export async function resolvePublicResearchAddress(hostname: string): Promise<{ 
 }
 
 export type ResearchFetchResult = { payload: Buffer; contentHash: string; contentType: string };
+type RetryAfterTiming = { retryAfterMs?: number | null; retryAfterAt?: string };
+export function researchRetryAfter(error: unknown): RetryAfterTiming {
+  if (!(error instanceof Error)) return {};
+  const timing: RetryAfterTiming = {};
+  if ('retryAfterMs' in error) {
+    if (error.retryAfterMs !== null && !(typeof error.retryAfterMs === 'number' && Number.isSafeInteger(error.retryAfterMs)
+      && error.retryAfterMs >= 0 && error.retryAfterMs <= 8_640_000_000_000_000)) throw new Error('RESEARCH_MARKETAUX_RETRY_AFTER_INVALID');
+    timing.retryAfterMs = error.retryAfterMs;
+  }
+  if ('retryAfterAt' in error) {
+    if (!('retryAfterMs' in error) && typeof error.retryAfterAt === 'string' && Number.isFinite(Date.parse(error.retryAfterAt))
+      && new Date(error.retryAfterAt).toISOString() === error.retryAfterAt) timing.retryAfterAt = error.retryAfterAt;
+    else throw new Error('RESEARCH_MARKETAUX_RETRY_AFTER_INVALID');
+  }
+  return timing;
+}
+function httpDate(value: string, reference: number): number | null {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const shortDays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const longDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const imf = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\d{2}) ([A-Z][a-z]{2}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$/.exec(value);
+  const rfc850 = /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (\d{2})-([A-Z][a-z]{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2}) GMT$/.exec(value);
+  const asctime = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) ([A-Z][a-z]{2}) (\d{2}| \d) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(value);
+  const parts = imf ?? rfc850 ?? (asctime ? [asctime[0], asctime[1], asctime[3].trim(), asctime[2], asctime[7], asctime[4], asctime[5], asctime[6]] : null);
+  if (!parts) return null;
+  let year = Number(parts[4]);
+  const month = months.indexOf(parts[3]), day = Number(parts[2]), hour = Number(parts[5]), minute = Number(parts[6]), second = Number(parts[7]);
+  if (month < 0 || day < 1 || hour > 23 || minute > 59 || second > 60) return null;
+  const date = new Date(0);
+  date.setUTCFullYear(year, month, day); date.setUTCHours(hour, minute, Math.min(second, 59), 0);
+  if (rfc850) {
+    const currentYear = new Date(reference).getUTCFullYear();
+    year += Math.floor(currentYear / 100) * 100;
+    if (year < currentYear - 50) year += 100;
+    date.setUTCFullYear(year);
+    const limit = new Date(reference); limit.setUTCFullYear(currentYear + 50);
+    if (date.getTime() > limit.getTime()) { year -= 100; date.setUTCFullYear(year); }
+  }
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month || date.getUTCDate() !== day
+    || (rfc850 ? longDays : shortDays)[date.getUTCDay()] !== parts[1]) return null;
+  return date.getTime() + (second === 60 ? 1000 : 0);
+}
+function retryAfterTiming(value: string | string[] | undefined, serverDate: string | undefined): RetryAfterTiming {
+  if (value === undefined) return {};
+  if (typeof value !== 'string') return { retryAfterMs: null };
+  const text = value.trim();
+  if (/^\d+$/.test(text)) {
+    const milliseconds = Number(text) * 1000;
+    return { retryAfterMs: Number.isSafeInteger(milliseconds) && Number.isFinite(new Date(Date.now() + milliseconds).getTime()) ? milliseconds : null };
+  }
+  const receivedAt = Date.now();
+  const deadline = httpDate(text, (serverDate ? httpDate(serverDate, receivedAt) : null) ?? receivedAt);
+  if (deadline === null) return { retryAfterMs: null };
+  return { retryAfterAt: new Date(deadline).toISOString() };
+}
 export function assertResearchPdfResponse(payload: Uint8Array, contentType: string): void {
   if (contentType.split(";")[0].trim().toLowerCase() !== "application/pdf") throw new Error("RESEARCH_PDF_CONTENT_TYPE_INVALID");
   if (!Buffer.from(payload.subarray(0, 5)).equals(Buffer.from("%PDF-"))) throw new Error("RESEARCH_PDF_MAGIC_INVALID");
@@ -108,12 +163,13 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
       let settled = false;
       let req: ReturnType<typeof request> | undefined;
       let httpDetails: ResearchSourceHttpDetails | undefined;
+      let retryAfter: RetryAfterTiming = {};
       const finishError = (error: unknown) => {
         if (settled) return;
         settled = true; dispatchClosed = true;
         const wrapped = httpDetails ? new ResearchSourceFailure(`RESEARCH_SOURCE_HTTP_${httpDetails.httpStatus}`, undefined, deps.privacy, httpDetails) : failure(error);
         req?.destroy();
-        reject(wrapped);
+        reject(Object.assign(wrapped, retryAfter));
       };
       const options = {
         method: "GET", signal: controller.signal, agent: false, autoSelectFamily: false, maxHeaderSize: 16 * 1024,
@@ -129,6 +185,7 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
             const status = response.statusCode;
             if (!status || status < 100 || status > 599) { finishError(new Error("HTTP status unavailable")); response.destroy(); return; }
             httpDetails = { httpStatus: status, ...(response.statusMessage ? { httpStatusMessage: response.statusMessage } : {}) };
+            retryAfter = retryAfterTiming(response.headers['retry-after'], response.headers.date);
             const limit = Math.min(16 * 1024, maxBytes);
             if (!deps.readJsonError || String(response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase() !== "application/json" ||
                 Number(response.headers["content-length"] ?? 0) > limit || response.headers.location) {

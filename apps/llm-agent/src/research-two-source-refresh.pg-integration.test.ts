@@ -69,8 +69,10 @@ test("v2 scheduler and PostgreSQL persist known and unknown first-call failures 
   for (const reason of ["RESEARCH_SOURCE_HTTP_429", "RESEARCH_SOURCE_TIMEOUT"] as const) await isolated(async pool => {
     const s = await seed(pool);
     await s.scheduler(reason).tick();
-    assert.equal(s.requests.length, s.f.manifest.instruments.length);
-    await s.scheduler().tick(); assert.equal(s.requests.length, s.f.manifest.instruments.length);
+    const expected = reason === "RESEARCH_SOURCE_HTTP_429" ? 1 : s.f.manifest.instruments.length;
+    assert.equal(s.requests.length, expected);
+    await s.scheduler().tick(); assert.equal(s.requests.length, expected);
+    assert.equal(Number((await pool.query("SELECT count(*) n FROM research_call_reservations")).rows[0].n), expected);
     for (const policy of s.f.manifest.instruments) {
       const identity = { configHash: s.f.configHash, manifestHash: s.f.manifestHash, instrumentId: policy.instrumentId, accountId: "DU_SYNTHETIC" };
       const head = await s.store.latestSnapshot(identity);
@@ -81,10 +83,15 @@ test("v2 scheduler and PostgreSQL persist known and unknown first-call failures 
         assert.equal(state.latestFailure?.reason, reason); assert.equal(state.lastSuccessfulAt, null);
         assert.equal((await s.store.prepareRepair(identity)).state, "HOLD");
       } else {
-        assert.ok(head);
-        const coverage = head.snapshot.coverage[0];
-        assert.equal(coverage.complete, false); assert.equal(coverage.reason, reason);
-        assert.equal("reports" in head.snapshot, false); assert.equal("facts" in head.snapshot, false);
+        const claim = await s.store.claimMarketauxAttempt({ ...identity, sourceId: policy.sources.find(source => source.adapter === "marketaux-news")!.id });
+        assert.equal(claim.claimed, false);
+        if (!claim.claimed) assert.equal(claim.reason, "RESEARCH_PROVIDER_COOLDOWN");
+        if (policy.instrumentId === s.f.manifest.instruments[0].instrumentId) {
+          assert.ok(head);
+          const coverage = head.snapshot.coverage[0];
+          assert.equal(coverage.complete, false); assert.equal(coverage.reason, reason);
+          assert.equal("reports" in head.snapshot, false); assert.equal("facts" in head.snapshot, false);
+        } else assert.equal(head, null);
       }
     }
   });

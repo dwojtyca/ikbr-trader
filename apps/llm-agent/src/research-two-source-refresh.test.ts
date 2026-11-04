@@ -14,6 +14,7 @@ function harness() {
   f.manifest.instruments = [f.policy]; f.manifestHash = researchHash(f.manifest); f.snapshot.manifestHash = f.manifestHash;
   let head: StoredResearchSnapshot = { id: "initial", hash: researchHash(f.snapshot), sequence: 1, snapshot: f.snapshot };
   const state = { dbNow: f.now, hostNow: f.now + 3 * 86400000, nextRegular: 0, claims: 0, attempts: 0, active: false,
+    kinds: [] as string[], demandAllowed: false,
     recoveries: 0, dispatchChecks: 0, requests: [] as MarketauxRequest[], outcomes: [] as { callKey: string; outcome: string; recordedAt: string; contentHash?: string }[],
     successes: [] as ResearchSnapshot[], failures: [] as { failure: any; snapshot: ResearchSnapshot }[],
     response: (request: MarketauxRequest) => marketauxResponse([], request.page, 0), terminalError: false, negativeError: false,
@@ -25,9 +26,10 @@ function harness() {
     latestSnapshot: unexpected, reserveCall: unexpected, recordCallOutcome: unexpected, storeSnapshot: unexpected,
     withWshEndpointLock: unexpected, dueWshAttempts: async () => [],
     recoverMarketauxAttempts: async () => { state.recoveries++; return { state: state.active ? 'WAITING' : 'NOT_REQUIRED', reason: null, nextCheckAt: null, recoveryIds: [] }; },
-    claimMarketauxAttempt: async (identity: any) => {
-      state.claims++;
-      if (state.active || state.dbNow < state.nextRegular) return { claimed: false, reason: "not-due", nextCheckAt: new Date(state.nextRegular).toISOString() };
+    claimMarketauxAttempt: async (identity: any, kind = 'regular') => {
+      state.claims++; state.kinds.push(kind);
+      if (state.active || kind === 'regular' && state.dbNow < state.nextRegular || kind === 'demand' && !state.demandAllowed)
+        return { claimed: false, reason: "not-due", nextCheckAt: new Date(state.nextRegular).toISOString() };
       state.active = true; state.attempts++; state.nextRegular = state.dbNow + 3600000;
       const slot = Math.floor(state.dbNow / 3600000);
       return { claimed: true, ticket: { ...identity, attemptId: `00000000-0000-4000-8000-${String(state.attempts).padStart(12, "0")}`,
@@ -180,7 +182,7 @@ test("empty snapshots preserve exact legacy shape and omit financial arrays only
 test("WSH first acquisition builds truthful two-source success and hard-negative snapshots without financial fields", async () => {
   const { createHash } = await import("node:crypto");
   const { refreshWsh } = await import("./research-wsh-refresh.js");
-  for (const failed of [false, true]) {
+  for (const kind of ['regular', 'demand'] as const) for (const failed of [false, true]) {
     const f = twoSourceResearchFixture(Date.parse("2026-10-15T12:35:00.000Z"));
     const metadata = JSON.stringify({ meta_data: { event_types: [{ tag: "wshe_ed", name: "Earnings", columns: [] }] } });
     (f.wshSource.parserConfig.qualification as any).metadataHash = createHash("sha256").update(metadata).digest("hex");
@@ -188,23 +190,28 @@ test("WSH first acquisition builds truthful two-source success and hard-negative
     const identity = { configHash: f.manifest.configHash, manifestHash, instrumentId: f.policy.instrumentId };
     const lease = { endpointId: "fixture-endpoint", assertHeld: async () => {} };
     const published: ResearchSnapshot[] = [];
+    const publishedSlots: (string | undefined)[] = [];
     let terminal: any;
     const store: any = {
       latestSnapshot: async () => null,
       withWshEndpointLock: async (_id: string, work: (l: typeof lease) => Promise<void>) => { await work(lease); return true; },
       pendingWshAcquisition: async () => null,
-      claimWshAttempt: async (_lease: unknown, input: object) => ({ state: "CLAIMED", ticket: { ...input, id: "attempt", cycleId: "cycle", ordinal: 0,
-        endpointId: lease.endpointId, startedAt: stamp, deadlineAt: new Date(f.now + 35000).toISOString(), nextRegularAt: new Date(f.now + 3600000).toISOString() } }),
+      claimWshAttempt: async (_lease: unknown, input: object, requestedKind: string) => {
+        assert.equal(requestedKind, kind);
+        return { state: "CLAIMED", ticket: { ...input, id: "attempt", cycleId: "cycle", ordinal: 0,
+          ...(kind === 'demand' ? { publicationSlotKey: 'fixture-demand-attempt-slot' } : {}),
+          endpointId: lease.endpointId, startedAt: stamp, deadlineAt: new Date(f.now + 35000).toISOString(), nextRegularAt: new Date(f.now + 3600000).toISOString() } };
+      },
       confirmWshPreflight: async () => {},
       beginWshAcquisition: async (_lease: unknown, input: object) => ({ ...input, ...identity, id: "00000000-0000-4000-8000-000000000001",
         endpointId: lease.endpointId, generation: 1, startedAt: stamp }),
       assertWshAcquisition: async () => {}, reserveWshCall: async () => {}, recordCallOutcome: async () => {},
-      publishWshSnapshot: async (_lease: unknown, _acquisition: unknown, snapshot: ResearchSnapshot) => {
-        parseResearchSnapshot(snapshot, f.manifest); published.push(snapshot);
+      publishWshSnapshot: async (_lease: unknown, _acquisition: unknown, snapshot: ResearchSnapshot, slot: string | undefined) => {
+        parseResearchSnapshot(snapshot, f.manifest); published.push(snapshot); publishedSlots.push(slot);
       },
       finishWshAttempt: async (_lease: unknown, _ticket: unknown, result: any) => { terminal = result; },
     };
-    await refreshWsh({ manifest: f.manifest, manifestHash, policy: f.policy, source: f.wshSource, accountId: "DU_SYNTHETIC", store, slotKey: "synthetic-slot",
+    await refreshWsh({ manifest: f.manifest, manifestHash, policy: f.policy, source: f.wshSource, accountId: "DU_SYNTHETIC", store, kind, slotKey: "synthetic-slot",
       now: () => f.now, wsh: { runtime: { enabled: true, endpointId: lease.endpointId, host: "127.0.0.1", port: 4002, clientId: 77 },
         createTransport: () => ({ sessionId: "fixture-session", serverVersion: 180, sdkVersion: "1.6.10", connect: async () => {}, metadata: async () => metadata,
           events: async () => { if (failed) throw new Error("RESEARCH_WSH_PAYLOAD_INVALID"); return "[]"; },
@@ -216,6 +223,7 @@ test("WSH first acquisition builds truthful two-source success and hard-negative
     assert.equal(snapshot.coverage.length, 1); assert.equal(snapshot.coverage[0].role, "calendar");
     assert.equal(snapshot.coverage[0].status, failed ? "ERROR" : "EMPTY");
     assert.equal(terminal.outcome, failed ? "FAILED" : "SUCCEEDED");
+    assert.equal(failed ? terminal.slotKey : publishedSlots[0], kind === 'demand' ? 'fixture-demand-attempt-slot' : 'synthetic-slot');
   }
 });
 
@@ -238,7 +246,107 @@ test('ordinary repair scans unresolved Marketaux despite HOLD and no due repair 
   s.store.dueRepairs = async () => [];
   s.store.prepareRepair = async () => { prepared++; return { state: 'HOLD', sources: [], reasons: ['RESEARCH_WSH_ATTEMPT_UNRESOLVED'] }; };
   await s.make().tickRepairs();
-  assert.equal(scanned, 1); assert.equal(prepared, 1); assert.equal(s.state.claims, 0); assert.equal(s.state.requests.length, 0);
+  assert.equal(scanned, 1); assert.equal(prepared, 2); assert.equal(s.state.claims, 0); assert.equal(s.state.requests.length, 0);
+});
+
+test('first repair discovers demand without rows and recovers only independently eligible sources under aggregate HOLD', async () => {
+  for (const newsState of ['READY', 'WAITING', 'HOLD'] as const) {
+    const s = harness(); let prepared = 0;
+    s.state.demandAllowed = true; s.state.nextRegular = s.state.dbNow + 3600000;
+    s.state.hostNow = s.state.dbNow - 3 * 86400000;
+    s.store.dueRepairs = async () => [];
+    s.store.prepareRepair = async () => {
+      prepared++;
+      return { state: 'HOLD', reasons: ['unrelated financial hold'], sources: [
+        { sourceId: s.f.source.id, role: 'news', state: 'HOLD', reasons: ['RESEARCH_MARKETAUX_PAYLOAD_INVALID'],
+          acquisition: { state: newsState, reason: 'fixture', nextDemandAt: new Date(s.state.dbNow).toISOString() } },
+        { sourceId: s.f.wshSource.id, role: 'calendar', state: 'HOLD', reasons: ['RESEARCH_WSH_PERMISSION_UNVERIFIED'],
+          acquisition: { state: 'HOLD', reason: 'permission', nextDemandAt: null } },
+      ] };
+    };
+    const scheduler = s.make();
+    await scheduler.tickRepairs();
+    assert.equal(s.state.requests.length, newsState === 'WAITING' ? 2 : 0);
+    assert.deepEqual(s.state.kinds, newsState === 'WAITING' ? ['demand'] : []);
+    assert.equal(prepared, 2);
+    await scheduler.tickRepairs();
+    assert.equal(prepared, 2, 'later repair tick uses only durable due work');
+    assert.equal(s.state.requests.length, newsState === 'WAITING' ? 2 : 0);
+  }
+});
+
+test('startup discovery retries a failed preparation and independent calendar demand survives news finalization failure', async () => {
+  const s = harness(); let preparations = 0, calendarClaims = 0;
+  s.state.demandAllowed = true; s.state.terminalError = true;
+  s.store.dueRepairs = async () => [];
+  s.store.prepareRepair = async () => {
+    if (++preparations === 1) throw new Error('fixture database unavailable');
+    return { state: 'HOLD', sources: [
+      { sourceId: s.f.source.id, role: 'news', acquisition: { state: 'WAITING', reason: 'missing', nextDemandAt: null } },
+      { sourceId: s.f.wshSource.id, role: 'calendar', acquisition: { state: 'WAITING', reason: 'missing', nextDemandAt: null } },
+    ] };
+  };
+  s.store.latestSnapshot = async () => null;
+  s.store.withWshEndpointLock = async (_id: string, run: (lease: unknown) => Promise<void>) => {
+    await run({ endpointId: s.f.wshConfig.endpointId }); return true;
+  };
+  s.store.pendingWshAcquisition = async () => null;
+  s.store.claimWshAttempt = async (_lease: unknown, _identity: unknown, kind: string) => {
+    assert.equal(kind, 'demand'); calendarClaims++;
+    return { state: 'DEFERRED', reason: 'fixture endpoint busy', nextCheckAt: null };
+  };
+  const scheduler = s.make();
+  await assert.rejects(scheduler.tickRepairs(), /fixture database unavailable/);
+  assert.equal(s.state.requests.length, 0);
+  await assert.rejects(scheduler.tickRepairs(), /synthetic uncertain finalization/);
+  assert.equal(calendarClaims, 1); assert.equal(s.state.requests.length, 2);
+  assert.equal(s.state.successes.length, 0);
+});
+
+test('provider Retry-After timing reaches durable failure without changing the source cause', async () => {
+  for (const timing of [{}, { retryAfterMs: 0 }, { retryAfterMs: null }, { retryAfterMs: 86400000 }, { retryAfterAt: '2026-11-04T12:30:00.000Z' }]) {
+    const s = harness();
+    s.state.response = () => { throw Object.assign(new ResearchSourceFailure('RESEARCH_SOURCE_HTTP_429', undefined, {}, { httpStatus: 429 }), timing); };
+    await s.make().tick();
+    assert.equal(s.state.failures.length, 1);
+    const failure = s.state.failures[0].failure;
+    assert.equal(failure.reason, 'RESEARCH_SOURCE_HTTP_429'); assert.equal(failure.sourceError.httpStatus, 429);
+    for (const key of ['retryAfterMs', 'retryAfterAt']) {
+      assert.equal(Object.hasOwn(failure, key), Object.hasOwn(timing, key));
+      assert.equal(failure[key], (timing as any)[key]);
+    }
+  }
+});
+
+test('WSH discovery failure does not suppress independently admitted news demand', async () => {
+  const s = harness(); s.state.demandAllowed = true;
+  s.store.dueWshAttempts = async () => { throw new Error('fixture WSH discovery unavailable'); };
+  s.store.dueRepairs = async () => [];
+  s.store.prepareRepair = async () => ({ state: 'HOLD', sources: [
+    { sourceId: s.f.source.id, role: 'news', acquisition: { state: 'WAITING', reason: 'missing', nextDemandAt: null } },
+  ] });
+  await assert.rejects(s.make().tickRepairs(), /fixture WSH discovery unavailable/);
+  assert.equal(s.state.requests.length, 2); assert.deepEqual(s.state.kinds, ['demand']);
+});
+
+test('minute observation rediscovers changed prerequisites and later repair dispatches only DB-selected due sources', async () => {
+  const s = harness(); let prepared = 0, due = false;
+  s.state.nextRegular = s.state.dbNow + 3600000; s.state.demandAllowed = true;
+  s.store.dueRepairs = async () => due ? [{ instrumentId: s.f.policy.instrumentId, sourceId: s.f.source.id, role: 'news' }] : [];
+  s.store.prepareRepair = async () => {
+    prepared++;
+    return { state: 'HOLD', sources: [
+      { sourceId: s.f.source.id, role: 'news', acquisition: { state: due ? 'WAITING' : 'READY', reason: 'fixture', nextDemandAt: null } },
+      { sourceId: s.f.wshSource.id, role: 'calendar', acquisition: { state: due ? 'WAITING' : 'HOLD', reason: 'future work', nextDemandAt: '2099-01-01T00:00:00.000Z' } },
+    ] };
+  };
+  const scheduler = s.make();
+  await scheduler.tickRepairs(); assert.equal(prepared, 2); assert.equal(s.state.requests.length, 0);
+  await scheduler.tickRepairs(); assert.equal(prepared, 2);
+  due = true;
+  await scheduler.tick(); assert.equal(prepared, 3); assert.equal(s.state.requests.length, 0);
+  await scheduler.tickRepairs();
+  assert.deepEqual(s.state.kinds, ['regular', 'demand']); assert.equal(s.state.requests.length, 2);
 });
 test('recovered scheduling retains the regular floor and does not republish or reacquire fresh success', async () => {
   const s = harness(); let recovery = 'RECOVERED';

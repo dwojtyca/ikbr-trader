@@ -67,8 +67,15 @@ Nowy profil WSH ustawia `refreshIntervalMs=3600000` i `maxAgeMs=86400000`:
 zwykłe odświeżanie odbywa się co godzinę, a poprawny kalendarz, również
 poprawnie potwierdzony pusty wynik, zachowuje ważność przez 24 godziny od
 rzeczywistego pobrania. Dokładnie po 24 godzinach jest już nieaktualny.
-Godzina jest liczona od rozpoczęcia poprzedniego zwykłego cyklu w bazie,
-nie od pełnej godziny na zegarze. Restart nie przyspiesza pobierania.
+Godzina jest liczona od rozpoczęcia poprzedniego cyklu w bazie,
+nie od pełnej godziny na zegarze. Dla brakujących lub nieaktualnych danych
+[kontrakt startu z 2026-11-04](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_PLAN.md)
+przewiduje oddzielne pobranie po upływie zapisanego odstępu ponowienia, bez
+czekania na godzinę. Stan wydania i wdrożenia jest w
+[raporcie](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_REPORT.md).
+Restart nie zeruje ograniczeń dostawcy ani historii prób. Sam błąd10281 podczas
+odświeżania nie wywołuje dodatkowego pobrania, jeśli zachowany kalendarz nadal
+jest poprawny i ważny. Gdy wygaśnie, źródło podlega automatycznemu odzyskiwaniu.
 
 Starsze manifesty z `refreshIntervalMs=900000` zachowują cykle 15-minutowe
 oraz zapisaną ważność danych (15 minut lub 24 godziny). Zmiana wymaga

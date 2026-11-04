@@ -1,3 +1,4 @@
+import { researchDemandSlotKey, type ResearchAdmissionKind, type ResearchSourceAcquisition } from './source-demand.js';
 import { MARKETAUX_RECOVERY_PROTOCOL, RECOVERY_CLOCK_TOLERANCE_MS, RECOVERY_EXPIRY_MARGIN_MS, systemResearchRecoveryClock, parseRecoveryIdentity, parseRecoveryEvidence, isRecoveryUuid, type ResearchRecoveryClock, type RecoveryIdentity, type RecoveryChallenge, type RecoveryPredecessor, type RecoveryCommit, type RecoveryReceipt, type RecoverySupersede, type MarketauxRecoveryResult, type ResearchRecoveryDiagnostic } from './startup-recovery.js';
 import { isTwoSourceResearch } from "./policy.js";
 import type { MarketauxAttemptIdentity, MarketauxAttemptTicket, MarketauxAttemptClaim, MarketauxAttemptFailure, MarketauxRefreshState } from "./marketaux-refresh.js";
@@ -150,7 +151,16 @@ export class ResearchStore {
     researchAssert(row && states.includes(String(row.state)) && row.account_id === ticket.accountId && row.config_hash === ticket.configHash && row.manifest_hash === ticket.manifestHash && row.instrument_id === ticket.instrumentId && row.source_id === ticket.sourceId && row.source_hash === ticket.sourceHash && Number(row.slot) === ticket.slot && iso(row.started_at) === ticket.startedAt && iso(row.deadline_at) === ticket.deadlineAt, 'RESEARCH_MARKETAUX_TICKET_INVALID');
     return row;
   }
-  async claimMarketauxAttempt(identity: MarketauxAttemptIdentity): Promise<MarketauxAttemptClaim> {
+  private async sourceAcquisition(identity:MarketauxAttemptIdentity,db:ResearchDb,now:number):Promise<ResearchSourceAcquisition> {
+    const row=(await db.query('SELECT * FROM research_source_demand($1,$2,$3,$4,$5,$6)',[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId,new Date(now)])).rows[0];
+    researchAssert(row && ['READY','WAITING','HOLD'].includes(String(row.state)),'RESEARCH_SOURCE_DEMAND_UNAVAILABLE');
+    return {state:row.state as ResearchSourceAcquisition['state'],reason:String(row.reason),nextDemandAt:row.next_at?iso(row.next_at):null};
+  }
+  private async demandRequestId(identity:MarketauxAttemptIdentity,db:ResearchDb):Promise<unknown> {
+    const row=(await db.query("SELECT id FROM research_repair_requests WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND instrument_id=$4 AND source_id=$5 AND state='WAITING' AND next_check_at<=clock_timestamp()",[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId])).rows[0];
+    researchAssert(row,'RESEARCH_SOURCE_DEMAND_NOT_PREPARED');return row.id;
+  }
+  async claimMarketauxAttempt(identity: MarketauxAttemptIdentity, kind: ResearchAdmissionKind = 'regular'): Promise<MarketauxAttemptClaim> {
     const deadline = performance.now() + 120000, wall=this.recoveryClock.wallNow(),mono=this.recoveryClock.monotonicNow();
     return this.marketauxTransaction(async db => {
       researchAssert(/^[A-Za-z0-9_-]{1,80}$/.test(identity.accountId), 'RESEARCH_ACCOUNT_INVALID');
@@ -158,6 +168,7 @@ export class ResearchStore {
       const { source, config, ledger, policy } = await this.marketauxSource(identity, db);
       await db.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`research-marketaux-issuer:${identity.accountId}:${ledger}`]);
       await this.assertAuthority(identity, db);
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-budget:${identity.accountId}:${source.provider}`]);
       const sample=await this.recoveryClockSample(db),now=sample.db; marketauxQualificationDeadline(config, now);
       await this.assertRecoveryAdmission(identity,db);
       researchAssert(source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now, "RESEARCH_PERMISSION_UNVERIFIED");
@@ -165,17 +176,28 @@ export class ResearchStore {
       const recovered=new Set((await db.query('SELECT attempt_id FROM research_marketaux_recoveries WHERE account_id=$1 AND ledger_key=$2',[identity.accountId,ledger])).rows.map(r=>r.attempt_id));
       const unresolved = prior.find(r => ['STARTED','FINALIZING','UNKNOWN'].includes(String(r.state)) && !recovered.has(r.id));
       if (unresolved) return { claimed: false, reason: 'RESEARCH_MARKETAUX_ATTEMPT_UNRESOLVED', nextCheckAt: unresolved.state === 'STARTED' && now < researchTime(iso(unresolved.deadline_at)) ? iso(unresolved.deadline_at) : null };
-      const next = prior.length ? researchTime(iso(prior[0].started_at)) + 3600000 : null;
+      researchAssert(kind === 'regular' || kind === 'demand', 'RESEARCH_SOURCE_ADMISSION_INVALID');
+      const cooldown=(await db.query('SELECT max(provider_not_before) AS due FROM research_marketaux_attempts WHERE account_id=$1',[identity.accountId])).rows[0]?.due;
+      if(cooldown && now<researchTime(iso(cooldown)))return {claimed:false,reason:'RESEARCH_PROVIDER_COOLDOWN',nextCheckAt:iso(cooldown)};
+      let requestId:unknown=null;
+      if(kind==='demand'){
+        const demand=await this.sourceAcquisition(identity,db,now);
+        if(demand.state!=='WAITING'||demand.reason!=='RESEARCH_SOURCE_DEMAND'||!demand.nextDemandAt||researchTime(demand.nextDemandAt)>now)return {claimed:false,reason:demand.reason,nextCheckAt:demand.nextDemandAt};
+        requestId=await this.demandRequestId(identity,db);
+      }
+      const next = kind==='regular' && prior.length ? researchTime(iso(prior[0].started_at)) + 3600000 : null;
       if (next !== null && now < next) return { claimed: false, reason: 'RESEARCH_MARKETAUX_SLOT_TOO_EARLY', nextCheckAt: new Date(next).toISOString() };
       const slot = Math.floor(now / 3600000), window = marketauxWindow(slot, config);
-      const ticket: MarketauxAttemptTicket = { ...identity, attemptId: randomUUID(), sourceHash: researchHash(source), slot, startedAt: new Date(now).toISOString(), deadlineAt: new Date(now + 120000).toISOString(), ...window, monotonicDeadlineMs: deadline };
-      await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state,recovery_protocol,clock_domain_id,clock_db_at,clock_wall_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED',$13,$14,$15,$16)`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt,MARKETAUX_RECOVERY_PROTOCOL,this.recoveryClock.domainId(),new Date(sample.db),new Date(sample.wall)]);
+      const attemptId=randomUUID();
+      const ticket: MarketauxAttemptTicket = { ...identity, attemptId, admissionKind:kind,...(kind==='demand'?{publicationSlotKey:researchDemandSlotKey(identity.manifestHash,identity.instrumentId,identity.sourceId,attemptId)}:{}), sourceHash: researchHash(source), slot, startedAt: new Date(now).toISOString(), deadlineAt: new Date(now + 120000).toISOString(), ...window, monotonicDeadlineMs: deadline };
+      await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state,recovery_protocol,clock_domain_id,clock_db_at,clock_wall_at,admission_kind,demand_request_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED',$13,$14,$15,$16,$17,$18)`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt,MARKETAUX_RECOVERY_PROTOCOL,this.recoveryClock.domainId(),new Date(sample.db),new Date(sample.wall),kind.toUpperCase(),requestId]);
       this.marketauxTickets.set(ticket, { deadline, ticketHash: researchHash(ticket),wall,mono,invalid:false }); return { claimed: true, ticket };
     }, deadline);
   }
   async reserveMarketauxCall(ticket: MarketauxAttemptTicket, request: MarketauxRequest, reservation: Omit<ResearchCallReservation, 'deadlineAt'>): Promise<{ deadlineAt: string; monotonicDeadlineMs: number; assertActive:()=>void }> {
     const budget = this.marketauxBudget(ticket), entered = performance.now(), wallEntered=this.recoveryClock.wallNow();
+    let refusedReason:string|null=null;
     const result = await this.marketauxTransaction(async db => {
       await this.assertAuthority(ticket, db);
       const { source, config, policy } = await this.marketauxSource(ticket, db);
@@ -190,18 +212,37 @@ export class ResearchStore {
       const remaining = Math.min(10000, researchTime(ticket.deadlineAt) - now, budget - performance.now(), expiry === null ? 10000 : expiry - now);
       researchAssert(remaining > 0, 'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
       const deadlineAt = new Date(Math.floor(now + remaining)).toISOString();
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-budget:${ticket.accountId}:${source.provider}`]);
+      const refusal=(await db.query(`SELECT provider_refusal,coalesce(provider_refusal->>'reason',CASE
+        WHEN EXISTS(SELECT 1 FROM research_marketaux_attempts other WHERE other.account_id=$2 AND other.provider_not_before>clock_timestamp()) THEN 'RESEARCH_PROVIDER_COOLDOWN'
+        WHEN admission_kind='DEMAND' AND research_marketaux_usage_hold($2) THEN 'RESEARCH_PROVIDER_USAGE_HOLD' END) AS reason
+        FROM research_marketaux_attempts WHERE id=$1`,[ticket.attemptId,ticket.accountId])).rows[0];
+      if(refusal?.reason){
+        refusedReason=String(refusal.reason);
+        if(!refusal.provider_refusal)await db.query("UPDATE research_marketaux_attempts SET provider_refusal=jsonb_build_object('reason',$2::text,'recordedAt',clock_timestamp()) WHERE id=$1",[ticket.attemptId,refusedReason]);
+        return {denied:refusedReason};
+      }
       try { await this.reserveCall({ ...reservation, deadlineAt }, db, ticket.attemptId); }
       catch (error) {
         if (!(error instanceof ResearchBudgetExhausted)) throw error;
         const p = error.proof;
         await db.query(`INSERT INTO research_marketaux_budget_denials(attempt_id,budget_day,recorded_at,requests_used,cost_used,max_requests,max_cost,next_cost)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [ticket.attemptId,p.day,p.recordedAt,p.requests,p.cost,p.maxRequests,p.maxCost,p.nextCost]);
-        return { denied: true as const };
+        return { denied: 'RESEARCH_BUDGET_EXHAUSTED' };
       }
       await db.query('INSERT INTO research_marketaux_attempt_calls(call_key,attempt_id,pass,page) VALUES($1,$2,$3,$4)', [expected.callKey,ticket.attemptId,request.pass,request.page]);
       return { deadlineAt, monotonicDeadlineMs: Math.min(budget, entered + remaining),wallDeadline:wallEntered+remaining };
-    }, budget);
-    if ("denied" in result) throw new Error("RESEARCH_BUDGET_EXHAUSTED");
+    }, budget).catch(async error=>{
+      if(!refusedReason)throw error;
+      try {
+        const marker=await this.marketauxTransaction(async db=>{
+          await this.assertAuthority(ticket,db);const row=await this.marketauxTicketRow(ticket,db,['STARTED']);return row.provider_refusal;
+        },budget,true);
+        if(marker && typeof marker==='object' && 'reason' in marker && marker.reason===refusedReason)return {denied:refusedReason};
+      } catch { /* An unproved refusal commit cannot authorize dispatch or known settlement. */ }
+      const state=this.marketauxTickets.get(ticket);if(state)state.invalid=true;throw error;
+    });
+    if ("denied" in result) throw new Error(result.denied);
     const assertActive=()=>this.assertMarketauxClock(ticket,result.wallDeadline,result.monotonicDeadlineMs);
     assertActive(); return {deadlineAt:result.deadlineAt,monotonicDeadlineMs:result.monotonicDeadlineMs,assertActive};
   }
@@ -279,7 +320,7 @@ export class ResearchStore {
         const call = calls.find(c => c.call_key === page.callKey);
         researchAssert(call && call.outcome === 'SUCCEEDED' && Number(call.pass) === page.pass && Number(call.page) === page.page && call.request_hash === page.requestHash && call.content_hash === page.contentHash && iso(call.recorded_at) === page.fetchedAt && iso(call.receipt_at) === page.fetchedAt, 'RESEARCH_MARKETAUX_RECEIPT_INVALID');
       }
-      const stored = await this.persistSnapshot(snapshot, researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot), ticket.deadlineAt, db, undefined, ticket.attemptId);
+      const stored = await this.persistSnapshot(snapshot, ticket.publicationSlotKey ?? researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot), ticket.deadlineAt, db, undefined, ticket.attemptId);
       await db.query(`UPDATE research_marketaux_attempts SET state='SUCCEEDED',finished_at=$2,snapshot_id=$3,projection_hash=$4 WHERE id=$1`, [ticket.attemptId,completedAt,stored.id,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId))]);
       researchAssert((await this.recoveryClockSample(db,ticket)).db<researchTime(ticket.deadlineAt),'RESEARCH_MARKETAUX_ATTEMPT_EXPIRED');
       return stored;
@@ -287,6 +328,7 @@ export class ResearchStore {
   }
   async finishMarketauxFailure(ticket: MarketauxAttemptTicket, failure: MarketauxAttemptFailure, buildNegative: (recordedAt: string) => ResearchSnapshot): Promise<{ retained: boolean; snapshot: StoredResearchSnapshot | null }> {
     const deadline = this.marketauxBudget(ticket, true);
+    researchAssert(!(failure.retryAfterMs!==undefined && failure.retryAfterAt!==undefined) && (failure.retryAfterMs===undefined||failure.retryAfterMs===null||Number.isSafeInteger(failure.retryAfterMs)&&failure.retryAfterMs>=0) && (failure.retryAfterAt===undefined||Number.isFinite(Date.parse(failure.retryAfterAt))&&new Date(failure.retryAfterAt).toISOString()===failure.retryAfterAt), 'RESEARCH_PROVIDER_COOLDOWN_INVALID');
     researchAssert(/^RESEARCH_[A-Z0-9_]{1,100}$/.test(failure.reason) && (!failure.sourceError || isResearchSourceError(failure.sourceError)), 'RESEARCH_MARKETAUX_FAILURE_INVALID');
     await this.marketauxFinalizeFence(ticket, deadline);
     return this.marketauxTransaction(async db => {
@@ -295,19 +337,25 @@ export class ResearchStore {
       await db.query('INSERT INTO research_snapshot_heads(config_hash,manifest_hash,instrument_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[ticket.configHash,ticket.manifestHash,ticket.instrumentId]);
       await this.latestSnapshot(ticket,db,true);
       const calls = await this.marketauxCalls(ticket, db), now = await this.now(db), stamp = new Date(now).toISOString();
+      const cooldownDelay=Math.max(failure.sourceError?.httpStatus===429?60000:0,failure.retryAfterMs===null?600000:failure.retryAfterMs??0);
+      const pooledCooldown=failure.reason==='RESEARCH_PROVIDER_COOLDOWN'?(await db.query('SELECT max(provider_not_before) AS due FROM research_marketaux_attempts WHERE account_id=$1 AND id<>$2',[ticket.accountId,ticket.attemptId])).rows[0]?.due:null;
+      const cooldownAt=Math.max(pooledCooldown?researchTime(iso(pooledCooldown)):0,now+cooldownDelay,failure.retryAfterAt===undefined?0:Date.parse(failure.retryAfterAt));
+      researchAssert(Number.isSafeInteger(cooldownAt)&&Number.isFinite(new Date(cooldownAt).getTime()),'RESEARCH_PROVIDER_COOLDOWN_INVALID');
+      const providerNotBefore=pooledCooldown||cooldownDelay>0||failure.retryAfterAt!==undefined?new Date(cooldownAt).toISOString():null;
       const known = calls.every(c => ['SUCCEEDED','FAILED'].includes(String(c.outcome)) && c.recorded_at && c.receipt_at && iso(c.recorded_at) === iso(c.receipt_at));
       try { await this.recoveryClockSample(db,ticket); } catch(error) {
         if(!(error instanceof Error)||!['RESEARCH_RECOVERY_CLOCK_UNPROVED','RESEARCH_MARKETAUX_CLOCK_OR_DEADLINE_INVALID'].includes(error.message))throw error;
       }
       if (failure.outcome === 'UNKNOWN' || this.marketauxTickets.get(ticket)?.invalid || !known) {
-        await db.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=$2,failure_class='UNKNOWN',failure_reason=$3,source_error=$4 WHERE id=$1", [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null]);
+        await db.query("UPDATE research_marketaux_attempts SET state='UNKNOWN',finished_at=$2,failure_class='UNKNOWN',failure_reason=$3,source_error=$4,provider_not_before=$5,provider_retry_invalid=$6 WHERE id=$1", [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null,providerNotBefore,failure.retryAfterMs===null]);
         return { retained: false, snapshot: null };
       }
       const current = await this.latestSnapshot(ticket, db, true);
       if (current) await this.assertMarketauxSnapshotProvenance(current.snapshot, db);
       const old = current?.snapshot.coverage.find(c => c.sourceId === ticket.sourceId);
       const http = failure.sourceError?.httpStatus;
-      const transient = http !== undefined && [429,500,502,503,504].includes(http) && failure.reason === `RESEARCH_SOURCE_HTTP_${http}` && calls.some(c => c.outcome === 'FAILED');
+      const localCooldown=failure.reason==='RESEARCH_PROVIDER_COOLDOWN' && (await db.query('SELECT research_marketaux_local_cooldown($1,$2,$3) proved',[ticket.attemptId,ticket.accountId,stamp])).rows[0]?.proved===true;
+      const transient = Boolean(localCooldown || http !== undefined && [429,500,502,503,504].includes(http) && failure.reason === `RESEARCH_SOURCE_HTTP_${http}` && calls.some(c => c.outcome === 'FAILED'));
       const denial = (await db.query('SELECT * FROM research_marketaux_budget_denials WHERE attempt_id=$1',[ticket.attemptId])).rows[0];
       const budget = failure.reason === 'RESEARCH_BUDGET_EXHAUSTED' && failure.sourceError?.httpStatus === undefined && calls.every(c => c.outcome === 'SUCCEEDED') && Boolean(denial);
       let rights = false; try { marketauxQualificationDeadline(config, now); rights = source.automation === "PERMITTED" && source.retention === "FACTS_AND_REFERENCES" && policy.verification.outcome === "VERIFIED" && researchTime(policy.verification.verifiedAt) <= now; } catch { /* A failed qualification cannot retain cached news. */ }
@@ -319,12 +367,12 @@ export class ResearchStore {
         const projection = this.marketauxProjection(incoming,ticket.sourceId), negative = projection.coverage[0];
         researchAssert(projection.coverage.length === 1 && !projection.evidence.length && !projection.news.length && negative?.status === 'ERROR' && !negative.complete && negative.checkedAt === stamp && negative.reason === failure.reason && canonicalJson(negative.sourceError ?? null) === canonicalJson(failure.sourceError ?? null), 'RESEARCH_MARKETAUX_NEGATIVE_INVALID');
         const snapshot = await this.mergeMarketauxSnapshot(ticket,incoming,manifest,db);
-        stored = await this.persistSnapshot(snapshot,researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),undefined,db);
+        stored = await this.persistSnapshot(snapshot,ticket.publicationSlotKey ?? researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),undefined,db);
       } else {
-        await db.query('INSERT INTO research_refresh_slots(slot_key,snapshot_id) VALUES($1,$2)', [researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),stored!.id]);
+        await db.query('INSERT INTO research_refresh_slots(slot_key,snapshot_id) VALUES($1,$2)', [ticket.publicationSlotKey ?? researchRefreshSlotKey(ticket.manifestHash,ticket.instrumentId,ticket.sourceId,'news',ticket.slot),stored!.id]);
       }
       researchAssert(stored, 'RESEARCH_MARKETAUX_PUBLICATION_INVALID');
-      await db.query(`UPDATE research_marketaux_attempts SET state='FAILED',finished_at=$2,failure_reason=$3,source_error=$4,snapshot_id=$5,retained=$6,projection_hash=$7,failure_class=$8 WHERE id=$1`, [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null,stored.id,retained,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId)),transient ? 'TRANSIENT' : budget ? 'BUDGET' : 'HARD']);
+      await db.query(`UPDATE research_marketaux_attempts SET state='FAILED',finished_at=$2,failure_reason=$3,source_error=$4,snapshot_id=$5,retained=$6,projection_hash=$7,failure_class=$8,provider_not_before=$9,provider_retry_invalid=$10 WHERE id=$1`, [ticket.attemptId,stamp,failure.reason,failure.sourceError ?? null,stored.id,retained,researchHash(this.marketauxProjection(stored.snapshot,ticket.sourceId)),transient ? 'TRANSIENT' : budget ? 'BUDGET' : 'HARD',providerNotBefore,failure.retryAfterMs===null]);
       await this.recoveryClockSample(db,ticket);
       return { retained, snapshot: stored };
     }, deadline);
@@ -361,7 +409,9 @@ export class ResearchStore {
       if (!original || original.snapshot.configHash !== row.config_hash || original.snapshot.manifestHash !== row.manifest_hash || original.snapshot.instrumentId !== row.instrument_id || row.projection_hash !== researchHash(this.marketauxProjection(original.snapshot,String(row.source_id)))) return false;
       const calls = await this.marketauxCalls({attemptId:String(row.id)},db);
       if (calls.some(c=>!['SUCCEEDED','FAILED'].includes(String(c.outcome)) || !c.recorded_at || !c.receipt_at || iso(c.recorded_at)!==iso(c.receipt_at) || c.outcome==='SUCCEEDED'&&!isResearchHash(c.content_hash) || c.outcome==='FAILED'&&c.content_hash!==null || c.account_id!==row.account_id || c.config_hash!==row.config_hash || c.manifest_hash!==row.manifest_hash || researchTime(iso(c.recorded_at))>researchTime(iso(row.finished_at)))) return false;
-      if (row.failure_class === 'TRANSIENT') {
+      if (row.failure_class === 'TRANSIENT' && row.failure_reason==='RESEARCH_PROVIDER_COOLDOWN') {
+        if(!(await db.query('SELECT research_marketaux_local_cooldown($1,$2,$3) AS valid',[row.id,row.account_id,row.finished_at])).rows[0]?.valid)return false;
+      } else if (row.failure_class === 'TRANSIENT') {
         if (!error?.httpStatus || ![429,500,502,503,504].includes(error.httpStatus) || row.failure_reason!==`RESEARCH_SOURCE_HTTP_${error.httpStatus}` || !calls.some(c=>c.outcome==='FAILED')) return false;
       } else {
         const denial=(await db.query('SELECT * FROM research_marketaux_budget_denials WHERE attempt_id=$1',[row.id])).rows[0];
@@ -812,15 +862,16 @@ export class ResearchStore {
           }
         }
       }
+      if(isTwoSourceResearch(manifest))for(const row of result.sources)row.acquisition=await this.sourceAcquisition({...identity,sourceId:row.sourceId},db,await this.now(db));
       if (result.sources.some(row => row.state === "HOLD")) {
         result.state = "HOLD"; result.reasons = [...new Set([...result.reasons, ...result.sources.filter(s => s.state === "HOLD").flatMap(s => s.reasons)])].sort();
       }
       if (result.state === "WAITING") result.reasons = [...new Set(result.sources.filter(s => s.state === "WAITING").flatMap(s => s.reasons))].sort();
       result.nextCheckAt = result.state === "WAITING" ? new Date(Math.min(...result.sources.filter(s => s.state === "WAITING").map(s => Date.parse(s.nextCheckAt!)))).toISOString() : null;
       for (const row of result.sources) {
-        const state = result.state === "HOLD" ? "HOLD" : row.state;
-        const reasons = state === "HOLD" ? result.reasons : row.reasons;
-        const next = state === "WAITING" ? row.nextCheckAt : null;
+        const state = row.acquisition?.state ?? (result.state === "HOLD" ? "HOLD" : row.state);
+        const reasons = row.acquisition ? [row.acquisition.reason] : state === "HOLD" ? result.reasons : row.reasons;
+        const next = state === "WAITING" ? row.acquisition?.nextDemandAt ?? row.nextCheckAt : null;
         const changed = await db.query(`INSERT INTO research_repair_requests(account_id,config_hash,manifest_hash,instrument_id,source_id,role,state,reasons,snapshot_id,next_check_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)
           ON CONFLICT(account_id,config_hash,manifest_hash,instrument_id,source_id,role) DO UPDATE SET
@@ -1259,7 +1310,7 @@ export class ResearchStore {
   }
 
   private wshTicket(row: Record<string, unknown>): WshAttemptTicket {
-    return { id:String(row.id), cycleId:String(row.cycle_id), ordinal:Number(row.ordinal) as 0|1|2,
+    return {...(row.admission_kind==='DEMAND'?{publicationSlotKey:researchDemandSlotKey(String(row.manifest_hash),String(row.instrument_id),String(row.source_id),String(row.id))}:{}), id:String(row.id), cycleId:String(row.cycle_id), ordinal:Number(row.ordinal) as 0|1|2,
       accountId:String(row.account_id),configHash:String(row.config_hash),manifestHash:String(row.manifest_hash),
       instrumentId:String(row.instrument_id),sourceId:String(row.source_id),endpointId:String(row.endpoint_id),sessionId:String(row.session_id),
       startedAt:iso(row.started_at),deadlineAt:iso(row.deadline_at),nextRegularAt:iso(row.next_regular_at) };
@@ -1274,7 +1325,7 @@ export class ResearchStore {
       ...(row.provider_error ? {providerError:row.provider_error as WshAttemptDiagnostic['providerError']} : {})};
   }
   private async wshAttemptRow(ticket:WshAttemptTicket,db:ResearchDb,lock=false):Promise<Record<string,unknown>> {
-    const row=(await db.query(`SELECT a.*,c.account_id,c.config_hash,c.manifest_hash,c.instrument_id,c.source_id,c.ledger_key,c.next_regular_at
+    const row=(await db.query(`SELECT a.*,c.account_id,c.config_hash,c.manifest_hash,c.instrument_id,c.source_id,c.ledger_key,c.next_regular_at,c.admission_kind
       FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id WHERE a.id=$1${lock?' FOR UPDATE OF a':''}`,[ticket.id])).rows[0];
     researchAssert(row && canonicalJson(this.wshTicket(row))===canonicalJson(ticket),'RESEARCH_WSH_ATTEMPT_IDENTITY');
     researchAssert(!(await db.query("SELECT 1 FROM research_wsh_read_recovery_predecessors WHERE kind='WSH_ATTEMPT' AND predecessor_id=$1",[ticket.id])).rows.length,'RESEARCH_WSH_GENERATION_RETIRED');return row;
@@ -1289,6 +1340,7 @@ export class ResearchStore {
       const ledger=wshLedgerKey(config.isin);
       await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-wsh-issuer:${ledger}`]);
       const observedAt=performance.now(),now=await this.now(db);
+      researchAssert(['regular','retry','demand'].includes(kind),'RESEARCH_SOURCE_ADMISSION_INVALID');
       const cleanupFence=await this.wshCleanupFence(lease.endpointId,ledger,kind,db);
       if(cleanupFence){
         const baseline=cleanupFence!==true && kind==='regular'?await this.wshRegularNotBefore(ledger,config.refreshIntervalMs,db):null;
@@ -1317,11 +1369,17 @@ export class ResearchStore {
         if(now<researchTime(iso(last.retry_due_at)))return defer('RESEARCH_WSH_RETRY_NOT_DUE',researchTime(iso(last.retry_due_at)));
         ordinal=Number(last.ordinal)+1;predecessor=last.id;
       }else{
-        const baseline=await this.wshRegularNotBefore(ledger,config.refreshIntervalMs,db);
+        let requestId:unknown=null;
+        if(kind==='demand'){
+          const demand=await this.sourceAcquisition(input,db,now);
+          if(demand.state!=='WAITING'||demand.reason!=='RESEARCH_SOURCE_DEMAND'||!demand.nextDemandAt||researchTime(demand.nextDemandAt)>now)return defer(demand.reason,demand.nextDemandAt?researchTime(demand.nextDemandAt):null);
+          requestId=await this.demandRequestId(input,db);
+        }
+        const baseline=kind==='demand'?null:await this.wshRegularNotBefore(ledger,config.refreshIntervalMs,db);
         if(baseline!==null && now<baseline)return defer('RESEARCH_WSH_SLOT_TOO_EARLY',baseline);
         cycle={id:randomUUID(),next_regular_at:new Date(now+config.refreshIntervalMs)};
-        await db.query(`INSERT INTO research_wsh_refresh_cycles(id,ledger_key,config_hash,manifest_hash,instrument_id,source_id,account_id,source_policy_hash,started_at,next_regular_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[cycle.id,ledger,input.configHash,input.manifestHash,input.instrumentId,input.sourceId,input.accountId,researchHash(source),new Date(now),cycle.next_regular_at]);
+        await db.query(`INSERT INTO research_wsh_refresh_cycles(id,ledger_key,config_hash,manifest_hash,instrument_id,source_id,account_id,source_policy_hash,started_at,next_regular_at,admission_kind,demand_request_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[cycle.id,ledger,input.configHash,input.manifestHash,input.instrumentId,input.sourceId,input.accountId,researchHash(source),new Date(now),cycle.next_regular_at,kind==='demand'?'DEMAND':'REGULAR',requestId]);
       }
       const id=randomUUID(),deadline=new Date(now+WSH_ATTEMPT_MS);
       this.wshBounds.get(lease)!.startAttempt(WSH_ATTEMPT_MS-(performance.now()-observedAt));
@@ -1330,7 +1388,7 @@ export class ResearchStore {
       if(ordinal===0)await db.query(`INSERT INTO research_wsh_recovery_successors(receipt_id,attempt_id)
         SELECT r.id,$1 FROM research_wsh_recovery_receipts r WHERE r.endpoint_id=$2 AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_successors s WHERE s.receipt_id=r.id)
         ON CONFLICT DO NOTHING`,[id,lease.endpointId]);
-      const ticket:WshAttemptTicket={...input,id,cycleId:String(cycle.id),ordinal:ordinal as 0|1|2,endpointId:lease.endpointId,
+      const ticket:WshAttemptTicket={...input,id,...(kind==='demand'?{publicationSlotKey:researchDemandSlotKey(input.manifestHash,input.instrumentId,input.sourceId,id)}:{}),cycleId:String(cycle.id),ordinal:ordinal as 0|1|2,endpointId:lease.endpointId,
         startedAt:new Date(now).toISOString(),deadlineAt:deadline.toISOString(),nextRegularAt:iso(cycle.next_regular_at)};
       this.wshTicketDeadlines.set(ticket,observedAt+WSH_ATTEMPT_MS);return {state:'CLAIMED',ticket};
     });
@@ -1344,7 +1402,7 @@ export class ResearchStore {
       FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id
       WHERE (a.endpoint_id=$1 OR c.ledger_key=$2) AND a.state<>'STARTED' AND a.cleanup_state='UNKNOWN'
       AND NOT EXISTS(SELECT 1 FROM research_wsh_recovery_predecessors p WHERE p.attempt_id=a.id AND (
-        ($3='regular' AND c.next_regular_at<=clock_timestamp()) OR EXISTS(
+        ($3='demand' OR $3='regular' AND c.next_regular_at<=clock_timestamp()) OR EXISTS(
           SELECT 1 FROM research_wsh_recovery_successors s JOIN research_wsh_refresh_attempts first_attempt ON first_attempt.id=s.attempt_id
           WHERE s.receipt_id=p.receipt_id AND first_attempt.started_at<=clock_timestamp())))
       AND NOT EXISTS(SELECT 1 FROM research_wsh_read_recovery_predecessors d WHERE d.kind='WSH_ATTEMPT' AND d.predecessor_id=a.id)`,[endpointId,ledger,kind])).rows;
@@ -1423,7 +1481,7 @@ export class ResearchStore {
         }
         const busyRetry=result.failureClass==='BUSY'&&result.failureReason==='RESEARCH_WSH_ERROR_10281'
           &&result.providerError?.code===10281&&cleanup.state==='CONFIRMED'&&result.acquisitionOutcome!=='UNKNOWN';
-        if(result.outcome==='FAILED'&&(result.failureClass==='TRANSIENT'&&cleanup.state!=='UNKNOWN'||busyRetry)&&ticket.ordinal<2){
+        if(!ticket.publicationSlotKey&&result.outcome==='FAILED'&&(result.failureClass==='TRANSIENT'&&cleanup.state!=='UNKNOWN'||busyRetry)&&ticket.ordinal<2){
           const due=(await this.now(db))+WSH_RETRY_DELAYS_MS[ticket.ordinal as 0|1];
           if(due<researchTime(ticket.nextRegularAt))retryAt=new Date(due);
         }
@@ -1538,7 +1596,7 @@ export class ResearchStore {
       researchAssert(researchTime(input.reservation.deadlineAt) <= await this.now(db) + config.timeoutMs, "RESEARCH_WSH_CALL_DEADLINE_INVALID");
       const ledgerKey = wshLedgerKey(config.isin);
       await db.query('SELECT pg_advisory_xact_lock(hashtext($1)::bigint)',[`research-wsh-issuer:${ledgerKey}`]);
-      researchAssert(!await this.wshCleanupFence(lease.endpointId,ledgerKey,ticket&&ticket.ordinal>0?'retry':'regular',db),'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED');
+      researchAssert(!await this.wshCleanupFence(lease.endpointId,ledgerKey,ticket?.publicationSlotKey?'demand':ticket&&ticket.ordinal>0?'retry':'regular',db),'RESEARCH_WSH_CLEANUP_RECOVERY_REQUIRED');
       if(!ticket)researchAssert(!(await db.query(`SELECT 1 FROM research_wsh_refresh_attempts a JOIN research_wsh_refresh_cycles c ON c.id=a.cycle_id WHERE c.ledger_key=$1 AND a.state='STARTED'`,[ledgerKey])).rows.length,'RESEARCH_WSH_ATTEMPT_ACTIVE');
       if(ticket){
         const attempt=await this.wshAttemptRow(ticket,db,true);

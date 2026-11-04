@@ -1,5 +1,22 @@
 # Odzyskiwanie danych przy starcie Paper
 
+Aktualizacja 2026-11-04: dla `TWO_SOURCE_HOURLY_V1` obowiązuje
+[plan automatycznego pobierania brakujących danych](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_PLAN.md).
+[Raport wdrożenia](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_REPORT.md)
+rozróżnia implementację od faktycznego uruchomienia. Po wdrożeniu zgodnego obrazu
+i migracji start sprawdza Marketaux i WSH niezależnie. Brakujące, wygasłe lub
+odrzucone dane uruchamiają nowe pobranie bez oczekiwania na cykl godzinowy.
+Po błędach pozostają zapisane odstępy ponowień 30 s, 120 s i maksymalnie 10 minut
+oraz dłuższe rzeczywiste ograniczenia dostawcy. Restart nie zeruje tych terminów.
+Nieznany wynik odczytu wymaga najpierw automatycznego wygaszenia i odgrodzenia
+starej próby. Nieznany wynik zlecenia pozostaje osobnym stanem finansowym.
+
+Poniższe ręczne procedury są historyczną ścieżką dla nieobsługiwanych starych
+dowodów, a nie rutynowym warunkiem startu. Aktualny zakres automatycznej obsługi
+opisuje [plan odzyskiwania](../implementation/phase3/AUTOMATIC_PAPER_STARTUP_RECOVERY_PLAN.md).
+Nie należy restartować TWS wyłącznie dlatego, że zwykły termin odświeżenia jest
+w przyszłości. Nie należy też usuwać historii ani przedłużać ważności danych.
+
 Zakres: zatwierdzony lokalny profil Docker Paper, Marketaux i WSH. Kalendarz sesji
 opisuje [oddzielny runbook](INSTRUMENT_SESSION_READINESS.md). Wdrożenie tej zmiany
 wymaga migracji 37, nowego obrazu i zgodnego prywatnego dowodu wydania. Najpierw

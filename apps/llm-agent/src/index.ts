@@ -114,6 +114,8 @@ async function main(): Promise<void> {
   }
   assertProcessActive(signal);
   if (refreshScheduler) {
+    await refreshScheduler.tickRepairs().catch(() => log("error", "research repair unavailable"));
+    assertProcessActive(signal);
     const refresh = () => void refreshScheduler.tick().catch(error => log("error", "research refresh failed", { message: (error as Error).message }));
     refreshTimer = setInterval(refresh, 60_000);
     refreshTimer.unref();
@@ -121,7 +123,6 @@ async function main(): Promise<void> {
     const repair = () => void refreshScheduler.tickRepairs().catch(() => log("error", "research repair unavailable"));
     repairTimer = setInterval(repair, 2000);
     repairTimer.unref();
-    repair();
   }
 
   log("info", "trading configuration loaded", configurationRuntime.diagnostics());

@@ -1,11 +1,11 @@
 import { marketauxQualificationDeadline, marketauxRequestUrl, parseMarketauxNewsConfig, ResearchSourceFailure, type MarketauxRequest, type ResearchSource } from "@ikbr/shared/instrument-research";
-import { fetchBoundedResearchUrl, RESEARCH_SOURCE_MAX_BYTES, type ResearchFetchResult, type ResearchDispatchGuard } from "./research-fetch.js";
+import { fetchBoundedResearchUrl, researchRetryAfter, RESEARCH_SOURCE_MAX_BYTES, type ResearchFetchResult, type ResearchDispatchGuard } from "./research-fetch.js";
 
 export type MarketauxFetch = (source: ResearchSource, descriptor: MarketauxRequest, deadlineAt: string, maxBytes?: number, monotonicDeadlineMs?: number, dispatchGuard?: ResearchDispatchGuard) => Promise<ResearchFetchResult>;
 const SAFE_CODES = new Set([
   ...["SCHEMA_INVALID", "LIMIT_INVALID", "TEXT_INVALID", "QUALIFICATION_INVALID", "SOURCE_INVALID", "ENTITY_INVALID", "IDENTITY_MISMATCH", "BUDGET_INVALID", "URL_INVALID", "TIME_INVALID", "QUALIFICATION_UNAVAILABLE", "REQUEST_INVALID", "RECEIPT_INVALID", "KEY_MISSING", "CONTENT_TYPE_INVALID", "ACQUISITION_FAILED", "PAYLOAD_INVALID", "RESULT_LIMIT", "DUPLICATE_UUID", "ENTITY_MISMATCH", "PUBLICATION_OUTSIDE_QUERY", "DEADLINE_EXPIRED", "BYTES_EXCEEDED", "RESULT_CHANGED"].map(code => "RESEARCH_MARKETAUX_" + code),
   ...["TIMEOUT", "TRANSPORT_TRANSIENT", "TOO_LARGE", "REDIRECT", "DNS_NOT_PUBLIC", "DEADLINE_INVALID"].map(code => "RESEARCH_SOURCE_" + code),
-  "RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED", "RESEARCH_REFRESH_ABORTED", "RESEARCH_CALL_ALREADY_RESERVED", "RESEARCH_BUDGET_EXHAUSTED", "RESEARCH_CALL_DEADLINE_INVALID", "RESEARCH_SNAPSHOT_TOO_LARGE",
+  "RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED", "RESEARCH_REFRESH_ABORTED", "RESEARCH_CALL_ALREADY_RESERVED", "RESEARCH_BUDGET_EXHAUSTED", "RESEARCH_PROVIDER_COOLDOWN", "RESEARCH_PROVIDER_USAGE_HOLD", "RESEARCH_CALL_DEADLINE_INVALID", "RESEARCH_SNAPSHOT_TOO_LARGE",
 ]);
 export function sanitizeMarketauxError(error: unknown): string {
   const code = error instanceof Error ? error.message : "";
@@ -32,6 +32,6 @@ export function createMarketauxFetch(apiKey: string | undefined,
       }, maxBytes);
       if (result.contentType.split(";")[0].trim().toLowerCase() !== "application/json") throw new Error("RESEARCH_MARKETAUX_CONTENT_TYPE_INVALID");
       return result;
-    } catch (error) { throw new ResearchSourceFailure(sanitizeMarketauxError(error), error, { ...deps.privacy, secrets: [...(deps.privacy?.secrets ?? []), ...(apiKey ? [apiKey] : [])] }); }
+    } catch (error) { throw Object.assign(new ResearchSourceFailure(sanitizeMarketauxError(error), error, { ...deps.privacy, secrets: [...(deps.privacy?.secrets ?? []), ...(apiKey ? [apiKey] : [])] }), researchRetryAfter(error)); }
   };
 }

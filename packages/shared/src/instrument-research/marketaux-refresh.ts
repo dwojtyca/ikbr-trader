@@ -2,6 +2,8 @@ import type { ResearchIdentity, ResearchSourceError } from './types.js';
 
 export interface MarketauxAttemptIdentity extends ResearchIdentity { accountId: string; instrumentId: string; sourceId: string }
 export interface MarketauxAttemptTicket extends MarketauxAttemptIdentity {
+  admissionKind?: import('./source-demand.js').ResearchAdmissionKind;
+  publicationSlotKey?: string;
   attemptId: string; sourceHash: string; slot: number; startedAt: string; deadlineAt: string;
   windowStart: string; asOf: string; monotonicDeadlineMs: number;
 }
@@ -14,4 +16,4 @@ export interface MarketauxRefreshState {
   latestFailure: { attemptId: string; recordedAt: string; reason: string; sourceError?: ResearchSourceError;
     retainedSnapshotId: string | null; retainedProjectionHash: string | null } | null;
 }
-export interface MarketauxAttemptFailure { reason: string; sourceError?: ResearchSourceError; outcome: 'FAILED' | 'UNKNOWN' }
+export interface MarketauxAttemptFailure { reason: string; sourceError?: ResearchSourceError; outcome: 'FAILED' | 'UNKNOWN'; retryAfterMs?: number | null; retryAfterAt?: string }

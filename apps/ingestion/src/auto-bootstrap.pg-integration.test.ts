@@ -21,6 +21,12 @@ test('ingestion stop survives repeated startup and enforces exactly one control 
     await assert.rejects(first.readIngestionStopped(), /UNAVAILABLE/);
     await assert.rejects(first.writeIngestionStopped(false), /UNAVAILABLE/);
   } finally {
-    await pool.end(); await admin.query(`DROP DATABASE ${database} WITH (FORCE)`); await admin.end();
+    const disconnected = new Promise<void>(resolve => {
+      let remaining = pool.totalCount;
+      if (!remaining) return resolve();
+      pool.on('remove', () => { if (--remaining === 0) resolve(); });
+    });
+    await pool.end(); await disconnected;
+    try { await admin.query(`DROP DATABASE ${database}`); } finally { await admin.end(); }
   }
 });

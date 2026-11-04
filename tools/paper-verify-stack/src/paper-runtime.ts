@@ -607,6 +607,8 @@ export class PaperRuntime {
             /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(value) && Number.isFinite(Date.parse(value)) &&
             new Date(value).toISOString() === value.replace(/Z$/, value.includes('.') ? 'Z' : '.000Z');
           const deadlines = [
+            obj(row.acquisition)?.state === 'WAITING' && instant(obj(row.acquisition)?.nextDemandAt)
+              ? `Najwcześniejsze pobranie brakujących danych: ${obj(row.acquisition)!.nextDemandAt}.` : '',
             instant(refresh?.nextRetryAt) ? `Najwcześniejsze ponowienie: ${refresh.nextRetryAt}.` : '',
             instant(refresh?.nextRegularAt) ? `Najwcześniejsze zwykłe odświeżenie: ${refresh.nextRegularAt}.` : '',
             instant(row.nextCheckAt) ? `Najwcześniejsze kolejne sprawdzenie: ${row.nextCheckAt}.` : '',

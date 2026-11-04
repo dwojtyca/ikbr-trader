@@ -7,6 +7,18 @@ and [delivery status](../implementation/phase3/TWO_SOURCE_RESEARCH_HOURLY_REPORT
 The v1 instructions below remain the legacy qualification and receipt contract;
 `marketaux-news-v2` adds explicit hourly cadence and completion-based freshness.
 
+Owner update 2026-11-04: the [startup freshness contract](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_PLAN.md)
+separates hourly background refresh from recovery of missing, expired or unusable
+data. Check the [release report](../implementation/phase3/STARTUP_RESEARCH_FRESHNESS_REPORT.md)
+before assuming the deployed image supports it. With that implementation and its
+migration, startup discovers each required source independently and admits a new
+read when its durable recovery delay and provider budget permit, even if ordinary
+hourly refresh is not due. A valid retained result does not create recovery demand.
+Restart does not reset charged calls, failure backoff or provider throttling.
+The v2 news query cutoff remains hour-aligned; a repeated fetch inside the hour
+does not claim coverage through the current second. No legacy on-demand flag is
+needed to enable this two-source recovery behavior.
+
 Updated 2026-10-07: the [WSH context contract](RESEARCH_CONTEXT_WSH.md) adds V2
 news descriptions, snippets and matched-issuer sentiment for AI adjudication.
 Calendar proximity is context, not an automatic entry veto; WSH is the sole
