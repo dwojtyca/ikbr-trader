@@ -21,6 +21,7 @@ export class SessionNativeRefresh {
   private running: Promise<void> | undefined;
   private attempts = new Map<string, RefreshAttempt>();
   private rotation = 0;
+  private generation = 0;
   readonly status = new Map<string, SessionWarmupStatus>();
   constructor(private readonly deps: {
     identity(sub: InstrumentSubscription): InstrumentSessionIdentity;
@@ -29,12 +30,16 @@ export class SessionNativeRefresh {
     invalidate(identity: InstrumentSessionIdentity): Promise<void>;
     read(identity: InstrumentSessionIdentity, tf: SessionTimeframe, limit: number): Promise<Candle[]>;
     fetch(sub: InstrumentSubscription, identity: InstrumentSessionIdentity, tf: SessionTimeframe, count: number): Promise<Candle[]>;
-    write(candle: Candle): Promise<void>; now?: () => number;
+    write(candle: Candle): Promise<void>; now?: () => number; current?: () => boolean;
   }) {}
   idle(): Promise<void> { return this.running ?? Promise.resolve(); }
-  run(subscriptions: readonly InstrumentSubscription[]): Promise<void> {
+  invalidate(): void { this.generation++; this.status.clear(); }
+  run(subscriptions: readonly InstrumentSubscription[], isCurrent: () => boolean = () => true): Promise<void> {
     if (this.running) return this.running;
-    this.running = this.refresh(subscriptions).finally(() => { this.running = undefined; });
+    const generation = this.generation;
+    const current = () => generation === this.generation && isCurrent() && (this.deps.current?.() ?? true)
+      && generation === this.generation;
+    this.running = this.refresh(subscriptions, current).finally(() => { this.running = undefined; });
     return this.running;
   }
   private now(): number { return this.deps.now?.() ?? Date.now(); }
@@ -46,7 +51,8 @@ export class SessionNativeRefresh {
       preparationState: error === 'session_refresh_queued' ? 'WAITING' : 'HOLD', historyCoverage: 'UNAVAILABLE', countsMeasured: false,
       nextCheckAt: new Date((Number.isFinite(now) ? now : Date.now()) + 60000).toISOString(), preparationReason: error });
   }
-  private async refresh(subscriptions: readonly InstrumentSubscription[]): Promise<void> {
+  private async refresh(subscriptions: readonly InstrumentSubscription[], current: () => boolean): Promise<void> {
+    if (!current()) return;
     const entries: Array<{ sub: InstrumentSubscription; identity: InstrumentSessionIdentity }> = [];
     this.status.clear();
     for (const sub of subscriptions) {
@@ -58,6 +64,7 @@ export class SessionNativeRefresh {
     if (entries.length > SESSION_POLLING_CAPACITY || conflictingMode) {
       const reason = conflictingMode ? 'session_mode_conflict' : 'session_polling_capacity_exceeded';
       for (const { sub, identity } of entries) {
+        if (!current()) return;
         try { await this.deps.invalidate(identity); this.blocked(sub, reason, identity); }
         catch { this.blocked(sub, 'session_invalidation_failed', identity); }
       }
@@ -69,21 +76,24 @@ export class SessionNativeRefresh {
     let maintenanceAt = -Infinity;
     const maintainMinutes = async () => {
       maintenanceAt = this.now();
-      for (const entry of ordered) await this.refreshTimeframe(entry.sub, entry.identity, '1m');
+      for (const entry of ordered) await this.refreshTimeframe(entry.sub, entry.identity, '1m', current);
     };
     await maintainMinutes();
     for (const tf of ['5m', '1h', '4h', '1d', '1w'] as SessionTimeframe[]) for (const { sub, identity } of ordered) {
       // A cold higher-timeframe bootstrap cannot monopolize the polling budget ahead of due minutes.
       if (this.now() - maintenanceAt >= 60000) await maintainMinutes();
-      await this.refreshTimeframe(sub, identity, tf);
+      await this.refreshTimeframe(sub, identity, tf, current);
     }
   }
-  private async refreshTimeframe(sub: InstrumentSubscription, identity: InstrumentSessionIdentity, tf: SessionTimeframe): Promise<void> {
+  private async refreshTimeframe(sub: InstrumentSubscription, identity: InstrumentSessionIdentity, tf: SessionTimeframe, current: () => boolean): Promise<void> {
+    if (!current()) return;
+    const assertCurrent = () => { if (!current()) throw new Error('INGESTION_READ_INTERRUPTED'); };
     const key = `${sessionKey(identity)}:${tf}`, required = SESSION_REQUIRED_CANDLES[tf];
     let evidence: SessionScheduleEvidence | null = null;
     let observedAt = NaN;
     let latestObservedAt = -Infinity;
     const observe = () => {
+      assertCurrent();
       const now = this.now();
       if (!Number.isFinite(now) || now < latestObservedAt) throw new Error('session_timestamp_invalid');
       latestObservedAt = now;
@@ -96,15 +106,16 @@ export class SessionNativeRefresh {
       return preparation;
     };
     try {
+      assertCurrent();
       evidence = await this.deps.schedule(identity);
       observedAt = observe();
       if (!Number.isFinite(observedAt)) throw new Error('session_timestamp_invalid');
       preparationFor(evidence, observedAt);
-      const current = await this.deps.read(identity, tf, required + 10);
+      const stored = await this.deps.read(identity, tf, required + 10);
       const now = observe();
       if (!Number.isFinite(now) || now < observedAt) throw new Error('session_timestamp_invalid');
       const schedule = preparationFor(evidence, now).schedule;
-      const closed = filterClosedSessionCandles(current, tf, schedule, now);
+      const closed = filterClosedSessionCandles(stored, tf, schedule, now);
       const expected = expectedSessionSlot(tf, schedule, now);
       const missing = expected !== undefined && !matchesSessionSlot(closed.at(-1)?.ts.toISOString(), expected);
       const previous = this.attempts.get(key);
@@ -130,7 +141,10 @@ export class SessionNativeRefresh {
         fetchedTarget = expected !== undefined && fetchedClosed.some(candle => matchesSessionSlot(candle.ts.toISOString(), expected));
         for (const candle of fetchedClosed) { observe(); await this.deps.write(candle); }
       }
-      const rows = await this.deps.read(identity, tf, required + 10), finalEvidence = await this.deps.readSchedule(identity), checkedAt = observe();
+      assertCurrent();
+      const rows = await this.deps.read(identity, tf, required + 10);
+      assertCurrent();
+      const finalEvidence = await this.deps.readSchedule(identity), checkedAt = observe();
       const finalPreparation = preparationFor(finalEvidence, checkedAt);
       if (finalEvidence?.generation !== evidence?.generation) throw new Error('session_schedule_generation_changed');
       const result = evaluateSessionCandles(rows, tf, finalEvidence, identity, checkedAt);
@@ -157,20 +171,21 @@ export class SessionNativeRefresh {
         preparationState: waiting ? 'WAITING' : error ? 'HOLD' : 'READY', historyCoverage: finalPreparation.state,
         countsMeasured: true, nextCheckAt: new Date(checkedAt + 60000).toISOString(), ...(preparationReason ? { preparationReason } : {}) });
     } catch (error) {
-      const current = this.now(), prior = this.attempts.get(key);
+      if (!current()) return;
+      const currentTime = this.now(), prior = this.attempts.get(key);
       const reason = error instanceof Error ? error.message : 'session_native_refresh_failed';
       const weeklyPending = reason === 'session_weekly_coverage_pending';
       const attemptedAt = Math.max(Number.isFinite(prior?.attemptedAt) ? prior!.attemptedAt : -Infinity,
         Number.isFinite(prior?.completedAt) ? prior!.completedAt! : -Infinity,
         Number.isFinite(observedAt) ? observedAt : -Infinity,
         Number.isFinite(latestObservedAt) ? latestObservedAt : -Infinity,
-        Number.isFinite(current) ? current : -Infinity);
+        Number.isFinite(currentTime) ? currentTime : -Infinity);
       if (Number.isFinite(attemptedAt)) this.attempts.set(key, { attemptedAt, success: false });
       this.status.set(key, { identity, instrumentId: identity.instrumentId, conid: String(identity.conId), timeframe: tf, required, available: 0,
         nativeClosed: 0, latest: null, latestEnd: null, generation: evidence?.generation, scheduleStatus: evidence?.status ?? 'FAILED',
-        checkedAt: new Date(Number.isFinite(current) ? current : Date.now()).toISOString(), error: reason,
+        checkedAt: new Date(Number.isFinite(currentTime) ? currentTime : Date.now()).toISOString(), error: reason,
         preparationState: weeklyPending ? 'WAITING' : 'HOLD', historyCoverage: weeklyPending ? 'PARTIAL' : 'UNAVAILABLE',
-        countsMeasured: false, nextCheckAt: new Date((Number.isFinite(current) ? current : Date.now()) + 60000).toISOString(), preparationReason: reason });
+        countsMeasured: false, nextCheckAt: new Date((Number.isFinite(currentTime) ? currentTime : Date.now()) + 60000).toISOString(), preparationReason: reason });
     }
   }
 }

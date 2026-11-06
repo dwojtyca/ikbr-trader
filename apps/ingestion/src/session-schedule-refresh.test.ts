@@ -31,6 +31,26 @@ test('a reconnect during schedule fetch fences out the older callback', async ()
   const pending = refresh.ensure(); await start; await refresh.invalidate(); release(); await pending;
   assert.equal(f.evidence?.status, 'FAILED');
 });
+test('invalidation during durable begin prevents the old run from acquiring a replacement transport', async () => {
+  const f = fixture(); let release!: () => void, entered!: () => void;
+  const waiting = new Promise<void>(r => { release = r; }), started = new Promise<void>(r => { entered = r; });
+  const refresh = new SessionScheduleRefresh(identity, { ...f.deps, begin: async status => {
+    if (status === 'REFRESHING') { entered(); await waiting; }
+    return f.deps.begin(status);
+  } });
+  const pending = refresh.ensure(); await started;
+  await refresh.invalidate(); release(); await pending;
+  assert.equal(f.calls, 0); assert.equal(f.evidence?.status, 'FAILED');
+  await refresh.ensure(); assert.equal(f.calls, 0);
+  f.advance(60000); await refresh.ensure(); assert.equal(f.calls, 1);
+});
+test('invalidation immediately after ensure cannot admit the suspended run after its initial await', async () => {
+  const f = fixture(), refresh = new SessionScheduleRefresh(identity, f.deps);
+  await refresh.ensure(); f.advance(60000);
+  const pending = refresh.ensure(); await refresh.invalidate(); await pending;
+  assert.equal(f.calls, 1); assert.equal(f.evidence?.status, 'FAILED');
+  await refresh.ensure(); assert.equal(f.calls, 2);
+});
 test('failure remains durable and cannot be hidden by older READY evidence or immediate retry', async () => {
   const f = fixture(); let calls = 0;
   const refresh = new SessionScheduleRefresh(identity, { ...f.deps, fetch: async () => { calls++; throw new Error('broker failed'); } });
@@ -43,7 +63,8 @@ test('failed durable invalidation blocks readiness and retries invalidation befo
   await refresh.ensure(); assert.equal(f.evidence?.status, 'READY');
   unavailable = true; await assert.rejects(refresh.invalidate(), /database/);
   await assert.rejects(refresh.ensure(), /database/); assert.match(refresh.lastError ?? '', /database/);
-  unavailable = false; await refresh.ensure(); assert.equal(f.evidence?.status, 'READY'); assert.equal(f.calls, 2);
+  unavailable = false; await refresh.ensure(); assert.equal(f.evidence?.status, 'FAILED'); assert.equal(f.calls, 1);
+  f.advance(60000); await refresh.ensure(); assert.equal(f.evidence?.status, 'READY'); assert.equal(f.calls, 2);
 });
 test('database read failure is explicit and never returned as prior READY evidence', async () => {
   const f = fixture(); const refresh = new SessionScheduleRefresh(identity, { ...f.deps, read: async () => { throw new Error('read_failed'); } });

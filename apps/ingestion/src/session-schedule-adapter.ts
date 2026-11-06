@@ -15,22 +15,30 @@ interface ScheduleSocket {
 export class SessionScheduleAdapter {
   constructor(private readonly options: {
     host: string; port: number; clientId: number;
-    acquirePacing(): Promise<void>;
+    acquirePacing(signal?: AbortSignal): Promise<void>;
+    current?: () => boolean;
     socket?: () => ScheduleSocket;
     timeoutMs?: number;
     now?: () => number;
   }) {}
   private tail: Promise<unknown> = Promise.resolve();
+  private abort = new AbortController();
+  invalidate(): void { this.abort.abort(); this.abort = new AbortController(); }
   fetch(identity: InstrumentSessionIdentity): Promise<SessionSchedule> {
-    const result = this.tail.catch(() => undefined).then(() => this.request(identity));
+    const signal = this.abort.signal;
+    const result = this.tail.catch(() => undefined).then(() => this.request(identity, signal));
     this.tail = result;
     return result;
   }
-  private async request(identity: InstrumentSessionIdentity): Promise<SessionSchedule> {
+  private async request(identity: InstrumentSessionIdentity, signal: AbortSignal): Promise<SessionSchedule> {
+    const current = () => !signal.aborted && (this.options.current?.() ?? true) && !signal.aborted;
+    const assertCurrent = () => { if (!current()) throw new Error('session_schedule_interrupted'); };
+    assertCurrent();
     const contract = { conId: identity.conId, symbol: identity.symbol, secType: identity.secType, exchange: identity.exchange,
       currency: identity.currency, ...(identity.primaryExchange ? { primaryExch: identity.primaryExchange } : {}),
       ...(identity.localSymbol ? { localSymbol: identity.localSymbol } : {}), ...(identity.tradingClass ? { tradingClass: identity.tradingClass } : {}) };
-    await this.options.acquirePacing();
+    await this.options.acquirePacing(signal);
+    assertCurrent();
     const ib = this.options.socket?.() ?? new IBApi({ host: this.options.host, port: this.options.port, clientId: this.options.clientId }) as unknown as ScheduleSocket;
     // SDK socket errors may arrive asynchronously after disconnect. Keep a harmless listener on this retired connection.
     ib.on("error", () => {});
@@ -41,16 +49,28 @@ export class SessionScheduleAdapter {
       const details: any[] = [];
       let currentHours: ContractSessionHours | undefined;
       const listeners: Array<[string, (...args: any[]) => void]> = [];
-      const listen = (event: string, handler: (...args: any[]) => void) => { listeners.push([event, handler]); ib.on(event, handler); };
+      const listen = (event: string, handler: (...args: any[]) => void) => {
+        const guarded = (...args: any[]) => {
+          if (!current()) return finish(new Error('session_schedule_interrupted'));
+          const elapsed = (this.options.now?.() ?? Date.now()) - Date.parse(requestedAt);
+          if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= (this.options.timeoutMs ?? 25000))
+            return finish(new Error('session_schedule_timeout'));
+          handler(...args);
+        };
+        listeners.push([event, guarded]); ib.on(event, guarded);
+      };
       const finish = (error?: Error, schedule?: SessionSchedule) => {
         if (done) return;
-        done = true; clearTimeout(timer);
+        done = true; clearTimeout(timer); signal.removeEventListener("abort", aborted);
         for (const [event, handler] of listeners) ib.off(event, handler);
         if (requested && !brokerCompleted) { try { ib.cancelHistoricalData(historyId); } catch { /* disconnected */ } }
         try { ib.disconnect(); } catch { /* disconnected */ }
         if (error) reject(error); else resolve(schedule!);
       };
+      const aborted = () => finish(new Error('session_schedule_interrupted'));
       const timer = setTimeout(() => finish(new Error("session_schedule_timeout")), this.options.timeoutMs ?? 25000);
+      signal.addEventListener('abort', aborted, { once: true });
+      if (signal.aborted) { aborted(); return; }
       listen("nextValidId", () => {
         if (detailsRequested) return;
         if (!Number.isFinite(ib.serverVersion) || ib.serverVersion < 165) return finish(new Error("session_schedule_unsupported_server"));

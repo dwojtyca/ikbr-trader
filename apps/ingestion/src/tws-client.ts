@@ -4,6 +4,7 @@ import { isAaplSubscription } from "./aapl-native-refresh.js";
 import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
 import { isWseSubscription } from "./wse-native-refresh.js";
 import IB from "ib";
+import { captureResearchSourceError } from "@ikbr/shared/instrument-research";
 import {
   buildExactIbkrEsHistoricalContract,
   formatIbUtcEndDateTime,
@@ -123,11 +124,17 @@ export interface AwaitExactlyOneContractDetailsInput {
   readonly contract: Record<string, unknown>;
   readonly label: string;
   readonly timeoutMs: number;
+  readonly signal?: AbortSignal;
+  readonly current?: () => boolean;
+  readonly monotonicNow?: () => number;
 }
 
 export interface TwsClientDependencies {
   /** Test seam for the installed ib client without opening a broker socket. */
   readonly ib?: any;
+  readonly ibFactory?: () => any;
+  readonly continuous?: () => boolean;
+  readonly monotonicNow?: () => number;
   readonly now?: () => number;
   readonly onConnectionInvalidated?: () => void;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -157,6 +164,11 @@ export function awaitExactlyOneContractDetails(
   const { ib, reqId, contract, label, timeoutMs } = input;
   return new Promise<Record<string, unknown>>((resolve, reject) => {
     const collected: Record<string, unknown>[] = [];
+    const started = input.monotonicNow?.() ?? performance.now();
+    const withinDeadline = () => {
+      const elapsed = (input.monotonicNow?.() ?? performance.now()) - started;
+      return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < timeoutMs;
+    };
 
     const timeout = setTimeout(() => {
       cleanup();
@@ -167,7 +179,9 @@ export function awaitExactlyOneContractDetails(
       );
     }, timeoutMs);
 
+    const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
     const cleanup = () => {
+      input.signal?.removeEventListener("abort", aborted);
       clearTimeout(timeout);
       ib.off("contractDetails", onContractDetails as (...args: unknown[]) => void);
       ib.off(
@@ -181,11 +195,15 @@ export function awaitExactlyOneContractDetails(
       incomingReqId: number,
       details: Record<string, unknown>,
     ) => {
+      if (input.current && !input.current()) return;
+      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
       if (incomingReqId !== reqId) return;
       collected.push(details);
     };
 
     const onContractDetailsEnd = (incomingReqId: number) => {
+      if (input.current && !input.current()) return;
+      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
       if (incomingReqId !== reqId) return;
       cleanup();
       if (collected.length === 0) {
@@ -209,6 +227,8 @@ export function awaitExactlyOneContractDetails(
     };
 
     const onError = (err: Error, code?: number, incomingReqId?: number) => {
+      if (input.current && !input.current()) return;
+      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
       if (incomingReqId !== reqId) return;
       cleanup();
       reject(
@@ -218,6 +238,8 @@ export function awaitExactlyOneContractDetails(
       );
     };
 
+    input.signal?.addEventListener("abort", aborted, { once: true });
+    if (input.signal?.aborted) { aborted(); return; }
     ib.on("contractDetails", onContractDetails as (...args: unknown[]) => void);
     ib.on(
       "contractDetailsEnd",
@@ -245,7 +267,13 @@ export function awaitExactlyOneContractDetails(
 }
 
 export class TwsClient {
-  private readonly ib: any;
+  private ib: any;
+  private transportAbort = new AbortController();
+  private retired = false;
+  private retirementError: Error | undefined;
+  private connecting: Promise<void> | undefined;
+  private probing: Promise<void> | undefined;
+  private transportGeneration = 0;
   private connected = false;
   private nextReqId = 10_000;
   private readonly tickerStates = new Map<number, TickerState>();
@@ -258,74 +286,135 @@ export class TwsClient {
     private readonly onLog: (line: string) => void,
     private readonly dependencies: TwsClientDependencies = {},
   ) {
-    this.ib =
-      dependencies.ib ??
-      new IB({
-        host: config.host,
-        port: config.port,
-        clientId: config.clientId,
-      });
+    this.ib = dependencies.ib ?? this.createIb();
 
     this.bindCoreListeners();
   }
 
-  async connect(): Promise<void> {
-    if (this.connected) return;
+  private createIb(): any {
+    return this.dependencies.ibFactory?.() ?? new IB({
+      host: this.config.host, port: this.config.port, clientId: this.config.clientId,
+    });
+  }
 
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("TWS connect timeout waiting for nextValidId"));
-      }, 12_000);
+  private capture() {
+    const ib = this.ib, signal = this.transportAbort.signal;
+    const current = () => !signal.aborted && !this.retired && ib === this.ib
+      && (this.dependencies.continuous?.() ?? true) && !signal.aborted;
+    return { ib, signal, current, assert: () => {
+      if (!current()) throw new Error('INGESTION_READ_INTERRUPTED');
+    } };
+  }
 
-      const cleanup = () => {
-        clearTimeout(timeout);
-        this.ib.off("nextValidId", onNextValidId);
-        this.ib.off("error", onError);
-      };
+  private deadline(timeoutMs: number): () => boolean {
+    const started = this.dependencies.monotonicNow?.() ?? performance.now();
+    return () => {
+      const elapsed = (this.dependencies.monotonicNow?.() ?? performance.now()) - started;
+      return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < timeoutMs;
+    };
+  }
 
-      const onNextValidId = (orderId: number) => {
+  readSignal(): AbortSignal { return this.transportAbort.signal; }
+  generation(): number { return this.transportGeneration; }
+
+  connect(): Promise<void> {
+    if (this.retirementError) return Promise.reject(this.retirementError);
+    if (this.connecting) return this.connecting;
+    if (this.connected) return Promise.resolve();
+    if (this.retired) {
+      this.ib = this.createIb();
+      this.transportAbort = new AbortController();
+      this.retired = false;
+      this.bindCoreListeners();
+    }
+    const scope = this.capture(), { ib, signal } = scope;
+    this.connecting = new Promise<void>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timeout); ib.off('nextValidId', ready); ib.off('error', error);
+        signal.removeEventListener('abort', aborted); };
+      const fail = (cause: Error) => { cleanup(); reject(cause); };
+      const aborted = () => fail(new Error('INGESTION_READ_INTERRUPTED'));
+      const deadline = (this.dependencies.monotonicNow?.() ?? performance.now()) + 12_000;
+      const timeout = setTimeout(() => fail(new Error('TWS connect timeout waiting for nextValidId')), 12_000);
+      const ready = (orderId: number) => {
+        if (!scope.current()) return;
+        if ((this.dependencies.monotonicNow?.() ?? performance.now()) >= deadline) return fail(new Error('TWS connect timeout waiting for nextValidId'));
         this.connected = true;
         this.nextReqId = Math.max(this.nextReqId, Number(orderId) + 1);
-        cleanup();
-        resolve();
+        cleanup(); resolve();
       };
-
-      const onError = (err: Error, code?: number) => {
-        if (code === 502 || code === 503 || code === 504) {
-          cleanup();
-          reject(
-            new Error(`TWS socket connection failed (${code}): ${err.message}`),
-          );
-        }
+      const error = (cause: Error, codeOrMeta?: unknown) => {
+        const { code } = ibErrorMeta(codeOrMeta);
+        if ([502, 503, 504].includes(code ?? 0)) fail(Object.assign(new Error('TWS_CONNECT_FAILED'), {
+          sourceError: { ...captureResearchSourceError(cause), code },
+        }));
       };
+      signal.addEventListener('abort', aborted, { once: true });
+      ib.once('nextValidId', ready); ib.on('error', error);
+      try { scope.assert(); ib.connect(); } catch (cause) { fail(cause instanceof Error ? cause : new Error('TWS_CONNECT_FAILED')); }
+    }).then(() => {
+      scope.assert();
+      ib.reqMarketDataType(this.config.marketDataType);
+      this.onLog('TWS: połączenie odczytu gotowe');
+    }).catch(error => { this.disconnect(); throw error; }).finally(() => { this.connecting = undefined; });
+    return this.connecting;
+  }
 
-      this.ib.once("nextValidId", onNextValidId);
-      this.ib.on("error", onError);
-      this.ib.connect();
-    });
-
-    this.onLog(
-      `TWS socket connected ${this.config.host}:${this.config.port}, clientId=${this.config.clientId}`,
-    );
-    try {
-      this.ib.reqMarketDataType(this.config.marketDataType);
-      this.onLog(`TWS market data type set to ${this.config.marketDataType}`);
-    } catch (error) {
-      this.onLog(`failed to set market data type: ${(error as Error).message}`);
-    }
+  probe(): Promise<void> {
+    if (this.probing) return this.probing;
+    if (!this.connected) return Promise.reject(new Error('TWS_NOT_CONNECTED'));
+    const scope = this.capture(), { ib, signal } = scope;
+    const started = this.dependencies.monotonicNow?.() ?? performance.now();
+    this.probing = new Promise<void>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); ib.off('currentTime', received); signal.removeEventListener('abort', aborted); };
+      const finish = (error?: Error) => { cleanup(); if (error) reject(error); else resolve(); };
+      const aborted = () => finish(new Error('INGESTION_READ_INTERRUPTED'));
+      const timer = setTimeout(() => finish(new Error('TWS_LIVENESS_TIMEOUT')), 15_000);
+      const received = (value: unknown) => {
+        if (!scope.current()) return;
+        const elapsed = (this.dependencies.monotonicNow?.() ?? performance.now()) - started;
+        if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= 15_000) return finish(new Error('TWS_LIVENESS_TIMEOUT'));
+        if (!Number.isSafeInteger(value) || Number(value) <= 0) return finish(new Error('TWS_LIVENESS_INVALID_REPLY'));
+        finish();
+      };
+      signal.addEventListener('abort', aborted, { once: true }); ib.on('currentTime', received);
+      try { scope.assert(); ib.reqCurrentTime(); } catch (cause) { finish(cause instanceof Error ? cause : new Error('TWS_LIVENESS_SEND_FAILED')); }
+    }).catch(error => { this.disconnect(); throw error; }).finally(() => { this.probing = undefined; });
+    return this.probing;
   }
 
   disconnect(): void {
-    if (!this.connected) return;
-    this.ib.disconnect();
+    if (this.retired) return;
+    this.retired = true;
+    this.transportGeneration++;
     this.connected = false;
+    this.subscriptionsByConid.clear();
+    this.tickerStates.clear();
+    this.transportAbort.abort();
+    const ib = this.ib;
+    // ib 0.2.9 queues disconnect behind handshake; destroy the actual socket instead.
+    if (!this.dependencies.ib && !this.dependencies.ibFactory) {
+      const controller = ib._controller, socket = controller?._socket, commands = controller?._commands;
+      if (!socket || !commands || typeof commands.pause !== 'function' || !Array.isArray(commands._commands) || !Array.isArray(commands._commandsCurrent)
+        || (socket._client !== null && typeof socket._client?.destroy !== 'function')) {
+        this.retirementError = new Error('TWS_TRANSPORT_RETIREMENT_UNSUPPORTED');
+        this.onLog(this.retirementError.message);
+        return;
+      }
+      commands.pause(); commands._commands.length = 0; commands._commandsCurrent.length = 0;
+      socket._connected = false;
+      // Late close handlers resume the command buffer, which has been emptied.
+      if (socket._client) { socket._client.on('error', () => {}); socket._client.destroy(); }
+    } else {
+      try { ib.disconnect?.(); } catch { /* Test/adapter transport is already invalidated. */ }
+    }
   }
 
   async confirmFinalEsMinute(
     sub: InstrumentSubscription,
     minute: Date,
   ): Promise<Candle | null> {
+    const scope = this.capture(), { ib, signal } = scope;
+    scope.assert();
     if (minute.getTime() % 60_000 !== 0) throw new Error("FUT confirmation minute is off-grid");
     const raw = sub.contract ?? {};
     const minTick = sub.instrumentContract?.minTick;
@@ -341,14 +430,18 @@ export class TwsClient {
       currency: toStr(raw.currency) ?? sub.instrumentContract?.currency ?? "",
       multiplier: toStr(raw.multiplier) ?? "",
     });
-    await this.acquireHistoricalPacingToken();
+    await this.acquireHistoricalPacingToken(signal);
+    scope.assert();
     const reqId = this.allocReqId();
+    const withinDeadline = this.deadline(30000);
     return new Promise<Candle | null>((resolve, reject) => {
       const matches: Candle[] = [];
+      const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
       const cleanup = () => {
+        signal.removeEventListener("abort", aborted);
         clearTimeout(timeout);
-        this.ib.off("historicalData", onHistoricalData);
-        this.ib.off("error", onError);
+        ib.off("historicalData", onHistoricalData);
+        ib.off("error", onError);
       };
       const finish = () => {
         cleanup();
@@ -359,6 +452,8 @@ export class TwsClient {
         incomingReqId: number, date: string, open: number, high: number,
         low: number, close: number, volume: number,
       ) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         if (incomingReqId !== reqId) return;
         if (String(date).toLowerCase().startsWith("finished")) return finish();
         const ts = this.parseHistoricalDate(date);
@@ -376,10 +471,12 @@ export class TwsClient {
         ));
       };
       const timeout = setTimeout(() => { cleanup(); reject(new Error("Native FUT final-bar request timed out")); }, 30_000);
-      this.ib.on("historicalData", onHistoricalData);
-      this.ib.on("error", onError);
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) { aborted(); return; }
+      ib.on("historicalData", onHistoricalData);
+      ib.on("error", onError);
       try {
-        this.ib.reqHistoricalData(reqId, contract,
+        ib.reqHistoricalData(reqId, contract,
           formatIbUtcEndDateTime(new Date(minute.getTime() + 60_000)), "120 S",
           IBKR_ES_BAR_REQUEST.barSize, IBKR_ES_BAR_REQUEST.whatToShow,
           IBKR_ES_BAR_REQUEST.useRTH, IBKR_ES_BAR_REQUEST.formatDate,
@@ -390,10 +487,12 @@ export class TwsClient {
     });
   }
 
-  async acquireHistoricalPacingToken(): Promise<void> {
+  async acquireHistoricalPacingToken(signal: AbortSignal = this.transportAbort.signal): Promise<void> {
     const windowMs = 10 * 60_000;
     while (true) {
+      if (signal.aborted || !(this.dependencies.continuous?.() ?? true)) throw new Error('INGESTION_READ_INTERRUPTED');
       const now = this.dependencies.now?.() ?? Date.now();
+      if (!Number.isFinite(now)) throw new Error('INGESTION_CLOCK_INVALID');
       while (this.finalBarRequestTimes.length && now - this.finalBarRequestTimes[0] >= windowMs)
         this.finalBarRequestTimes.shift();
       if (this.finalBarRequestTimes.length < 50) {
@@ -401,10 +500,16 @@ export class TwsClient {
         return;
       }
       const wait = windowMs - (now - this.finalBarRequestTimes[0]) + 50;
-      await (this.dependencies.sleep?.(Math.min(wait, 30_000)) ??
-        new Promise((resolve) =>
-          setTimeout(resolve, Math.min(wait, 30_000)),
-        ));
+      await new Promise<void>((resolve, reject) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const cleanup = () => { if (timer) clearTimeout(timer); signal.removeEventListener('abort', aborted); };
+        const aborted = () => { cleanup(); reject(new Error('INGESTION_READ_INTERRUPTED')); };
+        const done = () => { cleanup(); resolve(); };
+        signal.addEventListener('abort', aborted, { once: true });
+        if (signal.aborted) return aborted();
+        if (this.dependencies.sleep) void this.dependencies.sleep(Math.min(wait, 30_000)).then(done, error => { cleanup(); reject(error); });
+        else timer = setTimeout(done, Math.min(wait, 30_000));
+      });
     }
   }
 
@@ -413,24 +518,33 @@ export class TwsClient {
   }
 
   async getManagedAccounts(): Promise<string[]> {
+    const scope = this.capture(), { ib, signal } = scope;
+    scope.assert();
+    const withinDeadline = this.deadline(8000);
     const accounts = await new Promise<string>((resolve, reject) => {
       const timeout = setTimeout(() => {
         cleanup();
         reject(new Error("Timed out waiting for managedAccounts from TWS"));
       }, 8_000);
 
+      const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
       const cleanup = () => {
+        signal.removeEventListener("abort", aborted);
         clearTimeout(timeout);
-        this.ib.off("managedAccounts", onManagedAccounts);
+        ib.off("managedAccounts", onManagedAccounts);
       };
 
       const onManagedAccounts = (accountsList: string) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         cleanup();
         resolve(accountsList);
       };
 
-      this.ib.once("managedAccounts", onManagedAccounts);
-      this.ib.reqManagedAccts();
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) { aborted(); return; }
+      ib.once("managedAccounts", onManagedAccounts);
+      try { ib.reqManagedAccts(); } catch (error) { cleanup(); reject(error); }
     });
 
     return accounts
@@ -442,9 +556,11 @@ export class TwsClient {
   async resolveContracts(
     instruments: WatchlistInstrument[],
   ): Promise<InstrumentSubscription[]> {
+    const scope = this.capture();
     const out: InstrumentSubscription[] = [];
 
     for (const instrument of instruments) {
+      scope.assert();
       try {
         const contract = await this.resolveContract(instrument);
         out.push(contract);
@@ -543,9 +659,11 @@ export class TwsClient {
     if (candlesPerSymbol <= 0) return [];
 
     const out: HistoricalBackfillResult[] = [];
+    const scope = this.capture();
     const total = subscriptions.length;
     let index = 0;
     for (const sub of subscriptions) {
+      scope.assert();
       index += 1;
       onSymbolProgress?.({ symbol: sub.symbol, index, total });
       try {
@@ -720,9 +838,12 @@ export class TwsClient {
     symbol: string,
     contractLike: ContractShape,
   ): Promise<ContractDetailsShape> {
+    const scope = this.capture(), { ib, signal } = scope;
+    scope.assert();
     const reqId = this.allocReqId();
     const contract = this.withDefaults(contractLike);
 
+    const withinDeadline = this.deadline(8000);
     return new Promise<ContractDetailsShape>((resolve, reject) => {
       let firstDetails: ContractDetailsShape | undefined;
 
@@ -731,22 +852,28 @@ export class TwsClient {
         reject(new Error(`Timed out waiting contractDetails for ${symbol}`));
       }, 8_000);
 
+      const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
       const cleanup = () => {
+        signal.removeEventListener("abort", aborted);
         clearTimeout(timeout);
-        this.ib.off("contractDetails", onContractDetails);
-        this.ib.off("contractDetailsEnd", onContractDetailsEnd);
-        this.ib.off("error", onError);
+        ib.off("contractDetails", onContractDetails);
+        ib.off("contractDetailsEnd", onContractDetailsEnd);
+        ib.off("error", onError);
       };
 
       const onContractDetails = (
         incomingReqId: number,
         details: ContractDetailsShape,
       ) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         if (incomingReqId !== reqId) return;
         if (!firstDetails) firstDetails = details;
       };
 
       const onContractDetailsEnd = (incomingReqId: number) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         if (incomingReqId !== reqId) return;
         cleanup();
 
@@ -759,6 +886,8 @@ export class TwsClient {
       };
 
       const onError = (err: Error, code?: number, incomingReqId?: number) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         if (incomingReqId !== reqId) return;
         cleanup();
         reject(
@@ -768,10 +897,12 @@ export class TwsClient {
         );
       };
 
-      this.ib.on("contractDetails", onContractDetails);
-      this.ib.on("contractDetailsEnd", onContractDetailsEnd);
-      this.ib.on("error", onError);
-      this.ib.reqContractDetails(reqId, contract);
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) { aborted(); return; }
+      ib.on("contractDetails", onContractDetails);
+      ib.on("contractDetailsEnd", onContractDetailsEnd);
+      ib.on("error", onError);
+      try { ib.reqContractDetails(reqId, contract); } catch (error) { cleanup(); reject(error); }
     });
   }
 
@@ -787,8 +918,9 @@ export class TwsClient {
   ): Promise<ContractDetailsShape> {
     const reqId = this.allocReqId();
     const contract = this.withDefaults(contractLike);
+    const scope = this.capture(); scope.assert();
     return awaitExactlyOneContractDetails({
-      ib: this.ib as IbEventPort,
+      ib: scope.ib as IbEventPort, signal: scope.signal, current: scope.current, monotonicNow: this.dependencies.monotonicNow,
       reqId,
       contract,
       label,
@@ -911,8 +1043,11 @@ export class TwsClient {
     candlesPerSymbol: number,
     options: { progressPrefix?: string; sessionIdentity?: InstrumentSessionIdentity } = {},
   ): Promise<Candle[]> {
+    const scope = this.capture(), { ib, signal } = scope;
+    scope.assert();
     if (isAaplSubscription(sub) && !Object.hasOwn(AAPL_REQUIRED_CANDLES, timeframe)) throw new Error("aapl_timeframe_unsupported");
-    await this.acquireHistoricalPacingToken();
+    await this.acquireHistoricalPacingToken(signal);
+    scope.assert();
     const reqId = this.allocReqId();
     if (isWseSubscription(sub) && timeframe === "12h") throw new Error("wse_12h_unsupported");
     const { barSize, durationStr } = this.historicalParamsFor(
@@ -925,6 +1060,7 @@ export class TwsClient {
       ...(identity.tradingClass ? { tradingClass: identity.tradingClass } : {}), ...(identity.primaryExchange ? { primaryExch: identity.primaryExchange } : {}) }
       : this.withDefaults(sub.contract ?? { symbol: sub.symbol, conId: Number(sub.conid) });
 
+    const withinDeadline = this.deadline(30000);
     return new Promise<Candle[]>((resolve, reject) => {
       const bars: Candle[] = [];
       let settled = false;
@@ -941,11 +1077,13 @@ export class TwsClient {
         );
       }, 30_000);
 
+      const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
       const cleanup = () => {
+        signal.removeEventListener("abort", aborted);
         clearTimeout(timeout);
-        this.ib.off("historicalData", onHistoricalData);
-        this.ib.off("error", onError);
-        if (options.sessionIdentity && !brokerCompleted) { try { this.ib.cancelHistoricalData?.(reqId); } catch { /* broker may already be disconnected */ } }
+        ib.off("historicalData", onHistoricalData);
+        ib.off("error", onError);
+        if (options.sessionIdentity && !brokerCompleted) { try { ib.cancelHistoricalData?.(reqId); } catch { /* broker may already be disconnected */ } }
       };
 
       const finalize = () => {
@@ -983,6 +1121,8 @@ export class TwsClient {
         close: number,
         volume: number,
       ) => {
+        if (!scope.current()) return;
+        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
         if (incomingReqId !== reqId) return;
 
         if (
@@ -1051,10 +1191,12 @@ export class TwsClient {
         );
       };
 
-      this.ib.on("historicalData", onHistoricalData);
-      this.ib.on("error", onError);
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) { aborted(); return; }
+      ib.on("historicalData", onHistoricalData);
+      ib.on("error", onError);
       try {
-        this.ib.reqHistoricalData(
+        ib.reqHistoricalData(
           reqId,
           contract,
           "",
@@ -1088,14 +1230,18 @@ export class TwsClient {
   }
 
   private bindCoreListeners(): void {
-    this.ib.on("connected", () => {
+    const scope = this.capture();
+    const listen = (event: string, handler: (...args: any[]) => void) => {
+      scope.ib.on(event, (...args: any[]) => { if (scope.current()) handler(...args); });
+    };
+    listen("connected", () => {
       this.onLog("TWS socket connected event received");
     });
 
-    this.ib.on("disconnected", () => {
+    listen("disconnected", () => {
       this.onLog("TWS socket disconnected");
+      this.disconnect();
       this.dependencies.onConnectionInvalidated?.();
-      this.connected = false;
       for (const state of this.tickerStates.values()) {
         state.bidObservedAt = undefined;
         state.askObservedAt = undefined;
@@ -1103,9 +1249,11 @@ export class TwsClient {
       }
     });
 
-    this.ib.on("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
+    listen("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
       const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
-      if (parsed.code !== undefined && [1100, 1101, 1102, 1300].includes(Number(parsed.code))) this.dependencies.onConnectionInvalidated?.();
+      if (parsed.code !== undefined && [1100, 1101, 1102, 1300].includes(Number(parsed.code))) {
+        this.disconnect(); this.dependencies.onConnectionInvalidated?.();
+      }
       const prefix =
         parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : "reqId=n/a";
       this.onLog(
@@ -1113,7 +1261,7 @@ export class TwsClient {
       );
     });
 
-    this.ib.on("marketDataType", (tickerId: number, type: number) => {
+    listen("marketDataType", (tickerId: number, type: number) => {
       const state = this.tickerStates.get(tickerId);
       if (!state) return;
       if (state.marketDataType !== type) {
@@ -1124,7 +1272,7 @@ export class TwsClient {
       this.emitTick(state);
     });
 
-    this.ib.on(
+    listen(
       "tickPrice",
       (tickerId: number, field: number, price: number) => {
         const state = this.tickerStates.get(tickerId);
@@ -1153,7 +1301,7 @@ export class TwsClient {
       },
     );
 
-    this.ib.on("tickSize", (tickerId: number, field: number, size: number) => {
+    listen("tickSize", (tickerId: number, field: number, size: number) => {
       const state = this.tickerStates.get(tickerId);
       if (!state || !Number.isFinite(size)) return;
 
@@ -1174,7 +1322,7 @@ export class TwsClient {
       }
     });
 
-    this.ib.on(
+    listen(
       "tickString",
       (tickerId: number, field: number, value: string) => {
         const state = this.tickerStates.get(tickerId);
@@ -1199,7 +1347,7 @@ export class TwsClient {
     const price = state.price ?? fallbackPrice;
     if (price === undefined) return;
 
-    void this.onTick({
+    try { void Promise.resolve(this.onTick({
       conid: state.conid,
       symbol: state.symbol,
       price,
@@ -1209,8 +1357,9 @@ export class TwsClient {
       askObservedAt: state.askObservedAt,
       marketDataType: state.marketDataType,
       size: state.size,
-      ts: new Date(),
-    });
+      ts: new Date(this.dependencies.now?.() ?? Date.now()),
+    })).catch(() => this.onLog('INGESTION_TICK_PUBLICATION_FAILED')); }
+    catch { this.onLog('INGESTION_TICK_PUBLICATION_FAILED'); }
   }
 
   private allocReqId(): number {

@@ -22,7 +22,6 @@ export class SessionScheduleRefresh {
   }) {}
   invalidate(): Promise<void> {
     // Serialize database invalidation, preserving the generation fence across in-flight callbacks.
-    this.lastAttempt = -Infinity;
     this.invalidationVersion++;
     if (this.lastAttemptDiagnostic) this.lastAttemptDiagnostic = { ...this.lastAttemptDiagnostic, status: 'SUPERSEDED' };
     const pending = this.invalidating.catch(() => undefined).then(() => this.deps.begin('FAILED'));
@@ -31,7 +30,7 @@ export class SessionScheduleRefresh {
   }
   ensure(): Promise<SessionScheduleEvidence | null> {
     if (this.running) return this.running;
-    this.running = this.refresh().catch(error => {
+    this.running = this.refresh(this.invalidationVersion).catch(error => {
       this.lastError = error instanceof Error ? error.message : 'session_schedule_refresh_failed';
       if (this.lastAttemptDiagnostic && this.lastAttemptDiagnostic.status !== 'SUPERSEDED')
         this.lastAttemptDiagnostic = { ...this.lastAttemptDiagnostic, status: 'FAILED', reason: this.lastError };
@@ -56,11 +55,22 @@ export class SessionScheduleRefresh {
     this.lastAttemptDiagnostic = { ...diagnostic, status: preparation.state,
       reason: preparation.state === 'PARTIAL' ? 'session_history_partial' : undefined };
   }
-  private async refresh(): Promise<SessionScheduleEvidence | null> {
-    if (!this.initialized) { this.initialized = true; await this.invalidate(); }
-    try { await this.invalidating; } catch { await this.invalidate(); }
+  private async refresh(invalidationVersion: number): Promise<SessionScheduleEvidence | null> {
+    if (!this.initialized) {
+      this.initialized = true;
+      const initial = this.invalidate(); invalidationVersion = this.invalidationVersion;
+      await initial;
+    }
+    if (invalidationVersion !== this.invalidationVersion) { await this.invalidating; return this.deps.read(); }
+    try { await this.invalidating; } catch {
+      if (invalidationVersion !== this.invalidationVersion) throw new Error('session_schedule_interrupted');
+      const retry = this.invalidate(); invalidationVersion = this.invalidationVersion;
+      await retry;
+    }
+    if (invalidationVersion !== this.invalidationVersion) { await this.invalidating; return this.deps.read(); }
     const now = this.deps.now?.() ?? Date.now();
     const evidence = await this.deps.read();
+    if (invalidationVersion !== this.invalidationVersion) { await this.invalidating; return this.deps.read(); }
     this.reconcileDiagnostic(evidence, this.deps.now?.() ?? Date.now());
     let due = true;
     try {
@@ -71,8 +81,12 @@ export class SessionScheduleRefresh {
     } catch { /* Missing, stale or invalidated evidence must be refreshed. */ }
     if (!due || now - this.lastAttempt < 60000) return evidence;
     this.lastAttempt = now;
-    const invalidationVersion = this.invalidationVersion;
     const generation = await this.deps.begin('REFRESHING');
+    if (invalidationVersion !== this.invalidationVersion) {
+      await this.invalidating;
+      await this.deps.finish(generation, null);
+      return this.deps.read();
+    }
     const diagnostic: SessionScheduleDiagnostic = { identity: this.identity, generation, attemptedAt: new Date(now).toISOString(),
       nextCheckAt: new Date(now + 60000).toISOString(), status: 'FETCHING', required: sessionHistoryCoverageBounds(this.identity, now) };
     this.lastAttemptDiagnostic = diagnostic;

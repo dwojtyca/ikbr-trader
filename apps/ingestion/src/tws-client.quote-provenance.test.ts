@@ -43,10 +43,10 @@ test("quote evidence requires live confirmation and independent side observation
   assert.equal(ticks.at(-1)?.askObservedAt, undefined);
   price(1, 100);
   price(2, 101);
+  const emitted = ticks.length;
   ib.emit("disconnected");
   price(4, 100.5);
-  assert.equal(ticks.at(-1)?.marketDataType, undefined);
-  assert.equal(ticks.at(-1)?.bidObservedAt, undefined);
+  assert.equal(ticks.length, emitted, 'retired transport cannot publish another tick');
 });
 
 test("market state cache preserves side provenance; old caches do not invent it", async () => {

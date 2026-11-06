@@ -209,6 +209,36 @@ Pozostaw host pod zasilaniem, bez sleep i zamykania pokrywy; automat nie zastęp
 ciągłej dostępności TWS i komputera. Wygasła sesja logowania może wymagać logowania
 w IBKR. Nie wymaga to przebudowy bota ani ponownej adopcji polityki.
 
+## Odzyskiwanie danych po wybudzeniu
+
+Zakres i stan wydania opisuje [raport odzyskiwania po wybudzeniu](../implementation/phase3/SLEEP_WAKE_RECOVERY_REPORT.md).
+Poniższy mechanizm wymaga obrazu zawierającego tę poprawkę; wcześniejszy obraz
+nie uzyskuje tej funkcji przez samą zmianę dokumentacji.
+
+Przy włączonym automatycznym przygotowaniu ingestion wykrywa przerwę co najmniej
+30 sekund między kontrolami oraz sprawdza odpowiedź TWS na odczyt czasu.
+Kontrola połączenia ma 15 sekund na odpowiedź i działa nie częściej niż co
+30 sekund poza przygotowaniem danych. Nie zmienia to limitów pobierania historii.
+Przerwa w działaniu nie jest dowodem uśpienia systemu: tak samo może wyglądać
+wstrzymanie maszyny Dockera lub przeciążenie procesu.
+
+Po wykryciu utraty sprawnego połączenia bot wycofuje stare połączenie odczytowe,
+odtwarza subskrypcje i uruchamia przygotowanie harmonogramów oraz brakujących
+danych. Nie wymaga rutynowego restartu TWS. Zachowuje wykorzystane limity odczytów,
+a przy niedostępnym TWS ponawia próby z przerwą rosnącą do pięciu minut.
+Ręczne zatrzymanie pozostaje wiążące; odzyskiwanie nie zdejmuje pauzy wejść.
+
+Odpowiedź na odczyt czasu potwierdza komunikację z TWS, ale nie świeżość świec,
+uprawnienia do danych ani gotowość do handlu. Brakujące świece podczas sesji
+uzupełnia istniejący moduł odświeżania. Zamknięta sesja nie uruchamia pętli
+restartów. Oczekujący zapis do bazy lub Redis musi się zakończyć przed publikacją
+danych z nowego połączenia; samo przekroczenie czasu nie oznacza anulowania zapisu.
+
+Po wybudzeniu sprawdź w diagnostyce połączenie, aktualne świece, synchronizację
+rachunku i nową ocenę strategii. Samo `connected=true` lub zakończenie bootstrapu
+nie potwierdza wszystkich tych warunków. Podczas faktycznego uśpienia bot nie
+pracuje; poprawka dotyczy automatycznego powrotu po wybudzeniu.
+
 ## Środowisko deweloperskie odczytu rozliczeń
 
 Nowy odczyt korzysta z przypiętego oficjalnego SDK Python, przygotowanego przez

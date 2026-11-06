@@ -27,6 +27,27 @@ class Fake extends EventEmitter {
   cancelHistoricalData(id: number) { this.cancelled.push(id); }
 }
 const options = { host: 'unused', port: 0, clientId: 156, now: () => Date.parse('2026-09-24T18:00:00Z') };
+test('invalidation while queued or pacing prevents old schedule reads from creating a new socket', async () => {
+  let release!: () => void, entered!: () => void, sockets = 0;
+  const wait = new Promise<void>(r => { release = r; }), started = new Promise<void>(r => { entered = r; });
+  const adapter = new SessionScheduleAdapter({ ...options, socket: () => { sockets++; return new Fake(); },
+    acquirePacing: async () => { entered(); await wait; } });
+  const first = assert.rejects(adapter.fetch(sessionIdentityFixture()), /interrupted/);
+  const queued = assert.rejects(adapter.fetch(sessionIdentityFixture()), /interrupted/);
+  await started; adapter.invalidate(); release(); await Promise.all([first, queued]);
+  assert.equal(sockets, 0);
+  await adapter.fetch(sessionIdentityFixture()); assert.equal(sockets, 1);
+});
+test('invalidation aborts an active schedule socket and fences its late response', async () => {
+  const ib = new Fake(); ib.hang = true;
+  const adapter = new SessionScheduleAdapter({ ...options, socket: () => ib, acquirePacing: async () => {} });
+  const result = assert.rejects(adapter.fetch(sessionIdentityFixture()), /interrupted/);
+  for (let n = 0; n < 8; n++) await Promise.resolve();
+  adapter.invalidate(); await result;
+  assert.equal(ib.disconnected, true); assert.deepEqual(ib.cancelled, [91002]);
+  ib.emit('historicalSchedule', 91002, 'old', 'old', 'old', []);
+  assert.deepEqual(ib.eventNames(), ['error']);
+});
 test('schedule production adapter waits for pacing, exact contract completion and correlated SCHEDULE envelope', async () => {
   const ib = new Fake(); let paced = false;
   const adapter = new SessionScheduleAdapter({ ...options, socket: () => { assert.equal(paced, true); return ib; }, acquirePacing: async () => { paced = true; } });

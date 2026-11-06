@@ -16,6 +16,38 @@ function fixture(identities: InstrumentSessionIdentity[]) {
   };
   return { deps, calls, invalidations, writes, subscriptions, advance: (ms: number) => { clock += ms; } };
 }
+test('local invalidation while native history fetch waits rejects its late bars and status', async () => {
+  const identity = sessionIdentityFixture(), f = fixture([identity]);
+  let entered!: () => void, release!: () => void;
+  const started = new Promise<void>(r => { entered = r; }), wait = new Promise<void>(r => { release = r; });
+  f.deps.fetch = async (_sub, _identity, tf) => {
+    f.calls.push(tf); entered(); await wait;
+    return [{ conid: String(identity.conId), symbol: identity.symbol, timeframe: tf, ts: new Date(at - 60_000),
+      open: 100, high: 101, low: 99, close: 100, volume: 1, source: sessionNativeSource(identity) }];
+  };
+  const refresh = new SessionNativeRefresh(f.deps), running = refresh.run(f.subscriptions);
+  await started; refresh.invalidate(); release(); await running;
+  assert.equal(f.writes.length, 0); assert.equal(refresh.status.size, 0); assert.deepEqual(f.calls, ['1m']);
+});
+test('an admitted old historical write must really settle; invalidation prevents following writes/readiness and retains retry floor', async () => {
+  const identity = sessionIdentityFixture(), f = fixture([identity]);
+  let entered!: () => void, release!: () => void, minuteFetches = 0;
+  const started = new Promise<void>(r => { entered = r; }), wait = new Promise<void>(r => { release = r; });
+  f.deps.fetch = async (_sub, _identity, tf) => {
+    if (tf !== '1m') return [];
+    minuteFetches++;
+    return [2, 1].map(offset => ({ conid: String(identity.conId), symbol: identity.symbol, timeframe: tf, ts: new Date(at - offset * 60_000),
+      open: 100, high: 101, low: 99, close: 100, volume: 1, source: sessionNativeSource(identity) }));
+  };
+  f.deps.write = async candle => { f.writes.push(candle); entered(); await wait; };
+  const refresh = new SessionNativeRefresh(f.deps), running = refresh.run(f.subscriptions);
+  await started; refresh.invalidate(); let drained = false; void refresh.idle().then(() => { drained = true; });
+  await Promise.resolve(); assert.equal(drained, false); assert.equal(refresh.status.size, 0);
+  release(); await running;
+  assert.equal(f.writes.length, 1); assert.equal(refresh.status.size, 0);
+  await refresh.run(f.subscriptions); assert.equal(minuteFetches, 1);
+  f.advance(60000); await refresh.run(f.subscriptions); assert.equal(minuteFetches, 2);
+});
 test('all instruments use the same six-frame path, due minutes precede higher work and rotation is fair', async () => {
   const f = fixture([sessionIdentityFixture(), sessionIdentityFixture({ instrumentId: 'second', conId: 77, symbol: 'OTHER' })]);
   const refresh = new SessionNativeRefresh(f.deps); await refresh.run(f.subscriptions);

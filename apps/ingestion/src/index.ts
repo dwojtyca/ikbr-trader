@@ -1,4 +1,6 @@
 import { createMutationAuth, logSafeResponse, operatorSafeLogger } from "@ikbr/shared/http-auth";
+import { ReadRecoverySession } from "./read-recovery-session.js";
+import { PublicationFence } from "./publication-fence.js";
 import { AutoBootstrapController } from "./auto-bootstrap.js";
 import { SessionScheduleAdapter } from "./session-schedule-adapter.js";
 import { SessionScheduleRefresh } from "./session-schedule-refresh.js";
@@ -73,6 +75,18 @@ interface BackfillProgress {
 let backfillProgress: BackfillProgress | null = null;
 let bootstrapInFlight = false;
 let nativeRefreshPaused = false;
+const publications: PublicationFence = new PublicationFence(() => !nativeRefreshPaused && autoBootstrap.continuous());
+const readRecovery: ReadRecoverySession = new ReadRecoverySession({
+  pause: () => { nativeRefreshPaused = true; },
+  invalidatePublications: () => publications.invalidate(), invalidateNativeRefresh: () => sessionRefresh.invalidate(),
+  invalidateScheduleRequests: () => scheduleAdapter.invalidate(), disconnect: () => twsClient.disconnect(),
+  clearLocalState: () => { activeSubscriptions = []; aggregator.flushAll(); higherTimeframeAggregator.flushAll(); },
+  invalidateSchedules: () => Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.invalidate())),
+  drainPublications: () => publications.idle(), drainNativeRefresh: () => sessionRefresh.idle(),
+  drainSchedules: () => Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.idle())),
+  connect: () => twsClient.connect(), probe: () => twsClient.probe(),
+  onInvalidationError: error => app.log.error(error, 'Session schedule invalidation failed'),
+});
 
 async function flushBufferedCandles(): Promise<void> {
   const buffered = aggregator.flushAll();
@@ -93,11 +107,8 @@ async function flushBufferedCandles(): Promise<void> {
 }
 
 async function stopIngestionSession(): Promise<void> {
-  nativeRefreshPaused = true;
-  await sessionRefresh.idle();
-  await Promise.all(Array.from(scheduleCoordinators.values(), coordinator => coordinator.invalidate()));
+  await readRecovery.drain();
   await flushBufferedCandles();
-  twsClient.clearSubscriptions();
   twsClient.disconnect();
   activeSubscriptions = [];
 }
@@ -162,7 +173,7 @@ const finalBarCoordinator = new FuturesFinalBarCoordinator(
   },
 );
 
-const twsClient = new TwsClient(
+const twsClient: TwsClient = new TwsClient(
   {
     host: config.IB_SOCKET_HOST,
     port: config.IB_SOCKET_PORT,
@@ -173,7 +184,8 @@ const twsClient = new TwsClient(
     currency: config.IB_CURRENCY,
     marketDataType: config.IB_MARKET_DATA_TYPE,
   },
-  async (tick) => {
+  (tick) => publications.run(async current => {
+    if (!current()) return;
     lastTickAt = tick.ts;
     const spread =
       tick.bid !== undefined && tick.ask !== undefined
@@ -193,17 +205,19 @@ const twsClient = new TwsClient(
       ts: tick.ts,
     });
 
+    if (!current()) return;
     const ready = aggregator.ingest(tick);
     for (const oneMinuteCandle of ready) {
+      if (!current()) return;
       const subscription = activeSubscriptions.find((entry) => entry.conid === oneMinuteCandle.conid);
       if (subscription?.instrumentId) continue;
       const persisted = await finalBarCoordinator.route(oneMinuteCandle, subscription);
       if (!persisted && isFuturesSubscription(subscription))
         app.log.warn({ conid: oneMinuteCandle.conid, ts: oneMinuteCandle.ts }, "FUT candle remained provisional; no signal triggered");
     }
-  },
+  }),
   (line) => app.log.info(line),
-  { onConnectionInvalidated: () => { autoBootstrap?.invalidate(); for (const coordinator of scheduleCoordinators.values()) void coordinator.invalidate().catch(error => app.log.error(error, "Session schedule invalidation failed")); } },
+  { continuous: () => autoBootstrap.continuous(), onConnectionInvalidated: () => autoBootstrap.invalidate() },
 );
 
 function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIdentity {
@@ -214,7 +228,8 @@ function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIde
 }
 const scheduleCoordinators = new Map<string, SessionScheduleRefresh>();
 const scheduleAdapter = new SessionScheduleAdapter({ host: config.IB_SOCKET_HOST, port: config.IB_SOCKET_PORT,
-  clientId: config.SESSION_SCHEDULE_CLIENT_ID, acquirePacing: () => twsClient.acquireHistoricalPacingToken() });
+  clientId: config.SESSION_SCHEDULE_CLIENT_ID, acquirePacing: signal => twsClient.acquireHistoricalPacingToken(signal),
+  current: () => autoBootstrap.continuous() });
 function coordinatorFor(identity: InstrumentSessionIdentity): SessionScheduleRefresh {
   const key = sessionKey(identity);
   let coordinator = scheduleCoordinators.get(key);
@@ -226,7 +241,7 @@ function coordinatorFor(identity: InstrumentSessionIdentity): SessionScheduleRef
   }
   return coordinator;
 }
-const sessionRefresh = new SessionNativeRefresh({ identity: subscriptionIdentity,
+const sessionRefresh: SessionNativeRefresh = new SessionNativeRefresh({ identity: subscriptionIdentity, current: () => autoBootstrap.continuous(),
   schedule: identity => coordinatorFor(identity).ensure(), readSchedule: identity => repo.getSessionSchedule(identity),
   invalidate: identity => coordinatorFor(identity).invalidate(),
   read: (identity, tf, limit) => repo.getSessionCandles(identity, tf, limit),
@@ -241,14 +256,35 @@ app.addHook('onClose', async () => { clearInterval(sessionRefreshTimer); await s
 
 const autoBootstrap = new AutoBootstrapController({
   enabled: config.INGESTION_AUTO_BOOTSTRAP_ENABLED === "true",
+  privacy: { accountIds: config.IBKR_ACCOUNT_ID ? [config.IBKR_ACCOUNT_ID] : [],
+    secrets: Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY/.test(key)).map(([, value]) => value ?? '') },
   readStopped: () => repo.readIngestionStopped(), writeStopped: stopped => repo.writeIngestionStopped(stopped),
-  bootstrap, stop: stopIngestionSession,
+  bootstrap, stop: stopIngestionSession, invalidateReads: () => readRecovery.invalidate(),
+  probe: () => twsClient.probe(),
+  drainStatus: () => readRecovery.diagnostics(),
   ready: () => twsClient.isConnected() && watchlistInstruments.length > 0 && watchlistInstruments.every(wanted =>
     activeSubscriptions.some(actual => wanted.instrumentId ? actual.instrumentId === wanted.instrumentId : actual.symbol === wanted.symbol)),
 });
 let autoBootstrapTimer: ReturnType<typeof setInterval> | undefined;
+let lastRecoveryTransition = '';
+function logRecoveryTransition(): void {
+  const status = autoBootstrap.diagnostics();
+  const key = `${status.generation}:${status.recoveryReason}:${status.probing}:${status.recoveryNeeded}:${status.drain?.state}`;
+  if (key === lastRecoveryTransition) return;
+  lastRecoveryTransition = key;
+  const message = status.manuallyStopped ? 'Pobieranie danych zatrzymane przez operatora'
+    : status.probing ? 'Sprawdzanie odpowiedzi TWS'
+    : status.recoveryReason === 'SCHEDULING_INTERRUPTION' ? 'Wykryto przerwę działania; odtwarzanie odczytów TWS'
+    : status.drain?.state === 'DRAIN_WAITING_STORAGE' ? 'Oczekiwanie na zakończenie poprzednich zapisów danych'
+    : status.recoveryNeeded ? 'Odtwarzanie połączenia danych; dane sesyjne pozostają osobno sprawdzane'
+    : 'Odczyt TWS odtworzony; gotowość świec zależy od bieżącej sesji';
+  app.log.info(status, message);
+}
 function runAutomaticBootstrap(): void {
-  void autoBootstrap.tick().catch(() => app.log.warn(autoBootstrap.diagnostics(), "Automatyczne przygotowanie danych nie powiodło się; ponowienie po przerwie"));
+  const work = autoBootstrap.tick();
+  logRecoveryTransition();
+  void work.catch(() => app.log.warn(autoBootstrap.diagnostics(), "Automatyczne przygotowanie danych nie powiodło się; ponowienie po przerwie"))
+    .finally(logRecoveryTransition);
 }
 
 app.get("/health", async () => ({
@@ -326,9 +362,7 @@ async function bootstrap(isCurrent: () => boolean) {
   }
   bootstrapInFlight = true;
   try {
-    await sessionRefresh.idle();
-    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
-    nativeRefreshPaused = false;
+    return await readRecovery.bootstrap(isCurrent, async () => {
     backfillProgress = {
       phase: "connecting",
       startedAt: new Date().toISOString(),
@@ -342,8 +376,6 @@ async function bootstrap(isCurrent: () => boolean) {
       insertedByTimeframe: {},
       failedTimeframes: [],
     };
-    await twsClient.connect();
-    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     const accounts = await twsClient.getManagedAccounts();
     const accountId = config.IBKR_ACCOUNT_ID ?? accounts[0];
     if (!accountId) {
@@ -356,6 +388,7 @@ async function bootstrap(isCurrent: () => boolean) {
       );
     }
 
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     const rawSubscriptions = await twsClient.resolveContracts(
       watchlistInstruments,
     );
@@ -384,6 +417,7 @@ async function bootstrap(isCurrent: () => boolean) {
     if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     for (const subscription of subscriptions) {
       if (subscription.instrumentContract) {
+        if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
         await repo.upsertInstrumentContract(subscription.instrumentContract);
       }
     }
@@ -391,6 +425,7 @@ async function bootstrap(isCurrent: () => boolean) {
       backfillProgress.phase = "one_minute";
       backfillProgress.totalSymbols = subscriptions.length;
     }
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     const historical = await twsClient.backfillRecentCandles1m(
       subscriptions.filter(sub => !sub.instrumentId),
       config.backfill1mCandles,
@@ -417,12 +452,14 @@ async function bootstrap(isCurrent: () => boolean) {
       });
 
       for (const candle of entry.candles) {
+        if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
         await repo.upsertCandle(candle);
         backfilledCandles1m += 1;
 
         const higher = higherTimeframeAggregator.ingest(candle);
         for (const higherCandle of higher) {
-          await repo.upsertCandle(higherCandle);
+          if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
+        await repo.upsertCandle(higherCandle);
           if (higherCandle.timeframe === "5m") backfilledCandles5m += 1;
           if (higherCandle.timeframe === "1h") backfilledCandles1h += 1;
           if (higherCandle.timeframe === "4h") backfilledCandles4h += 1;
@@ -487,6 +524,7 @@ async function bootstrap(isCurrent: () => boolean) {
         job.timeframe,
         subscriptions.map((s) => s.conid),
       );
+      if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
       const now = Date.now();
       const subsToFetch = subscriptions.filter((sub) => {
         if (sub.instrumentId) return false;
@@ -519,7 +557,8 @@ async function bootstrap(isCurrent: () => boolean) {
         let inserted = 0;
         for (const entry of results) {
           for (const candle of entry.candles) {
-            await repo.upsertCandle(candle);
+            if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
+        await repo.upsertCandle(candle);
             inserted += 1;
           }
         }
@@ -579,13 +618,11 @@ async function bootstrap(isCurrent: () => boolean) {
       "historical backfill completed",
     );
 
+    if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
     twsClient.clearSubscriptions();
     activeSubscriptions = [];
-    await sessionRefresh.run(subscriptions);
+    await sessionRefresh.run(subscriptions, isCurrent);
     if (!isCurrent()) throw new Error("INGESTION_BOOTSTRAP_INTERRUPTED");
-    twsClient.addSubscriptions(subscriptions);
-    activeSubscriptions = subscriptions;
-    lastBootstrapAt = new Date();
 
     return {
       socket: {
@@ -608,6 +645,12 @@ async function bootstrap(isCurrent: () => boolean) {
       },
       subscribed: subscriptions,
     };
+    }, result => {
+      nativeRefreshPaused = false;
+      twsClient.addSubscriptions(result.subscribed);
+      activeSubscriptions = result.subscribed;
+      lastBootstrapAt = new Date();
+    });
   } finally {
     bootstrapInFlight = false;
   }
