@@ -11,7 +11,7 @@ import { marketauxRecordSetHash, parseMarketauxPage, type MarketauxNewsRecord } 
 import { emptyResearchSnapshot } from "./research-empty-snapshot.js";
 
 type Role = "reports" | "news" | "calendar";
-type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot"> & Partial<Pick<ResearchStore, "dueRepairs" | "prepareRepair" | "claimMarketauxAttempt" | "reserveMarketauxCall" | "recordMarketauxCallOutcome" | "finalizeMarketauxSuccess" | "finishMarketauxFailure" | "recoverMarketauxAttempts">>;
+type SourceStore = WshRefreshStore & Pick<ResearchStore, "latestSnapshot" | "storeSnapshot" | "reserveCall" | "recordCallOutcome" | "withRefreshLock" | "hasRefreshSlot"> & Partial<Pick<ResearchStore, "dueRepairs" | "prepareRepair" | "claimMarketauxAttempt" | "reserveMarketauxCall" | "recordMarketauxCallOutcome" | "finalizeMarketauxSuccess" | "finishMarketauxFailure" | "recoverMarketauxAttempts" | "assertStartupDispatch">>;
 type Fetch = (source: ResearchSource, url: string, deadlineAt: string) => Promise<ResearchFetchResult>;
 const REFRESH_INTERVAL_MS: Record<Role, number> = { reports: 86400000, news: 900000, calendar: 86400000 };
 const RETRYABLE_HTTP = /^RESEARCH_SOURCE_HTTP_(429|500|502|503|504)$/;
@@ -396,7 +396,7 @@ export class ResearchRefreshScheduler {
             callMonotonicDeadline = Math.min(admitted.monotonicDeadlineMs, ticket.monotonicDeadlineMs);
             checkpoint(callMonotonicDeadline);
             researchAssert(typeof admitted.assertActive === 'function', 'RESEARCH_MARKETAUX_DISPATCH_GUARD_REQUIRED');
-            dispatchGuard = { signal: this.controller.signal, assertActive: () => {
+            dispatchGuard = { signal: this.controller.signal, assertCurrent: () => store.assertStartupDispatch?.(ticket.attemptId) ?? Promise.resolve(), assertActive: () => {
               this.assertActive();
               if (dispatchRetired) throw new Error('RESEARCH_MARKETAUX_DEADLINE_EXPIRED');
               admitted.assertActive();
@@ -410,6 +410,7 @@ export class ResearchRefreshScheduler {
           try {
             checkpoint(callMonotonicDeadline);
             if (!ticket && now() >= Date.parse(deadlineAt)) throw new Error("RESEARCH_MARKETAUX_DEADLINE_EXPIRED");
+            if(ticket)await store.assertStartupDispatch?.(ticket.attemptId);
             dispatchGuard?.assertActive();
             result = await fetch(source, descriptor, deadlineAt, Math.min(10 * 1024 * 1024, remainingBytes), callMonotonicDeadline, dispatchGuard);
           } catch (error) {

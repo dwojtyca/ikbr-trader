@@ -2,6 +2,7 @@ import { researchHash } from './validation.js';
 
 export type ResearchAdmissionKind = 'regular' | 'demand';
 export interface ResearchSourceAcquisition {
+  startup?: { state: 'PENDING' | 'FRESH' | 'JOINED' | 'CLAIMED' | 'SUPERSEDED' };
   state: 'READY' | 'WAITING' | 'HOLD';
   reason: string;
   nextDemandAt: string | null;

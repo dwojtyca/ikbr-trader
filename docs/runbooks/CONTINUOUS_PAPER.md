@@ -118,6 +118,19 @@ pozostają dostępne dla nadzoru i automatycznych wyjść; sprawdź stan pozycji
 ich ręcznym wyłączeniem. Profil lokalny i dowód wydania są prywatne, ignorowane
 przez Git i pomijane w kontekście obrazu Docker.
 
+Poprawka [jawnego ponowienia przy starcie](../implementation/phase3/EXPLICIT_START_SOURCE_REVALIDATION_REPORT.md)
+po wdrożeniu zgodnego obrazu rozdziela start od godzinnego harmonogramu.
+Każde jawne `pnpm start` zgłasza jedną próbę pobrania potrzebnych danych z każdego
+źródła, także po potwierdzonej odmowie WSH 10276/10277 i zmianie subskrypcji.
+Nie czeka na godzinny cykl ani lokalną przerwę po błędzie. Ważne dane są
+wykorzystywane, a już rozpoczęty odczyt jest obserwowany bez dublowania.
+Pozostają rzeczywiste ograniczenia dostawcy, budżety, kontrola uprawnień i
+odzyskiwanie niepewnych odczytów. Kolejne sprawdzenia tego samego startu nie
+przyznają następnych prób. Historia cen i badania przygotowują się równolegle;
+wejścia wracają dopiero po ukończeniu obu i przejściu dotychczasowych bramek.
+Zatrzymanie lub nowszy start unieważnia niewykorzystane żądanie poprzedniego.
+Sam zakup subskrypcji nie potwierdza dostępu: potrzebna jest poprawna odpowiedź API.
+
 Profil strategii jest jedynym źródłem listy instrumentów dopuszczonych do wejść.
 W trybie `TRADING_CONFIG_MODE=bundle` pozostaw
 `TRADING_LOOP_INSTRUMENT_IDS` puste lub usuń tę zmienną; jej niepusta wartość

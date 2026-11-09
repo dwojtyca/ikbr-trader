@@ -1035,6 +1035,7 @@ test('startup observes repeated WAITING and BUSY or HARD HOLD until every instru
     let prepares = 0, waits = 0;
     const revisions = new Set<number>();
     h.adapters.http = async (path, body, ...rest) => {
+      if (path === 'http://ingestion/health') return readyHealth();
       if (path !== '/execution/entry-control/start/prepare') return http(path, body, ...rest);
       prepares++;
       assert.equal(h.resumeCalls, 0); assert.equal(h.control?.paused, true);
@@ -1115,7 +1116,7 @@ test('authority, protocol and authentication changes after research HOLD termina
   for (const failure of ['account', 'revision', 'unpaused', 'protocol', 'shape', 'auth', 'prepare-shape', 'prepare-auth', 'prepare-control']) {
     const h = await runScenario(), http = h.adapters.http;
     let holding = false, prepares = 0;
-    h.adapters.sleep = async () => { if (prepares) holding = true; };
+    h.adapters.sleep = async () => { if (h.logs.some(message => message.startsWith('HOLD:'))) holding = true; };
     h.adapters.http = async (path, body, ...rest) => {
       if (holding && path === '/execution/entry-control' && !failure.startsWith('prepare-')) {
         if (failure === 'auth') throw new PaperHttpError('unauthorized', 401);
@@ -1155,6 +1156,92 @@ test('research HOLD recovery never retries an unknown resume mutation', async ()
     try {
       await assert.rejects(h.runtime.start(), /PAPER_RESUME_UNKNOWN/);
       assert.equal(prepares, 2); assert.equal(h.resumeCalls, 1); assert.equal(h.control?.paused, true);
+    } finally { await h.f.cleanup(); }
+  }
+});
+
+test('explicit start prepares research while history is still loading and waits for both before resume', async () => {
+  const h = await runScenario(); const original = h.adapters.http;
+  let researchStarted!: () => void, releaseHistory!: () => void;
+  const research = new Promise<void>(resolve => { researchStarted = resolve; });
+  const history = new Promise<void>(resolve => { releaseHistory = resolve; });
+  let historyComplete = false, bootstrapStarted = false;
+  h.adapters.sleep = async () => { await new Promise(resolve => setTimeout(resolve, 1)); };
+  h.adapters.http = async (path, body, ...rest) => {
+    if (path === 'http://ingestion/health') return { ...readyHealth(), bootstrapped: historyComplete, bootstrapping: !historyComplete };
+    if (path === 'http://ingestion/bootstrap') { bootstrapStarted = true; await history; historyComplete = true; return { accepted: true }; }
+    if (path === '/execution/entry-control/start/prepare') researchStarted();
+    return original(path, body, ...rest);
+  };
+  const running = h.runtime.start();
+  try {
+    await research;
+    assert.equal(h.resumeCalls, 0);
+    assert.equal(h.control?.paused, true);
+    releaseHistory();
+    await running;
+    assert.equal(bootstrapStarted, true);
+    assert.equal(h.resumeCalls, 1);
+  } finally { releaseHistory(); await running.catch(() => undefined); await h.f.cleanup(); }
+});
+
+for (const failing of ['history', 'research', 'abort'] as const) test(`preparation ${failing} failure aborts and drains its sibling without resume`, async () => {
+  const h = await runScenario(); const original = h.adapters.http;
+  let siblingEntered!: () => void;
+  const entered = new Promise<void>(resolve => { siblingEntered = resolve; });
+  let siblingDrained = false;
+  const interruption = new AbortController();
+  h.adapters.signal = interruption.signal;
+  h.adapters.sleep = async () => { await new Promise(resolve => setTimeout(resolve, 1)); };
+  const failurePath = failing === 'history' ? 'http://ingestion/bootstrap' : '/execution/entry-control/start/prepare';
+  const siblingPath = failing === 'history' ? '/execution/entry-control/start/prepare' : 'http://ingestion/bootstrap';
+  h.adapters.http = async (path, body, timeout, signal) => {
+    if (path === 'http://ingestion/health') return { ...readyHealth(), bootstrapped: false, bootstrapping: true };
+    if (path === failurePath) { await entered; if (failing === 'abort') interruption.abort(); throw new PaperHttpError('unauthorized', 401); }
+    if (path === siblingPath) {
+      assert.ok(signal);
+      siblingEntered();
+      return new Promise((_resolve, reject) => {
+        const abort = () => { setTimeout(() => { siblingDrained = true; reject(new Error('fixture cancelled wait')); }, 10); };
+        if (signal.aborted) abort(); else signal.addEventListener('abort', abort, { once: true });
+      });
+    }
+    return original(path, body, timeout, signal);
+  };
+  try {
+    await assert.rejects(h.runtime.start());
+    assert.equal(siblingDrained, true);
+    assert.equal(h.resumeCalls, 0);
+    assert.equal(h.control?.paused, true);
+  } finally { await h.f.cleanup(); }
+});
+
+test('explicit startup diagnostics separate the observation request from the regular hour and preserve real constraints', async () => {
+  for (const state of ['PENDING', 'JOINED', 'CLAIMED', 'untrusted fixture DU123456']) {
+    const h = await runScenario(), original = h.adapters.http;
+    h.adapters.http = async (path, body, ...rest) => path !== '/execution/entry-control/start/prepare' ? original(path, body, ...rest) : {
+      revision: Number(h.control!.revision), instruments: ['pko_wse', 'aapl_smart'].map(instrumentId => ({
+        instrumentId, state: 'HOLD', reasons: ['RESEARCH_CALENDAR_ERROR'], sources: [{ sourceId: 'wsh_calendar', role: 'calendar', state: 'HOLD',
+          reasons: ['RESEARCH_CALENDAR_ERROR'], providerError: { code: 10276, message: 'News feed is not allowed.' },
+          acquisition: { state: 'WAITING', reason: 'RESEARCH_BUDGET_EXHAUSTED', nextDemandAt: '2026-11-10T00:00:00.000Z', startup: { state } },
+          wshRefresh: { nextRegularAt: '2026-11-09T11:05:32.000Z' },
+        }],
+      })),
+    };
+    try {
+      await assertHoldingUntilAborted(h);
+      const output = h.logs.join('\n');
+      assert.match(output, /10276/);
+      assert.match(output, /2026-11-10T00:00:00.000Z/);
+      assert.doesNotMatch(output, /untrusted|fixture|DU123456/);
+      if (state === 'PENDING') {
+        assert.match(output, /zgłoszono jednorazowe pobranie/);
+        assert.match(output, /Bieżący stan pobierania: RESEARCH_BUDGET_EXHAUSTED/);
+        assert.match(output, /nie wyznacza terminu tej próby startu/);
+        assert.doesNotMatch(output, /Najwcześniejsze zwykłe odświeżenie/);
+      }
+      if (state === 'JOINED') assert.match(output, /już rozpoczętą próbę/);
+      if (state === 'CLAIMED') assert.match(output, /wynik nadal wymaga potwierdzenia/);
     } finally { await h.f.cleanup(); }
   }
 });

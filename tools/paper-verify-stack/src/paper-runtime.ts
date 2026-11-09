@@ -419,8 +419,22 @@ export class PaperRuntime {
       await this.assertStart(generation, accountId, pausedRevision);
       await this.compose(['up', '-d', '--no-build', '--pull', 'never', ...PAPER_SERVICES]);
       await this.waitControl(generation, accountId, pausedRevision);
-      await this.prepareBootstrap(generation, accountId, pausedRevision, validated.instrumentIds);
-      await this.waitPreparation(generation, accountId, pausedRevision, validated.instrumentIds);
+      const preparationAbort = new AbortController();
+      const preparation = new PaperRuntime({ ...this.options, adapters: { ...this.options.adapters,
+        signal: AbortSignal.any([preparationAbort.signal, ...(this.options.adapters.signal ? [this.options.adapters.signal] : [])]),
+      } });
+      let firstFailure: { error: unknown } | undefined;
+      const branches = [
+        preparation.prepareBootstrap(generation, accountId, pausedRevision, validated.instrumentIds),
+        preparation.waitPreparation(generation, accountId, pausedRevision, validated.instrumentIds),
+      ].map(branch => branch.catch(error => {
+        firstFailure ??= { error };
+        preparationAbort.abort();
+        throw error;
+      }));
+      await Promise.allSettled(branches);
+      preparationAbort.abort();
+      if (firstFailure) throw firstFailure.error;
       await this.resume(reason, pausedRevision, accountId, generation, validated.instrumentIds);
       await this.assertStart(generation);
       return 'Paper działa w Dockerze; uruchomienie usług nie potwierdza gotowości wejścia dla każdego instrumentu. Użyj pnpm stop, aby zatrzymać nowe wejścia, oraz pnpm logs, aby obserwować pracę.';
@@ -467,7 +481,7 @@ export class PaperRuntime {
     await this.assertStart(generation, accountId, expectedRevision);
     const requestAbort = new AbortController();
     let outcome: { state: 'pending' | 'success' | 'unknown' | 'rejected'; error?: PaperHttpError } = { state: 'pending' };
-    void this.http('http://ingestion/bootstrap', {}, 120 * 60_000, true, requestAbort.signal).then(
+    const bootstrapRequest = this.http('http://ingestion/bootstrap', {}, 120 * 60_000, true, requestAbort.signal).then(
       value => { outcome = { state: obj(value) && !obj(value)?.error ? 'success' : 'unknown' }; },
       error => { outcome = error instanceof PaperHttpError && error.status < 500 ? { state: 'rejected', error } : { state: 'unknown' }; },
     );
@@ -503,7 +517,7 @@ export class PaperRuntime {
         if (status !== lastStatus) { this.options.adapters.log?.(`WAITING: automatyczne przygotowanie: historia cen i subskrypcje (${status.replace(/[^a-z_:]/gi, '')}).`); lastStatus = status; }
         await this.sleep(5000);
       }
-    } finally { requestAbort.abort(); }
+    } finally { requestAbort.abort(); await bootstrapRequest; }
   }
   private async waitPreparation(generation: string, accountId: string, expectedRevision: number, expectedInstruments: string[]): Promise<void> {
     let lastStatus = '';
@@ -602,6 +616,21 @@ export class PaperRuntime {
           const localBudget = row.role === 'news' && row.failureReason === 'RESEARCH_BUDGET_EXHAUSTED' ? formatLocalResearchBudget(row.localBudget) : null;
           if (calendar || sourceFailure)
             details.push(`  ${sourceLabel}: ${ownReason}${localBudget ? `${localBudget} ` : ''}${calendar ? formatResearchProviderError(row.providerError, privacy) : formatResearchSourceError(row.sourceError, privacy)}${row.role === 'calendar' && !calendar && isResearchProviderError(row.providerError) ? `; ${formatResearchProviderError(row.providerError, privacy)}` : ''}`);
+          const acquisition = obj(row.acquisition);
+          const startup = obj(acquisition?.startup);
+          const startupDescriptions: Record<string, string> = {
+            PENDING: 'Start: zgłoszono jednorazowe pobranie bez oczekiwania na harmonogram okresowy; nadal obowiązują kontrole dostępu, aktywnych odczytów i limitów.',
+            FRESH: 'Start: potwierdzono ważne dane; dodatkowe pobranie nie jest potrzebne.',
+            JOINED: 'Start: wykorzystuje już rozpoczętą próbę; nie zleca drugiego pobrania.',
+            CLAIMED: 'Start: przydzielono jednorazową próbę pobrania; wynik nadal wymaga potwierdzenia.',
+            SUPERSEDED: 'Start: wcześniejsze żądanie utraciło ważność.',
+          };
+          const startupState = typeof startup?.state === 'string' && Object.hasOwn(startupDescriptions, startup.state) ? startup.state : null;
+          if (startupState) {
+            const constraint = typeof acquisition?.reason === 'string' && /^RESEARCH_[A-Z0-9_]{1,100}$/.test(acquisition.reason)
+              ? ` Bieżący stan pobierania: ${acquisition.reason}.` : '';
+            details.push(`  ${sourceLabel}: ${startupDescriptions[startupState]}${constraint}`);
+          }
           if (row.state === 'READY') continue;
           const refresh = obj(row.role === 'calendar' ? row.wshRefresh : row.role === 'news' ? row.marketauxRefresh : null);
           const instant = (value: unknown): value is string => typeof value === 'string' &&
@@ -611,7 +640,9 @@ export class PaperRuntime {
             obj(row.acquisition)?.state === 'WAITING' && instant(obj(row.acquisition)?.nextDemandAt)
               ? `Najwcześniejsze pobranie brakujących danych: ${obj(row.acquisition)!.nextDemandAt}.` : '',
             instant(refresh?.nextRetryAt) ? `Najwcześniejsze ponowienie: ${refresh.nextRetryAt}.` : '',
-            instant(refresh?.nextRegularAt) ? `Najwcześniejsze zwykłe odświeżenie: ${refresh.nextRegularAt}.` : '',
+            instant(refresh?.nextRegularAt) ? startupState === 'PENDING'
+              ? `Odświeżenie okresowe: ${refresh.nextRegularAt}; nie wyznacza terminu tej próby startu.`
+              : `Najwcześniejsze zwykłe odświeżenie: ${refresh.nextRegularAt}.` : '',
             instant(row.nextCheckAt) ? `Najwcześniejsze kolejne sprawdzenie: ${row.nextCheckAt}.` : '',
           ].filter(Boolean);
           if (deadlines.length) details.push(`  ${sourceLabel}: ${deadlines.join(' ')} Terminy nie potwierdzają odzyskania poprawnych danych.`);

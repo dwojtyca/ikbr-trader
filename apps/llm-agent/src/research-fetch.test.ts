@@ -138,3 +138,13 @@ for (const stage of ['dns-monotonic', 'dns-wall', 'request-return', 'before-requ
     assert.equal(requests, ['request-return', 'before-end', 'shutdown-request', 'request-close'].includes(stage) ? 1 : 0);
     assert.equal(destroyed, requests);
   });
+
+test('startup revision is rechecked after DNS before any HTTP request is created', async () => {
+  let resolved=false, requests=0, checks=0;
+  await assert.rejects(fetchBoundedResearchUrl(new URL('https://api.marketaux.com'),new Date(Date.now()+1000).toISOString(),'application/json',{
+    resolveAddress:async()=>{resolved=true;return {address:'8.8.8.8',family:4};},
+    dispatchGuard:{assertActive:()=>{},assertCurrent:async()=>{checks++;assert.equal(resolved,true);throw new Error('RESEARCH_STARTUP_SUPERSEDED');}},
+    httpsRequest:(()=>{requests++;throw new Error('must not dispatch');}) as unknown as typeof request,
+  }),error=>{assert.equal(original(error).message,'RESEARCH_SOURCE_ACQUISITION_FAILED');return true;});
+  assert.equal(checks,1);assert.equal(requests,0);
+});

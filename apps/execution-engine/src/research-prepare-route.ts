@@ -6,7 +6,7 @@ import { getExecutionAuthContext } from "./auth.js";
 export interface ResearchPrepareRequest { instrumentId: string; conid: string; effectiveConfigHash: string }
 
 export function registerStartupResearchPrepareRoute(app: FastifyInstance, deps: {
-  store: Pick<ResearchStore, "prepareRepair">;
+  store: Pick<ResearchStore, "prepareStartupRepair">;
   controls: Pick<EntryControlStore, "withStartupPause">;
   authorize(): Promise<{ accountId: string; instruments: ResearchRepairIdentity[]; assertCurrent(): Promise<void> }>;
 }): void {
@@ -23,7 +23,7 @@ export function registerStartupResearchPrepareRoute(app: FastifyInstance, deps: 
       await authority.assertCurrent();
       const instruments = [];
       for (const identity of authority.instruments) {
-        instruments.push({ instrumentId: identity.instrumentId, ...await deps.store.prepareRepair(identity, db) });
+        instruments.push({ instrumentId: identity.instrumentId, ...await deps.store.prepareStartupRepair(identity, revision, db) });
       }
       await authority.assertCurrent();
       return { revision, instruments };

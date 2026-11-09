@@ -120,7 +120,7 @@ const TRANSIENT_CODES = new Set(["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ECONNR
 function transientCode(error: unknown): boolean {
   return error instanceof Error && "code" in error && typeof error.code === "string" && TRANSIENT_CODES.has(error.code);
 }
-export interface ResearchDispatchGuard { assertActive(): void; signal?: AbortSignal }
+export interface ResearchDispatchGuard { assertActive(): void; assertCurrent?(): Promise<void>; signal?: AbortSignal }
 type ResearchFetchDeps = {
   resolveAddress?: typeof resolvePublicResearchAddress;
   httpsRequest?: typeof request;
@@ -158,6 +158,7 @@ export async function fetchBoundedResearchUrl(url: URL, deadlineAt: string, acce
       (deps.resolveAddress ?? resolvePublicResearchAddress)(url.hostname),
       new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true })),
     ]);
+    await deps.dispatchGuard?.assertCurrent?.();
     assertDispatch();
     return await new Promise<ResearchFetchResult>((resolve, reject) => {
       let settled = false;

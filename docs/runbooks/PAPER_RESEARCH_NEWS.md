@@ -19,6 +19,17 @@ The v2 news query cutoff remains hour-aligned; a repeated fetch inside the hour
 does not claim coverage through the current second. No legacy on-demand flag is
 needed to enable this two-source recovery behavior.
 
+Owner update 2026-11-09: the [explicit-start contract](../implementation/phase3/EXPLICIT_START_SOURCE_REVALIDATION_PLAN.md)
+adds one authenticated observation opportunity per source and startup pause
+revision. After deployment of that package, explicit start bypasses local hourly
+and failure-backoff delays for eligible required reads, including proved WSH
+10276/10277 provider refusals. Automatic demand does not gain a broad HARD retry
+exception. Actual provider cooldowns, budgets, configured permissions and unknown
+read retirement still apply. Fresh data and already begun work consume the
+opportunity without duplicate calls; repeated preparation polls cannot renew it.
+See the [release evidence](../implementation/phase3/EXPLICIT_START_SOURCE_REVALIDATION_REPORT.md)
+for implementation and deployment status.
+
 Updated 2026-10-07: the [WSH context contract](RESEARCH_CONTEXT_WSH.md) adds V2
 news descriptions, snippets and matched-issuer sentiment for AI adjudication.
 Calendar proximity is context, not an automatic entry veto; WSH is the sole

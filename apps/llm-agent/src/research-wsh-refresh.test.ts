@@ -711,3 +711,13 @@ test("mixed WSH policy expiry after metadata prevents sending events", async () 
   await h.run(); assert.equal(h.calls.length, 1); assert.ok(!h.trace.includes("events"));
   assert.notEqual(calendar(h).status, "EMPTY"); assert.notEqual(calendar(h).status, "AVAILABLE");
 });
+
+for(const rejectedCall of [1,2])test(`startup supersession before WSH call${rejectedCall} leaves unsent reservation unknown and never replays`,async()=>{
+ const h=harness();let checkpoints=0;
+ h.store.assertStartupDispatch=async()=>{if(++checkpoints===rejectedCall)throw new Error('RESEARCH_STARTUP_SUPERSEDED');};
+ await h.run();
+ assert.equal(h.trace.includes('metadata'),rejectedCall===2);assert.equal(h.trace.includes('events'),false);
+ assert.equal(h.calls.length,rejectedCall);
+ assert.deepEqual([...h.outcomes.values()],rejectedCall===1?['UNKNOWN']:['SUCCEEDED','UNKNOWN']);
+ assert.equal(calendar(h).complete,false);
+});

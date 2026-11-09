@@ -42,8 +42,8 @@ test("explicit startup preparation requires authentication and exact revision; d
       if (revision !== 2) throw new EntryControlError("ENTRY_CONTROL_REVISION_CHANGED");
       return work(transaction);
     } },
-    store: { prepareRepair: async (identity, db) => {
-      assert.equal(db, transaction); prepared.push(identity.instrumentId);
+    store: { prepareStartupRepair: async (identity, revision, db) => {
+      assert.equal(revision, 2); assert.equal(db, transaction); prepared.push(identity.instrumentId);
       return { state: identity.instrumentId === "pko_wse" ? "WAITING" : "HOLD", reasons: [identity.instrumentId === "pko_wse" ? "RESEARCH_SOURCE_MISSING" : "RESEARCH_BUDGET_EXHAUSTED"], sources: [], snapshotId: null, nextCheckAt: null };
     } },
   });

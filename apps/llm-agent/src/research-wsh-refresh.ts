@@ -14,7 +14,7 @@ import { WshSocketTransport, type WshEventRequest, type WshRuntimeConfiguration,
 export type WshRefreshStore = Pick<ResearchStore, "latestSnapshot" | "readSnapshot" | "storeSnapshot" | "recordCallOutcome" |
   "withWshEndpointLock" | "pendingWshAcquisition" | "beginWshAcquisition" | "reserveWshCall" | "assertWshAcquisition" |
   "publishWshSnapshot" | "finishWshFailure" | "retireWshAcquisition" | "readWshAcquisition" |
-  "claimWshAttempt" | "confirmWshPreflight" | "finishWshAttempt" | "readWshAttempt" | "dueWshAttempts">;
+  "claimWshAttempt" | "confirmWshPreflight" | "finishWshAttempt" | "readWshAttempt" | "dueWshAttempts"> & Partial<Pick<ResearchStore, "assertStartupDispatch">>;
 export interface WshRefreshRuntime { runtime: WshRuntimeConfiguration; createTransport?: () => WshTransport }
 interface Options {
   manifest: ResearchManifest; manifestHash: string; accountId: string; policy: ResearchInstrumentPolicy;
@@ -153,6 +153,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       const metadataCall = reservation(1, "reqWshMetaData", null, deadline());
       acquisition = await store.beginWshAcquisition(lease, { ...identity, sourceId: source.id, sessionId: transport.sessionId, reservation: metadataCall }, ticket);
       await checkpoint(metadataCall.deadlineAt);
+      await store.assertStartupDispatch?.(ticket.id);
       const rawMetadata = await transport.metadata(1, metadataCall.deadlineAt, config.maxMetadataBytes);
       await checkpoint(metadataCall.deadlineAt);
       researchAssert(Buffer.byteLength(rawMetadata) <= config.maxMetadataBytes, "RESEARCH_WSH_PAYLOAD_LIMIT");
@@ -170,6 +171,7 @@ export async function refreshWsh(options: Options): Promise<boolean> {
       assertActive();
       await store.reserveWshCall(lease, acquisition, eventsCall);
       await checkpoint(eventsCall.deadlineAt);
+      await store.assertStartupDispatch?.(ticket.id);
       const rawEvents = await transport.events(2, request, eventsCall.deadlineAt, config.maxEventBytes);
       await checkpoint(eventsCall.deadlineAt);
       stage = 'normalize';

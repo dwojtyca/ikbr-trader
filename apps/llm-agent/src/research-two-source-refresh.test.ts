@@ -371,3 +371,10 @@ test('scheduler retires call guards after transport and composes shutdown while 
   await ready; scheduler.stop(); release(); await assert.rejects(pending, /RESEARCH_REFRESH_ABORTED/);
   assert.equal(requests, 0); assert.equal(aborted.state.successes.length, 0); assert.equal(aborted.state.outcomes[0].outcome, 'UNKNOWN');
 });
+
+test('startup supersession before a Marketaux page dispatch preserves UNKNOWN reservation and prevents the send',async()=>{
+ const s=harness();s.store.assertStartupDispatch=async()=>{throw new Error('RESEARCH_STARTUP_SUPERSEDED');};
+ await s.make().tick();
+ assert.equal(s.state.requests.length,0);assert.deepEqual(s.state.outcomes.map(o=>o.outcome),['UNKNOWN']);
+ assert.equal(s.state.failures[0].failure.outcome,'UNKNOWN');assert.equal(s.state.successes.length,0);
+});

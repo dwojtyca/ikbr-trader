@@ -30,6 +30,40 @@ type WshReadRecoveryRecord = {
   challenges: {id:string; hash:string}[];
 };
 export class ResearchStore {
+  private async hasStartupRequests(db: ResearchDb): Promise<boolean> {
+    return (await db.query("SELECT to_regclass('research_startup_source_requests') IS NOT NULL AS available")).rows[0]?.available===true;
+  }
+  private async startupDispatch(db: ResearchDb, attemptId: unknown): Promise<void> {
+    if(await this.hasStartupRequests(db))await db.query('SELECT research_startup_dispatch($1)',[attemptId]);
+  }
+  private async lockStartupAccount(db: ResearchDb, accountId: string): Promise<void> {
+    await db.query('SELECT account_id FROM execution_entry_controls WHERE account_id=$1 FOR SHARE', [accountId]);
+  }
+  async assertStartupDispatch(attemptId: string): Promise<void> {
+    await this.wshRead(async db => {
+      await db.query('BEGIN');
+      try {
+      if(!await this.hasStartupRequests(db)){await db.query('COMMIT');return;}
+      const row = (await db.query("SELECT account_id FROM research_startup_source_requests WHERE attempt_id=$1 AND state='CLAIMED'", [attemptId])).rows[0];
+      if (!row){await db.query('COMMIT');return;}
+      await this.lockStartupAccount(db, String(row.account_id));
+      await this.startupDispatch(db,attemptId);
+      await db.query('COMMIT');
+      } catch(error){await db.query('ROLLBACK').catch(()=>undefined);throw error;}
+    });
+  }
+  async prepareStartupRepair(identity: ResearchRepairIdentity, pauseRevision: number, db: ResearchDb): Promise<ResearchPreparation> {
+    await this.lockStartupAccount(db, identity.accountId);
+    await this.assertAuthority(identity, db);
+    const manifest = await this.readManifest(identity, db);
+    if (isTwoSourceResearch(manifest)) {
+      for (const source of manifest.instruments.find(p => p.instrumentId === identity.instrumentId)?.sources ?? []) {
+        for (const role of source.roles) await db.query('SELECT research_startup_register($1,$2,$3,$4,$5,$6,$7)',
+          [identity.accountId, pauseRevision, identity.configHash, identity.manifestHash, identity.instrumentId, source.id, role]);
+      }
+    }
+    return this.prepareRepair(identity, db);
+  }
   private readonly wshRecoveryOperations = new Map<string, string>();
   async recoverExpiredWshReads(identity: WshAttemptIdentity): Promise<{ state: 'NOT_REQUIRED'|'RECOVERED'|'WAITING'|'BUSY'; nextCheckAt: string|null; recoveryId: string|null }> {
     const key = researchHash(identity), retry = () => new Date(Date.now()+1000).toISOString();
@@ -128,10 +162,11 @@ export class ResearchStore {
   // Admission readers take authority SHARE, then attempt-table SHARE, then head; authority SHAREs
   // are compatible. Adoption takes authority UPDATE but never waits for this table/head protocol.
   // Callers must not pre-lock a head before entering bind/validateBinding/prepareRepair.
-  private async marketauxTransaction<T>(run: (db: ResearchDb) => Promise<T>, deadline: number, readOnly = false): Promise<T> {
+  private async marketauxTransaction<T>(run: (db: ResearchDb) => Promise<T>, deadline: number, readOnly = false, startupAccount?: string): Promise<T> {
     const bounded = await connectWshBounded(this.pool, undefined, deadline);
     try {
       const db = bounded.db; await db.query('BEGIN');
+      if (startupAccount) await this.lockStartupAccount(db, startupAccount);
       await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
       if (!readOnly) await db.query('LOCK TABLE research_marketaux_attempts IN ROW EXCLUSIVE MODE');
       const result = await run(db); await db.query('COMMIT'); return result;
@@ -154,7 +189,8 @@ export class ResearchStore {
   private async sourceAcquisition(identity:MarketauxAttemptIdentity,db:ResearchDb,now:number):Promise<ResearchSourceAcquisition> {
     const row=(await db.query('SELECT * FROM research_source_demand($1,$2,$3,$4,$5,$6)',[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId,new Date(now)])).rows[0];
     researchAssert(row && ['READY','WAITING','HOLD'].includes(String(row.state)),'RESEARCH_SOURCE_DEMAND_UNAVAILABLE');
-    return {state:row.state as ResearchSourceAcquisition['state'],reason:String(row.reason),nextDemandAt:row.next_at?iso(row.next_at):null};
+    const startup=await this.hasStartupRequests(db)?(await db.query('SELECT state FROM research_startup_source_requests WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND instrument_id=$4 AND source_id=$5 ORDER BY pause_revision DESC LIMIT 1',[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId])).rows[0]:undefined;
+    return {state:row.state as ResearchSourceAcquisition['state'],reason:String(row.reason),nextDemandAt:row.next_at?iso(row.next_at):null,...(startup?{startup:{state:startup.state as NonNullable<ResearchSourceAcquisition['startup']>['state']}}:{})};
   }
   private async demandRequestId(identity:MarketauxAttemptIdentity,db:ResearchDb):Promise<unknown> {
     const row=(await db.query("SELECT id FROM research_repair_requests WHERE account_id=$1 AND config_hash=$2 AND manifest_hash=$3 AND instrument_id=$4 AND source_id=$5 AND state='WAITING' AND next_check_at<=clock_timestamp()",[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId])).rows[0];
@@ -181,6 +217,7 @@ export class ResearchStore {
       if(cooldown && now<researchTime(iso(cooldown)))return {claimed:false,reason:'RESEARCH_PROVIDER_COOLDOWN',nextCheckAt:iso(cooldown)};
       let requestId:unknown=null;
       if(kind==='demand'){
+        if(await this.hasStartupRequests(db))await db.query('SELECT research_startup_observe($1,$2,$3,$4,$5)',[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,identity.sourceId]);
         const demand=await this.sourceAcquisition(identity,db,now);
         if(demand.state!=='WAITING'||demand.reason!=='RESEARCH_SOURCE_DEMAND'||!demand.nextDemandAt||researchTime(demand.nextDemandAt)>now)return {claimed:false,reason:demand.reason,nextCheckAt:demand.nextDemandAt};
         requestId=await this.demandRequestId(identity,db);
@@ -193,12 +230,13 @@ export class ResearchStore {
       await db.query(`INSERT INTO research_marketaux_attempts(id,account_id,provider,config_hash,manifest_hash,instrument_id,source_id,ledger_key,source_hash,slot,started_at,deadline_at,state,recovery_protocol,clock_domain_id,clock_db_at,clock_wall_at,admission_kind,demand_request_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'STARTED',$13,$14,$15,$16,$17,$18)`, [ticket.attemptId, identity.accountId, source.provider, identity.configHash, identity.manifestHash, identity.instrumentId, identity.sourceId, ledger, ticket.sourceHash, slot, ticket.startedAt, ticket.deadlineAt,MARKETAUX_RECOVERY_PROTOCOL,this.recoveryClock.domainId(),new Date(sample.db),new Date(sample.wall),kind.toUpperCase(),requestId]);
       this.marketauxTickets.set(ticket, { deadline, ticketHash: researchHash(ticket),wall,mono,invalid:false }); return { claimed: true, ticket };
-    }, deadline);
+    }, deadline, false, identity.accountId);
   }
   async reserveMarketauxCall(ticket: MarketauxAttemptTicket, request: MarketauxRequest, reservation: Omit<ResearchCallReservation, 'deadlineAt'>): Promise<{ deadlineAt: string; monotonicDeadlineMs: number; assertActive:()=>void }> {
     const budget = this.marketauxBudget(ticket), entered = performance.now(), wallEntered=this.recoveryClock.wallNow();
     let refusedReason:string|null=null;
     const result = await this.marketauxTransaction(async db => {
+      await this.startupDispatch(db,ticket.attemptId);
       await this.assertAuthority(ticket, db);
       const { source, config, policy } = await this.marketauxSource(ticket, db);
       await this.marketauxTicketRow(ticket, db, ['STARTED']);
@@ -232,7 +270,7 @@ export class ResearchStore {
       }
       await db.query('INSERT INTO research_marketaux_attempt_calls(call_key,attempt_id,pass,page) VALUES($1,$2,$3,$4)', [expected.callKey,ticket.attemptId,request.pass,request.page]);
       return { deadlineAt, monotonicDeadlineMs: Math.min(budget, entered + remaining),wallDeadline:wallEntered+remaining };
-    }, budget).catch(async error=>{
+    }, budget, false, ticket.accountId).catch(async error=>{
       if(!refusedReason)throw error;
       try {
         const marker=await this.marketauxTransaction(async db=>{
@@ -781,6 +819,7 @@ export class ResearchStore {
       await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');
       const manifest = await this.readManifest(identity, db), now = await this.now(db);
       if (isTwoSourceResearch(manifest)) await db.query("LOCK TABLE research_marketaux_attempts IN SHARE MODE");
+      if(isTwoSourceResearch(manifest)&&await this.hasStartupRequests(db))for(const source of manifest.instruments.find(p=>p.instrumentId===identity.instrumentId)?.sources??[])await db.query('SELECT research_startup_observe($1,$2,$3,$4,$5)',[identity.accountId,identity.configHash,identity.manifestHash,identity.instrumentId,source.id]);
       const stored = await this.latestSnapshot(identity, db, true);
       const legacy = await this.legacyMarketauxRecoveries(identity, manifest, stored, now, db);
       const budget = await this.marketauxBudgetRecoveries(identity, manifest, stored, now, db);
@@ -892,6 +931,12 @@ export class ResearchStore {
           reasons ?| ARRAY['RESEARCH_MARKETAUX_ACQUISITION_FAILED','RESEARCH_SOURCE_TIMEOUT','RESEARCH_SOURCE_TRANSPORT_TRANSIENT',
           'RESEARCH_SOURCE_HTTP_429','RESEARCH_SOURCE_HTTP_500','RESEARCH_SOURCE_HTTP_502','RESEARCH_SOURCE_HTTP_503','RESEARCH_SOURCE_HTTP_504']))
       ORDER BY next_check_at NULLS LAST,id LIMIT 100`, [identity.accountId, identity.configHash, identity.manifestHash])).rows;
+    if(await this.hasStartupRequests(this.pool))rows.push(...(await this.pool.query(`SELECT q.instrument_id,q.source_id,q.role,'WAITING'::text AS state,FALSE AS budget_candidate
+      FROM research_startup_source_requests q JOIN execution_entry_controls c ON c.account_id=q.account_id AND c.revision=q.pause_revision AND c.paused
+      CROSS JOIN LATERAL research_source_demand(q.account_id,q.config_hash,q.manifest_hash,q.instrument_id,q.source_id,clock_timestamp()) d
+      WHERE q.account_id=$1 AND q.config_hash=$2 AND q.manifest_hash=$3 AND q.state='PENDING'
+        AND (d.state='READY' OR d.state='WAITING' AND d.reason='RESEARCH_SOURCE_DEMAND' AND d.next_at<=clock_timestamp())
+      ORDER BY q.id LIMIT 100`,[identity.accountId,identity.configHash,identity.manifestHash])).rows);
     const now = await this.now(this.pool), discoveryKey = researchHash(identity);
     const previous = this.budgetDiscovery?.identity === discoveryKey ? this.budgetDiscovery : undefined;
     const scanBudget = !previous || now >= previous.nextScanAt;
@@ -1291,10 +1336,10 @@ export class ResearchStore {
       finally { bounded.destroy(); }
     }
   }
-  private async wshTransaction<T>(lease: WshEndpointLease, fn: (db: ResearchDb) => Promise<T>): Promise<T> {
+  private async wshTransaction<T>(lease: WshEndpointLease, fn: (db: ResearchDb) => Promise<T>, startupAccount?: string): Promise<T> {
     const bounded=this.wshBounds.get(lease),db=this.wshLeases.get(lease);researchAssert(bounded&&db,'RESEARCH_WSH_LOCK_LOST');
     bounded.beginOperation();
-    try {await lease.assertHeld();await db.query('BEGIN');await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');const result=await fn(db);await lease.assertHeld();await db.query('COMMIT');return result;}
+    try {await lease.assertHeld();await db.query('BEGIN');if(startupAccount)await this.lockStartupAccount(db,startupAccount);await db.query('LOCK TABLE research_recovery_challenges IN SHARE MODE');const result=await fn(db);await lease.assertHeld();await db.query('COMMIT');return result;}
     catch(error){if(!bounded.closed){try{await db.query('ROLLBACK');}catch{bounded.destroy();}}throw error;}
     finally{bounded.endOperation();}
   }
@@ -1371,6 +1416,7 @@ export class ResearchStore {
       }else{
         let requestId:unknown=null;
         if(kind==='demand'){
+          if(await this.hasStartupRequests(db))await db.query('SELECT research_startup_observe($1,$2,$3,$4,$5)',[input.accountId,input.configHash,input.manifestHash,input.instrumentId,input.sourceId]);
           const demand=await this.sourceAcquisition(input,db,now);
           if(demand.state!=='WAITING'||demand.reason!=='RESEARCH_SOURCE_DEMAND'||!demand.nextDemandAt||researchTime(demand.nextDemandAt)>now)return defer(demand.reason,demand.nextDemandAt?researchTime(demand.nextDemandAt):null);
           requestId=await this.demandRequestId(input,db);
@@ -1391,7 +1437,7 @@ export class ResearchStore {
       const ticket:WshAttemptTicket={...input,id,...(kind==='demand'?{publicationSlotKey:researchDemandSlotKey(input.manifestHash,input.instrumentId,input.sourceId,id)}:{}),cycleId:String(cycle.id),ordinal:ordinal as 0|1|2,endpointId:lease.endpointId,
         startedAt:new Date(now).toISOString(),deadlineAt:deadline.toISOString(),nextRegularAt:iso(cycle.next_regular_at)};
       this.wshTicketDeadlines.set(ticket,observedAt+WSH_ATTEMPT_MS);return {state:'CLAIMED',ticket};
-    });
+    },input.accountId);
   }
   private async wshRegularNotBefore(ledger:string,interval:900000|3600000,db:ResearchDb):Promise<number|null> {
     const row=(await db.query(`SELECT greatest(research_wsh_regular_not_before($1,$2,clock_timestamp()),(SELECT max((i->>'nextRegularAt')::timestamptz) FROM research_wsh_read_recoveries r CROSS JOIN LATERAL jsonb_array_elements(r.canonical_json::jsonb->'issuers') i WHERE i->>'ledgerKey'=$1)) AS due`,[ledger,interval])).rows[0];
@@ -1588,6 +1634,7 @@ export class ResearchStore {
   async beginWshAcquisition(lease: WshEndpointLease, input: ResearchIdentity & { instrumentId: string; sourceId: string; sessionId: string; reservation: ResearchCallReservation }, ticket?: WshAttemptTicket): Promise<WshAcquisition> {
     researchAssert(input.sessionId.length > 0 && input.sessionId.length <= 500);
     return this.wshTransaction(lease, async db => {
+      if(ticket)await this.startupDispatch(db,ticket.id);
       await this.assertAuthority(input, db); await this.assertRecoveryAdmission(input,db); const { config } = await this.wshSource(input, db);
       researchAssert(config.endpointId === lease.endpointId && input.reservation.kind === "source" && input.reservation.provider === "ibkr-wsh" && input.reservation.configHash === input.configHash && input.reservation.manifestHash === input.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
       await db.query("INSERT INTO research_wsh_endpoints(endpoint_id) VALUES($1) ON CONFLICT DO NOTHING", [lease.endpointId]);
@@ -1613,10 +1660,12 @@ export class ResearchStore {
       await this.reserveCall(input.reservation, db);
       await db.query("INSERT INTO research_wsh_acquisition_calls(acquisition_id,call_key) VALUES($1,$2)", [id,input.reservation.callKey]);
       return { id,endpointId:lease.endpointId,generation,sessionId:input.sessionId,sourceId:input.sourceId,instrumentId:input.instrumentId,configHash:input.configHash,manifestHash:input.manifestHash,startedAt:iso(row.started_at) };
-    });
+    },input.reservation.accountId);
   }
   async reserveWshCall(lease: WshEndpointLease, acquisition: WshAcquisition, reservation: ResearchCallReservation): Promise<void> {
     await this.wshTransaction(lease, async db => {
+      const startupAttempt=(await db.query('SELECT id FROM research_wsh_refresh_attempts WHERE acquisition_id=$1',[acquisition.id])).rows[0];
+      if(startupAttempt)await this.startupDispatch(db,startupAttempt.id);
       await this.assertAuthority(acquisition, db); await this.assertRecoveryAdmission(acquisition,db); const { config } = await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db);
       researchAssert(researchTime(reservation.deadlineAt) <= await this.now(db) + config.timeoutMs, "RESEARCH_WSH_CALL_DEADLINE_INVALID");
       researchAssert(reservation.kind === "source" && reservation.provider === "ibkr-wsh" && reservation.configHash === acquisition.configHash && reservation.manifestHash === acquisition.manifestHash, "RESEARCH_WSH_RESERVATION_INVALID");
@@ -1628,7 +1677,7 @@ export class ResearchStore {
       researchAssert(!account||account.account_id===reservation.accountId,'RESEARCH_WSH_RESERVATION_INVALID');
       await this.reserveCall(reservation, db);
       await db.query("INSERT INTO research_wsh_acquisition_calls(acquisition_id,call_key) VALUES($1,$2)", [acquisition.id,reservation.callKey]);
-    });
+    },reservation.accountId);
   }
   async assertWshAcquisition(lease: WshEndpointLease, acquisition: WshAcquisition): Promise<void> {
     await this.wshTransaction(lease, async db => { await this.assertAuthority(acquisition, db); await this.wshSource(acquisition, db); await this.assertWshFence(lease, acquisition, db); });
