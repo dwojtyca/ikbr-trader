@@ -1,4 +1,5 @@
 import { captureResearchSourceError } from "@ikbr/shared/instrument-research";
+import type { ContractBootstrapFailures } from "./contract-resolution-diagnostics.js";
 import type { DiagnosticPrivacy } from "@ikbr/shared/diagnostics";
 export interface AutoBootstrapDependencies<T> {
   enabled: boolean;
@@ -7,6 +8,8 @@ export interface AutoBootstrapDependencies<T> {
   bootstrap(isCurrent: () => boolean): Promise<T>;
   stop(): Promise<void>;
   ready(): boolean;
+  beginBootstrapDiagnostics?(): void;
+  contractFailures?(): ContractBootstrapFailures;
   now?: () => number;
   privacy?: DiagnosticPrivacy;
   probe?(): Promise<void>;
@@ -28,6 +31,7 @@ export class AutoBootstrapController<T> {
   private pendingControls = 0;
   private error: string | null = null;
   private cause: ReturnType<typeof captureResearchSourceError> | null = null;
+  private contractFailure: ContractBootstrapFailures | null = null;
   private lastTickAt: number | undefined;
   private lastProbeAt = -Infinity;
   private lastProbeSuccess: string | null = null;
@@ -70,7 +74,7 @@ export class AutoBootstrapController<T> {
     return { enabled: this.deps.enabled, initialized: this.initialized, manuallyStopped: this.stopped,
       shuttingDown: this.closed, inFlight: this.flight !== null, recoveryNeeded: this.needed,
       failures: this.failures, nextAttemptAt: this.nextAttemptAt ? new Date(this.nextAttemptAt).toISOString() : null,
-      error: this.error, cause: this.cause, generation: this.generation, recoveryReason: this.reason,
+      error: this.error, cause: this.cause, contractFailure: structuredClone(this.contractFailure), generation: this.generation, recoveryReason: this.reason,
       lastSchedulingInterruption: this.lastGap, lastProbeSuccess: this.lastProbeSuccess,
       probing: this.probing !== null, drain: this.deps.drainStatus?.() };
   }
@@ -155,6 +159,7 @@ export class AutoBootstrapController<T> {
     return result;
   }
   private failed(error: unknown): void {
+    if (!(error instanceof Error) || error.message !== 'INGESTION_SUBSCRIPTIONS_INCOMPLETE') this.contractFailure = null;
     this.cause = captureResearchSourceError(error, this.deps.privacy);
     this.failures++;
     this.nextAttemptAt = this.now() + Math.min(300_000, 30_000 * 2 ** Math.min(this.failures - 1, 4));
@@ -164,13 +169,19 @@ export class AutoBootstrapController<T> {
     if (this.flight) return this.flight;
     if (this.closed || this.stopped) return Promise.reject(new Error('INGESTION_START_UNAVAILABLE'));
     this.revoked = false;
+    this.contractFailure = null;
+    try { this.deps.beginBootstrapDiagnostics?.(); } catch { /* Diagnostic hooks cannot prevent bootstrap. */ }
     this.lastTickAt = this.now();
     const generation = this.generation;
     const current = () => !this.closed && !this.stopped && generation === this.generation
       && this.continuous() && generation === this.generation;
     this.flight = Promise.resolve().then(() => this.deps.bootstrap(current)).then(result => {
       if (!current()) throw new Error('INGESTION_BOOTSTRAP_INTERRUPTED');
-      if (!this.deps.ready()) throw new Error('INGESTION_SUBSCRIPTIONS_INCOMPLETE');
+      if (!this.deps.ready()) {
+        try { this.contractFailure = structuredClone(this.deps.contractFailures?.() ?? null); }
+        catch { this.contractFailure = null; }
+        throw new Error('INGESTION_SUBSCRIPTIONS_INCOMPLETE');
+      }
       this.needed = false;
       this.failures = 0;
       this.nextAttemptAt = 0;

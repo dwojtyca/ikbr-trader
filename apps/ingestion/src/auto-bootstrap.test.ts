@@ -104,3 +104,14 @@ test('connection invalidation during acquisition cannot certify that bootstrap g
   assert.equal(f.state.calls, 1); assert.equal(f.state.ready, false);
   f.state.now += 30_000; await c.tick(); assert.equal(f.state.calls, 2);
 });
+
+test('throwing diagnostic hooks cannot prevent bootstrap, change incomplete error or backoff', async () => {
+  let calls = 0;
+  const controller = new AutoBootstrapController({ enabled: true, now: () => 0,
+    readStopped: async () => false, writeStopped: async () => {}, stop: async () => {}, ready: () => false,
+    bootstrap: async () => { calls++; }, beginBootstrapDiagnostics: () => { throw new Error('diagnostic begin'); },
+    contractFailures: () => { throw new Error('diagnostic capture'); } });
+  await controller.initialize(); await assert.rejects(controller.tick(), /INGESTION_SUBSCRIPTIONS_INCOMPLETE/);
+  assert.equal(calls, 1); assert.equal(controller.diagnostics().contractFailure, null);
+  assert.equal(controller.diagnostics().nextAttemptAt, new Date(30000).toISOString());
+});

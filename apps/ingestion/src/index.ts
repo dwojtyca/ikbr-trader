@@ -1,4 +1,5 @@
 import { createMutationAuth, logSafeResponse, operatorSafeLogger } from "@ikbr/shared/http-auth";
+import { recoveryDiagnosticPrivacy } from "@ikbr/shared/instrument-research";
 import { ReadRecoverySession } from "./read-recovery-session.js";
 import { PublicationFence } from "./publication-fence.js";
 import { AutoBootstrapController } from "./auto-bootstrap.js";
@@ -34,6 +35,7 @@ const TIMEFRAME_INTERVAL_MS: Record<
   "1w": 7 * 24 * 60 * 60_000,
 };
 
+const diagnosticPrivacy = recoveryDiagnosticPrivacy(process.env);
 const app = Fastify({ disableRequestLogging: true, logger: operatorSafeLogger(config.LOG_LEVEL) });
 app.addHook("onResponse", logSafeResponse);
 app.addHook("onRequest", createMutationAuth(process.env.EXECUTION_API_TOKEN ?? ""));
@@ -217,7 +219,12 @@ const twsClient: TwsClient = new TwsClient(
     }
   }),
   (line) => app.log.info(line),
-  { continuous: () => autoBootstrap.continuous(), onConnectionInvalidated: () => autoBootstrap.invalidate() },
+  { continuous: () => autoBootstrap.continuous(), onConnectionInvalidated: () => autoBootstrap.invalidate(),
+    privacy: diagnosticPrivacy,
+    onDiagnostic: event => {
+      if (event.diagnostic?.outcome && event.diagnostic.outcome !== 'SUCCESS') app.log.warn(event, event.message);
+      else app.log.info(event, event.message);
+    } },
 );
 
 function subscriptionIdentity(sub: InstrumentSubscription): InstrumentSessionIdentity {
@@ -256,8 +263,9 @@ app.addHook('onClose', async () => { clearInterval(sessionRefreshTimer); await s
 
 const autoBootstrap = new AutoBootstrapController({
   enabled: config.INGESTION_AUTO_BOOTSTRAP_ENABLED === "true",
-  privacy: { accountIds: config.IBKR_ACCOUNT_ID ? [config.IBKR_ACCOUNT_ID] : [],
-    secrets: Object.entries(process.env).filter(([key]) => /TOKEN|SECRET|PASSWORD|API_KEY/.test(key)).map(([, value]) => value ?? '') },
+  privacy: diagnosticPrivacy,
+  beginBootstrapDiagnostics: () => twsClient.beginBootstrapDiagnostics(),
+  contractFailures: () => twsClient.contractFailures(),
   readStopped: () => repo.readIngestionStopped(), writeStopped: stopped => repo.writeIngestionStopped(stopped),
   bootstrap, stop: stopIngestionSession, invalidateReads: () => readRecovery.invalidate(),
   probe: () => twsClient.probe(),
@@ -293,6 +301,7 @@ app.get("/health", async () => ({
   bootstrapped: activeSubscriptions.length > 0,
   bootstrapping: bootstrapInFlight,
   automaticBootstrap: autoBootstrap.diagnostics(),
+  contractResolution: twsClient.contractResolutionDiagnostics(),
   lastBootstrapAt,
   lastTickAt,
   lastCandleAt,

@@ -4,6 +4,10 @@ import { isAaplSubscription } from "./aapl-native-refresh.js";
 import { WSE_NATIVE_SOURCE, validClosedWseCandle, warsawMidnight } from "@ikbr/shared";
 import { isWseSubscription } from "./wse-native-refresh.js";
 import IB from "ib";
+import type { DiagnosticPrivacy } from "@ikbr/shared/diagnostics";
+import { contractDiagnosticMessage, contractDiagnosticText, contractDiagnosticTimestamp, contractQueryDiagnostic,
+  contractSourceError, emitContractDiagnostic, type ContractBootstrapFailures, type ContractDiagnosticEvent,
+  type ContractResolutionDiagnostic, type ContractResolutionOutcome, type ContractTransportDiagnostic } from "./contract-resolution-diagnostics.js";
 import { captureResearchSourceError } from "@ikbr/shared/instrument-research";
 import {
   buildExactIbkrEsHistoricalContract,
@@ -127,6 +131,14 @@ export interface AwaitExactlyOneContractDetailsInput {
   readonly signal?: AbortSignal;
   readonly current?: () => boolean;
   readonly monotonicNow?: () => number;
+  readonly now?: () => number;
+  readonly privacy?: DiagnosticPrivacy;
+  readonly instrumentId?: string;
+  readonly bootstrapAttempt?: number;
+  readonly transportGeneration?: number;
+  readonly transportDiagnostic?: () => ContractTransportDiagnostic;
+  readonly currentTransportGeneration?: () => number;
+  readonly onDiagnostic?: (diagnostic: ContractResolutionDiagnostic) => void;
 }
 
 export interface TwsClientDependencies {
@@ -138,6 +150,8 @@ export interface TwsClientDependencies {
   readonly now?: () => number;
   readonly onConnectionInvalidated?: () => void;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly privacy?: DiagnosticPrivacy;
+  readonly onDiagnostic?: (event: ContractDiagnosticEvent) => void;
 }
 
 /**
@@ -161,107 +175,107 @@ export interface TwsClientDependencies {
 export function awaitExactlyOneContractDetails(
   input: AwaitExactlyOneContractDetailsInput,
 ): Promise<Record<string, unknown>> {
-  const { ib, reqId, contract, label, timeoutMs } = input;
+  return awaitContractDetails(input, true);
+}
+
+function awaitContractDetails(input: AwaitExactlyOneContractDetailsInput, exactlyOne: boolean): Promise<Record<string, unknown>> {
+  const { ib, reqId, contract, timeoutMs } = input;
+  const label = contractDiagnosticText(input.label, input.privacy);
   return new Promise<Record<string, unknown>>((resolve, reject) => {
-    const collected: Record<string, unknown>[] = [];
+    let first: Record<string, unknown> | undefined;
+    let settled = false;
     const started = input.monotonicNow?.() ?? performance.now();
-    const withinDeadline = () => {
-      const elapsed = (input.monotonicNow?.() ?? performance.now()) - started;
-      return Number.isFinite(elapsed) && elapsed >= 0 && elapsed < timeoutMs;
+    const elapsed = () => {
+      const value = (input.monotonicNow?.() ?? performance.now()) - started;
+      return Number.isFinite(value) && value >= 0 ? value : null;
     };
-
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(
-        new Error(
-          `Timed out waiting contractDetails for bound instrument ${label}`,
-        ),
-      );
-    }, timeoutMs);
-
-    const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
+    const withinDeadline = () => { const value = elapsed(); return value !== null && value < timeoutMs; };
+    const readDiagnostic = <T>(read: (() => T) | undefined): T | null => {
+      try { return read ? structuredClone(read()) : null; } catch { return null; }
+    };
+    const diagnostic: ContractResolutionDiagnostic = {
+      schemaVersion: 1, attemptId: `${input.transportGeneration ?? 'unknown'}:${reqId}`,
+      bootstrapAttempt: input.bootstrapAttempt ?? null, requestId: reqId,
+      transportGeneration: input.transportGeneration ?? null,
+      instrumentId: input.instrumentId ? contractDiagnosticText(input.instrumentId, input.privacy) : null,
+      label, query: contractQueryDiagnostic(contract, input.privacy),
+      startedAt: contractDiagnosticTimestamp(input.now?.() ?? Date.now()), completedAt: null, elapsedMs: null,
+      timeoutMs, detailCount: 0, endCount: 0, sdkInvocationAttempted: false, sdkInvocationReturned: false,
+      wireTransmission: 'UNAVAILABLE', outcome: null, sourceError: null, brokerCause: 'UNKNOWN',
+      transport: readDiagnostic(input.transportDiagnostic),
+      currentTransportGeneration: readDiagnostic(input.currentTransportGeneration),
+    };
+    const publish = () => {
+      try { input.onDiagnostic?.(structuredClone(diagnostic)); } catch { /* An observer cannot change read outcomes. */ }
+    };
     const cleanup = () => {
-      input.signal?.removeEventListener("abort", aborted);
+      input.signal?.removeEventListener('abort', aborted);
       clearTimeout(timeout);
-      ib.off("contractDetails", onContractDetails as (...args: unknown[]) => void);
-      ib.off(
-        "contractDetailsEnd",
-        onContractDetailsEnd as (...args: unknown[]) => void,
-      );
-      ib.off("error", onError as (...args: unknown[]) => void);
+      ib.off('contractDetails', onDetails as (...args: unknown[]) => void);
+      ib.off('contractDetailsEnd', onEnd as (...args: unknown[]) => void);
+      ib.off('error', onError as (...args: unknown[]) => void);
     };
-
-    const onContractDetails = (
-      incomingReqId: number,
-      details: Record<string, unknown>,
-    ) => {
-      if (input.current && !input.current()) return;
-      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-      if (incomingReqId !== reqId) return;
-      collected.push(details);
-    };
-
-    const onContractDetailsEnd = (incomingReqId: number) => {
-      if (input.current && !input.current()) return;
-      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-      if (incomingReqId !== reqId) return;
+    const finish = (outcome: ContractResolutionOutcome, error?: Error, original?: unknown, originalCode?: unknown) => {
+      if (settled) return;
+      settled = true;
       cleanup();
-      if (collected.length === 0) {
-        reject(
-          new Error(
-            `No contract details for bound instrument ${label} (expected exactly one)`,
-          ),
-        );
-        return;
-      }
-      if (collected.length > 1) {
-        reject(
-          new Error(
-            `Ambiguous contract details for bound instrument ${label}: ` +
-              `IBKR returned ${collected.length} matches, expected exactly one`,
-          ),
-        );
-        return;
-      }
-      resolve(collected[0]);
+      diagnostic.outcome = outcome;
+      diagnostic.completedAt = contractDiagnosticTimestamp(input.now?.() ?? Date.now());
+      diagnostic.elapsedMs = elapsed();
+      diagnostic.transport = readDiagnostic(input.transportDiagnostic);
+      diagnostic.currentTransportGeneration = readDiagnostic(input.currentTransportGeneration);
+      if (original !== undefined) diagnostic.sourceError = contractSourceError(original, input.privacy, originalCode);
+      if (outcome === 'BROKER_ERROR') diagnostic.brokerCause = 'REQUEST_ERROR_OBSERVED';
+      publish();
+      if (error) {
+        if (diagnostic.sourceError) Object.assign(error, { sourceError: diagnostic.sourceError });
+        reject(error);
+      } else resolve(first!);
     };
-
-    const onError = (err: Error, code?: number, incomingReqId?: number) => {
+    const timeout = setTimeout(() => finish('TIMEOUT', new Error(
+      `Timed out waiting contractDetails for ${exactlyOne ? 'bound instrument ' : ''}${label}`)), timeoutMs);
+    const aborted = () => finish('INTERRUPTED', new Error('INGESTION_READ_INTERRUPTED'));
+    const onDetails = (id: number, details: Record<string, unknown>) => {
       if (input.current && !input.current()) return;
-      if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-      if (incomingReqId !== reqId) return;
-      cleanup();
-      reject(
-        new Error(
-          `contractDetails error ${code ?? "unknown"} for bound instrument ${label}: ${err.message}`,
-        ),
-      );
+      if (!withinDeadline()) { finish('TIMEOUT', new Error('TWS_READ_TIMEOUT')); return; }
+      if (id !== reqId || settled) return;
+      diagnostic.detailCount++;
+      first ??= details;
+      publish();
     };
-
-    input.signal?.addEventListener("abort", aborted, { once: true });
+    const onEnd = (id: number) => {
+      if (input.current && !input.current()) return;
+      if (!withinDeadline()) { finish('TIMEOUT', new Error('TWS_READ_TIMEOUT')); return; }
+      if (id !== reqId || settled) return;
+      diagnostic.endCount++;
+      if (diagnostic.detailCount === 0) return finish('NO_DETAILS', new Error(exactlyOne
+        ? `No contract details for bound instrument ${label} (expected exactly one)` : `No contract details for ${label}`));
+      if (exactlyOne && diagnostic.detailCount > 1) return finish('AMBIGUOUS_DETAILS', new Error(
+        `Ambiguous contract details for bound instrument ${label}: IBKR returned ${diagnostic.detailCount} matches, expected exactly one`));
+      finish('SUCCESS');
+    };
+    const onError = (error: Error, codeOrMeta?: unknown, legacyReqId?: number) => {
+      if (input.current && !input.current()) return;
+      if (!withinDeadline()) { finish('TIMEOUT', new Error('TWS_READ_TIMEOUT')); return; }
+      const meta = ibErrorMeta(codeOrMeta, legacyReqId);
+      if (!Number.isSafeInteger(meta.reqId) || meta.reqId !== reqId || settled) return;
+      const rawCode = codeOrMeta && typeof codeOrMeta === 'object' ? (codeOrMeta as { code?: unknown }).code : codeOrMeta;
+      const source = contractSourceError(error, input.privacy, rawCode);
+      finish('BROKER_ERROR', new Error(`contractDetails error ${source.code ?? 'unknown'} for ${exactlyOne ? 'bound instrument ' : ''}${label}: ${source.message}`), error, rawCode);
+    };
+    publish();
+    input.signal?.addEventListener('abort', aborted, { once: true });
     if (input.signal?.aborted) { aborted(); return; }
-    ib.on("contractDetails", onContractDetails as (...args: unknown[]) => void);
-    ib.on(
-      "contractDetailsEnd",
-      onContractDetailsEnd as (...args: unknown[]) => void,
-    );
-    ib.on("error", onError as (...args: unknown[]) => void);
-    // PR15.2 hostile-review round-4 — a synchronous throw from
-    // `reqContractDetails` (e.g. socket-not-connected, marshaling
-    // failure, or a fake IB in tests) would otherwise leave the
-    // three listeners AND the timeout registered until the timeout
-    // fires. Fail-closed: clean up immediately, reject once, and
-    // never retry / fall back to symbol-based resolution.
+    ib.on('contractDetails', onDetails as (...args: unknown[]) => void);
+    ib.on('contractDetailsEnd', onEnd as (...args: unknown[]) => void);
+    ib.on('error', onError as (...args: unknown[]) => void);
     try {
+      diagnostic.sdkInvocationAttempted = true;
       ib.reqContractDetails(reqId, contract);
-    } catch (err) {
-      cleanup();
-      const msg = err instanceof Error ? err.message : String(err);
-      reject(
-        new Error(
-          `reqContractDetails threw synchronously for bound instrument ${label}: ${msg}`,
-        ),
-      );
+      if (!settled) { diagnostic.sdkInvocationReturned = true; publish(); }
+    } catch (error) {
+      const source = contractSourceError(error, input.privacy);
+      finish('SEND_THROW', new Error(`reqContractDetails threw synchronously for ${exactlyOne ? 'bound instrument ' : ''}${label}: ${source.message}`), error);
     }
   });
 }
@@ -275,6 +289,11 @@ export class TwsClient {
   private probing: Promise<void> | undefined;
   private transportGeneration = 0;
   private connected = false;
+  private transportDiagnostic: ContractTransportDiagnostic = this.newTransportDiagnostic();
+  private contractHistory: ContractResolutionDiagnostic[] = [];
+  private activeContract: ContractResolutionDiagnostic | null = null;
+  private omittedContractRequests = 0;
+  private bootstrapContractFailures: ContractBootstrapFailures = { attempt: 0, failures: [], omittedFailures: 0, truncated: false };
   private nextReqId = 10_000;
   private readonly tickerStates = new Map<number, TickerState>();
   private readonly subscriptionsByConid = new Map<string, number>();
@@ -289,6 +308,51 @@ export class TwsClient {
     this.ib = dependencies.ib ?? this.createIb();
 
     this.bindCoreListeners();
+  }
+
+  private diagnosticTimestamp(): string | null { return contractDiagnosticTimestamp(this.dependencies.now?.() ?? Date.now()); }
+
+  private newTransportDiagnostic(): ContractTransportDiagnostic {
+    return { generation: this.transportGeneration, connected: false, retired: false, aborted: false,
+      socketConnectedAt: null, serverAt: null, serverVersion: null, nextValidIdAt: null,
+      disconnectedAt: null, retiredAt: null, globalContext: [], omittedGlobalMessages: 0 };
+  }
+
+  beginBootstrapDiagnostics(): void {
+    this.bootstrapContractFailures = { attempt: this.bootstrapContractFailures.attempt + 1, failures: [], omittedFailures: 0, truncated: false };
+  }
+
+  contractFailures(): ContractBootstrapFailures { return structuredClone(this.bootstrapContractFailures); }
+
+  contractResolutionDiagnostics() {
+    return { transport: structuredClone(this.transportDiagnostic), active: structuredClone(this.activeContract),
+      history: structuredClone(this.contractHistory), omittedRequests: this.omittedContractRequests,
+      truncated: this.omittedContractRequests > 0, bootstrapFailures: this.contractFailures() };
+  }
+
+  private recordContractDiagnostic(diagnostic: ContractResolutionDiagnostic): void {
+    const updating = diagnostic.outcome === null && this.activeContract?.attemptId === diagnostic.attemptId;
+    if (diagnostic.outcome === null) this.activeContract = structuredClone(diagnostic);
+    else {
+      this.activeContract = null;
+      this.contractHistory.push(structuredClone(diagnostic));
+      if (this.contractHistory.length > 20) { this.contractHistory.shift(); this.omittedContractRequests++; }
+      if (diagnostic.outcome !== 'SUCCESS' && diagnostic.bootstrapAttempt === this.bootstrapContractFailures.attempt) {
+        if (this.bootstrapContractFailures.failures.length < 20) this.bootstrapContractFailures.failures.push(structuredClone(diagnostic));
+        else { this.bootstrapContractFailures.omittedFailures++; this.bootstrapContractFailures.truncated = true; }
+      }
+    }
+    if (updating) return;
+    emitContractDiagnostic(this.dependencies.onDiagnostic, { event: diagnostic.outcome === null ? 'contract_resolution_started' : 'contract_resolution_finished',
+      message: contractDiagnosticMessage(diagnostic), diagnostic });
+  }
+
+  private contractDiagnosticInput(instrumentId?: string) {
+    const transport = this.transportDiagnostic;
+    return { now: this.dependencies.now, privacy: this.dependencies.privacy, instrumentId,
+      bootstrapAttempt: this.bootstrapContractFailures.attempt, transportGeneration: transport.generation,
+      transportDiagnostic: () => structuredClone(transport), currentTransportGeneration: () => this.transportGeneration,
+      onDiagnostic: (diagnostic: ContractResolutionDiagnostic) => this.recordContractDiagnostic(diagnostic) };
   }
 
   private createIb(): any {
@@ -325,6 +389,7 @@ export class TwsClient {
       this.ib = this.createIb();
       this.transportAbort = new AbortController();
       this.retired = false;
+      this.transportDiagnostic = this.newTransportDiagnostic();
       this.bindCoreListeners();
     }
     const scope = this.capture(), { ib, signal } = scope;
@@ -339,6 +404,8 @@ export class TwsClient {
         if (!scope.current()) return;
         if ((this.dependencies.monotonicNow?.() ?? performance.now()) >= deadline) return fail(new Error('TWS connect timeout waiting for nextValidId'));
         this.connected = true;
+        this.transportDiagnostic.connected = true;
+        this.transportDiagnostic.nextValidIdAt = this.diagnosticTimestamp();
         this.nextReqId = Math.max(this.nextReqId, Number(orderId) + 1);
         cleanup(); resolve();
       };
@@ -387,6 +454,10 @@ export class TwsClient {
     this.retired = true;
     this.transportGeneration++;
     this.connected = false;
+    this.transportDiagnostic.connected = false;
+    this.transportDiagnostic.retired = true;
+    this.transportDiagnostic.aborted = true;
+    this.transportDiagnostic.retiredAt = this.diagnosticTimestamp();
     this.subscriptionsByConid.clear();
     this.tickerStates.clear();
     this.transportAbort.abort();
@@ -565,9 +636,7 @@ export class TwsClient {
         const contract = await this.resolveContract(instrument);
         out.push(contract);
       } catch (error) {
-        this.onLog(
-          `resolve contract failed for ${instrument.symbol}: ${(error as Error).message}`,
-        );
+        this.onLog(`Nie udało się ustalić kontraktu ${contractDiagnosticText(instrument.symbol, this.dependencies.privacy)}: ${contractSourceError(error, this.dependencies.privacy).message}`);
       }
     }
 
@@ -713,6 +782,7 @@ export class TwsClient {
       const details = await this.requestContractDetailsExactlyOne(
         `${symbol} (${instrument.instrumentId})`,
         directContract,
+        instrument.instrumentId,
       );
       const summary = pickContract(details);
       const conid =
@@ -763,7 +833,7 @@ export class TwsClient {
           throw error;
         }
         this.onLog(
-          `contractDetails unavailable for ${symbol}; using WATCHLIST_CONTRACT_OVERRIDES fallback: ${(error as Error).message}`,
+          `contractDetails unavailable for ${contractDiagnosticText(symbol, this.dependencies.privacy)}; using WATCHLIST_CONTRACT_OVERRIDES fallback: ${contractSourceError(error, this.dependencies.privacy).message}`,
         );
         const fallbackContract = this.withDefaults(directContract);
         return {
@@ -843,67 +913,8 @@ export class TwsClient {
     const reqId = this.allocReqId();
     const contract = this.withDefaults(contractLike);
 
-    const withinDeadline = this.deadline(8000);
-    return new Promise<ContractDetailsShape>((resolve, reject) => {
-      let firstDetails: ContractDetailsShape | undefined;
-
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error(`Timed out waiting contractDetails for ${symbol}`));
-      }, 8_000);
-
-      const aborted = () => { cleanup(); reject(new Error("INGESTION_READ_INTERRUPTED")); };
-      const cleanup = () => {
-        signal.removeEventListener("abort", aborted);
-        clearTimeout(timeout);
-        ib.off("contractDetails", onContractDetails);
-        ib.off("contractDetailsEnd", onContractDetailsEnd);
-        ib.off("error", onError);
-      };
-
-      const onContractDetails = (
-        incomingReqId: number,
-        details: ContractDetailsShape,
-      ) => {
-        if (!scope.current()) return;
-        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-        if (incomingReqId !== reqId) return;
-        if (!firstDetails) firstDetails = details;
-      };
-
-      const onContractDetailsEnd = (incomingReqId: number) => {
-        if (!scope.current()) return;
-        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-        if (incomingReqId !== reqId) return;
-        cleanup();
-
-        if (!firstDetails) {
-          reject(new Error(`No contract details for ${symbol}`));
-          return;
-        }
-
-        resolve(firstDetails);
-      };
-
-      const onError = (err: Error, code?: number, incomingReqId?: number) => {
-        if (!scope.current()) return;
-        if (!withinDeadline()) { cleanup(); reject(new Error('TWS_READ_TIMEOUT')); return; }
-        if (incomingReqId !== reqId) return;
-        cleanup();
-        reject(
-          new Error(
-            `contractDetails error ${code ?? "unknown"} for ${symbol}: ${err.message}`,
-          ),
-        );
-      };
-
-      signal.addEventListener("abort", aborted, { once: true });
-      if (signal.aborted) { aborted(); return; }
-      ib.on("contractDetails", onContractDetails);
-      ib.on("contractDetailsEnd", onContractDetailsEnd);
-      ib.on("error", onError);
-      try { ib.reqContractDetails(reqId, contract); } catch (error) { cleanup(); reject(error); }
-    });
+    return awaitContractDetails({ ib, signal, current: scope.current, monotonicNow: this.dependencies.monotonicNow,
+      reqId, contract, label: symbol, timeoutMs: 8_000, ...this.contractDiagnosticInput() }, false);
   }
 
   /**
@@ -915,6 +926,7 @@ export class TwsClient {
   private async requestContractDetailsExactlyOne(
     label: string,
     contractLike: ContractShape,
+    instrumentId?: string,
   ): Promise<ContractDetailsShape> {
     const reqId = this.allocReqId();
     const contract = this.withDefaults(contractLike);
@@ -925,6 +937,7 @@ export class TwsClient {
       contract,
       label,
       timeoutMs: 8_000,
+      ...this.contractDiagnosticInput(instrumentId),
     });
   }
 
@@ -1235,10 +1248,17 @@ export class TwsClient {
       scope.ib.on(event, (...args: any[]) => { if (scope.current()) handler(...args); });
     };
     listen("connected", () => {
+      this.transportDiagnostic.socketConnectedAt = this.diagnosticTimestamp();
       this.onLog("TWS socket connected event received");
     });
 
+    listen("server", (version: unknown) => {
+      this.transportDiagnostic.serverAt = this.diagnosticTimestamp();
+      this.transportDiagnostic.serverVersion = Number.isSafeInteger(version) ? Number(version) : null;
+    });
+
     listen("disconnected", () => {
+      this.transportDiagnostic.disconnectedAt = this.diagnosticTimestamp();
       this.onLog("TWS socket disconnected");
       this.disconnect();
       this.dependencies.onConnectionInvalidated?.();
@@ -1251,14 +1271,22 @@ export class TwsClient {
 
     listen("error", (arg1: unknown, arg2?: unknown, arg3?: unknown) => {
       const parsed = this.parseIbErrorArgs(arg1, arg2, arg3);
+      const sourceError = contractSourceError(arg1, this.dependencies.privacy, parsed.code);
+      const context = { observedAt: this.diagnosticTimestamp(), generation: this.transportGeneration, sourceError };
+      const global = parsed.reqId === undefined || Number(parsed.reqId) === -1;
+      if (global) {
+        this.transportDiagnostic.globalContext.push(context);
+        if (this.transportDiagnostic.globalContext.length > 8) {
+          this.transportDiagnostic.globalContext.shift(); this.transportDiagnostic.omittedGlobalMessages++;
+        }
+      }
+      emitContractDiagnostic(this.dependencies.onDiagnostic, { event: 'broker_context',
+        message: global ? 'Komunikat połączenia TWS; nie stanowi przyczyny błędu konkretnego żądania' : 'Komunikat TWS przypisany do żądania',
+        context: { ...context, requestId: parsed.reqId !== undefined && Number.isSafeInteger(Number(parsed.reqId)) ? Number(parsed.reqId) : null, scope: global ? 'GLOBAL' : 'REQUEST' } });
       if (parsed.code !== undefined && [1100, 1101, 1102, 1300].includes(Number(parsed.code))) {
         this.disconnect(); this.dependencies.onConnectionInvalidated?.();
       }
-      const prefix =
-        parsed.reqId !== undefined ? `reqId=${parsed.reqId}` : "reqId=n/a";
-      this.onLog(
-        `TWS error code=${parsed.code ?? "n/a"} ${prefix}: ${parsed.message}`,
-      );
+      if (!this.dependencies.onDiagnostic) this.onLog(`TWS: ${sourceError.code ?? 'brak kodu'}; ${sourceError.message}`);
     });
 
     listen("marketDataType", (tickerId: number, type: number) => {
