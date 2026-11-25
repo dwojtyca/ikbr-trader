@@ -2,6 +2,7 @@ import { AccountingSourceOwner } from "./source-owner.js";
 import { recoveryStatus, type ClockEpisode } from "./clock-recovery-store.js";
 import { randomUUID } from "node:crypto";
 import { performance } from 'node:perf_hooks';
+import { setTimeout as delay } from 'node:timers/promises';
 import { brokerPhase, emitBrokerPhase, type BrokerPhaseDiagnostics } from '../reconciliation/phase-diagnostics.js';
 import type { Pool, PoolClient } from "pg";
 import type { BrokerExecutionFill, BrokerCommissionReport, BrokerOrderStatusUpdate } from "../tws-execution-client.js";
@@ -206,11 +207,63 @@ export class AccountingSourceService {
     for (const fee of this.commissions.values()) if (!this.executions.has(fee.execId)) throw accountingError("FEE_PENDING");
     return { executions: executions.sort((a, b) => a.execId.localeCompare(b.execId)), commissions: commissions.sort((a, b) => a.execId.localeCompare(b.execId)) };
   }
-  private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false, recoveryFloor?: number): Promise<SourceInspection> {
+  private assertEvidenceFresh(through: number, signal?: AbortSignal, deadline = Infinity): void {
+    if (signal?.aborted || performance.now() >= deadline) throw accountingError('REPLAY_INCOMPLETE');
+    const now = Date.now();
+    if (!Number.isFinite(through) || through > now || now - through >= 10_000 || paperAccountDate(through) !== paperAccountDate(now)) throw accountingError('EVIDENCE_STALE');
+  }
+  private async catchUpClock(through: number, deadline: number, signal: AbortSignal, assertCurrent: () => void,
+    metadata: { runId?: number; generation: number; requestId: number }): Promise<void> {
+    const started = performance.now(), until = Math.min(deadline, started + 2000);
+    const abort = new AbortController(), operation = AbortSignal.any([signal, abort.signal]);
+    const timer = setTimeout(() => abort.abort(), Math.max(0, until - started));
+    let localLead: number | undefined, databaseLead: number | undefined, maxLocalLead: number | undefined, maxDatabaseLead: number | undefined, reason = 'checking_clocks';
+    const details = () => ({ ...metadata, reason: `${reason};localLeadMs=${localLead ?? 'unavailable'};databaseLeadMs=${databaseLead ?? 'unavailable'};maxLocalLeadMs=${maxLocalLead ?? 'unavailable'};maxDatabaseLeadMs=${maxDatabaseLead ?? 'unavailable'}` });
+    const cancelled = () => { if (operation.aborted || performance.now() >= until) { reason = signal.aborted ? 'aborted' : 'deadline_expired'; throw accountingError('REPLAY_INCOMPLETE'); } };
+    let rejectAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_, reject) => {
+      rejectAbort = () => reject(accountingError('REPLAY_INCOMPLETE'));
+      operation.addEventListener('abort', rejectAbort, { once: true });
+    });
+    let previous: { local: number; database: number; monotonic: number } | undefined;
+    try {
+      while (true) {
+        cancelled(); assertCurrent();
+        const database = await Promise.race([this.store.databaseTime(Math.max(1, Math.ceil(until - performance.now()))), aborted]);
+        cancelled(); assertCurrent();
+        const local = Date.now(), monotonic = performance.now();
+        localLead = Number.isFinite(through - local) ? through - local : undefined;
+        databaseLead = Number.isFinite(through - database) ? through - database : undefined;
+        if (localLead !== undefined) maxLocalLead = Math.max(maxLocalLead ?? -Infinity, localLead);
+        if (databaseLead !== undefined) maxDatabaseLead = Math.max(maxDatabaseLead ?? -Infinity, databaseLead);
+        if (localLead === undefined || databaseLead === undefined || localLead > 2000 || databaseLead > 2000) {
+          reason = 'clock_lead_invalid'; throw accountingError('CLOCK_INVALID');
+        }
+        if (previous && (Math.abs(local - previous.local - (monotonic - previous.monotonic)) > 2000
+          || Math.abs(database - previous.database - (monotonic - previous.monotonic)) > 2000)) {
+          reason = 'clock_discontinuity'; throw accountingError('CLOCK_INVALID');
+        }
+        previous = { local, database, monotonic };
+        if (local - through >= 10_000 || database - through >= 10_000 || paperAccountDate(through) !== paperAccountDate(local)
+          || paperAccountDate(through) !== paperAccountDate(database)) { reason = 'evidence_stale'; throw accountingError('EVIDENCE_STALE'); }
+        if (localLead <= 0 && databaseLead <= 0) break;
+        reason = 'waiting_for_clocks';
+        await delay(Math.min(50, Math.max(localLead, databaseLead), Math.max(1, until - performance.now())), undefined, { signal: operation });
+      }
+      reason = 'clocks_caught_up'; emitBrokerPhase(this.diagnostics, 'accounting.clock_catchup', 'ok', details(), performance.now() - started);
+    } catch (error) {
+      let failure = error;
+      if (operation.aborted || performance.now() >= until) {
+        reason = signal.aborted ? 'aborted' : 'deadline_expired'; failure = accountingError('REPLAY_INCOMPLETE');
+      }
+      emitBrokerPhase(this.diagnostics, 'accounting.clock_catchup', 'error', details(), performance.now() - started, failure); throw failure;
+    } finally { clearTimeout(timer); if (rejectAbort) operation.removeEventListener('abort', rejectAbort); }
+  }
+  private async inspectInternal(timeoutMs: number, signal: AbortSignal, allowClockHold = false, recoveryFloor?: number,
+    operationDeadline = performance.now() + Math.min(timeoutMs, 10_000)): Promise<SourceInspection> {
     if(signal.aborted) throw accountingError("REPLAY_INCOMPLETE");
     this.requestObservations.clear(); this.endIds.clear();
     this.collector.connect(); const epoch = this.gapEpoch, execution = this.executionIdentity();
-    const deadline = Date.now() + Math.min(timeoutMs, 10_000);
     const replay = await this.collector.replay(timeoutMs, signal, recoveryFloor);
     const through = Date.parse(replay.brokerTime), start = paperAccountDayStart(Date.now());
     if (paperAccountDate(through) !== paperAccountDate(Date.now())) throw accountingError("EVIDENCE_STALE");
@@ -226,8 +279,9 @@ export class AccountingSourceService {
         phase = 'accounting.cost_wait';
         try { this.costs(replay.executionIds, start, through); break; }
         catch (error) {
-          if (!(error instanceof Error) || !["ACCOUNTING_FEE_PENDING", "ACCOUNTING_VALUE_UNSET"].includes(error.message) || Date.now() >= deadline || signal.aborted) throw error;
-          await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, deadline - Date.now()))));
+          if (!(error instanceof Error) || !["ACCOUNTING_FEE_PENDING", "ACCOUNTING_VALUE_UNSET"].includes(error.message) || performance.now() >= operationDeadline || signal.aborted) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, operationDeadline - performance.now()))));
+          if (performance.now() >= operationDeadline || signal.aborted) throw error;
         }
       }
       emitBrokerPhase(this.diagnostics, 'accounting.drain', 'ok', metadata, drainMs);
@@ -236,6 +290,14 @@ export class AccountingSourceService {
       emitBrokerPhase(this.diagnostics, phase, 'error', metadata, phase === 'accounting.drain' ? drainMs : Math.max(0, performance.now() - costsStarted - drainMs), error);
       throw error;
     }
+    const barrier = this.barrier();
+    const current = () => {
+      this.owner.assertCurrent(); this.assertDrained(allowClockHold); this.assertIdentity();
+      if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())) throw accountingError('SOURCE_GAP');
+      if (accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError('REVISION_CHANGED');
+    };
+    await this.catchUpClock(through, operationDeadline, signal, current, metadata);
+    current(); this.assertEvidenceFresh(through, signal, operationDeadline);
     const inspection: SourceInspection = { id: randomUUID(), sourceId: this.store.sourceId, processSessionId: this.store.sessionId,
       connectionGeneration: replay.generation, protocolVersion: this.collector.identity().protocolVersion, accounts: this.collector.identity().accounts,
       ...(replay.capability ? { capability: replay.capability } : {}),
@@ -249,6 +311,12 @@ export class AccountingSourceService {
     if (!inspection.replayEndId) throw accountingError("REPLAY_INCOMPLETE");
     this.append("accounting", "inspection", inspection, undefined, undefined, undefined, inspection.id);
     await brokerPhase(this.diagnostics, 'accounting.inspection_persistence', metadata, () => this.persisted(signal));
+    this.owner.assertCurrent(); this.assertDrained(allowClockHold); this.assertIdentity();
+    const expected = structuredClone(barrier);
+    expected.lanes.accounting.received++; expected.lanes.accounting.persisted++;
+    if (this.gapEpoch !== epoch || accountingHash(execution) !== accountingHash(this.executionIdentity())
+      || accountingHash(this.barrier()) !== accountingHash(expected)) throw accountingError('REVISION_CHANGED');
+    this.assertEvidenceFresh(through, signal, operationDeadline);
     return inspection;
   }
   async inspect(timeoutMs = 9000, signal = new AbortController().signal): Promise<SourceInspection> {
@@ -339,7 +407,7 @@ export class AccountingSourceService {
       const operation = AbortSignal.any([wholeOperation,AbortSignal.timeout(Math.max(1,Math.min(timeoutMs,9000)))]);
       const inspection = await this.inspectInternal(Math.min(timeoutMs,9000), operation, true);
       await this.persisted(operation); this.assertDrained(true); this.assertIdentity();
-      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection);
+      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection, operation);
       if (!manual) this.assertQualified();
       const barrier = this.barrier(), epoch = this.gapEpoch, through = Date.parse(inspection.brokerTime);
       if (inspection.executionIds.some(id => !this.executions.has(id) || Date.parse(this.executions.get(id)!.executedAt) > through)) throw accountingError("REVISION_CHANGED");
@@ -397,7 +465,8 @@ export class AccountingSourceService {
     this.episode=await this.store.recovery.latest();
     return this.store.recoveryReceipt(this.episode!.receipt_id!);
   }
-  private async qualifyAutomatically(inspection: SourceInspection): Promise<void> {
+  private async qualifyAutomatically(inspection: SourceInspection, signal: AbortSignal, deadline = Infinity): Promise<void> {
+    this.assertEvidenceFresh(Date.parse(inspection.brokerTime), signal, deadline);
     if (!inspection.capability || inspection.protocolVersion < 219) throw accountingError('CAPABILITY_UNAVAILABLE');
     const prior = this.qualification;
     if (prior?.input.schemaVersion === 2 && prior.input.processSessionId === this.store.sessionId && prior.input.connectionGeneration === inspection.connectionGeneration
@@ -408,7 +477,8 @@ export class AccountingSourceService {
       timestampPolicy: 'EXPLICIT_OR_CONFIGURED_ZONE', executionTimeZone: this.settings.executionTimeZone },
       settings: this.settings, protocolVersion: inspection.protocolVersion, inspectionId: inspection.id, expiresAt: null };
     const epoch = this.gapEpoch, barrier = this.barrier();
-    const fresh = () => { this.owner.assertCurrent(); if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError('REVISION_CHANGED'); };
+    const fresh = () => { this.owner.assertCurrent(); this.assertEvidenceFresh(Date.parse(inspection.brokerTime), signal, deadline);
+      if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError('REVISION_CHANGED'); };
     this.control = await this.store.recordQualification(record, fresh);
     this.qualification = record; this.gap = true; this.latest = undefined;
   }
@@ -459,13 +529,14 @@ export class AccountingSourceService {
       settingsHash: this.settingsHash, brokerReadOnly: true, automaticClockRecovery: {...recoveryStatus(!!this.options.automaticClockRecoveryEnabled,this.episode,this.recoveryUnknown,!!this.options.automaticSourceRecoveryEnabled),rejectedClock:this.rejectedClock} };
   }
   async join(snapshot: BrokerReconciliationSnapshot, input: { runId: number; positionGeneration: number; recoveryStart: Date; timeoutMs: number; abortSignal: AbortSignal }): Promise<BrokerReconciliationSnapshot> {
+    const deadline = performance.now() + Math.min(input.timeoutMs, 10_000);
     if (this.busy) throw accountingError("SOURCE_BUSY");
     if (this.control?.hold === "ACCOUNTING_CLOCK_INVALID") throw accountingError("CLOCK_INVALID");
     this.busy = true;
     this.diagnosticRunId = input.runId;
     try {
-      const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal, false, input.recoveryStart.getTime());
-      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection);
+      const inspection = await this.inspectInternal(input.timeoutMs, input.abortSignal, false, input.recoveryStart.getTime(), deadline);
+      if (this.options.automaticSourceRecoveryEnabled) await this.qualifyAutomatically(inspection, input.abortSignal, deadline);
       await this.drain(); this.assertDrained(); this.assertIdentity(); this.assertQualified();
       const barrier = this.barrier(), through = Date.parse(inspection.brokerTime), floor = inspection.capability ? Date.parse(inspection.capability.certifiedFrom) : through - 48 * 3600_000;
       if (!snapshot.exposureComplete || !snapshot.recoveryComplete || snapshot.accountId !== this.settings.accountId
@@ -486,6 +557,7 @@ export class AccountingSourceService {
       this.gap=true; this.latest=undefined;
       await brokerPhase(this.diagnostics, 'accounting.publication', { runId: input.runId, requestId: inspection.replayId, generation: inspection.connectionGeneration }, () => this.store.publish(capture, () => {
         this.assertDrained(); this.assertIdentity(); this.assertQualified();
+        this.assertEvidenceFresh(through, input.abortSignal, deadline);
         if (this.gapEpoch !== epoch || accountingHash(this.barrier()) !== accountingHash(barrier)) throw accountingError("REVISION_CHANGED");
       }));
       this.gap = false; this.latest = capture;

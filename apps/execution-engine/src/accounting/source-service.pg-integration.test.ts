@@ -22,13 +22,13 @@ function ibTime(time: number) { return new Date(time).toISOString().slice(0, 19)
 class Socket extends EventEmitter implements AccountingSocket {
   serverVersion = 178; sdkSha256 = OFFICIAL_SDK_SHA256;
   fills: Array<{ contract: Record<string, unknown>; exec: Record<string, unknown>; fee?: Record<string, unknown> }> = [];
-  feesAfterEnd = false; omitEnd = false; afterReplay?: () => void;
+  feesAfterEnd = false; omitEnd = false; clockSkewMs = 0; afterReplay?: () => void;
   constructor(readonly account: string, readonly automatic = false) { super(); if (automatic) this.serverVersion = 226; }
   async reqConfig() { return { masterClientIdPresent: true as const, masterClientId: 0 as const }; }
   connect() { this.emit("server", this.serverVersion, "test server time"); this.emit("nextValidId", 1); }
   disconnect() { this.emit("disconnected"); this.emit("transportClosed"); }
   reqManagedAccts() { this.emit("managedAccounts", this.account); }
-  reqCurrentTime() { if (this.automatic) this.emit("currentTimeInMillis", Date.now()); else this.emit("currentTime", Math.floor(Date.now() / 1000)); }
+  reqCurrentTime() { if (this.automatic) this.emit("currentTimeInMillis", Date.now() + this.clockSkewMs); else this.emit("currentTime", Math.floor(Date.now() / 1000)); }
   reqExecutions(id: number) {
     for (const fill of this.fills) { this.emit("execDetails", id, fill.contract, fill.exec); if (fill.fee && !this.feesAfterEnd) this.emit("commissionReport", fill.fee); }
     if (!this.omitEnd) this.emit("execDetailsEnd", id);
@@ -92,6 +92,63 @@ test("F1 durable production source, qualification, capture and admission", { ski
     await admin.query(`CREATE DATABASE ${database}`);
     created = true;
     await runMigrations(pool);
+    await t.test('positive millisecond broker skew qualifies once and publishes repeated strict current captures', async () => {
+      const f = await fixture(false, true); f.socket.clockSkewMs = 55;
+      try {
+        let qualificationId: string | undefined;
+        for (let n = 0; n < 3; n++) {
+          const { joined, day } = await f.capture(); assert.equal(day.ok, true, JSON.stringify(day));
+          f.service.assertCurrent(joined.accounting);
+          const q = await f.store.qualification(); assert.equal(q?.input.schemaVersion, 2);
+          if (qualificationId) assert.equal(q?.id, qualificationId); else qualificationId = q?.id;
+          const { capture } = await f.store.readCapture(pool, joined.accounting!.captureId, false);
+          assert.ok(Date.parse(capture.coveredThrough) <= Date.parse(capture.capturedAt));
+          const now = await f.store.databaseTime(1000);
+          assert.ok(Date.parse(capture.coveredThrough) <= now);
+          assert.ok(now - Date.parse(capture.coveredThrough) < 10000);
+        }
+        const inspections = (await pool.query(`SELECT payload->'value' AS value FROM broker_accounting_observations WHERE source_id=$1 AND kind='inspection'`, [f.store.sourceId])).rows;
+        assert.equal(inspections.length, 3);
+        assert.ok(inspections.every(row => Date.parse(row.value.brokerTime) <= Date.parse(row.value.completedAt)));
+        assert.equal((await pool.query('SELECT count(*) AS n FROM broker_accounting_qualifications WHERE source_id=$1', [f.store.sourceId])).rows[0].n, '1');
+      } finally { await f.service.close(); }
+    });
+    for (const stage of ['qualification', 'capture'] as const) for (const clock of ['database-future', 'database-stale', 'local-future', 'local-stale'] as const) {
+      await t.test(`${stage} final ${clock} clock rejects and rolls back`, async () => {
+        const f = await fixture(false, true), original = f.store.transaction.bind(f.store), now = Date.now;
+        if (stage === 'capture') await f.capture();
+        const baseline = stage === 'capture' ? '1' : '0';
+        let injected = false, rejection: unknown;
+        const join = f.service.join.bind(f.service);
+        f.service.join = async (...args) => { try { return await join(...args); } catch (error) { rejection = error; throw error; } };
+        f.store.transaction = (job, beforeCommit) => original(async db => {
+          let inserted = false;
+          const query = db.query.bind(db);
+          const proxy = new Proxy(db, { get(target, property) {
+            if (property !== 'query') return Reflect.get(target, property);
+            return async (sql: string, values?: unknown[]) => {
+              const result = await query(sql, values);
+              if (sql.includes(`INSERT INTO broker_accounting_${stage === 'qualification' ? 'qualifications' : 'captures'}`)) inserted = true;
+              if (inserted && sql === 'SELECT clock_timestamp() AS now') {
+                injected = true;
+                const shift = clock.endsWith('future') ? -1000 : 11000;
+                if (clock.startsWith('database')) result.rows[0].now = new Date(now() + shift);
+                else Date.now = () => now() + shift;
+              }
+              return result;
+            };
+          } });
+          return job(proxy);
+        }, beforeCommit);
+        try {
+          await assert.rejects(f.capture(), /ACCOUNTING_REPLAY_INCOMPLETE/);
+          assert.match(rejection instanceof Error ? rejection.message : '', stage === 'qualification' ? /INSPECTION_INVALID|EVIDENCE_STALE/ : /EVIDENCE_STALE/);
+          assert.equal(injected, true);
+          assert.equal((await pool.query('SELECT count(*) AS n FROM broker_accounting_qualifications WHERE source_id=$1', [f.store.sourceId])).rows[0].n, baseline);
+          assert.equal((await pool.query('SELECT count(*) AS n FROM broker_accounting_captures WHERE source_id=$1', [f.store.sourceId])).rows[0].n, baseline);
+        } finally { Date.now = now; f.store.transaction = original; await f.service.close(); }
+      });
+    }
     await t.test("automatic v2 qualifies without manual artifacts, stores request proof, and rejects forged interval", async () => {
       const f = await fixture(false, true);
       try {

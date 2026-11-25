@@ -15,10 +15,30 @@ export interface SourceObservation {
   id: string; lane: AccountingLane; laneSequence: number; generation: number; requestId?: number;
   kind: string; key?: string; value: unknown; raw?: unknown; receivedAt: string;
 }
+function assertEvidenceTime(through: number, now: number, code: string): void {
+  if (!Number.isFinite(through) || !Number.isFinite(now) || through > now || now - through >= 10_000
+    || paperAccountDate(through) !== paperAccountDate(now)) throw accountingError(code);
+}
 export class AccountingSourceStore {
   readonly recovery = new ClockRecoveryStore(this);
   owner: AccountingSourceOwner | undefined;
   constructor(readonly pool: Pool, readonly sourceId: string, readonly sessionId: string) {}
+  async databaseTime(timeoutMs: number): Promise<number> {
+    const deadline = performance.now() + Math.max(1, Math.min(2000, timeoutMs)), connection = this.pool.connect();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const db = await Promise.race([connection, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(accountingError('PERSISTENCE_TIMEOUT')), Math.max(1, deadline - performance.now()));
+    })]).catch(error => { void connection.then(client => client.release(true), () => undefined); throw error; }).finally(() => clearTimeout(timer));
+    let failed = false;
+    try {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining <= 0) throw accountingError('PERSISTENCE_TIMEOUT');
+      const query = { text: 'SELECT clock_timestamp() AS now', query_timeout: remaining };
+      const row = (await db.query(query)).rows[0];
+      return new Date(row?.now).getTime();
+    } catch (error) { failed = true; throw error; }
+    finally { db.release(failed || performance.now() >= deadline); }
+  }
   async transaction<T>(fn: (db: PoolClient) => Promise<T>, beforeCommit?: () => void): Promise<T> {
     const deadline = performance.now() + 2000;
     let expired = false;
@@ -228,12 +248,17 @@ export class AccountingSourceStore {
     return (await db.query(`SELECT record FROM broker_accounting_qualifications WHERE id=$1 AND source_id=$2`, [control.qualification_id, this.sourceId])).rows[0]?.record ?? null;
   }
   async recordQualification(record: StoredQualification, assertCurrent: () => void): Promise<SourceControl> {
+    let through = NaN;
+    const fresh = () => { assertCurrent(); assertEvidenceTime(through, Date.now(), 'INSPECTION_INVALID'); };
     return this.transaction(async db => {
       const control = await this.control(db, true);
       const inspection = await db.query(`SELECT payload->'value' AS value,clock_timestamp() AS database_now FROM broker_accounting_observations WHERE id=$1 AND source_id=$2 AND process_session_id=$3
         AND connection_generation=$4 AND kind='inspection'`, [record.inspectionId, this.sourceId, this.sessionId, control.connection_generation]);
       if (!inspection.rowCount) throw accountingError("INSPECTION_INVALID");
       const now = Math.max(Date.now(), new Date(inspection.rows[0].database_now).getTime()), evidence = inspection.rows[0].value;
+      through = Date.parse(evidence.brokerTime);
+      assertEvidenceTime(through, Date.now(), 'INSPECTION_INVALID');
+      assertEvidenceTime(through, new Date(inspection.rows[0].database_now).getTime(), 'INSPECTION_INVALID');
       if (record.input.schemaVersion === 2) {
         automaticQualificationSchema.parse(record.input);
         if (record.expiresAt !== null || record.input.processSessionId !== this.sessionId || record.input.connectionGeneration !== Number(control.connection_generation)
@@ -250,14 +275,17 @@ export class AccountingSourceStore {
         [record.id, this.sourceId, record.inspectionId, record, record.expiresAt]);
       await db.query(`UPDATE broker_accounting_sources SET qualification_id=$2,semantic_revision=semantic_revision+1,gap=true WHERE source_id=$1`, [this.sourceId, record.id]);
       assertCurrent();
-      return this.control(db);
-    });
+      const result = await this.control(db);
+      assertEvidenceTime(through, new Date((await db.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime(), 'INSPECTION_INVALID');
+      fresh(); return result;
+    }, fresh);
   }
   async publish(capture: AccountingCapture, assertCurrent: () => void): Promise<void> {
     let verificationDeadline:number|null=null;
+    const fresh = () => { assertCurrent(); assertEvidenceTime(Date.parse(capture.coveredThrough), Date.now(), 'EVIDENCE_STALE'); };
     await this.transaction(async db => {
       const c = await this.control(db, true), q = await this.qualification(db);
-      assertCurrent();
+      fresh();
       if (!q || q.id !== capture.qualificationId || qualificationExpired(q) || c.hold || Number(c.semantic_revision) !== capture.barrier.semanticRevision
         || Number(c.connection_generation) !== capture.barrier.sourceConnectionGeneration) throw accountingError("REVISION_CHANGED");
       const run = (await db.query(`SELECT position_generation FROM reconciliation_runs WHERE id=$1 AND account_id=$2 AND session_id=$3 AND status='RUNNING'`,
@@ -273,8 +301,9 @@ export class AccountingSourceStore {
       const episode = await this.recovery.active(db,true);
       if (episode?.state === "VERIFYING") verificationDeadline=await this.recovery.complete(db,capture.captureId);
       await db.query(`UPDATE broker_accounting_sources SET gap=false WHERE source_id=$1`, [this.sourceId]);
-      assertCurrent();
-    },()=>{assertCurrent();if(verificationDeadline!==null && performance.now()>=verificationDeadline) throw accountingError("CLOCK_RECOVERY_VERIFY_TIMEOUT");});
+      assertEvidenceTime(Date.parse(capture.coveredThrough), new Date((await db.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime(), 'EVIDENCE_STALE');
+      fresh();
+    },()=>{fresh();if(verificationDeadline!==null && performance.now()>=verificationDeadline) throw accountingError("CLOCK_RECOVERY_VERIFY_TIMEOUT");});
   }
   private receipt(capture: AccountingCapture) {
     return { reference: accountingReference(capture), accountId: capture.accountId, replayId: capture.replayId,

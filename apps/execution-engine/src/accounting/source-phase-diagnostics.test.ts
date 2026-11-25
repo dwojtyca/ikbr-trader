@@ -21,7 +21,7 @@ async function fixture(mode: 'ok' | 'drain' | 'cost' | 'publication') {
   const qualification = { id: 'qualification', settings, input: { settingsSha256: 'hash' }, protocolVersion: 178,
     expiresAt: new Date(Date.now() + 60_000).toISOString() } as StoredQualification;
   const store = { rejectedClock:async()=>null, recovery:{initialize:async()=>{},latest:async()=>null}, sourceId: 'source', sessionId: 'process', begin: async () => control, qualification: async () => qualification,
-    latestValues: async () => [], gap: async () => control,
+    latestValues: async () => [], gap: async () => control, databaseTime: async () => Date.now(),
     append: async (observation: SourceObservation) => { if (mode === 'drain') throw original; return { control, value: observation.value }; },
     publish: async (_capture: unknown, validate: () => void) => { validate(); if (mode === 'publication') throw original; },
   } as unknown as AccountingSourceStore;
