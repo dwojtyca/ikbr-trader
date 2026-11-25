@@ -45,7 +45,7 @@ async function fixture(mode: 'ok' | 'drain' | 'cost' | 'publication') {
   const snapshot = { exposureComplete: true, recoveryComplete: true, accountId: settings.accountId, sessionId: 'process', connectionGeneration: 1,
     sourceCoverage: { executions: { window: {} } } } as unknown as BrokerReconciliationSnapshot;
   return { service, events, original, join: () => service.join(snapshot,
-    { runId: 42, positionGeneration: 1, recoveryStart: new Date(), timeoutMs: 25, abortSignal: new AbortController().signal }) };
+    { runId: 42, positionGeneration: 1, recoveryStart: new Date(), timeoutMs: mode === 'cost' ? 25 : 9000, abortSignal: new AbortController().signal }) };
 }
 test('accounting diagnostics cover successful drain, costs and publication with run identity', async () => {
   const f = await fixture('ok'); const result = await f.join(); assert.ok(result.accounting);

@@ -82,3 +82,35 @@ image build. The stale image was never deployed. Elapsed lead work was about
 35 minutes through local runtime acceptance; exact provider timing is unavailable.
 Publication must follow this recorded acceptance; the final delivery records the
 commit and exact-commit CI result without claiming them in advance.
+
+
+## CI fixture correction
+
+The first published commit `82d6fa3a006a8893bfd8bc45f58fedd98d32dd70` failed
+[CI](https://github.com/dwojtyca/ikbr-trader/actions/runs/45626994686) in two
+`source-phase-diagnostics` cases. The owner supplied the authenticated failure
+log: successful diagnostics took 46ms and publication-error diagnostics took
+35ms, exceeding the fixture's 25ms timeout. These scenarios test phase/error
+reporting, not deadline exhaustion; the new original-deadline checks correctly
+refused them when the runner was delayed.
+
+The separately accepted plan amendment changes only that fixture's timeout:
+9000ms for normal/drain/publication cases, retaining 25ms for the intentional
+missing-fee timeout. Every assertion, production deadline and production source
+byte remains unchanged. The different final reviewer accepted the narrow diff
+and independently passed all four diagnostics tests; the author passed 31 focused
+tests. Full checks on the amended test snapshot passed before the follow-up commit:
+lint (two existing warnings), typecheck, build, 4,574 unit tests (4,135 passed, 439 skipped),
+and isolated integration 3,383/3,383 with no skips. An initial default-concurrency
+unit run overlapped compilation/integration and exposed two unchanged tight-timing
+fixtures (owner recovery and ingestion diagnostics); the subsequent complete
+`pnpm test` with default concurrency and no competing validation jobs passed.
+Those unrelated fixtures and their assertions were not changed. Existing image and local runtime evidence remain applicable because only
+a test and documentation changed, with production hashes verified against the
+candidate manifest. No second runtime deployment is needed.
+
+Public GitHub API exposed the failure status but refused log download; the owner
+provided the missing failure excerpt. A Linux-container reproduction passed the
+execution suite but could not run two unrelated Compose CLI tests because the
+production image intentionally lacks the Docker CLI. That reproduction is not
+counted as a full pass; the complete host tests use the installed Docker CLI.

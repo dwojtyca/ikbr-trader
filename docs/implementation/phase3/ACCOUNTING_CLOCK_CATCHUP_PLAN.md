@@ -103,3 +103,19 @@ readiness if another guard remains. Only then publish the reviewed scope on main
 and verify exact-commit CI. Runtime actions belong to the lead; this document does
 not expand their authorization. Record model/effort, repair/review findings, elapsed
 time and unavailable token telemetry honestly in the final package report.
+
+## CI diagnostics fixture amendment
+
+Date: 2026-11-25. Accepted by independent `clock_plan_review`, requested/actual
+`gpt-6-astra`, high. The CI success/publication diagnostic cases elapsed 46ms/35ms
+against an unrelated 25ms fixture budget, causing `ACCOUNTING_REPLAY_INCOMPLETE`
+before their diagnostic assertions could run. Their purpose is phase/cause/privacy
+verification, not deadline enforcement.
+
+Change only `source-phase-diagnostics.test.ts`: use the normal 9000ms budget for
+success, drain and publication modes, retaining 25ms for the cost-timeout case.
+Keep every assertion unchanged. Production deadlines and the dedicated catch-up
+deadline, cancellation and two-second-cap tests remain unchanged. Run the focused
+31-test accounting suite, obtain independent implementation review, and retain
+the existing publication and exact-commit CI requirements. This amendment needs
+no new broker action or runtime deployment because production bytes do not change.
